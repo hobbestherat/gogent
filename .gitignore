@@ -1,0 +1,16 @@
+# Compiled binary
+/gogent
+
+# Local config & session data
+*.jsonl
+config.json
+
+# Test / scratch artifacts
+internal/gogent/write_test.txt
+internal/gogent/model_response.txt
+haiku.txt
+
+# Go
+*.test
+*.out
+

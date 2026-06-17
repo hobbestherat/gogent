@@ -1,0 +1,190 @@
+package agent
+
+import (
+	"testing"
+
+	"gogent/internal/model"
+)
+
+func TestAgentCreate(t *testing.T) {
+	m := model.NewModelConnection()
+	s := model.NewModelSession("test1", m)
+	a := NewAgent("agent1", s)
+
+	if a.ID != "agent1" {
+		t.Errorf("Expected ID 'agent1', got %q", a.ID)
+	}
+
+	if a.ThoughtTrain != s {
+		t.Error("Expected session to be set")
+	}
+
+	if a.State != StateIdle {
+		t.Errorf("Expected state Idle, got %v", a.State)
+	}
+}
+
+func TestAgentAddSubAgent(t *testing.T) {
+	m := model.NewModelConnection()
+	s := model.NewModelSession("test2", m)
+	a := NewAgent("parent", s)
+	sub := NewAgent("child", s)
+
+	a.AddSubAgent(sub)
+
+	subAgents := a.GetSubAgents()
+	if len(subAgents) != 1 {
+		t.Errorf("Expected 1 sub-agent, got %d", len(subAgents))
+	}
+
+	if subAgents[0] != sub {
+		t.Error("Expected sub-agent to be added")
+	}
+
+	if sub.Parent != a {
+		t.Error("Expected parent to be set")
+	}
+}
+
+func TestAgentRemoveSubAgent(t *testing.T) {
+	m := model.NewModelConnection()
+	s := model.NewModelSession("test3", m)
+	a := NewAgent("parent", s)
+	sub1 := NewAgent("child1", s)
+	sub2 := NewAgent("child2", s)
+
+	a.AddSubAgent(sub1)
+	a.AddSubAgent(sub2)
+
+	if len(a.GetSubAgents()) != 2 {
+		t.Errorf("Expected 2 sub-agents, got %d", len(a.GetSubAgents()))
+	}
+
+	a.RemoveSubAgent("child1")
+
+	if len(a.GetSubAgents()) != 1 {
+		t.Errorf("Expected 1 sub-agent after removal, got %d", len(a.GetSubAgents()))
+	}
+}
+
+func TestAgentGetSubAgent(t *testing.T) {
+	m := model.NewModelConnection()
+	s := model.NewModelSession("test4", m)
+	a := NewAgent("parent", s)
+	sub := NewAgent("child", s)
+
+	a.AddSubAgent(sub)
+
+	found := a.GetSubAgent("child")
+	if found != sub {
+		t.Error("Expected to find sub-agent")
+	}
+
+	notFound := a.GetSubAgent("nonexistent")
+	if notFound != nil {
+		t.Error("Expected not to find non-existent agent")
+	}
+}
+
+func TestAgentGetRootAgent(t *testing.T) {
+	m := model.NewModelConnection()
+	s := model.NewModelSession("test5", m)
+	root := NewAgent("root", s)
+	child := NewAgent("child", s)
+	grandChild := NewAgent("grandChild", s)
+
+	root.AddSubAgent(child)
+	child.AddSubAgent(grandChild)
+
+	if root.GetRootAgent() != root {
+		t.Error("Root's root should be itself")
+	}
+
+	if child.GetRootAgent() != root {
+		t.Error("Child's root should be root")
+	}
+
+	if grandChild.GetRootAgent() != root {
+		t.Error("Grandchild's root should be root")
+	}
+}
+
+func TestAgentListAllAgents(t *testing.T) {
+	m := model.NewModelConnection()
+	s := model.NewModelSession("test6", m)
+	root := NewAgent("root", s)
+	child1 := NewAgent("child1", s)
+	child2 := NewAgent("child2", s)
+	grandChild := NewAgent("grandChild", s)
+
+	root.AddSubAgent(child1)
+	root.AddSubAgent(child2)
+	child1.AddSubAgent(grandChild)
+
+	all := root.ListAllAgents()
+	if len(all) != 4 {
+		t.Errorf("Expected 4 agents, got %d", len(all))
+	}
+
+	// Verify all IDs
+	ids := make(map[string]bool)
+	for _, a := range all {
+		ids[a.ID] = true
+	}
+
+	if !ids["root"] || !ids["child1"] || !ids["child2"] || !ids["grandChild"] {
+		t.Errorf("Not all agents found in list")
+	}
+}
+
+func TestAgentGetAgentByID(t *testing.T) {
+	m := model.NewModelConnection()
+	s := model.NewModelSession("test7", m)
+	root := NewAgent("root", s)
+	child := NewAgent("child", s)
+	grandChild := NewAgent("grandChild", s)
+
+	root.AddSubAgent(child)
+	child.AddSubAgent(grandChild)
+
+	found := root.GetAgentByID("grandChild")
+	if found != grandChild {
+		t.Error("Expected to find grandChild")
+	}
+
+	notFound := root.GetAgentByID("nonexistent")
+	if notFound != nil {
+		t.Error("Expected not to find non-existent agent")
+	}
+}
+
+func TestAgentSetState(t *testing.T) {
+	m := model.NewModelConnection()
+	s := model.NewModelSession("test8", m)
+	a := NewAgent("agent", s)
+
+	if a.GetState() != StateIdle {
+		t.Errorf("Expected initial state Idle, got %v", a.GetState())
+	}
+
+	a.SetState(StateThinking)
+
+	if a.GetState() != StateThinking {
+		t.Errorf("Expected state Thinking, got %v", a.GetState())
+	}
+}
+
+func TestAgentUpdateState(t *testing.T) {
+	m := model.NewModelConnection()
+	s := model.NewModelSession("test9", m)
+	a := NewAgent("agent", s)
+
+	old := a.UpdateState(StateThinking)
+	if old != StateIdle {
+		t.Errorf("Expected old state Idle, got %v", old)
+	}
+
+	if a.GetState() != StateThinking {
+		t.Errorf("Expected state Thinking, got %v", a.GetState())
+	}
+}

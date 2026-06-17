@@ -1,0 +1,158 @@
+package gogent
+
+import (
+	"testing"
+
+	"gogent/internal/agent"
+	"gogent/internal/config"
+	"gogent/internal/model"
+)
+
+func TestGogentCreate(t *testing.T) {
+	g := NewGogent("/tmp/test")
+
+	if g == nil {
+		t.Error("Expected Gogent to be created")
+	}
+
+	if len(g.userSessions) != 0 {
+		t.Errorf("Expected 0 sessions, got %d", len(g.userSessions))
+	}
+}
+
+func TestGogentCreateUserSession(t *testing.T) {
+	g := NewGogent("/tmp/test")
+	m := model.NewModelConnection()
+	s := model.NewModelSession("session1", m)
+	agent := agent.NewAgent("agent1", s)
+
+	userSession := g.CreateUserSession("session1", agent)
+
+	if g.GetUserSession("session1") != userSession {
+		t.Error("Expected session to be created")
+	}
+}
+
+func TestGogentGetUserSession(t *testing.T) {
+	g := NewGogent("/tmp/test")
+	m := model.NewModelConnection()
+	s := model.NewModelSession("session2", m)
+	agent := agent.NewAgent("agent2", s)
+
+	g.CreateUserSession("session2", agent)
+
+	session := g.GetUserSession("session2")
+	if session == nil {
+		t.Error("Expected session to exist")
+	}
+}
+
+func TestGogentListSessions(t *testing.T) {
+	g := NewGogent("/tmp/test")
+	m := model.NewModelConnection()
+
+	// Create first session
+	s1 := model.NewModelSession("s1", m)
+	agent1 := agent.NewAgent("a1", s1)
+	g.CreateUserSession("session1", agent1)
+
+	// Create second session
+	s2 := model.NewModelSession("s2", m)
+	agent2 := agent.NewAgent("a2", s2)
+	g.CreateUserSession("session2", agent2)
+
+	sessions := g.ListSessions()
+	if len(sessions) != 2 {
+		t.Errorf("Expected 2 sessions, got %d", len(sessions))
+	}
+}
+
+func TestGogentSendMessage(t *testing.T) {
+	requireModel(t)
+
+	g := NewGogent("/tmp/test")
+	m := model.NewModelConnection()
+	m.SetURL(config.DefaultEndpoint())
+	s := model.NewModelSession("session3", m)
+	agent := agent.NewAgent("agent3", s)
+	g.CreateUserSession("session3", agent)
+
+	resp, err := g.SendMessageToSession("session3", "agent3", "hi")
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+	if resp == nil {
+		t.Error("Expected response")
+	}
+}
+
+func TestGogentSendMessageNotFound(t *testing.T) {
+	g := NewGogent("/tmp/test")
+
+	_, err := g.SendMessageToSession("nonexistent", "agent", "hi")
+	if err == nil {
+		t.Error("Expected error for non-existent session")
+	}
+
+	_, ok := err.(*SessionNotFoundError)
+	if !ok {
+		t.Errorf("Expected SessionNotFoundError, got %T", err)
+	}
+}
+
+func TestGogentCountMessages(t *testing.T) {
+	g := NewGogent("/tmp/test")
+	m := model.NewModelConnection()
+	s := model.NewModelSession("session4", m)
+	agent := agent.NewAgent("agent4", s)
+	_ = g.CreateUserSession("session4", agent)
+	agent.ThoughtTrain.AddTurn([]model.Message{{Role: model.RoleUser, Content: "hi"}}, "Hello!", nil, nil)
+
+	count := g.CountMessages("session4")
+	if count != 1 {
+		t.Errorf("Expected 1 message, got %d", count)
+	}
+}
+
+func TestGogentCountMessagesNotFound(t *testing.T) {
+	g := NewGogent("/tmp/test")
+
+	count := g.CountMessages("nonexistent")
+	if count != 0 {
+		t.Errorf("Expected 0 messages, got %d", count)
+	}
+}
+
+func TestGogentAddHook(t *testing.T) {
+	g := NewGogent("/tmp/test")
+
+	received := false
+	g.AddHook("test1", func(event HookEvent) {
+		if event.Type == HookTokenReceived {
+			received = true
+		}
+	})
+
+	g.NotifyHooks(HookEvent{Type: HookTokenReceived})
+
+	if !received {
+		t.Error("Expected hook to be called")
+	}
+}
+
+func TestGogentRemoveHook(t *testing.T) {
+	g := NewGogent("/tmp/test")
+
+	hookCalled := false
+	hook := func(event HookEvent) {
+		hookCalled = true
+	}
+
+	g.AddHook("test2", hook)
+	g.RemoveHook("test2")
+	g.NotifyHooks(HookEvent{Type: HookTokenReceived})
+
+	if hookCalled {
+		t.Error("Expected hook not to be called after removal")
+	}
+}

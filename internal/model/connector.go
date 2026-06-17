@@ -1,0 +1,120 @@
+package model
+
+// This file defines the clean, reusable interface surface for "something that
+// can talk to a model". It is intentionally split into small capability
+// interfaces so the connector can later be extracted into its own standalone
+// module: a downstream project that only needs blocking completions can depend
+// on Completer alone, while gogent uses the full Connector (tools + streaming +
+// stats) to drive multi-turn tool calling and live progress.
+// Completer is the minimal capability a model backend must provide: turn a list
+// of chat messages into a single completion. This is the interface most
+// external callers need.
+type Completer interface {
+	Complete(messages []Message) (*CompletionResponse, error)
+}
+
+// ToolCompleter additionally supports advertising native (OpenAI-style) tools so
+// the model can emit structured tool calls.
+type ToolCompleter interface {
+	CompleteWithTools(messages []Message, tools []ToolDef) (*CompletionResponse, error)
+}
+
+// Streamer supports incremental/streaming completions. gogent uses this to
+// surface live progress as tokens arrive.
+type Streamer interface {
+	CompleteStream(messages []Message) (<-chan StreamResponse, <-chan error)
+}
+
+// StatsReporter exposes accumulated usage/latency counters collected by the
+// connector (token counts, request counts, error breakdown, ...).
+type StatsReporter interface {
+	GetStats() *ModelStats
+	// StatsSnapshot returns a mutex-free, copyable view of the counters, which
+	// is the safe way to read/aggregate stats from outside the connector.
+	StatsSnapshot() StatsSnapshot
+}
+
+// Connector is the full model-backend surface used inside gogent. It bundles the
+// capability interfaces above. ModelSession depends on this interface rather
+// than the concrete *ModelConnection, which keeps the model package easy to
+// lift out into its own GitHub module (and makes the backend swappable/mockable
+// in tests).
+type Connector interface {
+	Completer
+	ToolCompleter
+	Streamer
+	StatsReporter
+}
+
+// ModelInfo describes one model advertised by a backend's listing endpoint.
+type ModelInfo struct {
+	ID      string `json:"id"`
+	Object  string `json:"object,omitempty"`
+	OwnedBy string `json:"owned_by,omitempty"`
+}
+
+// ModelLister is an optional capability: a backend that can report which models
+// it serves (the OpenAI/OpenRouter "GET /v1/models" convention). It is kept out
+// of the core Connector because not every backend supports it; callers should
+// type-assert to ModelLister and fall back to the configured model when absent.
+type ModelLister interface {
+	ListModels() ([]ModelInfo, error)
+}
+
+// Compile-time assertions that the concrete HTTP connection satisfies the full
+// Connector contract and the optional model-listing capability.
+var (
+	_ Connector   = (*ModelConnection)(nil)
+	_ ModelLister = (*ModelConnection)(nil)
+)
+
+// StatsSnapshot is a mutex-free, copyable view of a connector's accumulated
+// counters. It mirrors ModelStats without the embedded sync.Mutex so it can be
+// safely returned by value, logged, serialized, or summed.
+type StatsSnapshot struct {
+	RequestCount               int
+	SuccessCount               int
+	ErrorCount                 int
+	TotalTokensIn              int
+	TotalTokensOut             int
+	TotalTimeMs                int64
+	TimeoutCount               int
+	ContextWindowOverflowCount int
+	RefusalCount               int
+	GenericErrorCount          int
+}
+
+// Add returns the element-wise sum of two snapshots, which is how per-agent or
+// per-session connector stats are aggregated into a grand total.
+func (s StatsSnapshot) Add(other StatsSnapshot) StatsSnapshot {
+	return StatsSnapshot{
+		RequestCount:               s.RequestCount + other.RequestCount,
+		SuccessCount:               s.SuccessCount + other.SuccessCount,
+		ErrorCount:                 s.ErrorCount + other.ErrorCount,
+		TotalTokensIn:              s.TotalTokensIn + other.TotalTokensIn,
+		TotalTokensOut:             s.TotalTokensOut + other.TotalTokensOut,
+		TotalTimeMs:                s.TotalTimeMs + other.TotalTimeMs,
+		TimeoutCount:               s.TimeoutCount + other.TimeoutCount,
+		ContextWindowOverflowCount: s.ContextWindowOverflowCount + other.ContextWindowOverflowCount,
+		RefusalCount:               s.RefusalCount + other.RefusalCount,
+		GenericErrorCount:          s.GenericErrorCount + other.GenericErrorCount,
+	}
+}
+
+// Snapshot returns a mutex-free copy of the current counters.
+func (s *ModelStats) Snapshot() StatsSnapshot {
+	s.Mutex.Lock()
+	defer s.Mutex.Unlock()
+	return StatsSnapshot{
+		RequestCount:               s.RequestCount,
+		SuccessCount:               s.SuccessCount,
+		ErrorCount:                 s.ErrorCount,
+		TotalTokensIn:              s.TotalTokensIn,
+		TotalTokensOut:             s.TotalTokensOut,
+		TotalTimeMs:                s.TotalTimeMs,
+		TimeoutCount:               s.TimeoutCount,
+		ContextWindowOverflowCount: s.ContextWindowOverflowCount,
+		RefusalCount:               s.RefusalCount,
+		GenericErrorCount:          s.GenericErrorCount,
+	}
+}
