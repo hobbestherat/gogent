@@ -1279,6 +1279,28 @@ func (g *Gogent) UpdateModel(updated config.ModelConfig) error {
 	return nil
 }
 
+// ScanModels queries the given backend's model-listing endpoint and returns the
+// advertised model ids, so the model editor can offer a pick-list instead of a
+// free-text model id. The draft config need not be saved first; only its
+// api_type, endpoint and api_key are used to reach the backend.
+func (g *Gogent) ScanModels(cfg config.ModelConfig) ([]string, error) {
+	conn := model.NewModelConnectionFromConfig(&cfg)
+	infos, err := conn.ListModels()
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(infos))
+	for _, info := range infos {
+		if info.ID != "" {
+			ids = append(ids, info.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("backend returned no models")
+	}
+	return ids, nil
+}
+
 // SetSubAgentOneShot switches sub-agent mode.
 // true  => one-shot agents (SUCCESS/FAILURE)
 // false => interactive agents (may return CLARIFY)

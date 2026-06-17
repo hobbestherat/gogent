@@ -11,6 +11,10 @@ import (
 type ModelConfig struct {
 	Name        string  `json:"name"`
 	DisplayName string  `json:"display_name"`
+	// APIType selects the provider conventions used to talk to this backend
+	// ("openai" for any OpenAI-compatible server, "zai" for the Z.AI platform).
+	// Empty defaults to "openai".
+	APIType     string  `json:"api_type,omitempty"`
 	Endpoint    string  `json:"endpoint"`
 	Model       string  `json:"model"`
 	APIKey      string  `json:"api_key,omitempty"`
@@ -280,6 +284,19 @@ func GetDefaultConfig() *Config {
 				DisplayName: "OpenRouter (gemma-3-27b-it)",
 				Endpoint:    "https://openrouter.ai/api/v1/chat/completions",
 				Model:       "google/gemma-3-27b-it:free",
+				APIKey:      "",
+				Temperature: 0.7,
+				MaxTokens:   262144,
+				Free:        false,
+			},
+			{
+				// Z.AI: api_type "zai" supplies the base URL automatically, so
+				// only an API key (and model) are needed. See https://docs.z.ai.
+				Name:        "zai-glm",
+				DisplayName: "Z.AI (API Key Required)",
+				APIType:     "zai",
+				Endpoint:    "",
+				Model:       "glm-4.6",
 				APIKey:      "",
 				Temperature: 0.7,
 				MaxTokens:   262144,

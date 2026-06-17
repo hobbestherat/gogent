@@ -57,6 +57,10 @@ type Handlers struct {
 	// persists changes to one model (matched by Name). May be nil.
 	GetModels   func() []config.ModelConfig
 	UpdateModel func(config.ModelConfig) error
+	// ScanModels queries a backend (built from the given draft config's
+	// api_type/endpoint/api_key) for the model ids it serves, so the editor can
+	// swap the model-id text field for a dropdown. May be nil.
+	ScanModels func(config.ModelConfig) ([]string, error)
 	// GetTranscript returns a (sub-)agent's message transcript for the monologue
 	// popup. May be nil.
 	GetTranscript func(sessionID, agentID string) []ChatMessage

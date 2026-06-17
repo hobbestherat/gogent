@@ -172,6 +172,9 @@ func main() {
 			UpdateModel: func(m config.ModelConfig) error {
 				return g.UpdateModel(m)
 			},
+			ScanModels: func(m config.ModelConfig) ([]string, error) {
+				return g.ScanModels(m)
+			},
 			GetTranscript: func(sessionID, agentID string) []tuipkg.ChatMessage {
 				return toChatMessages(g.AgentTranscript(sessionID, agentID))
 			},

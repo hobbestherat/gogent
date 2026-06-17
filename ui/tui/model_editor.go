@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 
+	"gogent/internal/model"
+
 	tui "github.com/hobbestherat/turbotui"
 	tv "github.com/hobbestherat/turbotui/turbotv"
 )
@@ -25,7 +27,7 @@ func (w *Workbench) showModelEditor() {
 	}
 
 	const width = 64
-	const height = 17
+	const height = 18
 	const labelW = 16
 	const boxX = 2 + labelW
 	boxW := width - boxX - 3
@@ -57,31 +59,96 @@ func (w *Workbench) showModelEditor() {
 	dialog.Window.AddContent(sel)
 
 	display := field("Display name:", 3)
-	endpoint := field("Endpoint:", 4)
-	modelID := field("Model id:", 5)
-	apiKey := field("API key:", 6)
-	temp := field("Temperature:", 7)
-	maxTokens := field("Max tokens:", 8)
+
+	dialog.Window.AddContent(dialogLabel("API type:", tv.Rect{X: 2, Y: 4, W: labelW, H: 1}))
+	apiTypeOpts := model.APITypeIDs()
+	apiType := tv.NewSelect(w.desktop, apiTypeOpts, tv.Rect{X: boxX, Y: 4, W: boxW, H: 1})
+	dialog.Window.AddContent(apiType)
+
+	endpoint := field("Endpoint:", 5)
+
+	// Model id: a text field with a "Scan" button that queries the backend and,
+	// on success, swaps the text field for a dropdown of the advertised models.
+	dialog.Window.AddContent(dialogLabel("Model id:", tv.Rect{X: 2, Y: 6, W: labelW, H: 1}))
+	const scanW = 8
+	modelBoxW := boxW - scanW - 1
+	modelRect := tv.Rect{X: boxX, Y: 6, W: modelBoxW, H: 1}
+	modelID := tv.NewTextBox("", modelRect)
+	dialog.Window.AddContent(modelID)
+	modelSelect := tv.NewSelect(w.desktop, nil, modelRect)
+	modelSelect.Root().Visible = false
+	dialog.Window.AddContent(modelSelect)
+	var scanModels func()
+	scanBtn := tv.NewButton("Scan", tv.Rect{X: boxX + modelBoxW + 1, Y: 6, W: scanW, H: 1}, func() {
+		if scanModels != nil {
+			scanModels()
+		}
+	})
+	dialog.Window.AddContent(scanBtn)
+
+	apiKey := field("API key:", 7)
+	temp := field("Temperature:", 8)
+	maxTokens := field("Max tokens:", 9)
+
+	// currentModelID reads the model id from whichever model widget is active.
+	currentModelID := func() string {
+		if modelSelect.Root().Visible {
+			return modelSelect.Value()
+		}
+		return modelID.GetText()
+	}
 
 	cur := 0
 	load := func(i int) {
 		m := models[i]
 		display.SetText(m.DisplayName)
+		apiType.SetSelected(indexOrZero(apiTypeOpts, m.APIType))
 		endpoint.SetText(m.Endpoint)
+		// Reset to free-text mode; a scanned list belongs to one backend only.
 		modelID.SetText(m.Model)
+		modelSelect.Root().Visible = false
+		modelID.Root().Visible = true
 		apiKey.SetText(m.APIKey)
 		temp.SetText(strconv.FormatFloat(float64(m.Temperature), 'g', -1, 32))
 		maxTokens.SetText(strconv.Itoa(m.MaxTokens))
 	}
 	store := func(i int) {
 		models[i].DisplayName = display.GetText()
+		models[i].APIType = apiType.Value()
 		models[i].Endpoint = endpoint.GetText()
-		models[i].Model = modelID.GetText()
+		models[i].Model = currentModelID()
 		models[i].APIKey = apiKey.GetText()
 		if v, err := strconv.ParseFloat(temp.GetText(), 32); err == nil {
 			models[i].Temperature = float32(v)
 		}
 		models[i].MaxTokens = atoiOr(maxTokens.GetText(), models[i].MaxTokens)
+	}
+	scanModels = func() {
+		if w.handlers.ScanModels == nil {
+			tv.ShowConfirmYesNo(w.desktop, "Scan", "Model scanning is unavailable.", nil)
+			return
+		}
+		store(cur)
+		target := cur
+		draft := models[cur]
+		// Query off the UI thread so a slow backend can't freeze the dialog.
+		go func() {
+			ids, err := w.handlers.ScanModels(draft)
+			w.desktop.Post(func() {
+				if err != nil {
+					tv.ShowConfirmYesNo(w.desktop, "Scan", "Failed to list models:\n"+err.Error(), nil)
+					return
+				}
+				if target != cur {
+					return
+				}
+				modelSelect.Options = ids
+				modelSelect.SetSelected(indexOrZero(ids, models[cur].Model))
+				modelID.Root().Visible = false
+				modelSelect.Root().Visible = true
+				w.desktop.SetFocus(modelSelect)
+			})
+		}()
 	}
 	load(cur)
 	sel.OnChange = func(index int) {
@@ -125,4 +192,15 @@ func (w *Workbench) showModelEditor() {
 	layer = tv.NewModalLayer("model-editor", dialog)
 	w.desktop.AddLayer(layer)
 	w.desktop.SetFocus(sel)
+}
+
+// indexOrZero returns the index of value in opts, or 0 (the default option) when
+// it is absent or empty.
+func indexOrZero(opts []string, value string) int {
+	for i, o := range opts {
+		if o == value {
+			return i
+		}
+	}
+	return 0
 }

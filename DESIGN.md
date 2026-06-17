@@ -46,8 +46,11 @@ internal/http/         HTTP client; cmd also has a headless HTTP server mode
   `spawn_subagent` calls run concurrently.
 - **Model layer** (`internal/model`) — split into small capability interfaces
   (`Completer`, streaming, tools, stats) so it can later be extracted into its
-  own library. Connections are rebuilt per send, so model/endpoint edits take
-  effect on the next turn.
+  own library. A provider abstraction (`provider.go`, `APIType`) maps each
+  configured backend to its endpoint layout, so the same OpenAI-compatible
+  transport serves generic servers (`openai`) and the Z.AI platform (`zai`); a
+  bare base URL is normalized into the concrete endpoints. Connections are
+  rebuilt per send, so model/endpoint edits take effect on the next turn.
 - **Tools** (`internal/tool`, `internal/fileops`) — `read`, `write`, `edit`,
   `shell`, `spawn_subagent`, agent-control tools, and `structured_output`. File
   ops resolve paths against the workspace root (the launch cwd) and run through a

@@ -142,9 +142,11 @@ func (e *ModelError) Error() string {
 type ModelConnection struct {
 	URL       string
 	ModelName string
+	APIType   APIType
 	Config    *config.ModelConfig
 	Stats     *ModelStats
 	Timeout   time.Duration
+	spec      providerSpec
 	client    *http.Client
 }
 
@@ -159,20 +161,31 @@ const DefaultModelURL = "http://localhost:8080/v1/chat/completions"
 func NewModelConnection() *ModelConnection {
 	return &ModelConnection{
 		URL:     DefaultModelURL,
+		APIType: APITypeOpenAI,
+		spec:    specFor(APITypeOpenAI),
 		Stats:   &ModelStats{},
 		Timeout: 5 * time.Minute,
 		client:  &http.Client{Timeout: 5 * time.Minute},
 	}
 }
 
-// NewModelConnectionFromConfig creates a model connection from config
+// NewModelConnectionFromConfig creates a model connection from config. The
+// configured APIType selects the provider conventions; the endpoint may be a
+// full chat-completions URL or just a base URL (or empty, to use the provider
+// default), which is normalized into the concrete endpoints automatically.
 func NewModelConnectionFromConfig(modelConfig *config.ModelConfig) *ModelConnection {
+	apiType := StringToAPIType(modelConfig.APIType)
+	spec := specFor(apiType)
+	base := normalizeBaseURL(modelConfig.Endpoint, spec)
+
 	conn := &ModelConnection{
-		URL:       modelConfig.Endpoint,
+		URL:       spec.chatURL(base),
 		ModelName: modelConfig.Model,
+		APIType:   apiType,
 		Config:    modelConfig,
 		Stats:     &ModelStats{},
 		Timeout:   5 * time.Minute,
+		spec:      spec,
 		client:    &http.Client{Timeout: 30 * time.Second},
 	}
 
@@ -557,14 +570,19 @@ func (c *ModelConnection) GetStats() *ModelStats {
 	return c.Stats
 }
 
-// modelsURL derives the OpenAI-style models listing endpoint from the
-// chat-completions URL (e.g. ".../v1/chat/completions" -> ".../v1/models").
+// modelsURL derives the provider's model-listing endpoint from the configured
+// chat-completions URL (e.g. ".../chat/completions" -> ".../models"), honoring
+// the provider-specific path layout.
 func (c *ModelConnection) modelsURL() string {
-	u := c.URL
-	if i := strings.LastIndex(u, "/chat/completions"); i >= 0 {
-		return u[:i] + "/models"
+	spec := c.spec
+	if spec.chatPath == "" {
+		spec = specFor(APITypeOpenAI)
 	}
-	return strings.TrimRight(u, "/") + "/models"
+	u := strings.TrimRight(c.URL, "/")
+	if i := strings.LastIndex(u, spec.chatPath); i >= 0 {
+		return u[:i] + spec.modelsPath
+	}
+	return u + spec.modelsPath
 }
 
 // ListModels asks the backend which models it serves, using the OpenAI/OpenRouter

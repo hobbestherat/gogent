@@ -62,7 +62,25 @@ Current compression is rudimentary and needs a proper rewrite:
 - [ ] Trigger on token-budget thresholds, preserve recent turns + tool results,
       and keep the summary in-context across model switches.
 
-## 6. Smaller items
+## 6. Provider-specific request parameters (thinking, reasoning effort, …) (MEDIUM)
+
+The connector currently sends a fixed OpenAI-style request (messages, temperature,
+max_tokens, tools). Some providers expose extra controls we should surface in the
+model config + editor, gated by `api_type` so they only appear where supported:
+
+- [ ] **Z.AI** (`api_type: "zai"`, see https://docs.z.ai/api-reference/llm/chat-completion):
+  - `thinking` — `{ "type": "enabled" | "disabled" }` to toggle chain-of-thought
+    (GLM-4.5+); plus `clear_thinking` for cross-turn reasoning retention.
+  - `reasoning_effort` — `max | xhigh | high | medium | low | minimal | none`
+    (GLM-5.2), takes effect when thinking is enabled.
+  - `do_sample`, `top_p` (already in config but not always sent).
+- [ ] Add the corresponding fields to `config.ModelConfig` (e.g. a small,
+      provider-namespaced `params`/`extra` map, or typed `thinking`/`reasoning_effort`
+      fields) and thread them into `CompletionRequest` only for matching providers.
+- [ ] Editor UI: show "Thinking" (on/off) and "Reasoning effort" (dropdown) when
+      `api_type` supports them; hide otherwise.
+
+## 7. Smaller items
 
 - [ ] Reconcile docs/README: confirm shell/file safety story everywhere.
 - [ ] Hook event types (`HookResponseComplete`, `HookError`, `HookStateChange`,
