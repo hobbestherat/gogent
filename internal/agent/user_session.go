@@ -1162,7 +1162,13 @@ func (s *UserSession) InterruptAgent(agentID string) error {
 func (s *UserSession) CountMessages() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.countMessagesLocked()
+}
 
+// countMessagesLocked counts total messages in the session. Callers must hold
+// s.mu (read or write). RWMutex is not reentrant, so methods that already hold
+// the lock must use this instead of CountMessages.
+func (s *UserSession) countMessagesLocked() int {
 	count := 0
 	agents := s.RootAgent.ListAllAgents()
 	for _, agent := range agents {
@@ -1181,7 +1187,7 @@ func (s *UserSession) GetStats() map[string]interface{} {
 	return map[string]interface{}{
 		"id":              s.ID,
 		"agent_count":     len(agents),
-		"total_turns":     s.CountMessages(),
+		"total_turns":     s.countMessagesLocked(),
 		"tokens_in":       s.tokenCountIn,
 		"tokens_out":      s.tokenCountOut,
 		"tool_calls":      s.toolCallCount,
