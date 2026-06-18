@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -148,7 +150,22 @@ type ModelConnection struct {
 	Timeout   time.Duration
 	spec      providerSpec
 	client    *http.Client
+
+	// Retry policy for transient completion failures. Defaults are set by the
+	// constructors; tests may override them to keep backoff deterministic/fast.
+	maxAttempts    int           // total request attempts (including the first)
+	retryBaseDelay time.Duration // base for exponential backoff with full jitter
+	retryMaxDelay  time.Duration // cap on any single backoff (also caps Retry-After)
 }
+
+// Default retry policy: a handful of attempts with exponential backoff capped at
+// a few tens of seconds. These mirror the AWS "exponential backoff with full
+// jitter" guidance and only ever fire for transient status classes.
+const (
+	defaultMaxAttempts    = 3
+	defaultRetryBaseDelay = 500 * time.Millisecond
+	defaultRetryMaxDelay  = 30 * time.Second
+)
 
 // DefaultModelURL is the connector's neutral fallback endpoint: a local
 // OpenAI-compatible server on the conventional port. This is intentionally
@@ -160,12 +177,15 @@ const DefaultModelURL = "http://localhost:8080/v1/chat/completions"
 // NewModelConnection creates a new model connection pointed at DefaultModelURL.
 func NewModelConnection() *ModelConnection {
 	return &ModelConnection{
-		URL:     DefaultModelURL,
-		APIType: APITypeOpenAI,
-		spec:    specFor(APITypeOpenAI),
-		Stats:   &ModelStats{},
-		Timeout: 5 * time.Minute,
-		client:  &http.Client{Timeout: 5 * time.Minute},
+		URL:            DefaultModelURL,
+		APIType:        APITypeOpenAI,
+		spec:           specFor(APITypeOpenAI),
+		Stats:          &ModelStats{},
+		Timeout:        5 * time.Minute,
+		client:         &http.Client{Timeout: 5 * time.Minute},
+		maxAttempts:    defaultMaxAttempts,
+		retryBaseDelay: defaultRetryBaseDelay,
+		retryMaxDelay:  defaultRetryMaxDelay,
 	}
 }
 
@@ -179,14 +199,17 @@ func NewModelConnectionFromConfig(modelConfig *config.ModelConfig) *ModelConnect
 	base := normalizeBaseURL(modelConfig.Endpoint, spec)
 
 	conn := &ModelConnection{
-		URL:       spec.chatURL(base),
-		ModelName: modelConfig.Model,
-		APIType:   apiType,
-		Config:    modelConfig,
-		Stats:     &ModelStats{},
-		Timeout:   5 * time.Minute,
-		spec:      spec,
-		client:    &http.Client{Timeout: 30 * time.Second},
+		URL:            spec.chatURL(base),
+		ModelName:      modelConfig.Model,
+		APIType:        apiType,
+		Config:         modelConfig,
+		Stats:          &ModelStats{},
+		Timeout:        5 * time.Minute,
+		spec:           spec,
+		client:         &http.Client{Timeout: 30 * time.Second},
+		maxAttempts:    defaultMaxAttempts,
+		retryBaseDelay: defaultRetryBaseDelay,
+		retryMaxDelay:  defaultRetryMaxDelay,
 	}
 
 	// Add API key header if present
@@ -298,20 +321,25 @@ func (c *ModelConnection) complete(messages []Message, stream bool, tools []Tool
 		reqBody.Model = c.ModelName
 	}
 
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, &ModelError{
+			Type:    ErrorGeneric,
+			Message: fmt.Sprintf("failed to marshal request: %v", err),
+		}
+	}
+
+	attempts := c.maxAttempts
+	if attempts < 1 {
+		attempts = 1
+	}
+
 	var resp *http.Response
 	var bodyBytes []byte
 
 	startTime := time.Now()
 
-	for attempt := 0; attempt < 3; attempt++ {
-		jsonData, err := json.Marshal(reqBody)
-		if err != nil {
-			return nil, &ModelError{
-				Type:    ErrorGeneric,
-				Message: fmt.Sprintf("failed to marshal request: %v", err),
-			}
-		}
-
+	for attempt := 0; attempt < attempts; attempt++ {
 		req, err := http.NewRequest("POST", c.URL, bytes.NewReader(jsonData))
 		if err != nil {
 			return nil, &ModelError{
@@ -324,8 +352,9 @@ func (c *ModelConnection) complete(messages []Message, stream bool, tools []Tool
 
 		resp, err = c.client.Do(req)
 		if err != nil {
-			if attempt < 2 {
-				time.Sleep(time.Second * time.Duration(attempt+1))
+			// Network/timeout errors are transient: retry with backoff.
+			if attempt < attempts-1 {
+				time.Sleep(c.backoff(attempt, 0))
 				continue
 			}
 			return nil, &ModelError{
@@ -335,6 +364,7 @@ func (c *ModelConnection) complete(messages []Message, stream bool, tools []Tool
 		}
 
 		bodyBytes, err = io.ReadAll(resp.Body)
+		retryAfter, _ := parseRetryAfter(resp.Header.Get("Retry-After"), startTime)
 		resp.Body.Close()
 		if err != nil {
 			return nil, &ModelError{
@@ -347,23 +377,19 @@ func (c *ModelConnection) complete(messages []Message, stream bool, tools []Tool
 			break
 		}
 
-		if attempt < 2 {
-			time.Sleep(time.Second * time.Duration(attempt+1))
-			continue
+		// Fail fast on permanent errors (most 4xx); retry only transient
+		// classes (408/409/429/5xx), honoring Retry-After when present.
+		if !isRetryableStatus(resp.StatusCode) || attempt == attempts-1 {
+			return nil, c.analyzeError(resp.StatusCode, string(bodyBytes))
 		}
 
-		resp.Body.Close()
-		return nil, c.analyzeError(resp.StatusCode, string(bodyBytes))
+		time.Sleep(c.backoff(attempt, retryAfter))
 	}
 
 	c.Stats.Mutex.Lock()
 	c.Stats.RequestCount++
 	c.Stats.TotalTimeMs += time.Since(startTime).Milliseconds()
 	c.Stats.Mutex.Unlock()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, c.analyzeError(resp.StatusCode, string(bodyBytes))
-	}
 
 	var fullResp CompletionResponse
 	if err := json.Unmarshal(bodyBytes, &fullResp); err != nil {
@@ -567,6 +593,68 @@ func (c *ModelConnection) analyzeError(statusCode int, response string) *ModelEr
 		Message:        fmt.Sprintf("unexpected error: status %d", statusCode),
 		RawResponse:    response,
 	}
+}
+
+// isRetryableStatus reports whether an HTTP status denotes a transient failure
+// worth retrying. Permanent client errors (400/401/403/404/422, ...) are not
+// retried so config/schema mistakes fail fast instead of burning attempts.
+func isRetryableStatus(code int) bool {
+	switch code {
+	case http.StatusRequestTimeout, // 408
+		http.StatusConflict,        // 409
+		http.StatusTooManyRequests: // 429
+		return true
+	}
+	return code >= 500 && code <= 599
+}
+
+// parseRetryAfter interprets a Retry-After header, which may be either a number
+// of seconds or an HTTP-date (RFC 7231). It returns the delay relative to now
+// and whether a valid value was parsed. Negative/past values clamp to zero.
+func parseRetryAfter(header string, now time.Time) (time.Duration, bool) {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return 0, false
+	}
+	if secs, err := strconv.Atoi(header); err == nil {
+		if secs < 0 {
+			return 0, false
+		}
+		return time.Duration(secs) * time.Second, true
+	}
+	if t, err := http.ParseTime(header); err == nil {
+		if d := t.Sub(now); d > 0 {
+			return d, true
+		}
+		return 0, true
+	}
+	return 0, false
+}
+
+// backoff computes how long to wait before the next attempt. A server-provided
+// Retry-After (capped by retryMaxDelay) takes precedence; otherwise it uses
+// exponential backoff with full jitter: a uniform random delay in [0, base*2^n],
+// capped at retryMaxDelay (AWS "exponential backoff and jitter").
+func (c *ModelConnection) backoff(attempt int, retryAfter time.Duration) time.Duration {
+	maxDelay := c.retryMaxDelay
+	if retryAfter > 0 {
+		if maxDelay > 0 && retryAfter > maxDelay {
+			return maxDelay
+		}
+		return retryAfter
+	}
+	base := c.retryBaseDelay
+	if base <= 0 {
+		return 0
+	}
+	d := base << attempt
+	if d <= 0 || (maxDelay > 0 && d > maxDelay) { // d <= 0 guards shift overflow
+		d = maxDelay
+	}
+	if d <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Int64N(int64(d) + 1))
 }
 
 func (c *ModelConnection) GetStats() *ModelStats {
