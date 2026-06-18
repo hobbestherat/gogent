@@ -64,6 +64,11 @@ type Handlers struct {
 	// GetTranscript returns a (sub-)agent's message transcript for the monologue
 	// popup. May be nil.
 	GetTranscript func(sessionID, agentID string) []ChatMessage
+	// GetSkills returns the loaded skills with active state and usage stats.
+	// SetSkillActive toggles whether a skill is active (offered to the model and
+	// listed in the system prompt). Both may be nil.
+	GetSkills      func() []SkillInfo
+	SetSkillActive func(name string, active bool)
 	// Restore returns sessions to re-open at startup (crash/continuation
 	// recovery). May be nil.
 	Restore func() []RestoredSession
@@ -74,6 +79,16 @@ type RestoredSession struct {
 	ID       string
 	Title    string
 	Messages []ChatMessage
+}
+
+// SkillInfo is a UI-facing view of a loaded skill and its usage stats.
+type SkillInfo struct {
+	Name        string
+	Description string
+	Active      bool
+	Success     int
+	Failure     int
+	TotalCalls  int
 }
 
 // Workbench is the top-level multi-session TUI.
@@ -225,6 +240,7 @@ func (w *Workbench) settingsItems() []*tv.MenuItem {
 		tv.NewMenuItem("&Sub-agents…", func() { w.showSettingsDialog() }).
 			WithShortcut("Ctrl+,", tui.KeyRune, ',', true),
 		tv.NewMenuItem("&Models…", func() { w.showModelEditor() }),
+		tv.NewMenuItem("S&kills…", func() { w.showSkillsDialog() }),
 		tv.NewMenuItem("----------", nil),
 		tv.NewMenuItem("Mode: "+mode, func() { w.showSettingsDialog() }),
 		tv.NewMenuItem("Recursive: "+recursive, func() { w.showSettingsDialog() }),

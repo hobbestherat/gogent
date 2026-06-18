@@ -76,6 +76,12 @@ type UserSession struct {
 	// the agent's built-in default in place.
 	subAgentTimeoutMs int64
 
+	// systemContextFn, when set, returns extra system-prompt context (project
+	// AGENTS.md instructions and the available-skills index) appended to every
+	// agent loop's system prompt. Evaluated per loop so runtime changes (skill
+	// activation) are reflected.
+	systemContextFn func() string
+
 	// Interactive (experimental) sub-agent bookkeeping.
 	interactive map[string]*InteractiveAgent
 	agentEvents chan AgentEvent
@@ -119,6 +125,26 @@ func (s *UserSession) SubAgentConfig() config.SubAgentConfig {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.subAgentCfg
+}
+
+// SetSystemContextProvider registers a function returning extra system-prompt
+// context (project AGENTS.md instructions and the available-skills index). It is
+// evaluated at the start of each agent loop.
+func (s *UserSession) SetSystemContextProvider(fn func() string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.systemContextFn = fn
+}
+
+// systemContext returns the current extra system context, or "" if none.
+func (s *UserSession) systemContext() string {
+	s.mu.RLock()
+	fn := s.systemContextFn
+	s.mu.RUnlock()
+	if fn == nil {
+		return ""
+	}
+	return fn()
 }
 
 // SetSubAgentTimeout sets the timeout applied to newly spawned sub-agents. A
@@ -332,6 +358,9 @@ func (s *UserSession) ExecuteTaskLoop(agentID string, initialMessage string) ([]
 func (s *UserSession) runLoop(agent *Agent, agentID, initialMessage, systemPrompt string) ([]*model.CompletionResponse, error) {
 	sess := agent.ThoughtTrain
 	tools := toolDefsFromRegistry(agent.ToolRegistry)
+	if ctx := s.systemContext(); ctx != "" {
+		systemPrompt += "\n\n" + ctx
+	}
 	sess.SetSystemPrompt(systemPrompt)
 
 	// Only the top-level (root) agent streams its thinking/tool events into the

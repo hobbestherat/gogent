@@ -17,7 +17,6 @@ import (
 	"gogent/internal/config"
 	"gogent/internal/gogent"
 	"gogent/internal/model"
-	"gogent/internal/skill"
 	tuipkg "gogent/ui/tui"
 )
 
@@ -46,47 +45,20 @@ func main() {
 	// Create paths
 	skillsDir := filepath.Join(homeDir, ".gogent", "skills")
 	configDir := filepath.Join(homeDir, ".gogent")
-	builtinSkillsDir := "./skills"
 
-	// Create skill registry
-	skillRegistry := skill.NewSkillRegistry()
+	// Create Gogent instance (loads skills + AGENTS.md and owns the registry)
+	g := gogent.NewGogent(homeDir)
+	fmt.Printf("\nWorking directory (file & shell ops): %s\n", g.GetWorkspaceRoot())
 
-	// Load skills from user directory (optional)
-	if *verbose {
-		fmt.Printf("Loading skills...\n")
-	}
-	if _, err := os.Stat(skillsDir); err == nil {
-		if err := skillRegistry.LoadSkills(skillsDir); err != nil {
-			log.Printf("Warning: Failed to load skills from %s: %v", skillsDir, err)
-		}
-		if *verbose {
-			fmt.Printf("  Loaded %d skills from user directory\n", len(skillRegistry.ListSkills()))
-		}
-	} else {
-		if *verbose {
-			fmt.Printf("  No user skills directory found\n")
-		}
-	}
-
-	// Load built-in skills
-	if err := skillRegistry.LoadSkills(builtinSkillsDir); err != nil {
-		log.Printf("Warning: Failed to load built-in skills from %s: %v", builtinSkillsDir, err)
-	}
-
-	// Get list of loaded skills
+	skillRegistry := g.GetSkillRegistry()
 	skills := skillRegistry.ListSkills()
 	fmt.Printf("\nLoaded %d skills:\n", len(skills))
 	for _, s := range skills {
 		fmt.Printf("  - %s: %s\n", s.Name, s.Description)
 	}
-
 	if *verbose {
 		fmt.Printf("\nActive skills: %d\n", len(skillRegistry.ListActiveSkills()))
 	}
-
-	// Create Gogent instance
-	g := gogent.NewGogent(homeDir)
-	fmt.Printf("\nWorking directory (file & shell ops): %s\n", g.GetWorkspaceRoot())
 
 	// Create model session for the default (HTTP) session, pointed at the
 	// configured default endpoint (honors GOGENT_MODEL_URL).
@@ -180,6 +152,38 @@ func main() {
 			},
 			GetTranscript: func(sessionID, agentID string) []tuipkg.ChatMessage {
 				return toChatMessages(g.AgentTranscript(sessionID, agentID))
+			},
+			GetSkills: func() []tuipkg.SkillInfo {
+				reg := g.GetSkillRegistry()
+				if reg == nil {
+					return nil
+				}
+				var out []tuipkg.SkillInfo
+				for _, s := range reg.ListSkills() {
+					info := tuipkg.SkillInfo{
+						Name:        s.Name,
+						Description: s.Description,
+						Active:      reg.IsSkillActive(s.Name),
+					}
+					if st := reg.GetSkillStats(s.Name); st != nil {
+						info.Success = st.Success
+						info.Failure = st.Failure
+						info.TotalCalls = st.TotalCalls
+					}
+					out = append(out, info)
+				}
+				return out
+			},
+			SetSkillActive: func(name string, active bool) {
+				reg := g.GetSkillRegistry()
+				if reg == nil {
+					return
+				}
+				if active {
+					reg.ActivateSkill(name)
+				} else {
+					reg.DeactivateSkill(name)
+				}
 			},
 			Restore: func() []tuipkg.RestoredSession {
 				loaded := g.RestoreSessions()

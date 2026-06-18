@@ -17,6 +17,7 @@ import (
 	"gogent/internal/fileops"
 	"gogent/internal/model"
 	"gogent/internal/permission"
+	"gogent/internal/skill"
 	"gogent/internal/tool"
 )
 
@@ -34,6 +35,10 @@ type Gogent struct {
 	workspaceRoot    string
 	homeDir          string
 	store            *SessionStore
+	skills           *skill.SkillRegistry
+	// agentsContext is the project AGENTS.md instruction text discovered at
+	// startup, injected into every session's system prompt.
+	agentsContext string
 	// sessionTitles records a human-friendly title per session for persistence.
 	sessionTitles map[string]string
 }
@@ -119,6 +124,14 @@ func NewGogentWithWorkspace(homeDir, workspaceRoot string) *Gogent {
 	g.permissions.AddRule(permission.Rule{Action: string(permission.ActionRead), Resource: "*", Effect: string(permission.EffectAllow)})
 	g.permissions.AddRule(permission.Rule{Action: string(permission.ActionWrite), Resource: "*", Effect: string(permission.EffectAllow)})
 	g.fileMutation = fileops.NewFileMutation(g.fileSystem, g.locationMutation)
+
+	// Load skills (user + built-in) and discover project AGENTS.md instructions
+	// before building the tool registry so the skill tool and system-context
+	// provider can see them.
+	g.skills = skill.NewSkillRegistry()
+	_ = g.skills.LoadSkills(filepath.Join(homeDir, ".gogent", "skills"))
+	_ = g.skills.LoadSkills(filepath.Join(workspaceRoot, "skills"))
+	g.agentsContext = renderAgentsContext(discoverAgentsDocs(workspaceRoot, filepath.Join(homeDir, ".gogent")))
 
 	// Initialize tool registry with file tools
 	g.initializeToolRegistry()
@@ -479,6 +492,37 @@ func (g *Gogent) initializeToolRegistry() {
 			}, nil
 		},
 	})
+
+	// Register the skill tool only when skills are loaded, so models without
+	// skills aren't offered a useless tool.
+	if g.skills != nil && len(g.skills.ListSkills()) > 0 {
+		g.toolRegistry.Register(&tool.Tool{
+			Name:        "skill",
+			Description: "Load the full instructions for a named skill before performing a task it covers. Returns the skill's markdown content. Use the skill names listed under 'Available skills'.",
+			InputSchema: map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{"name": map[string]interface{}{"type": "string"}},
+				"required":   []string{"name"},
+			},
+			Execute: func(args map[string]interface{}, ctx tool.ToolContext) (interface{}, error) {
+				name, ok := args["name"].(string)
+				if !ok || name == "" {
+					return nil, fmt.Errorf("name argument is required")
+				}
+				sk := g.skills.GetSkill(name)
+				if sk == nil || !g.skills.IsSkillActive(name) {
+					g.skills.RecordSkillUsage(name, false)
+					return nil, fmt.Errorf("no active skill named %q", name)
+				}
+				g.skills.RecordSkillUsage(name, true)
+				return map[string]interface{}{
+					"success": true,
+					"name":    sk.Name,
+					"content": sk.Content,
+				}, nil
+			},
+		})
+	}
 }
 
 // CreateUserSession creates a new user session
@@ -489,6 +533,7 @@ func (g *Gogent) CreateUserSession(id string, rootAgent *agent.Agent) *agent.Use
 	userSession := agent.NewUserSession(id, rootAgent)
 	userSession.SetSubAgentConfig(g.config.SubAgents)
 	userSession.SetSubAgentTimeout(time.Duration(g.config.Timeouts.SubAgentSecondsOrDefault()) * time.Second)
+	userSession.SetSystemContextProvider(g.buildSystemContext)
 	// Hand the root agent a tool registry filtered to the active execution model
 	// so the model is only offered the coordination tools it is instructed to use.
 	rootAgent.SetToolRegistry(g.toolRegistryForMode(g.config.SubAgents))
@@ -672,6 +717,11 @@ func (g *Gogent) GetLocationMutation() *fileops.LocationMutation {
 // GetPermissionService returns the permission service
 func (g *Gogent) GetPermissionService() *permission.Service {
 	return g.permissions
+}
+
+// GetSkillRegistry returns the shared skill registry.
+func (g *Gogent) GetSkillRegistry() *skill.SkillRegistry {
+	return g.skills
 }
 
 // GetFileMutation returns the file mutation service
