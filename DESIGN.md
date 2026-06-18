@@ -23,6 +23,7 @@ internal/model/        Connector interfaces + HTTP model connection + session
 internal/tool/         Tool registry, shell/git/web tools, structured-output tool
 internal/vcs/          Thin, safe git wrapper (backs the git tool + git-status context)
 internal/fileops/      Path resolution, file I/O, file mutation
+internal/diff/         Unified line diff (backs edit diff-preview/approve)
 internal/command/      Shell exec + internal commands (calc/echo/help)
 internal/skill/        SKILL.md loader + registry (wired via syscontext + skill tool)
 internal/permission/   Resource+action permission gate (shell/file/external/...)

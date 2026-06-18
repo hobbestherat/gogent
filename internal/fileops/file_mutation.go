@@ -117,14 +117,41 @@ func (fm *FileMutation) WriteFile(path string, content string, auth Authorizatio
 // EditFile edits a file by replacing text. The Authorization is forwarded to the
 // underlying reads/writes.
 func (fm *FileMutation) EditFile(path, find, replace string, auth Authorization) error {
+	_, updated, err := fm.PreviewEdit(path, find, replace, auth)
+	if err != nil {
+		return err
+	}
+	return fm.WriteFile(path, updated, auth)
+}
+
+// PreviewEdit computes the before/after content of an edit without writing it,
+// so callers can show a diff and gate the commit behind approval (issue #64).
+// The Authorization is forwarded to the underlying read.
+func (fm *FileMutation) PreviewEdit(path, find, replace string, auth Authorization) (before, after string, err error) {
 	current, err := fm.fileSys.Read(path, auth)
 	if err != nil {
-		return fmt.Errorf("failed to read file: %w", err)
+		return "", "", fmt.Errorf("failed to read file: %w", err)
 	}
+	before = string(current)
+	return before, strings.ReplaceAll(before, find, replace), nil
+}
 
-	updated := strings.ReplaceAll(string(current), find, replace)
-
-	return fm.WriteFile(path, updated, auth)
+// PreviewWrite returns the current content of path (empty when the file does not
+// yet exist) so callers can diff it against the content they are about to write.
+// The Authorization is forwarded to the underlying read.
+func (fm *FileMutation) PreviewWrite(path string, auth Authorization) (before string, err error) {
+	existed, err := fm.fileSys.Exists(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to check if file exists: %w", err)
+	}
+	if !existed {
+		return "", nil
+	}
+	current, err := fm.fileSys.Read(path, auth)
+	if err != nil {
+		return "", fmt.Errorf("failed to read file: %w", err)
+	}
+	return string(current), nil
 }
 
 // replaceString replaces all occurrences of old with new

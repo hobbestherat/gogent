@@ -39,6 +39,19 @@ the grant to `~/.gogent/permissions.json`. In headless/non-interactive runs
 > `eval`, subshells). Treat it as a seatbelt against accidental damage, not as
 > containment. OS-level sandboxing remains a future enhancement.
 
+### Review edits before applying
+
+By default `write`/`edit` apply immediately. Turn on **Config → Review edits**
+(or set `"review_edits": true` in `~/.gogent/config.json`) to gate every change
+behind a unified diff: before the bytes hit disk the TUI shows the before/after
+as a colour-coded, scrollable diff and waits for you to **Accept** (`a`),
+**Reject** (`r`, or `Esc`), or **Accept all this session** (`A`) — the last
+auto-approves the rest of the run so you are not asked again until restart. A
+rejected edit is reported back to the model as an error so it can adjust course;
+a change that turns out to be a no-op is applied without prompting. Review is a
+TUI affordance: headless runs (`--disable-tui`) have no one to ask, so edits
+apply as before.
+
 ---
 
 ## Build & run

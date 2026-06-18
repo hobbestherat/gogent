@@ -49,6 +49,12 @@ type Gogent struct {
 	gitRepo bool
 	// sessionTitles records a human-friendly title per session for persistence.
 	sessionTitles map[string]string
+	// editApprover, when set, reviews each write/edit as a diff before it is
+	// committed (issue #64). acceptAllEdits latches once the user chooses
+	// "accept all this session", short-circuiting further prompts. Both are
+	// guarded by mu.
+	editApprover   EditApprover
+	acceptAllEdits bool
 }
 
 // HookEvent represents an event that triggers hooks
@@ -217,6 +223,14 @@ func (g *Gogent) initializeToolRegistry() {
 				return nil, err
 			}
 
+			before, err := g.fileMutation.PreviewWrite(path, auth)
+			if err != nil {
+				return nil, fmt.Errorf("failed to preview write: %v", err)
+			}
+			if err := g.reviewEdit(path, before, content); err != nil {
+				return nil, err
+			}
+
 			if err := g.fileMutation.WriteFile(path, content, auth); err != nil {
 				return nil, fmt.Errorf("failed to write file: %v", err)
 			}
@@ -255,8 +269,15 @@ func (g *Gogent) initializeToolRegistry() {
 				return nil, err
 			}
 
-			err = g.fileMutation.EditFile(path, find, replace, auth)
+			before, after, err := g.fileMutation.PreviewEdit(path, find, replace, auth)
 			if err != nil {
+				return nil, fmt.Errorf("failed to edit file: %v", err)
+			}
+			if err := g.reviewEdit(path, before, after); err != nil {
+				return nil, err
+			}
+
+			if err := g.fileMutation.WriteFile(path, after, auth); err != nil {
 				return nil, fmt.Errorf("failed to edit file: %v", err)
 			}
 

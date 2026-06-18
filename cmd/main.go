@@ -108,6 +108,8 @@ func main() {
 
 		// Route interactive permission prompts to the workbench modal.
 		g.GetPermissionService().SetPrompter(wb)
+		// Route diff/approve-before-apply edit reviews to the workbench (issue #64).
+		g.SetEditApprover(wb)
 
 		wb.SetHandlers(tuipkg.Handlers{
 			// OnCreate builds the backend session and bridges its live events to
@@ -153,6 +155,12 @@ func main() {
 				// workbench's notifier so the next notification respects it.
 				g.SetNotifications(n)
 				wb.SetNotifyConfig(n)
+			},
+			GetReviewEdits: func() bool {
+				return g.ReviewEdits()
+			},
+			SetReviewEdits: func(enabled bool) {
+				g.SetReviewEdits(enabled)
 			},
 			GetModels: func() []config.ModelConfig {
 				return g.Models()

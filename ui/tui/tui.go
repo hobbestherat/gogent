@@ -61,6 +61,10 @@ type Handlers struct {
 	// config into the workbench's live notifier. May be nil.
 	GetNotifyConfig func() config.NotifyConfig
 	SetNotifyConfig func(config.NotifyConfig)
+	// GetReviewEdits / SetReviewEdits read and persist whether write/edit changes
+	// are gated behind a diff review before applying (issue #64). May be nil.
+	GetReviewEdits func() bool
+	SetReviewEdits func(bool)
 	// GetModels returns editable copies of the configured models; UpdateModel
 	// persists changes to one model (matched by Name). May be nil.
 	GetModels   func() []config.ModelConfig
@@ -361,6 +365,22 @@ func (w *Workbench) settingsItems() []*tv.MenuItem {
 			tv.NewMenuItem("----------", nil),
 			tv.NewMenuItem("&Notifications…", func() { w.showNotificationsDialog() }),
 			tv.NewMenuItem("Notifications: "+state, func() { w.showNotificationsDialog() }),
+		)
+	}
+	// Diff preview / approve-before-apply for edits (issue #64). A plain on/off
+	// toggle: when on, each write/edit shows a diff for accept/reject before it
+	// touches disk.
+	if w.handlers.GetReviewEdits != nil && w.handlers.SetReviewEdits != nil {
+		state := "off"
+		if w.handlers.GetReviewEdits() {
+			state = "on"
+		}
+		items = append(items,
+			tv.NewMenuItem("----------", nil),
+			tv.NewMenuItem("Re&view edits: "+state, func() {
+				w.handlers.SetReviewEdits(!w.handlers.GetReviewEdits())
+				w.rebuildMenu()
+			}),
 		)
 	}
 	return items
