@@ -204,6 +204,12 @@ func main() {
 				}
 				return out
 			},
+			LoadLayout: func() gogent.Layout { return g.LoadLayout() },
+			SaveLayout: func(layout gogent.Layout) {
+				if err := g.SaveLayout(layout); err != nil {
+					log.Printf("save layout: %v", err)
+				}
+			},
 		})
 
 		// Run the TUI in a goroutine.

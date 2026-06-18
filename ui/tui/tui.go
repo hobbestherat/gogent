@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"gogent/internal/agent"
 	"gogent/internal/config"
+	"gogent/internal/gogent"
 	"strings"
 	"sync"
 
@@ -72,6 +73,14 @@ type Handlers struct {
 	// Restore returns sessions to re-open at startup (crash/continuation
 	// recovery). May be nil.
 	Restore func() []RestoredSession
+	// LoadLayout returns the persisted workbench layout (sidebar order, titles,
+	// pin states and window bounds) to re-apply after sessions are restored. May
+	// be nil, in which case the desktop starts with its default arrangement.
+	LoadLayout func() gogent.Layout
+	// SaveLayout persists the current workbench layout so it survives a restart.
+	// Best-effort: the handler should not block the UI on a write failure. May
+	// be nil, in which case layout changes are kept only for the current run.
+	SaveLayout func(gogent.Layout)
 }
 
 // RestoredSession describes a session to be re-opened from persisted state.
@@ -100,10 +109,13 @@ type Workbench struct {
 	mu         sync.Mutex
 	sessions   map[string]*SessionWindow
 	order      []string
-	nextNum    int
-	handlers   Handlers
-	sidebar    *sidebar
-	monolog    *tv.Layer
+	// pinned records favorite sessions (shown with a ★ marker and floated to the
+	// top of the sidebar on pin). Kept as a set so the flag survives reorders.
+	pinned   map[string]bool
+	nextNum  int
+	handlers Handlers
+	sidebar  *sidebar
+	monolog  *tv.Layer
 	// shutdown is cancelled (via quit) when the UI loop stops. Background
 	// goroutines blocked on a permission prompt select on it so they unblock
 	// instead of leaking when the user quits. See AskPermission.
@@ -125,6 +137,7 @@ func NewWorkbench(models []*config.ModelConfig) *Workbench {
 		app:      app,
 		desktop:  tv.NewDesktop(app),
 		sessions: make(map[string]*SessionWindow),
+		pinned:   make(map[string]bool),
 		// Use default window config (resizable and minimizable by default)
 		windowConfig: config.WindowConfig{
 			Resizable:   true,
@@ -201,6 +214,11 @@ func (w *Workbench) rebuildMenu() {
 			titles[id] = s.title
 		}
 	}
+	pinned := make(map[string]bool, len(w.pinned))
+	for id, p := range w.pinned {
+		pinned[id] = p
+	}
+	active := w.activeIDLocked()
 	w.mu.Unlock()
 	sessionItems := []*tv.MenuItem{
 		tv.NewMenuItem("&New Session", func() { w.NewSession() }).
@@ -209,12 +227,34 @@ func (w *Workbench) rebuildMenu() {
 			WithShortcut("Ctrl+]", tui.KeyRune, ']', true),
 		tv.NewMenuItem("&Close Session", func() { w.CloseActive() }).
 			WithShortcut("Ctrl+W", tui.KeyRune, 'w', true),
+		tv.NewMenuItem("----------", nil),
+		tv.NewMenuItem("Close &Others", func() { w.CloseOthers(w.ActiveID()) }),
+		tv.NewMenuItem("Close Al&l", func() { w.CloseAll() }),
+	}
+	// Per-active-session operations (rename / pin / reorder) only make sense when
+	// a window is open. They reflect the active session's current pin state.
+	if active != "" {
+		pinLabel := "&Pin Active"
+		if pinned[active] {
+			pinLabel = "Un&pin Active"
+		}
+		sessionItems = append(sessionItems,
+			tv.NewMenuItem("----------", nil),
+			tv.NewMenuItem("&Rename Active…", func() { w.RenameSession(w.ActiveID()) }),
+			tv.NewMenuItem(pinLabel, func() { w.TogglePin(w.ActiveID()) }),
+			tv.NewMenuItem("Move Active &Up", func() { w.MoveSession(w.ActiveID(), -1) }),
+			tv.NewMenuItem("Move Active &Down", func() { w.MoveSession(w.ActiveID(), 1) }),
+		)
 	}
 	if len(order) > 0 {
 		sessionItems = append(sessionItems, tv.NewMenuItem("----------", nil))
 		for _, id := range order {
 			id := id
-			sessionItems = append(sessionItems, tv.NewMenuItem(titles[id], func() { w.Focus(id) }))
+			label := titles[id]
+			if pinned[id] {
+				label = "★ " + label
+			}
+			sessionItems = append(sessionItems, tv.NewMenuItem(label, func() { w.Focus(id) }))
 		}
 	}
 	bar := tv.NewMenuBar(tv.Rect{X: 0, Y: 0, W: w.app.Width(), H: 1},
@@ -285,6 +325,7 @@ func (w *Workbench) NewSession() *SessionWindow {
 		w.handlers.OnCreate(id, title)
 	}
 	w.rebuildMenu()
+	w.persistLayout()
 	return sw
 }
 
@@ -334,10 +375,11 @@ func (w *Workbench) openWindow(id, title string) *SessionWindow {
 	sw := newSessionWindow(w, id, title, tv.Rect{X: x, Y: y, W: width, H: height})
 	w.sessions[id] = sw
 	w.order = append(w.order, id)
+	pinned := w.pinned[id]
 	w.mu.Unlock()
 	w.desktop.AddLayer(sw.layer)
 	if w.sidebar != nil {
-		w.sidebar.addSession(id, title)
+		w.sidebar.addSession(id, title, pinned)
 	}
 	return sw
 }
@@ -410,11 +452,17 @@ func (w *Workbench) activeIDLocked() string {
 	return ""
 }
 
+// ActiveID returns the id of the currently top-most session window, or "" when
+// none is open. It is the thread-safe counterpart of activeIDLocked.
+func (w *Workbench) ActiveID() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.activeIDLocked()
+}
+
 // CloseActive closes the top-most session window.
 func (w *Workbench) CloseActive() {
-	w.mu.Lock()
-	id := w.activeIDLocked()
-	w.mu.Unlock()
+	id := w.ActiveID()
 	if id != "" {
 		w.CloseSession(id)
 	}
@@ -429,6 +477,7 @@ func (w *Workbench) CloseSession(id string) {
 		return
 	}
 	delete(w.sessions, id)
+	delete(w.pinned, id)
 	next := w.order[:0]
 	for _, existing := range w.order {
 		if existing != id {
@@ -445,6 +494,7 @@ func (w *Workbench) CloseSession(id string) {
 		w.handlers.OnClose(id)
 	}
 	w.rebuildMenu()
+	w.persistLayout()
 	w.mu.Lock()
 	last := ""
 	if len(w.order) > 0 {
@@ -454,6 +504,326 @@ func (w *Workbench) CloseSession(id string) {
 	if last != "" {
 		w.Focus(last)
 	}
+}
+
+// RenameSession opens a modal that lets the user edit a session's title. The
+// new title is reflected in the window, sidebar and menu. Renaming is a UI
+// concern: it never changes the session id or its transcript.
+func (w *Workbench) RenameSession(id string) {
+	w.mu.Lock()
+	sw := w.sessions[id]
+	current := ""
+	if sw != nil {
+		current = sw.title
+	}
+	w.mu.Unlock()
+	if sw == nil {
+		return
+	}
+	w.showInputDialog("Rename Session", "&Title:", current, func(value string, ok bool) {
+		if !ok {
+			return
+		}
+		if title := strings.TrimSpace(value); title != "" {
+			w.SetSessionTitle(id, title)
+		}
+	})
+}
+
+// SetSessionTitle applies a new title to a session's window, sidebar node and
+// menu, then persists the layout. Empty titles are ignored.
+func (w *Workbench) SetSessionTitle(id, title string) {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return
+	}
+	w.mu.Lock()
+	sw := w.sessions[id]
+	if sw != nil {
+		sw.title = title
+		sw.window.Title = title
+	}
+	w.mu.Unlock()
+	if sw == nil {
+		return
+	}
+	if w.sidebar != nil {
+		w.sidebar.relabelSession(id, title, w.IsPinned(id))
+	}
+	w.rebuildMenu()
+	w.persistLayout()
+}
+
+// IsPinned reports whether a session is marked as a favorite.
+func (w *Workbench) IsPinned(id string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.pinned[id]
+}
+
+// TogglePin flips a session's favorite state. Pinning also moves it to the front
+// of the sidebar so favorites stay on top; unpinning leaves it in place. The
+// state is reflected in the sidebar marker and menu, then persisted.
+func (w *Workbench) TogglePin(id string) {
+	w.mu.Lock()
+	if _, ok := w.sessions[id]; !ok {
+		w.mu.Unlock()
+		return
+	}
+	nowPinned := !w.pinned[id]
+	w.pinned[id] = nowPinned
+	if nowPinned {
+		w.orderToFrontLocked(id)
+	}
+	title := ""
+	if sw := w.sessions[id]; sw != nil {
+		title = sw.title
+	}
+	order := append([]string(nil), w.order...)
+	w.mu.Unlock()
+	if w.sidebar != nil {
+		w.sidebar.reorder(order)
+		w.sidebar.relabelSession(id, title, nowPinned)
+	}
+	w.rebuildMenu()
+	w.persistLayout()
+}
+
+// orderToFrontLocked moves id to the front of w.order. Caller must hold w.mu.
+func (w *Workbench) orderToFrontLocked(id string) {
+	next := make([]string, 0, len(w.order))
+	next = append(next, id)
+	for _, existing := range w.order {
+		if existing != id {
+			next = append(next, existing)
+		}
+	}
+	w.order = next
+}
+
+// MoveSession reorders a session within the sidebar by delta places (-1 toward
+// the top, +1 toward the bottom), clamped to the list bounds, then persists the
+// new order.
+func (w *Workbench) MoveSession(id string, delta int) {
+	if delta == 0 {
+		return
+	}
+	w.mu.Lock()
+	if _, ok := w.sessions[id]; !ok {
+		w.mu.Unlock()
+		return
+	}
+	idx := -1
+	for i, existing := range w.order {
+		if existing == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		w.mu.Unlock()
+		return
+	}
+	next := idx + delta
+	if next < 0 {
+		next = 0
+	}
+	if next >= len(w.order) {
+		next = len(w.order) - 1
+	}
+	if next == idx {
+		w.mu.Unlock()
+		return
+	}
+	w.order = append(w.order[:idx], w.order[idx+1:]...)
+	w.order = append(w.order[:next], append([]string{id}, w.order[next:]...)...)
+	order := append([]string(nil), w.order...)
+	w.mu.Unlock()
+	if w.sidebar != nil {
+		w.sidebar.reorder(order)
+	}
+	w.rebuildMenu()
+	w.persistLayout()
+}
+
+// CloseOthers closes every open session except id.
+func (w *Workbench) CloseOthers(id string) {
+	w.mu.Lock()
+	others := make([]string, 0, len(w.order))
+	for _, existing := range w.order {
+		if existing != id {
+			others = append(others, existing)
+		}
+	}
+	w.mu.Unlock()
+	for _, other := range others {
+		w.CloseSession(other)
+	}
+}
+
+// CloseAll closes every open session, then opens a single fresh window so the
+// user always has somewhere to type.
+func (w *Workbench) CloseAll() {
+	w.mu.Lock()
+	all := append([]string(nil), w.order...)
+	w.mu.Unlock()
+	for _, id := range all {
+		w.CloseSession(id)
+	}
+	if len(all) > 0 {
+		w.NewSession()
+	}
+}
+
+// captureLayout snapshots the current sidebar order together with each session's
+// title, pin state and window bounds/minimized flag into a Layout.
+func (w *Workbench) captureLayout() gogent.Layout {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	layout := gogent.Layout{Entries: make([]gogent.LayoutEntry, 0, len(w.order))}
+	for _, id := range w.order {
+		sw := w.sessions[id]
+		if sw == nil {
+			continue
+		}
+		bounds := sw.window.Component.Bounds
+		layout.Entries = append(layout.Entries, gogent.LayoutEntry{
+			ID:        id,
+			Title:     sw.title,
+			Pinned:    w.pinned[id],
+			Minimized: sw.window.IsMinimized(),
+			X:         bounds.X,
+			Y:         bounds.Y,
+			W:         bounds.W,
+			H:         bounds.H,
+		})
+	}
+	return layout
+}
+
+// persistLayout captures the current layout and writes it via the SaveLayout
+// handler. It is best-effort and a no-op when the handler is unset, so layout
+// changes are kept only for the current run when persistence is unavailable.
+func (w *Workbench) persistLayout() {
+	if w.handlers.SaveLayout == nil {
+		return
+	}
+	w.handlers.SaveLayout(w.captureLayout())
+}
+
+// applyLayout restores titles, pin states and window bounds from a persisted
+// layout onto already-open windows. Entries for sessions that no longer exist
+// are ignored; the next persistLayout drops them (the layout is self-healing).
+func (w *Workbench) applyLayout(layout gogent.Layout) {
+	w.mu.Lock()
+	if len(layout.Entries) == 0 {
+		w.mu.Unlock()
+		return
+	}
+	screenW, screenH := w.app.Width(), w.app.Height()
+	// relabel captures each applied session's final title + pin so the sidebar
+	// refresh runs without re-reading workbench state outside the lock.
+	type relabel struct {
+		id, title string
+		pinned    bool
+	}
+	var relabels []relabel
+	for _, e := range layout.Entries {
+		sw := w.sessions[e.ID]
+		if sw == nil {
+			continue
+		}
+		if e.Title != "" {
+			sw.title = e.Title
+			sw.window.Title = e.Title
+		}
+		w.pinned[e.ID] = e.Pinned
+		bounds := clampWindowRect(tv.Rect{X: e.X, Y: e.Y, W: e.W, H: e.H},
+			screenW, screenH, sw.window.MinWidth, sw.window.MinHeight)
+		sw.window.Component.SetBounds(bounds)
+		if e.Minimized && !sw.window.IsMinimized() {
+			sw.window.Minimize()
+		}
+		relabels = append(relabels, relabel{e.ID, sw.title, e.Pinned})
+	}
+	w.mu.Unlock()
+	if w.sidebar != nil {
+		for _, r := range relabels {
+			w.sidebar.relabelSession(r.id, r.title, r.pinned)
+		}
+	}
+	w.rebuildMenu()
+}
+
+// clampWindowRect keeps a restored window on-screen and at least minW×minH after
+// a possible terminal resize since the layout was saved, so a layout from a
+// larger terminal can't strand a window off-screen.
+func clampWindowRect(r tv.Rect, screenW, screenH, minW, minH int) tv.Rect {
+	if minW < 1 {
+		minW = 1
+	}
+	if minH < 1 {
+		minH = 1
+	}
+	if r.W < minW {
+		r.W = minW
+	}
+	if r.H < minH {
+		r.H = minH
+	}
+	if r.W > screenW && screenW > 0 {
+		r.W = screenW
+	}
+	if r.H > screenH && screenH > 0 {
+		r.H = screenH
+	}
+	if r.X < 0 {
+		r.X = 0
+	}
+	if r.Y < 0 {
+		r.Y = 0
+	}
+	if screenW > 0 && r.X+r.W > screenW {
+		r.X = screenW - r.W
+	}
+	if screenH > 0 && r.Y+r.H > screenH {
+		r.Y = screenH - r.H
+	}
+	if r.X < 0 {
+		r.X = 0
+	}
+	if r.Y < 0 {
+		r.Y = 0
+	}
+	return r
+}
+
+// orderByLayout returns the restored sessions reordered so that those recorded
+// in the layout come first (in layout order), with any unknown sessions appended
+// in their original order. This re-establishes the sidebar arrangement the user
+// left behind without losing sessions added out-of-band.
+func orderByLayout(restored []RestoredSession, layout gogent.Layout) []RestoredSession {
+	if len(layout.Entries) == 0 || len(restored) <= 1 {
+		return restored
+	}
+	byID := make(map[string]RestoredSession, len(restored))
+	for _, rs := range restored {
+		byID[rs.ID] = rs
+	}
+	seen := make(map[string]bool, len(restored))
+	out := make([]RestoredSession, 0, len(restored))
+	for _, e := range layout.Entries {
+		if rs, ok := byID[e.ID]; ok && !seen[e.ID] {
+			out = append(out, rs)
+			seen[e.ID] = true
+		}
+	}
+	for _, rs := range restored {
+		if !seen[rs.ID] {
+			out = append(out, rs)
+		}
+	}
+	return out
 }
 
 // EmitSessionEvent forwards a core session event to the matching window. It is
@@ -487,11 +857,21 @@ func (w *Workbench) Run() error {
 	// goroutine still blocked on a permission prompt unblocks (DecisionDeny)
 	// instead of leaking once the event loop is gone.
 	defer w.quit()
-	// Re-open any persisted sessions (crash recovery / continuation).
+	// Persist the final desktop arrangement (including window moves/resizes the
+	// user made this session) when the loop stops, so it is restored next launch.
+	defer w.persistLayout()
+	// Re-open any persisted sessions (crash recovery / continuation), then
+	// re-apply the saved workbench layout (titles, pin/order, window bounds).
 	if w.handlers.Restore != nil {
-		for _, rs := range w.handlers.Restore() {
+		restored := w.handlers.Restore()
+		var layout gogent.Layout
+		if w.handlers.LoadLayout != nil {
+			layout = w.handlers.LoadLayout()
+		}
+		for _, rs := range orderByLayout(restored, layout) {
 			w.AdoptSession(rs)
 		}
+		w.applyLayout(layout)
 	}
 	// Open an initial session so the user has somewhere to type.
 	if len(w.order) == 0 {

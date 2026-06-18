@@ -63,6 +63,25 @@ These features are controlled by the `window` section of `config.json`:
 }
 ```
 
+### Session management
+
+When you run many sessions at once, the **Session** menu (and the right-hand
+sidebar) let you keep them organized:
+
+- **Rename** — *Rename Active…* sets a custom title shown in the window, sidebar
+  and menu (the session id is unchanged).
+- **Pin / favorite** — *Pin Active* marks a session with a ★ and floats it to the
+  top of the sidebar; *Unpin Active* clears the mark.
+- **Reorder** — *Move Active Up / Down* reorders sessions in the sidebar.
+- **Close Others / Close All** — bulk-close every window except the active one,
+  or all of them (a fresh window is opened so you always have somewhere to type).
+
+The full desktop layout — sidebar order, titles, pin state, and each window's
+position/size — is saved to `~/.gogent/workbench_layout.json` and restored on
+the next launch, so your workbench comes back exactly as you left it. (Window
+moves and resizes are captured when you quit; renames, pins, reorders and
+open/close are saved immediately.)
+
 Each model entry has an `api_type` selecting the provider conventions:
 
 - `openai` (default) — any OpenAI-compatible server. `endpoint` may be a full
