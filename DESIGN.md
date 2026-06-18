@@ -51,10 +51,13 @@ internal/http/         HTTP client; cmd also has a headless HTTP server mode
   transport serves generic servers (`openai`) and the Z.AI platform (`zai`); a
   bare base URL is normalized into the concrete endpoints. Connections are
   rebuilt per send, so model/endpoint edits take effect on the next turn.
-- **Tools** (`internal/tool`, `internal/fileops`) — `read`, `write`, `edit`,
-  `shell`, `spawn_subagent`, agent-control tools, and `structured_output`. File
-  ops resolve paths against the workspace root (the launch cwd) and run through a
-  keyed-mutex file mutator.
+- **Tools** (`internal/tool`, `internal/fileops`, `internal/web`) — `read`,
+  `write`, `edit`, `shell`, `web_fetch`, `spawn_subagent`, agent-control tools,
+  and `structured_output`. File ops resolve paths against the workspace root (the
+  launch cwd) and run through a keyed-mutex file mutator. `web_fetch` downloads an
+  http(s) URL and returns readability-style Markdown (size-capped, short-TTL
+  cached, gated per domain via `ActionNetwork`); the HTML→Markdown reduction is a
+  dependency-free, stdlib-only extractor (`internal/web`).
 - **TUI** (`ui/tui`) — `Workbench` desktop hosting draggable `SessionWindow`s,
   each with a foldable transcript (turbotv `TextView`), per-session model select,
   status line, a right-hand sidebar (session/sub-agent tree), and Config / model

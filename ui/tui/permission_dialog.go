@@ -77,6 +77,11 @@ func permissionPrompt(req permission.Request) (title, question, alwaysLabel stri
 	case permission.ActionSubagent:
 		return "Spawn sub-agent?", "The agent wants to spawn a sub-agent.", "Always"
 	case permission.ActionNetwork:
+		if req.Resource != "" {
+			return "Network access?",
+				fmt.Sprintf("The agent wants to fetch from the network:\n%s", req.Resource),
+				fmt.Sprintf("Always allow %s", req.Resource)
+		}
 		return "Network access?", "The agent wants to access the network.", "Always"
 	default:
 		return "Permission required",

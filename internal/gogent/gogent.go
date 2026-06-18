@@ -262,8 +262,10 @@ func (g *Gogent) initializeToolRegistry() {
 		g.toolRegistry.ShellTimeout = time.Duration(g.config.Timeouts.ToolSecondsOrDefault()) * time.Second
 	}
 	g.toolRegistry.WorkspaceRoot = g.workspaceRoot
+	g.toolRegistry.NetworkTimeout = g.toolRegistry.ShellTimeout
 	g.toolRegistry.Permission = g.permissions
 	g.toolRegistry.RegisterShellTool()
+	g.toolRegistry.RegisterWebFetchTool()
 
 	g.toolRegistry.Register(&tool.Tool{
 		Name:        "spawn_subagent",
@@ -1296,6 +1298,7 @@ func (g *Gogent) SetTimeouts(t config.TimeoutConfig) {
 	g.mu.Lock()
 	g.config.Timeouts = t
 	g.toolRegistry.ShellTimeout = time.Duration(t.ToolSecondsOrDefault()) * time.Second
+	g.toolRegistry.NetworkTimeout = g.toolRegistry.ShellTimeout
 	g.toolRegistry.WorkspaceRoot = g.workspaceRoot
 	g.toolRegistry.Permission = g.permissions
 	sessions := make([]*agent.UserSession, 0, len(g.userSessions))
@@ -1304,9 +1307,10 @@ func (g *Gogent) SetTimeouts(t config.TimeoutConfig) {
 	}
 	g.mu.Unlock()
 
-	// Re-register the shell tool so the new timeout is captured, then refresh
-	// every session's root registry so running sessions pick it up.
+	// Re-register the shell and web_fetch tools so the new timeout is captured,
+	// then refresh every session's root registry so running sessions pick it up.
 	g.toolRegistry.RegisterShellTool()
+	g.toolRegistry.RegisterWebFetchTool()
 	subAgentTO := time.Duration(t.SubAgentSecondsOrDefault()) * time.Second
 	for _, s := range sessions {
 		s.SetSubAgentTimeout(subAgentTO)
