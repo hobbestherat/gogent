@@ -264,11 +264,12 @@ func (w *Workbench) rebuildMenu() {
 			}).WithShortcut("Ctrl+Q", tui.KeyRune, 'q', true),
 		),
 		tv.NewSubMenu("&Session", sessionItems...),
+		tv.NewSubMenu("&View", w.viewItems()...),
 		tv.NewSubMenu("&Config", w.settingsItems()...),
 		tv.NewSubMenu("&Help",
 			tv.NewMenuItem("&About", func() {
 				tv.ShowConfirmYesNo(w.desktop, "Gogent",
-					"Gogent multi-session TUI.\nEach session is its own window; fold thoughts & tool calls with the >/v markers.", nil)
+					"Gogent multi-session TUI.\nEach session is its own window; fold thoughts & tool calls with the >/v markers.\nFocus a transcript to search ('/'), filter by type (a/t/r/e) and fold/unfold (f/u); the View menu lists the same.", nil)
 			}),
 		),
 	)
@@ -303,6 +304,51 @@ func (w *Workbench) settingsItems() []*tv.MenuItem {
 		tv.NewMenuItem("Recursive: "+recursive, func() { w.showSettingsDialog() }),
 	}
 }
+
+// viewItems builds the View submenu: find-in-transcript, the event-type filter
+// toggles and fold/unfold — all acting on the active session's transcript. The
+// same operations are available from the keyboard while the transcript is
+// focused ('/', a/t/r/e, f/u, Esc); the menu makes them discoverable.
+func (w *Workbench) viewItems() []*tv.MenuItem {
+	return []*tv.MenuItem{
+		tv.NewMenuItem("&Find…", func() { w.withActiveTranscript((*SessionWindow).promptFind) }).
+			WithShortcut("Ctrl+F", tui.KeyRune, 'f', true),
+		tv.NewMenuItem("Show &All", func() { w.transcriptDo(func(m *transcriptModel) { m.showAll() }) }),
+		tv.NewMenuItem("----------", nil),
+		tv.NewMenuItem("Toggle &Messages", func() { w.transcriptDo(func(m *transcriptModel) { m.toggleKind(kindAssistant) }) }),
+		tv.NewMenuItem("Toggle &Tool Calls", func() { w.transcriptDo(func(m *transcriptModel) { m.toggleKind(kindTool) }) }),
+		tv.NewMenuItem("Toggle Thi&nking", func() { w.transcriptDo(func(m *transcriptModel) { m.toggleKind(kindThinking) }) }),
+		tv.NewMenuItem("Toggle &Errors", func() { w.transcriptDo(func(m *transcriptModel) { m.toggleKind(kindError) }) }),
+		tv.NewMenuItem("----------", nil),
+		tv.NewMenuItem("F&old All", func() { w.transcriptDo(func(m *transcriptModel) { m.setFold(true) }) }),
+		tv.NewMenuItem("&Unfold All", func() { w.transcriptDo(func(m *transcriptModel) { m.setFold(false) }) }),
+	}
+}
+
+// withActiveTranscript runs fn against the currently active session window, if
+// any. It is the shared lookup behind the View menu actions.
+func (w *Workbench) withActiveTranscript(fn func(*SessionWindow)) {
+	id := w.ActiveID()
+	if id == "" {
+		return
+	}
+	w.mu.Lock()
+	sw := w.sessions[id]
+	w.mu.Unlock()
+	if sw != nil {
+		fn(sw)
+	}
+}
+
+// transcriptDo applies a transcript-model mutation to the active session and
+// repaints.
+func (w *Workbench) transcriptDo(fn func(*transcriptModel)) {
+	w.withActiveTranscript(func(sw *SessionWindow) {
+		fn(sw.transcript)
+		w.desktop.Redraw()
+	})
+}
+
 func (w *Workbench) confirmQuit() {
 	tv.ShowConfirmYesNo(w.desktop, "Quit Gogent", "Are you sure you want to quit?", func(yes bool) {
 		if yes && w.quit != nil {
@@ -344,7 +390,7 @@ func (w *Workbench) AdoptSession(rs RestoredSession) *SessionWindow {
 		title = rs.ID
 	}
 	sw := w.openWindow(rs.ID, title)
-	renderTranscript(sw.history, rs.Messages)
+	sw.restore(rs.Messages)
 	if w.handlers.OnCreate != nil {
 		w.handlers.OnCreate(rs.ID, title)
 	}

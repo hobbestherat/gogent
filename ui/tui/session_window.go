@@ -20,15 +20,16 @@ type SessionWindow struct {
 	window      *tv.Window
 	layer       *tv.Layer
 	history     *tv.TextView
+	transcript  *transcriptModel
 	input       *tv.MultiLineInput
 	sendButton  *tv.Button
 	modelLabel  *tv.Label
 	modelSelect *tv.Select
 	status      *tv.Label
 	systemInstr string
-	// pendingTool tracks the foldable entry created for an in-flight tool call so
-	// its result can be appended as a child when it returns.
-	pendingTool *tv.TextEntry
+	// pendingTool tracks the record created for an in-flight tool call so its
+	// result can be appended to the same foldable entry when it returns.
+	pendingTool *transcriptRecord
 	busy        bool
 	// statusState is the current left-hand status text (idle/working.../thinking
 	// ... (step N)); statusStats holds the latest per-session stats snapshot.
@@ -51,7 +52,6 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect) *SessionW
 	window.OnClose = func(_ *tv.Window) { wb.CloseSession(id) }
 	history := tv.NewTextView("", tv.Rect{})
 	history.Wrap = true
-	history.AddColored("[System] "+title+" ready. Type a message and press Enter (Shift+Enter for newline).", colorInfo)
 	input := tv.NewMultiLineInput("", tv.Rect{})
 	sendButton := tv.NewButton("Send", tv.Rect{}, nil)
 	modelLabel := tv.NewLabel("Model", tv.Rect{})
@@ -61,6 +61,24 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect) *SessionW
 	status.FG = colorNote
 	sw.window = window
 	sw.history = history
+	sw.transcript = newTranscriptModel(history)
+	sw.transcript.add(&transcriptRecord{
+		kind:   kindSystem,
+		header: "[System] " + title + " ready. Type a message and press Enter (Shift+Enter for newline).",
+		color:  colorInfo,
+	})
+	// Intercept transcript keys (search/filter/fold) before the TextView's own
+	// scroll handling, falling through to it for everything else.
+	scroll := history.Component.OnTypeFn
+	history.Component.OnTypeFn = func(c *tv.VisualComponent, event tui.TypeEvent) bool {
+		if sw.handleTranscriptKey(event) {
+			return true
+		}
+		if scroll != nil {
+			return scroll(c, event)
+		}
+		return false
+	}
 	sw.input = input
 	sw.sendButton = sendButton
 	sw.modelLabel = modelLabel
@@ -181,12 +199,22 @@ func (sw *SessionWindow) apply(ev agent.SessionEvent) {
 	}
 }
 
+// styledChildLines splits text into foldable child lines sharing one colour.
+func styledChildLines(text string, color tui.Color) []styledLine {
+	lines := childLines(text)
+	out := make([]styledLine, len(lines))
+	for i, line := range lines {
+		out[i] = styledLine{text: line, color: color}
+	}
+	return out
+}
+
 // addUser appends the user's message.
 func (sw *SessionWindow) addUser(text string) {
-	header := sw.history.AddColored("You:", colorUser)
-	for _, line := range childLines(text) {
-		header.AddColored(line, colorUser)
-	}
+	sw.transcript.add(&transcriptRecord{
+		kind: kindUser, header: "You:", color: colorUser,
+		lines: styledChildLines(text, colorUser),
+	})
 }
 
 // addAssistant appends the assistant's final answer (expanded, not folded).
@@ -194,11 +222,10 @@ func (sw *SessionWindow) addAssistant(text string) {
 	if strings.TrimSpace(text) == "" {
 		return
 	}
-	header := sw.history.AddColored("Gogent:", colorAgent)
-	for _, line := range childLines(text) {
-		header.AddColored(line, colorAgent)
-	}
-	header.SetCollapsed(false)
+	sw.transcript.add(&transcriptRecord{
+		kind: kindAssistant, header: "Gogent:", color: colorAgent,
+		lines: styledChildLines(text, colorAgent),
+	})
 }
 
 // addThought appends a collapsed-by-default "thought" entry.
@@ -206,55 +233,155 @@ func (sw *SessionWindow) addThought(text string) {
 	if strings.TrimSpace(text) == "" {
 		return
 	}
-	header := sw.history.AddColored("thought", colorNote)
-	for _, line := range childLines(text) {
-		header.AddColored(line, colorNote)
-	}
-	header.SetCollapsed(true)
+	sw.transcript.add(&transcriptRecord{
+		kind: kindThinking, header: "thought", color: colorNote, collapsed: true,
+		lines: styledChildLines(text, colorNote),
+	})
 }
 
 // addCompaction appends a collapsed note recording a context-compression pass;
 // the structured summary is folded inside.
 func (sw *SessionWindow) addCompaction(estTokens int, digest string) {
-	header := sw.history.AddColored(fmt.Sprintf("context compacted (~%d tokens)", estTokens), colorNote)
-	for _, line := range childLines(digest) {
-		header.AddColored(line, colorNote)
-	}
-	header.SetCollapsed(true)
+	sw.transcript.add(&transcriptRecord{
+		kind:      kindCompaction,
+		header:    fmt.Sprintf("context compacted (~%d tokens)", estTokens),
+		color:     colorNote,
+		collapsed: true,
+		lines:     styledChildLines(digest, colorNote),
+	})
 }
 
 // beginToolCall creates a collapsed entry for a tool call, holding its args.
 func (sw *SessionWindow) beginToolCall(name string, args map[string]interface{}) {
-	header := sw.history.AddColored(fmt.Sprintf("tool: %s (running...)", name), colorTool)
-	header.AddColored("args:", colorTool)
+	lines := []styledLine{{text: "args:", color: colorTool}}
 	for _, line := range formatArgs(args) {
-		header.AddColored("  "+line, colorTool)
+		lines = append(lines, styledLine{text: "  " + line, color: colorTool})
 	}
-	header.SetCollapsed(true)
-	sw.pendingTool = header
+	sw.pendingTool = sw.transcript.add(&transcriptRecord{
+		kind: kindTool, header: fmt.Sprintf("tool: %s (running...)", name),
+		color: colorTool, collapsed: true, lines: lines,
+	})
 }
 
 // finishToolCall appends the result to the pending tool entry (or a fresh one).
 func (sw *SessionWindow) finishToolCall(name, result string) {
-	header := sw.pendingTool
-	if header == nil {
-		header = sw.history.AddColored(fmt.Sprintf("tool: %s", name), colorTool)
+	rec := sw.pendingTool
+	if rec == nil {
+		rec = sw.transcript.add(&transcriptRecord{
+			kind: kindTool, header: fmt.Sprintf("tool: %s", name), color: colorTool, collapsed: true,
+		})
 	} else {
-		header.SetText(fmt.Sprintf("tool: %s (done)", name))
+		sw.transcript.setHeader(rec, fmt.Sprintf("tool: %s (done)", name))
 	}
-	header.AddColored("result:", colorResult)
+	sw.transcript.appendLine(rec, styledLine{text: "result:", color: colorResult})
 	for _, line := range childLines(result) {
-		header.AddColored("  "+line, colorResult)
+		sw.transcript.appendLine(rec, styledLine{text: "  " + line, color: colorResult})
 	}
-	header.SetCollapsed(true)
+	sw.transcript.setCollapsed(rec, true)
 	sw.pendingTool = nil
 }
 
 // addError appends a red error line.
 func (sw *SessionWindow) addError(text string) {
-	header := sw.history.AddColored("error:", colorError)
+	lines := make([]styledLine, 0)
 	for _, line := range childLines(text) {
-		header.AddColored("  "+line, colorError)
+		lines = append(lines, styledLine{text: "  " + line, color: colorError})
+	}
+	sw.transcript.add(&transcriptRecord{
+		kind: kindError, header: "error:", color: colorError, lines: lines,
+	})
+}
+
+// handleTranscriptKey implements the less/vim-style transcript controls while the
+// history view is focused: '/' to search, single letters to toggle event-type
+// filters, 'f'/'u' to fold/unfold all, and Esc to clear an active filter/search.
+// It returns false (letting the TextView scroll) when nothing applies.
+func (sw *SessionWindow) handleTranscriptKey(event tui.TypeEvent) bool {
+	if event.Ctrl || event.Alt {
+		return false
+	}
+	switch event.Key {
+	case tui.KeyEscape:
+		if sw.transcript.filtering() {
+			sw.transcript.showAll()
+			return true
+		}
+		return false
+	case tui.KeyRune:
+		switch event.Rune {
+		case '/':
+			sw.promptFind()
+		case 'a':
+			sw.transcript.toggleKind(kindAssistant)
+		case 't':
+			sw.transcript.toggleKind(kindTool)
+		case 'r':
+			sw.transcript.toggleKind(kindThinking)
+		case 'e':
+			sw.transcript.toggleKind(kindError)
+		case 'f':
+			sw.transcript.setFold(true)
+		case 'u':
+			sw.transcript.setFold(false)
+		default:
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+// promptFind opens the search prompt and applies the entered query as a
+// find-in-transcript filter (an empty query clears the search).
+func (sw *SessionWindow) promptFind() {
+	sw.wb.showInputDialog("Find in Transcript", "&Search:", sw.transcript.query, func(value string, ok bool) {
+		if !ok {
+			return
+		}
+		sw.transcript.setQuery(value)
+		sw.wb.desktop.Redraw()
+	})
+}
+
+// restore replays a saved transcript into the model so a re-opened session is
+// searchable and filterable like a live one. It mirrors renderTranscript's
+// role-to-entry mapping.
+func (sw *SessionWindow) restore(msgs []ChatMessage) {
+	for _, m := range msgs {
+		switch strings.ToLower(m.Role) {
+		case "user":
+			if strings.TrimSpace(m.Content) != "" {
+				sw.addUser(m.Content)
+			}
+		case "assistant":
+			sw.addAssistant(m.Content)
+			if m.Tool != "" {
+				lines := make([]styledLine, 0)
+				for _, line := range childLines(m.Args) {
+					lines = append(lines, styledLine{text: "  " + line, color: colorTool})
+				}
+				sw.transcript.add(&transcriptRecord{
+					kind: kindTool, header: fmt.Sprintf("tool: %s", m.Tool),
+					color: colorTool, collapsed: true, lines: lines,
+				})
+			}
+		case "tool":
+			lines := make([]styledLine, 0)
+			for _, line := range childLines(m.Content) {
+				lines = append(lines, styledLine{text: "  " + line, color: colorResult})
+			}
+			sw.transcript.add(&transcriptRecord{
+				kind: kindTool, header: fmt.Sprintf("result: %s", m.Tool),
+				color: colorResult, collapsed: true, lines: lines,
+			})
+		default: // system / other
+			if strings.TrimSpace(m.Content) != "" {
+				sw.transcript.add(&transcriptRecord{
+					kind: kindSystem, header: "[System]", color: colorInfo, collapsed: true,
+					lines: styledChildLines(m.Content, colorInfo),
+				})
+			}
+		}
 	}
 }
 

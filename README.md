@@ -86,6 +86,20 @@ the next launch, so your workbench comes back exactly as you left it. (Window
 moves and resizes are captured when you quit; renames, pins, reorders and
 open/close are saved immediately.)
 
+### Navigating a transcript
+
+Long sessions are searchable and filterable. Focus a transcript (click it or
+Tab to it) and use less/vim-style keys — or the **View** menu, which lists the
+same actions:
+
+- **Find** — `/` (or *View → Find…*, **Ctrl+F**) opens a prompt; the transcript
+  is filtered to entries containing your text (case-insensitive), with a match
+  count. An empty query clears the search.
+- **Filter by type** — toggle event types in or out: `a` messages, `t` tool
+  calls/results, `r` thinking, `e` errors.
+- **Fold / unfold all** — `f` folds every entry, `u` unfolds them.
+- **Clear** — `Esc` removes any active search and filters.
+
 Each model entry has an `api_type` selecting the provider conventions:
 
 - `openai` (default) — any OpenAI-compatible server. `endpoint` may be a full

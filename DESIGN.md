@@ -65,7 +65,10 @@ internal/http/         HTTP client; cmd also has a headless HTTP server mode
   (favorite, floats to the top with a ★), move up/down to reorder, and
   close-others / close-all. The desktop layout (order, titles, pin state, window
   bounds) is persisted to `~/.gogent/workbench_layout.json` and restored on the
-  next launch.
+  next launch. Each transcript is backed by an indexed model (`transcript_model.go`)
+  that keys entries by event kind, so the **View** menu (and the focused-transcript
+  keys `/`, `a`/`t`/`r`/`e`, `f`/`u`, `Esc`) can search and filter over the model
+  and rebuild the view rather than scanning rendered cells.
 
 ## Persistence
 
