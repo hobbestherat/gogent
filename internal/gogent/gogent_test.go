@@ -9,7 +9,7 @@ import (
 )
 
 func TestGogentCreate(t *testing.T) {
-	g := NewGogent("/tmp/test")
+	g := NewGogent(t.TempDir())
 
 	if g == nil {
 		t.Error("Expected Gogent to be created")
@@ -25,7 +25,7 @@ func TestGogentCreate(t *testing.T) {
 // is then returned verbatim. (Persistence to disk is best-effort and not
 // asserted here; the accessor round-trip is the contract the UI relies on.)
 func TestNotificationsRoundTrip(t *testing.T) {
-	g := NewGogent("/tmp/test")
+	g := NewGogent(t.TempDir())
 
 	if !g.Notifications().Enabled {
 		t.Error("Notifications() should default to enabled")
@@ -44,7 +44,7 @@ func TestNotificationsRoundTrip(t *testing.T) {
 // then returned verbatim. (Persistence to disk is best-effort and not asserted
 // here; the accessor round-trip is the contract the UI relies on.)
 func TestBudgetRoundTrip(t *testing.T) {
-	g := NewGogent("/tmp/test")
+	g := NewGogent(t.TempDir())
 
 	if g.Budget().TokenBudget != 0 {
 		t.Error("Budget() should default to zero (alerting off)")
@@ -59,7 +59,7 @@ func TestBudgetRoundTrip(t *testing.T) {
 }
 
 func TestGogentCreateUserSession(t *testing.T) {
-	g := NewGogent("/tmp/test")
+	g := NewGogent(t.TempDir())
 	m := model.NewModelConnection()
 	s := model.NewModelSession("session1", m)
 	agent := agent.NewAgent("agent1", s)
@@ -72,7 +72,7 @@ func TestGogentCreateUserSession(t *testing.T) {
 }
 
 func TestGogentGetUserSession(t *testing.T) {
-	g := NewGogent("/tmp/test")
+	g := NewGogent(t.TempDir())
 	m := model.NewModelConnection()
 	s := model.NewModelSession("session2", m)
 	agent := agent.NewAgent("agent2", s)
@@ -86,7 +86,7 @@ func TestGogentGetUserSession(t *testing.T) {
 }
 
 func TestGogentListSessions(t *testing.T) {
-	g := NewGogent("/tmp/test")
+	g := NewGogent(t.TempDir())
 	m := model.NewModelConnection()
 
 	// Create first session
@@ -108,7 +108,7 @@ func TestGogentListSessions(t *testing.T) {
 func TestGogentSendMessage(t *testing.T) {
 	requireModel(t)
 
-	g := NewGogent("/tmp/test")
+	g := NewGogent(t.TempDir())
 	m := model.NewModelConnection()
 	m.SetURL(config.DefaultEndpoint())
 	s := model.NewModelSession("session3", m)
@@ -125,7 +125,7 @@ func TestGogentSendMessage(t *testing.T) {
 }
 
 func TestGogentSendMessageNotFound(t *testing.T) {
-	g := NewGogent("/tmp/test")
+	g := NewGogent(t.TempDir())
 
 	_, err := g.SendMessageToSession("nonexistent", "agent", "hi")
 	if err == nil {
@@ -139,7 +139,7 @@ func TestGogentSendMessageNotFound(t *testing.T) {
 }
 
 func TestGogentCountMessages(t *testing.T) {
-	g := NewGogent("/tmp/test")
+	g := NewGogent(t.TempDir())
 	m := model.NewModelConnection()
 	s := model.NewModelSession("session4", m)
 	agent := agent.NewAgent("agent4", s)
@@ -153,7 +153,7 @@ func TestGogentCountMessages(t *testing.T) {
 }
 
 func TestGogentCountMessagesNotFound(t *testing.T) {
-	g := NewGogent("/tmp/test")
+	g := NewGogent(t.TempDir())
 
 	count := g.CountMessages("nonexistent")
 	if count != 0 {
@@ -162,7 +162,7 @@ func TestGogentCountMessagesNotFound(t *testing.T) {
 }
 
 func TestGogentAddHook(t *testing.T) {
-	g := NewGogent("/tmp/test")
+	g := NewGogent(t.TempDir())
 
 	received := false
 	g.AddHook("test1", func(event HookEvent) {
@@ -179,7 +179,7 @@ func TestGogentAddHook(t *testing.T) {
 }
 
 func TestGogentRemoveHook(t *testing.T) {
-	g := NewGogent("/tmp/test")
+	g := NewGogent(t.TempDir())
 
 	hookCalled := false
 	hook := func(event HookEvent) {
