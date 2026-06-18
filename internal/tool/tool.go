@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -51,21 +52,43 @@ type ToolRegistry struct {
 	NetworkTimeout time.Duration
 	// Permission gates side-effecting tools (shell, etc.). May be nil.
 	Permission *permission.Service
-	// mu guards the runtime state below, which the UI reads (to browse tools and
-	// their usage) while the agent mutates it during runs. The tools map itself is
-	// populated once at startup and read thereafter, so it stays unlocked.
+	// mu guards enabled, which is per-registry: a cloned registry starts with
+	// every tool enabled regardless of its parent's toggles. The tools map itself
+	// is populated once at startup and read thereafter, so it stays unlocked.
+	mu      sync.RWMutex
+	enabled map[string]bool
+	// counts holds the per-tool invocation/outcome/duration counters. It is a
+	// pointer so a clone family (see CloneWithout) shares one set: calls executed
+	// on a session's mode-filtered clone aggregate into the same counters the
+	// global registry exposes for the Statistics view.
+	counts *toolCounts
+}
+
+// toolCounts holds the shared, mutex-guarded per-tool counters.
+type toolCounts struct {
 	mu          sync.RWMutex
-	enabled     map[string]bool
 	invocations map[string]int
 	lastUsed    map[string]time.Time
+	success     map[string]int
+	failure     map[string]int
+	totalMs     map[string]int64
+}
+
+func newToolCounts() *toolCounts {
+	return &toolCounts{
+		invocations: make(map[string]int),
+		lastUsed:    make(map[string]time.Time),
+		success:     make(map[string]int),
+		failure:     make(map[string]int),
+		totalMs:     make(map[string]int64),
+	}
 }
 
 func NewToolRegistry() *ToolRegistry {
 	return &ToolRegistry{
-		tools:       make(map[string]*Tool),
-		enabled:     make(map[string]bool),
-		invocations: make(map[string]int),
-		lastUsed:    make(map[string]time.Time),
+		tools:   make(map[string]*Tool),
+		enabled: make(map[string]bool),
+		counts:  newToolCounts(),
 	}
 }
 
@@ -139,31 +162,93 @@ func (tr *ToolRegistry) ListEnabled() []*Tool {
 // Invocations returns how many times a tool has been invoked through the
 // registry (validated calls only).
 func (tr *ToolRegistry) Invocations(name string) int {
-	tr.mu.RLock()
-	defer tr.mu.RUnlock()
-	return tr.invocations[name]
+	tr.counts.mu.RLock()
+	defer tr.counts.mu.RUnlock()
+	return tr.counts.invocations[name]
 }
 
 // LastUsed returns the time of a tool's most recent invocation, or the zero
 // time if it has never been used.
 func (tr *ToolRegistry) LastUsed(name string) time.Time {
-	tr.mu.RLock()
-	defer tr.mu.RUnlock()
-	return tr.lastUsed[name]
+	tr.counts.mu.RLock()
+	defer tr.counts.mu.RUnlock()
+	return tr.counts.lastUsed[name]
 }
 
 // recordInvocation bumps a tool's invocation count and last-used timestamp. It
 // is called once a tool call has passed validation and is about to run.
 func (tr *ToolRegistry) recordInvocation(name string) {
-	tr.mu.Lock()
-	defer tr.mu.Unlock()
-	tr.invocations[name]++
-	tr.lastUsed[name] = time.Now()
+	tr.counts.mu.Lock()
+	defer tr.counts.mu.Unlock()
+	tr.counts.invocations[name]++
+	tr.counts.lastUsed[name] = time.Now()
+}
+
+// recordOutcome records the result and duration of a tool execution that already
+// passed validation. success follows the returned ToolCallResponse.Success flag
+// (an error or a non-success response counts as a failure). It pairs with
+// recordInvocation, which bumped the invocation count just before execution.
+func (tr *ToolRegistry) recordOutcome(name string, success bool, durationMs int64) {
+	tr.counts.mu.Lock()
+	defer tr.counts.mu.Unlock()
+	if success {
+		tr.counts.success[name]++
+	} else {
+		tr.counts.failure[name]++
+	}
+	tr.counts.totalMs[name] += durationMs
+}
+
+// ToolStats is a point-in-time view of one tool's usage: how many times it ran,
+// the success/failure split and the cumulative/average execution time. It is the
+// per-tool row the Statistics view (issue #57) renders.
+type ToolStats struct {
+	Name        string
+	Invocations int
+	Success     int
+	Failure     int
+	TotalMs     int64
+}
+
+// AvgMs returns the mean execution time per invocation, or 0 when the tool has
+// never run.
+func (s ToolStats) AvgMs() int64 {
+	if s.Invocations == 0 {
+		return 0
+	}
+	return s.TotalMs / int64(s.Invocations)
+}
+
+// GetAllToolStats returns a ToolStats row for every registered tool, sorted by
+// name for a stable display. Tools that have never run report zero counters.
+func (tr *ToolRegistry) GetAllToolStats() []ToolStats {
+	tr.counts.mu.RLock()
+	defer tr.counts.mu.RUnlock()
+	out := make([]ToolStats, 0, len(tr.tools))
+	names := make([]string, 0, len(tr.tools))
+	for name := range tr.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		out = append(out, ToolStats{
+			Name:        name,
+			Invocations: tr.counts.invocations[name],
+			Success:     tr.counts.success[name],
+			Failure:     tr.counts.failure[name],
+			TotalMs:     tr.counts.totalMs[name],
+		})
+	}
+	return out
 }
 
 // CloneWithout returns a shallow copy of the registry with the named tools
 // removed. It is used to hand sub-agents a registry that omits the sub-agent
-// spawning tools when recursive sub-agents are disabled.
+// spawning tools when recursive sub-agents are disabled. The per-tool counters
+// are shared with the parent (a fresh clone family aggregates into one set) so
+// usage recorded on a session's mode-filtered clone reaches the global registry
+// the Statistics view reads; the enabled map is intentionally not shared, so a
+// clone starts with every tool enabled regardless of its parent's toggles.
 func (tr *ToolRegistry) CloneWithout(names ...string) *ToolRegistry {
 	excluded := make(map[string]bool, len(names))
 	for _, n := range names {
@@ -174,6 +259,7 @@ func (tr *ToolRegistry) CloneWithout(names ...string) *ToolRegistry {
 	clone.WorkspaceRoot = tr.WorkspaceRoot
 	clone.NetworkTimeout = tr.NetworkTimeout
 	clone.Permission = tr.Permission
+	clone.counts = tr.counts // share counters across the clone family
 	for name, t := range tr.tools {
 		if excluded[name] {
 			continue
@@ -231,7 +317,9 @@ func (tr *ToolRegistry) ExecuteToolCall(toolCall *ToolCall, ctx ToolContext) (*T
 		ctx.ToolCallback(toolCall.Tool, toolCall.Args)
 	}
 
+	start := time.Now()
 	result, err := tool.Execute(toolCall.Args, ctx)
+	tr.recordOutcome(toolCall.Tool, err == nil, time.Since(start).Milliseconds())
 	if err != nil {
 		return &ToolCallResponse{
 			Success: false,

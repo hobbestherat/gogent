@@ -20,6 +20,7 @@ import (
 	"gogent/internal/config"
 	"gogent/internal/gogent"
 	"gogent/internal/model"
+	"gogent/internal/stats"
 	"gogent/internal/tool"
 	tuipkg "gogent/ui/tui"
 )
@@ -226,6 +227,7 @@ func main() {
 					reg.SetEnabled(name, enabled)
 				}
 			},
+			GetStatistics: func() stats.Report { return g.Statistics() },
 			Restore: func() []tuipkg.RestoredSession {
 				loaded := g.RestoreSessions()
 				out := make([]tuipkg.RestoredSession, 0, len(loaded))

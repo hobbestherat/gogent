@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"gogent/internal/model"
 	"gogent/internal/permission"
 	"gogent/internal/skill"
+	"gogent/internal/stats"
 	"gogent/internal/tool"
 	"gogent/internal/vcs"
 )
@@ -927,6 +929,111 @@ func (g *Gogent) AggregateStats() map[string]int {
 	return total
 }
 
+// Statistics assembles the detailed statistics report surfaced by the
+// Statistics view (issue #57). It joins the per-session counters (turns, tokens,
+// tool calls, context, compactions, connector stats), the per-tool usage/duration
+// counters, the per-skill success/failure counters, and the per-model token
+// attribution — most of which gogent already collects but only partially shows.
+//
+// The report is a point-in-time, in-memory snapshot; durable/queryable history
+// arrives with the structured-logging/audit stream (issue #51). Per-model cost,
+// cache-hit % and TTFT are likewise deferred (they depend on issues #48/#2 and a
+// per-model pricing configuration).
+func (g *Gogent) Statistics() stats.Report {
+	// Snapshot the session pointers under the registry lock, then release it
+	// before touching each session's own lock to avoid lock-ordering issues.
+	g.mu.RLock()
+	type entry struct {
+		id string
+		s  *agent.UserSession
+	}
+	items := make([]entry, 0, len(g.userSessions))
+	for id, s := range g.userSessions {
+		items = append(items, entry{id: id, s: s})
+	}
+	toolReg := g.toolRegistry
+	skills := g.skills
+	g.mu.RUnlock()
+
+	// Stable order: oldest session first (creation time, then id), matching how
+	// the sidebar lists sessions.
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].s.CreatedAt != items[j].s.CreatedAt {
+			return items[i].s.CreatedAt < items[j].s.CreatedAt
+		}
+		return items[i].id < items[j].id
+	})
+
+	rep := stats.Report{GeneratedAt: time.Now().Unix()}
+	modelTotals := make(map[string]stats.ModelStat)
+	for _, it := range items {
+		snap := it.s.Snapshot()
+		primary := stats.FromSnapshot(it.s.ConnectorStats())
+		fast := stats.FromSnapshot(it.s.FastConnectorStats())
+		rep.Sessions = append(rep.Sessions, stats.SessionRow{
+			ID:            it.id,
+			Turns:         snap.Turns,
+			TokensIn:      snap.TokensIn,
+			TokensOut:     snap.TokensOut,
+			ToolCalls:     snap.ToolCalls,
+			ContextTokens: snap.ContextTokens,
+			ContextWindow: snap.ContextWindow,
+			Compactions:   it.s.CompactionCount(),
+			Primary:       primary,
+			Fast:          fast,
+		})
+		rep.Totals.Sessions++
+		rep.Totals.Turns += snap.Turns
+		rep.Totals.TokensIn += snap.TokensIn
+		rep.Totals.TokensOut += snap.TokensOut
+		rep.Totals.ToolCalls += snap.ToolCalls
+		rep.Totals.Compactions += it.s.CompactionCount()
+		rep.Totals.Primary = rep.Totals.Primary.Add(primary)
+		rep.Totals.Fast = rep.Totals.Fast.Add(fast)
+		for _, m := range it.s.ModelTokens() {
+			mt := modelTotals[m.Name]
+			mt.Name = m.Name
+			mt.TokensIn += m.TokensIn
+			mt.TokensOut += m.TokensOut
+			modelTotals[m.Name] = mt
+		}
+	}
+
+	if toolReg != nil {
+		for _, ts := range toolReg.GetAllToolStats() {
+			rep.Tools = append(rep.Tools, stats.ToolStat{
+				Name:        ts.Name,
+				Invocations: ts.Invocations,
+				Success:     ts.Success,
+				Failure:     ts.Failure,
+				TotalMs:     ts.TotalMs,
+			})
+		}
+	}
+	if skills != nil {
+		for _, sk := range skills.GetAllSkillStats() {
+			rep.Skills = append(rep.Skills, stats.SkillStat{
+				Name:       sk.SkillName,
+				Success:    sk.Success,
+				Failure:    sk.Failure,
+				TotalCalls: sk.TotalCalls,
+			})
+		}
+		sort.Slice(rep.Skills, func(i, j int) bool { return rep.Skills[i].Name < rep.Skills[j].Name })
+	}
+
+	rep.Models = make([]stats.ModelStat, 0, len(modelTotals))
+	names := make([]string, 0, len(modelTotals))
+	for n := range modelTotals {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		rep.Models = append(rep.Models, modelTotals[n])
+	}
+	return rep
+}
+
 // SendMessageToSession sends a message to a session and executes any tool calls
 // This uses the ExecuteTaskLoop for proper multi-turn tool calling support
 func (g *Gogent) SendMessageToSession(sessionID, agentID, message string) (*model.CompletionResponse, error) {
@@ -986,6 +1093,9 @@ func (g *Gogent) SendMessageToSessionWithModel(sessionID, agentID, message, mode
 	// conversation transcript across user messages. Only build a fresh session
 	// if the agent somehow has none.
 	if selectedConfig != nil {
+		// Attribute this turn's token usage to the selected model for the
+		// per-model breakdown in the Statistics view (issue #57).
+		userSession.SetPrimaryModel(selectedConfig.Name)
 		newModel := g.buildConnection(selectedConfig)
 		if ag.ThoughtTrain == nil {
 			ag.ThoughtTrain = model.NewModelSession("session", newModel)

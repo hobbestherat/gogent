@@ -146,6 +146,31 @@ so existing installs get notifications automatically.
 }
 ```
 
+### Statistics
+
+A dedicated **Config → Statistics…** view surfaces the counters gogent already
+collects but previously only showed in part (or not at all). It has five tabs:
+
+- **Overview** — grand totals across every session (sessions, turns, tokens
+  in/out, tool calls, compactions) plus the primary and fast model backends'
+  request/success/error counts, token totals, average latency and error
+  breakdown (timeouts, context overflows, refusals, generic).
+- **Sessions** — one row per session: turns, tokens, tool calls, context %,
+  primary-model requests/errors and compactions.
+- **Tools** — per registered tool: call count, success/failure split and average
+  execution time.
+- **Skills** — per skill: success/failure/total.
+- **Models** — per-model token attribution.
+
+**Export CSV** / **Export JSON** write a timestamped snapshot to
+`~/.gogent/gogent-stats-<timestamp>.{csv,json}`. The CSV is long-format
+(`section,name,metric,value`) so it loads cleanly into a spreadsheet.
+
+The view is a point-in-time, in-memory snapshot. Durable/queryable history
+arrives with the structured-logging/audit stream; per-model cost, cache-hit % and
+TTFT are likewise follow-ups (they depend on a per-model pricing configuration
+and streaming/cache support).
+
 Each model entry has an `api_type` selecting the provider conventions:
 
 - `openai` (default) — any OpenAI-compatible server. `endpoint` may be a full

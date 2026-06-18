@@ -16,6 +16,7 @@ import (
 	"gogent/internal/config"
 	"gogent/internal/gogent"
 	"gogent/internal/notify"
+	"gogent/internal/stats"
 	"os"
 	"strings"
 	"sync"
@@ -83,6 +84,10 @@ type Handlers struct {
 	// executable. Both may be nil.
 	GetTools       func() []ToolInfo
 	SetToolEnabled func(name string, enabled bool)
+	// GetStatistics returns the detailed statistics report for the Statistics
+	// view (issue #57): per-session, per-tool, per-skill and per-model
+	// breakdowns of the counters gogent already collects. May be nil.
+	GetStatistics func() stats.Report
 	// Restore returns sessions to re-open at startup (crash/continuation
 	// recovery). May be nil.
 	Restore func() []RestoredSession
@@ -345,10 +350,16 @@ func (w *Workbench) settingsItems() []*tv.MenuItem {
 			WithShortcut("Ctrl+,", tui.KeyRune, ',', true),
 		tv.NewMenuItem("&Models…", func() { w.showModelEditor() }),
 		tv.NewMenuItem("&Resources…", func() { w.showResourcesDialog() }),
+	}
+	// Statistics is surfaced only when the backend wires the report handler.
+	if w.handlers.GetStatistics != nil {
+		items = append(items, tv.NewMenuItem("S&tatistics…", func() { w.showStatisticsDialog() }))
+	}
+	items = append(items,
 		tv.NewMenuItem("----------", nil),
 		tv.NewMenuItem("Mode: "+mode, func() { w.showSettingsDialog() }),
 		tv.NewMenuItem("Recursive: "+recursive, func() { w.showSettingsDialog() }),
-	}
+	)
 	// Notification settings (issue #59). Surfaced only when the backend wired the
 	// accessors; a one-line summary mirrors the sub-agent mode/recursive lines.
 	if w.handlers.GetNotifyConfig != nil && w.handlers.SetNotifyConfig != nil {
