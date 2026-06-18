@@ -94,8 +94,8 @@ in the session stats (`fast_tokens_in` / `fast_tokens_out`).
     "title": "fast_model"
   },
   "models": [
-    { "name": "opus", "model": "claude-opus-4-8", "max_tokens": 32000 },
-    { "name": "haiku-fast", "model": "claude-haiku-4-5", "max_tokens": 4096 }
+    { "name": "opus", "model": "claude-opus-4-8", "max_tokens": 32000, "context_window": 200000 },
+    { "name": "haiku-fast", "model": "claude-haiku-4-5", "max_tokens": 4096, "context_window": 200000 }
   ]
 }
 ```
@@ -105,6 +105,13 @@ Each `model_roles` value is either the `"fast_model"` sentinel or a specific
 is configured; map a role to the primary model's name to pin it back to the
 primary. Recognized roles: `compression`, `web_fetch_summarize`, `title`,
 `json_repair`.
+
+Per-model fields: `max_tokens` is the per-request **output** cap (the API's
+`max_tokens`), while `context_window` is the model's **input** context window in
+tokens. Context compaction is calibrated against `context_window` (it fires at
+~80% and settles near ~50%, never against the output cap) — set `context_window`
+to your model's real window so long sessions compact at the right point. When
+omitted it falls back to a conservative built-in default.
 
 ## Skills & project instructions
 
