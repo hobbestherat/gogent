@@ -70,6 +70,12 @@ type Handlers struct {
 	// listed in the system prompt). Both may be nil.
 	GetSkills      func() []SkillInfo
 	SetSkillActive func(name string, active bool)
+	// GetTools returns the registered tools with their enabled state and usage
+	// stats so the Resources browser can list, inspect and toggle them.
+	// SetToolEnabled toggles whether a tool is advertised to the model and
+	// executable. Both may be nil.
+	GetTools       func() []ToolInfo
+	SetToolEnabled func(name string, enabled bool)
 	// Restore returns sessions to re-open at startup (crash/continuation
 	// recovery). May be nil.
 	Restore func() []RestoredSession
@@ -98,6 +104,20 @@ type SkillInfo struct {
 	Success     int
 	Failure     int
 	TotalCalls  int
+	// Content holds the raw SKILL.md text for the Resources browser preview.
+	Content string
+}
+
+// ToolInfo is a UI-facing view of a registered tool and its usage stats. The
+// input schema is pre-serialized to indented JSON by the backend so the UI does
+// not depend on the tool package.
+type ToolInfo struct {
+	Name        string
+	Description string
+	InputSchema string
+	Enabled     bool
+	Invocations int
+	LastUsed    string // human-readable, empty when never used
 }
 
 // Workbench is the top-level multi-session TUI.
@@ -297,7 +317,7 @@ func (w *Workbench) settingsItems() []*tv.MenuItem {
 		tv.NewMenuItem("&Sub-agents…", func() { w.showSettingsDialog() }).
 			WithShortcut("Ctrl+,", tui.KeyRune, ',', true),
 		tv.NewMenuItem("&Models…", func() { w.showModelEditor() }),
-		tv.NewMenuItem("S&kills…", func() { w.showSkillsDialog() }),
+		tv.NewMenuItem("&Resources…", func() { w.showResourcesDialog() }),
 		tv.NewMenuItem("----------", nil),
 		tv.NewMenuItem("Mode: "+mode, func() { w.showSettingsDialog() }),
 		tv.NewMenuItem("Recursive: "+recursive, func() { w.showSettingsDialog() }),

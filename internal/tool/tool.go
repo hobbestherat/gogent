@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"gogent/internal/mathexpr"
@@ -50,16 +51,41 @@ type ToolRegistry struct {
 	NetworkTimeout time.Duration
 	// Permission gates side-effecting tools (shell, etc.). May be nil.
 	Permission *permission.Service
+	// mu guards the runtime state below, which the UI reads (to browse tools and
+	// their usage) while the agent mutates it during runs. The tools map itself is
+	// populated once at startup and read thereafter, so it stays unlocked.
+	mu          sync.RWMutex
+	enabled     map[string]bool
+	invocations map[string]int
+	lastUsed    map[string]time.Time
 }
 
 func NewToolRegistry() *ToolRegistry {
 	return &ToolRegistry{
-		tools: make(map[string]*Tool),
+		tools:       make(map[string]*Tool),
+		enabled:     make(map[string]bool),
+		invocations: make(map[string]int),
+		lastUsed:    make(map[string]time.Time),
 	}
 }
 
 func (tr *ToolRegistry) Register(tool *Tool) {
 	tr.tools[tool.Name] = tool
+}
+
+// SchemaJSON serializes a tool's input schema to indented JSON for display (the
+// Resources browser shows it in a tool's detail pane). It returns "" for a nil
+// schema or a marshaling failure. Go's encoder sorts object keys, so the output
+// is stable.
+func SchemaJSON(schema interface{}) string {
+	if schema == nil {
+		return ""
+	}
+	b, err := json.MarshalIndent(schema, "", "  ")
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 func (tr *ToolRegistry) Get(name string) *Tool {
@@ -72,6 +98,67 @@ func (tr *ToolRegistry) List() []*Tool {
 		tools = append(tools, t)
 	}
 	return tools
+}
+
+// IsEnabled reports whether a tool is enabled. Tools are enabled by default;
+// SetEnabled is the only way to disable one.
+func (tr *ToolRegistry) IsEnabled(name string) bool {
+	tr.mu.RLock()
+	defer tr.mu.RUnlock()
+	enabled, ok := tr.enabled[name]
+	if !ok {
+		return true
+	}
+	return enabled
+}
+
+// SetEnabled enables or disables a tool. A disabled tool is hidden from the
+// model (it is omitted from the advertised tool set) and refused at execution
+// time, so the agent neither sees nor can call it.
+func (tr *ToolRegistry) SetEnabled(name string, enabled bool) {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	tr.enabled[name] = enabled
+}
+
+// ListEnabled returns the currently enabled tools. It backs the tool set
+// advertised to the model, so disabling a tool drops it from the agent's view.
+func (tr *ToolRegistry) ListEnabled() []*Tool {
+	tr.mu.RLock()
+	defer tr.mu.RUnlock()
+	tools := make([]*Tool, 0, len(tr.tools))
+	for name, t := range tr.tools {
+		if enabled, ok := tr.enabled[name]; ok && !enabled {
+			continue
+		}
+		tools = append(tools, t)
+	}
+	return tools
+}
+
+// Invocations returns how many times a tool has been invoked through the
+// registry (validated calls only).
+func (tr *ToolRegistry) Invocations(name string) int {
+	tr.mu.RLock()
+	defer tr.mu.RUnlock()
+	return tr.invocations[name]
+}
+
+// LastUsed returns the time of a tool's most recent invocation, or the zero
+// time if it has never been used.
+func (tr *ToolRegistry) LastUsed(name string) time.Time {
+	tr.mu.RLock()
+	defer tr.mu.RUnlock()
+	return tr.lastUsed[name]
+}
+
+// recordInvocation bumps a tool's invocation count and last-used timestamp. It
+// is called once a tool call has passed validation and is about to run.
+func (tr *ToolRegistry) recordInvocation(name string) {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	tr.invocations[name]++
+	tr.lastUsed[name] = time.Now()
 }
 
 // CloneWithout returns a shallow copy of the registry with the named tools
@@ -117,12 +204,22 @@ func (tr *ToolRegistry) ExecuteToolCall(toolCall *ToolCall, ctx ToolContext) (*T
 		}, nil
 	}
 
+	if !tr.IsEnabled(toolCall.Tool) {
+		return &ToolCallResponse{
+			Success: false,
+			Error:   fmt.Sprintf("tool is disabled: %s", toolCall.Tool),
+		}, nil
+	}
+
 	if err := validateArgs(toolCall.Args, tool.InputSchema); err != nil {
 		return &ToolCallResponse{
 			Success: false,
 			Error:   fmt.Sprintf("invalid args: %v", err),
 		}, nil
 	}
+
+	// Count the invocation now that it has been validated and is about to run.
+	tr.recordInvocation(toolCall.Tool)
 
 	// Make the registry's permission service available to tools that gate
 	// through the context (the agent loop builds a context without it).

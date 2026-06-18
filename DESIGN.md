@@ -104,7 +104,8 @@ Each task loop injects a system-context block built by `internal/gogent`:
 - **Skills** use progressive disclosure: an index of *active* skills (name +
   description) is listed in the prompt, and a `skill` tool loads a skill's full
   `SKILL.md` on demand, recording per-skill usage. Skills load from `~/.gogent/skills`
-  and `./skills`; they can be toggled in the TUI (Config → Skills…).
+  and `./skills`; they can be toggled in the TUI (Config → Resources…), which is also
+  where the registered tools (and, once MCP lands, MCP servers) are browsed and toggled.
 
 ## Known gaps
 
