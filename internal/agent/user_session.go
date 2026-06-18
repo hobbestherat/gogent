@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -130,23 +131,43 @@ type UserSession struct {
 	// turnCount is the number of completed top-level task loops (one per user
 	// turn). It backs the SessionStats.Turns figure shown in the status bar.
 	turnCount int
+	// compactionCount is how many context-compression passes have run in this
+	// session (see compactIfNeeded). It feeds the Statistics view's compaction
+	// breakdown (issue #57).
+	compactionCount int
+	// primaryModel is the name of the model the session currently routes its
+	// primary turns through. It attributes token usage to a model (see
+	// perModelTokens) for the per-model breakdown in the Statistics view. Empty
+	// means unknown / not yet set, in which case tokens are counted only in the
+	// session totals.
+	primaryModel string
+	// perModelTokens attributes prompt/completion tokens to each model the
+	// session has used. Keyed by model config name.
+	perModelTokens map[string]modelTokens
+}
+
+// modelTokens is the per-model token accumulator (prompt/completion totals).
+type modelTokens struct {
+	In  int
+	Out int
 }
 
 // NewUserSession creates a new user session
 func NewUserSession(id string, agent *Agent) *UserSession {
 	return &UserSession{
-		ID:            id,
-		RootAgent:     agent,
-		CreatedAt:     time.Now().Unix(),
-		ToolCallback:  nil,
-		subAgentCfg:   config.DefaultSubAgentConfig(),
-		interactive:   make(map[string]*InteractiveAgent),
-		agentEvents:   make(chan AgentEvent, 64),
-		currentTask:   nil,
-		tokenCountIn:  0,
-		tokenCountOut: 0,
-		toolCallCount: 0,
-		turnCount:     0,
+		ID:             id,
+		RootAgent:      agent,
+		CreatedAt:      time.Now().Unix(),
+		ToolCallback:   nil,
+		subAgentCfg:    config.DefaultSubAgentConfig(),
+		interactive:    make(map[string]*InteractiveAgent),
+		agentEvents:    make(chan AgentEvent, 64),
+		currentTask:    nil,
+		tokenCountIn:   0,
+		tokenCountOut:  0,
+		toolCallCount:  0,
+		turnCount:      0,
+		perModelTokens: make(map[string]modelTokens),
 	}
 }
 
@@ -584,6 +605,9 @@ func (s *UserSession) compactIfNeeded(sess *model.ModelSession, emit func(Sessio
 	}
 	newTranscript := append([]model.Message{digestMsg}, recent...)
 	sess.ApplyCompressedTranscript(newTranscript)
+	s.mu.Lock()
+	s.compactionCount++
+	s.mu.Unlock()
 	emit(SessionEvent{Type: SessionEventCompaction, Step: sess.GetTokenCount(), Text: digest})
 }
 
@@ -1258,12 +1282,73 @@ func (s *UserSession) fastConnectorStatsLocked() model.StatsSnapshot {
 	return model.StatsSnapshot{}
 }
 
-// AddTokenUsage adds token usage to the session stats
+// AddTokenUsage adds token usage to the session stats, attributing it to the
+// currently selected primary model when one is known (see SetPrimaryModel) for
+// the per-model breakdown surfaced in the Statistics view.
 func (s *UserSession) AddTokenUsage(promptTokens, completionTokens int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.tokenCountIn += promptTokens
 	s.tokenCountOut += completionTokens
+	if s.primaryModel != "" {
+		m := s.perModelTokens[s.primaryModel]
+		m.In += promptTokens
+		m.Out += completionTokens
+		s.perModelTokens[s.primaryModel] = m
+	}
+}
+
+// SetPrimaryModel records the name of the model the session routes its primary
+// turns through, so subsequent token usage is attributed to it. It is set by the
+// backend when a user picks a model for a turn.
+func (s *UserSession) SetPrimaryModel(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.primaryModel = name
+}
+
+// PrimaryModel returns the name of the currently selected primary model, or "".
+func (s *UserSession) PrimaryModel() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.primaryModel
+}
+
+// ModelTokens returns the per-model token attribution accumulated by the session
+// (keyed by model config name). The order is stable (sorted by model name) so
+// the Statistics view renders deterministically.
+func (s *UserSession) ModelTokens() []ModelTokenStat {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	names := make([]string, 0, len(s.perModelTokens))
+	for name := range s.perModelTokens {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]ModelTokenStat, 0, len(names))
+	for _, name := range names {
+		m := s.perModelTokens[name]
+		out = append(out, ModelTokenStat{Name: name, TokensIn: m.In, TokensOut: m.Out})
+	}
+	return out
+}
+
+// ModelTokenStat is a UI/report-facing view of one model's token usage within a
+// session. It mirrors stats.ModelStat but lives in the agent package so the
+// session can return it without importing the stats package (which would invert
+// the dependency direction).
+type ModelTokenStat struct {
+	Name      string
+	TokensIn  int
+	TokensOut int
+}
+
+// CompactionCount returns how many context-compression passes have run in this
+// session.
+func (s *UserSession) CompactionCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.compactionCount
 }
 
 // Snapshot returns a mutex-free, point-in-time view of the session's per-session
