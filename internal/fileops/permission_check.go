@@ -35,6 +35,13 @@ func (a Authorization) AllowsExternal() bool { return a.external }
 // workspace". A nil service yields a workspace-only Authorization (callers that
 // gate elsewhere still get boundary enforcement).
 func CheckFileAccess(perm *permission.Service, loc *LocationMutation, write bool, path string) (Authorization, error) {
+	return CheckFileAccessCtx(perm, loc, write, path, "", "")
+}
+
+// CheckFileAccessCtx is CheckFileAccess with session/agent attribution, so an
+// "ask" prompt raised here can be routed to and badged on the requesting
+// session. session and agent may be empty (headless callers use CheckFileAccess).
+func CheckFileAccessCtx(perm *permission.Service, loc *LocationMutation, write bool, path, session, agent string) (Authorization, error) {
 	if perm == nil || loc == nil {
 		return Authorization{}, nil
 	}
@@ -49,7 +56,13 @@ func CheckFileAccess(perm *permission.Service, loc *LocationMutation, write bool
 		if err != nil {
 			return Authorization{}, err
 		}
-		if err := perm.CheckWithDetail(permission.ActionExternal, filepath.Dir(abs), path); err != nil {
+		if err := perm.CheckRequest(permission.Request{
+			Action:   permission.ActionExternal,
+			Resource: filepath.Dir(abs),
+			Detail:   path,
+			Session:  session,
+			Agent:    agent,
+		}); err != nil {
 			return Authorization{}, err
 		}
 		return Authorization{external: true}, nil
@@ -64,7 +77,12 @@ func CheckFileAccess(perm *permission.Service, loc *LocationMutation, write bool
 	if write {
 		action = permission.ActionWrite
 	}
-	if err := perm.Check(action, resource); err != nil {
+	if err := perm.CheckRequest(permission.Request{
+		Action:   action,
+		Resource: resource,
+		Session:  session,
+		Agent:    agent,
+	}); err != nil {
 		return Authorization{}, err
 	}
 	return Authorization{}, nil

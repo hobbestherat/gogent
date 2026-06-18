@@ -59,6 +59,11 @@ type Request struct {
 	Action   Action
 	Resource string
 	Detail   string // human context, e.g. the shell command being run
+	// Session and Agent attribute the request to the (sub-)agent that triggered
+	// it, so a multi-session UI can badge the requesting session and route the
+	// prompt to it. Both may be empty (e.g. headless CLI checks).
+	Session string
+	Agent   string
 }
 
 // Prompter asks the user for a decision. It blocks until the user answers and
@@ -88,6 +93,16 @@ type Service struct {
 	rules     []Rule
 	saved     map[string]Decision
 	prompter  Prompter
+
+	// pendingMu guards the in-flight "ask" requests and the change observer. It
+	// is separate from mu so the observer can be fired (and PendingRequests read)
+	// without contending with policy evaluation. A request is recorded just
+	// before the (blocking) prompter call and dropped once the user answers, so
+	// the set reflects exactly the approvals currently awaiting a decision.
+	pendingMu  sync.Mutex
+	pending    map[int]Request
+	pendingSeq int
+	onPending  func()
 }
 
 // New creates a Service whose persisted "always" decisions live under
@@ -150,13 +165,21 @@ func (s *Service) effect(a Action, resource string) Effect {
 // Check authorizes (action, resource), prompting if necessary. It returns nil
 // when allowed and a *DeniedError when denied.
 func (s *Service) Check(a Action, resource string) error {
-	return s.CheckWithDetail(a, resource, "")
+	return s.CheckRequest(Request{Action: a, Resource: resource})
 }
 
 // CheckWithDetail is Check with extra human context for the prompt.
 func (s *Service) CheckWithDetail(a Action, resource, detail string) error {
+	return s.CheckRequest(Request{Action: a, Resource: resource, Detail: detail})
+}
+
+// CheckRequest authorizes a fully-specified request, prompting if necessary. It
+// is the context-aware entry point: callers that know which session/agent is
+// asking populate Request.Session/Agent so the prompt and the pending-request
+// set carry that attribution.
+func (s *Service) CheckRequest(req Request) error {
 	s.mu.Lock()
-	eff := s.effect(a, resource)
+	eff := s.effect(req.Action, req.Resource)
 	prompter := s.prompter
 	s.mu.Unlock()
 
@@ -164,24 +187,80 @@ func (s *Service) CheckWithDetail(a Action, resource, detail string) error {
 	case EffectAllow:
 		return nil
 	case EffectDeny:
-		return &DeniedError{Action: a, Resource: resource}
+		return &DeniedError{Action: req.Action, Resource: req.Resource}
 	}
 
 	if prompter == nil {
-		return &DeniedError{Action: a, Resource: resource}
+		return &DeniedError{Action: req.Action, Resource: req.Resource}
 	}
 
-	switch prompter.AskPermission(Request{Action: a, Resource: resource, Detail: detail}) {
+	// Publish the request as pending while the (blocking) prompt is outstanding,
+	// so the UI can badge the requesting session, then drop it once answered.
+	id := s.addPending(req)
+	defer s.removePending(id)
+
+	switch prompter.AskPermission(req) {
 	case DecisionAllow:
 		return nil
 	case DecisionAlways:
-		s.persist(a, resource, DecisionAlways)
+		s.persist(req.Action, req.Resource, DecisionAlways)
 		return nil
 	case DecisionAlwaysDeny:
-		s.persist(a, resource, DecisionAlwaysDeny)
-		return &DeniedError{Action: a, Resource: resource}
+		s.persist(req.Action, req.Resource, DecisionAlwaysDeny)
+		return &DeniedError{Action: req.Action, Resource: req.Resource}
 	default: // DecisionDeny and anything unexpected
-		return &DeniedError{Action: a, Resource: resource}
+		return &DeniedError{Action: req.Action, Resource: req.Resource}
+	}
+}
+
+// SetPendingObserver registers a callback invoked (outside the service's locks)
+// whenever the set of in-flight "ask" requests changes, so a UI can refresh its
+// approval badges. Pass nil to clear it.
+func (s *Service) SetPendingObserver(fn func()) {
+	s.pendingMu.Lock()
+	s.onPending = fn
+	s.pendingMu.Unlock()
+}
+
+// PendingRequests returns a snapshot of the requests currently awaiting a user
+// decision. The order is unspecified.
+func (s *Service) PendingRequests() []Request {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	out := make([]Request, 0, len(s.pending))
+	for _, r := range s.pending {
+		out = append(out, r)
+	}
+	return out
+}
+
+// addPending records req as awaiting a decision and returns its id. It notifies
+// the observer (if any) outside the lock.
+func (s *Service) addPending(req Request) int {
+	s.pendingMu.Lock()
+	if s.pending == nil {
+		s.pending = make(map[int]Request)
+	}
+	s.pendingSeq++
+	id := s.pendingSeq
+	s.pending[id] = req
+	fn := s.onPending
+	s.pendingMu.Unlock()
+	if fn != nil {
+		fn()
+	}
+	return id
+}
+
+// removePending drops the pending request with the given id and notifies the
+// observer outside the lock.
+func (s *Service) removePending(id int) {
+	s.pendingMu.Lock()
+	delete(s.pending, id)
+	fn := s.onPending
+	s.pendingMu.Unlock()
+	if fn != nil {
+		fn()
 	}
 }
 

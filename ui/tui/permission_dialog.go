@@ -29,17 +29,38 @@ func (w *Workbench) AskPermission(req permission.Request) permission.Decision {
 	w.notifyApproval(req)
 	return w.prompt(req, func(req permission.Request, resolve func(permission.Decision)) {
 		w.desktop.Post(func() {
-			showPermissionDialog(w.desktop, req, resolve)
+			showPermissionDialog(w.desktop, req, w.requesterLabel(req), resolve)
 		})
 	})
+}
+
+// requesterLabel renders a short "who is asking" string for the prompt — the
+// requesting session's title (falling back to its id) and, when it is a named
+// sub-agent rather than the session's root agent, the agent too. It returns ""
+// when the request carries no session attribution (e.g. headless callers).
+func (w *Workbench) requesterLabel(req permission.Request) string {
+	if req.Session == "" {
+		return ""
+	}
+	w.mu.Lock()
+	title := req.Session
+	if sw := w.sessions[req.Session]; sw != nil && sw.title != "" {
+		title = sw.title
+	}
+	w.mu.Unlock()
+	if req.Agent != "" && req.Agent != "root" {
+		return title + " · " + req.Agent
+	}
+	return title
 }
 
 // notifyApproval fires an "approval needed" notification when the config allows
 // it. It is called from the agent goroutine, so the emit is marshalled onto the
 // UI thread: that keeps the bell/OSC write serialized with frame rendering
 // (avoids interleaving with the TUI's own stdout writes) and matches how session
-// events are notified. The permission prompter has no session context, so the
-// focus-suppression toggle is bypassed (focused=false) — approvals always fire.
+// events are notified. The focus check runs on the UI thread so the
+// suppress-when-focused toggle is honoured against the live active session: a
+// prompt raised by an unfocused background session always alerts.
 func (w *Workbench) notifyApproval(req permission.Request) {
 	if w.notify == nil {
 		return
@@ -50,7 +71,8 @@ func (w *Workbench) notifyApproval(req permission.Request) {
 		_, body, _ = permissionPrompt(req)
 	}
 	w.desktop.Post(func() {
-		if w.notify.ShouldNotify(notify.ReasonApproval, false) {
+		focused := req.Session != "" && w.ActiveID() == req.Session
+		if w.notify.ShouldNotify(notify.ReasonApproval, focused) {
 			w.notify.Notify(title, body)
 		}
 	})
@@ -119,7 +141,7 @@ func permissionPrompt(req permission.Request) (title, question, alwaysLabel stri
 	}
 }
 
-func showPermissionDialog(desktop *tv.Desktop, req permission.Request, onResult func(permission.Decision)) {
+func showPermissionDialog(desktop *tv.Desktop, req permission.Request, requester string, onResult func(permission.Decision)) {
 	if desktop == nil {
 		onResult(permission.DecisionDeny)
 		return
@@ -128,7 +150,7 @@ func showPermissionDialog(desktop *tv.Desktop, req permission.Request, onResult 
 	title, question, alwaysLabel := permissionPrompt(req)
 
 	const width = 64
-	const height = 13
+	const height = 14
 	x := (desktop.App().Width() - width) / 2
 	y := (desktop.App().Height() - height) / 2
 	if x < 0 {
@@ -141,13 +163,22 @@ func showPermissionDialog(desktop *tv.Desktop, req permission.Request, onResult 
 	dialog := tv.NewDialog(title, x, y, width, height)
 	dialog.Window.ShowClose = false
 
-	q := tv.NewLabel(question, tv.Rect{X: 2, Y: 1, W: width - 4, H: 3})
+	// Attribute the prompt to the requesting session/agent so a prompt raised by
+	// a background session is unambiguous about who is asking (issue #55).
+	if requester != "" {
+		who := tv.NewLabel("Requested by: "+truncate(requester, width-18), tv.Rect{X: 2, Y: 1, W: width - 4, H: 1})
+		who.FG = tui.ANSIColor(14)
+		who.BG = tv.DefaultTheme.DialogBG
+		dialog.Window.AddContent(who)
+	}
+
+	q := tv.NewLabel(question, tv.Rect{X: 2, Y: 2, W: width - 4, H: 3})
 	q.FG = tv.DefaultTheme.DialogFG
 	q.BG = tv.DefaultTheme.DialogBG
 	dialog.Window.AddContent(q)
 
 	if req.Detail != "" {
-		detail := tv.NewLabel("$ "+truncate(req.Detail, width-6), tv.Rect{X: 2, Y: 5, W: width - 4, H: 1})
+		detail := tv.NewLabel("$ "+truncate(req.Detail, width-6), tv.Rect{X: 2, Y: 6, W: width - 4, H: 1})
 		detail.FG = tui.ANSIColor(11)
 		detail.BG = tv.DefaultTheme.DialogBG
 		dialog.Window.AddContent(detail)

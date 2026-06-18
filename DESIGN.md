@@ -132,6 +132,10 @@ Each task loop injects a system-context block built by `internal/gogent`:
 The permission gate (`internal/permission`) authorizes every side-effecting tool:
 workspace file ops are allowed; shell and any out-of-workspace access prompt
 interactively (Allow once / Always / Deny), with "Always" persisted to
-`~/.gogent/permissions.json`. The shell external-path check is a best-effort
-guardrail, not a sandbox; OS-level sandboxing is still future work.
+`~/.gogent/permissions.json`. Each request carries the session/agent that raised
+it; the service tracks its in-flight "ask" requests (`PendingRequests`) and
+notifies an observer on every change, which the TUI uses to badge the requesting
+session in the sidebar (⏳) and surface a global indicator. The shell
+external-path check is a best-effort guardrail, not a sandbox; OS-level
+sandboxing is still future work.
 

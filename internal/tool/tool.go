@@ -31,6 +31,19 @@ type ToolContext struct {
 	ToolCallback      func(toolName string, args map[string]interface{}) error
 }
 
+// permRequest builds a permission request attributed to this context's
+// session/agent, so an "ask" prompt can be routed to and badged on the
+// requesting session.
+func (c ToolContext) permRequest(a permission.Action, resource, detail string) permission.Request {
+	return permission.Request{
+		Action:   a,
+		Resource: resource,
+		Detail:   detail,
+		Session:  c.SessionID,
+		Agent:    c.AgentID,
+	}
+}
+
 type Tool struct {
 	Name        string
 	Description string
@@ -295,11 +308,11 @@ func (tr *ToolRegistry) RegisterShellTool() {
 			// may choose "always"); then any path that escapes the workspace is
 			// gated per external root folder.
 			if tr.Permission != nil {
-				if err := tr.Permission.CheckWithDetail(permission.ActionShell, "", command); err != nil {
+				if err := tr.Permission.CheckRequest(ctx.permRequest(permission.ActionShell, "", command)); err != nil {
 					return nil, err
 				}
 				for _, root := range shell.ExternalRoots(command, tr.WorkspaceRoot) {
-					if err := tr.Permission.CheckWithDetail(permission.ActionExternal, root, command); err != nil {
+					if err := tr.Permission.CheckRequest(ctx.permRequest(permission.ActionExternal, root, command)); err != nil {
 						return nil, err
 					}
 				}
@@ -374,7 +387,7 @@ func (tr *ToolRegistry) RegisterWebFetchTool() {
 				perm = tr.Permission
 			}
 			if perm != nil {
-				if err := perm.CheckWithDetail(permission.ActionNetwork, u.Host, rawURL); err != nil {
+				if err := perm.CheckRequest(ctx.permRequest(permission.ActionNetwork, u.Host, rawURL)); err != nil {
 					return nil, err
 				}
 			}

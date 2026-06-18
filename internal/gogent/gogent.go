@@ -176,7 +176,7 @@ func (g *Gogent) initializeToolRegistry() {
 				return nil, fmt.Errorf("path argument is required")
 			}
 
-			auth, err := fileops.CheckFileAccess(g.permissions, g.locationMutation, false, path)
+			auth, err := fileops.CheckFileAccessCtx(g.permissions, g.locationMutation, false, path, ctx.SessionID, ctx.AgentID)
 			if err != nil {
 				return nil, err
 			}
@@ -212,7 +212,7 @@ func (g *Gogent) initializeToolRegistry() {
 				return nil, fmt.Errorf("content argument is required")
 			}
 
-			auth, err := fileops.CheckFileAccess(g.permissions, g.locationMutation, true, path)
+			auth, err := fileops.CheckFileAccessCtx(g.permissions, g.locationMutation, true, path, ctx.SessionID, ctx.AgentID)
 			if err != nil {
 				return nil, err
 			}
@@ -250,7 +250,7 @@ func (g *Gogent) initializeToolRegistry() {
 				return nil, fmt.Errorf("replace argument is required")
 			}
 
-			auth, err := fileops.CheckFileAccess(g.permissions, g.locationMutation, true, path)
+			auth, err := fileops.CheckFileAccessCtx(g.permissions, g.locationMutation, true, path, ctx.SessionID, ctx.AgentID)
 			if err != nil {
 				return nil, err
 			}

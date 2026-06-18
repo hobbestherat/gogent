@@ -106,8 +106,13 @@ func main() {
 		wb = tuipkg.NewWorkbench(g.GetConfig().ModelConfigs)
 		fmt.Println("TUI enabled. Press Ctrl+C to exit.")
 
-		// Route interactive permission prompts to the workbench modal.
-		g.GetPermissionService().SetPrompter(wb)
+		// Route interactive permission prompts to the workbench modal, and drive
+		// the sidebar's "approval needed" badges off the service's pending
+		// requests so a prompt raised by a background session is visible (#55).
+		perm := g.GetPermissionService()
+		perm.SetPrompter(wb)
+		wb.SetApprovalSource(perm.PendingRequests)
+		perm.SetPendingObserver(wb.RefreshApprovals)
 
 		wb.SetHandlers(tuipkg.Handlers{
 			// OnCreate builds the backend session and bridges its live events to

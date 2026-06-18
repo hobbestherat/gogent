@@ -34,6 +34,15 @@ the grant to `~/.gogent/permissions.json`. In headless/non-interactive runs
 (`--disable-tui`, HTTP server) there is no one to ask, so any "ask" decision is
 **denied** by default — keeping automated runs safe.
 
+**Approval alerting (multi-session).** A prompt names the session/agent that
+raised it ("Requested by: …"), and the requesting session is marked with an
+**⏳ "approval needed"** badge in the sidebar — with a global ⏳ counter in the
+sidebar title — so a prompt raised by a background session is never missed.
+Selecting that session in the sidebar jumps straight to it. When the prompt's
+session is not focused, an approval notification (bell / OS notification) also
+fires, gated by the notification settings. Concurrent prompts are queued and
+shown one at a time so they cannot clobber each other's focus.
+
 > The shell guardrail is best-effort, not a sandbox: a shell is Turing-complete
 > and a determined command can still reach outside the workspace (variables,
 > `eval`, subshells). Treat it as a seatbelt against accidental damage, not as

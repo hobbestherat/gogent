@@ -16,6 +16,7 @@ import (
 	"gogent/internal/config"
 	"gogent/internal/gogent"
 	"gogent/internal/notify"
+	"gogent/internal/permission"
 	"os"
 	"strings"
 	"sync"
@@ -157,6 +158,11 @@ type Workbench struct {
 	// output (os.Stdout); SetNotifyConfig keeps its config in sync with the
 	// persisted setting.
 	notify *notify.Notifier
+	// approvalSource returns the permission requests currently awaiting a
+	// decision, so the sidebar can badge the requesting sessions and show a
+	// global indicator (issue #55). Wired to the permission service's
+	// PendingRequests in main.go; nil disables badging.
+	approvalSource func() []permission.Request
 }
 
 // NewWorkbench creates the workbench and its desktop chrome.
@@ -992,6 +998,52 @@ func (w *Workbench) maybeNotify(id string, ev agent.SessionEvent) {
 	focused := w.ActiveID() == id
 	if w.notify.ShouldNotify(reason, focused) {
 		w.notify.Notify(title, body)
+	}
+}
+
+// SetApprovalSource wires the workbench to the permission service's pending
+// requests so the sidebar can badge sessions awaiting an approval decision. It
+// then does an initial refresh so any already-pending requests are reflected.
+func (w *Workbench) SetApprovalSource(fn func() []permission.Request) {
+	w.approvalSource = fn
+	w.RefreshApprovals()
+}
+
+// RefreshApprovals recomputes the approval badges from the current pending
+// requests. It is safe to call from any goroutine (the permission service
+// invokes it from an agent-loop goroutine when a prompt is raised or answered):
+// the update is marshalled onto the UI thread.
+func (w *Workbench) RefreshApprovals() {
+	if w.approvalSource == nil {
+		return
+	}
+	w.desktop.Post(w.updateApprovalBadges)
+}
+
+// updateApprovalBadges reconciles the sidebar's per-session approval badges and
+// the global indicator with the pending requests. It must run on the UI thread.
+func (w *Workbench) updateApprovalBadges() {
+	if w.approvalSource == nil || w.sidebar == nil {
+		return
+	}
+	pending := w.approvalSource()
+	bySession := make(map[string]bool, len(pending))
+	for _, r := range pending {
+		if r.Session != "" {
+			bySession[r.Session] = true
+		}
+	}
+	w.mu.Lock()
+	ids := append([]string(nil), w.order...)
+	w.mu.Unlock()
+	changed := w.sidebar.setGlobalApprovals(len(pending))
+	for _, id := range ids {
+		if w.sidebar.setApprovalPending(id, bySession[id]) {
+			changed = true
+		}
+	}
+	if changed {
+		w.desktop.Redraw()
 	}
 }
 

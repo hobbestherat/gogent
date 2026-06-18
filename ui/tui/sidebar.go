@@ -24,22 +24,33 @@ type sidebar struct {
 
 	sessions map[string]*tv.TreeNode // sessionID -> root node
 	agents   map[string]*tv.TreeNode // agentID  -> sub-agent node
+
+	// approvals records which sessions have a permission prompt awaiting a
+	// decision (issue #55); pending is the total across all sessions, shown as a
+	// global indicator in the panel title. Both are read while rendering session
+	// labels so a badged session stays badged across renames/pins.
+	approvals map[string]bool
+	pending   int
 }
 
 // nodeRef identifies what a tree node points at: a session (agentID empty) or a
-// sub-agent within a session.
+// sub-agent within a session. For session nodes, pinned mirrors the workbench's
+// favorite flag so the label can be re-rendered (e.g. on an approval badge
+// change) without re-reading workbench state.
 type nodeRef struct {
 	sessionID string
 	agentID   string
 	name      string
+	pinned    bool
 }
 
 // newSidebar builds the pinned sidebar panel and its tree.
 func newSidebar(wb *Workbench) *sidebar {
 	s := &sidebar{
-		wb:       wb,
-		sessions: make(map[string]*tv.TreeNode),
-		agents:   make(map[string]*tv.TreeNode),
+		wb:        wb,
+		sessions:  make(map[string]*tv.TreeNode),
+		agents:    make(map[string]*tv.TreeNode),
+		approvals: make(map[string]bool),
 	}
 
 	panel := tv.NewComponent(tv.Rect{})
@@ -52,7 +63,14 @@ func newSidebar(wb *Workbench) *sidebar {
 		for y := 0; y < abs.H; y++ {
 			surface.SetCell(abs.X, abs.Y+y, tui.Cell{Ch: '│', FG: tui.ANSIColor(8), BG: tui.ANSIColor(0)})
 		}
-		surface.WriteString(abs.X+2, abs.Y, "Sessions & Agents", tui.Cell{FG: tui.ANSIColor(15), BG: tui.ANSIColor(0)})
+		title := "Sessions & Agents"
+		titleFG := tui.ANSIColor(15)
+		if s.pending > 0 {
+			// Global "approval needed" indicator: count + an attention colour.
+			title = fmt.Sprintf("⏳ %d  Sessions & Agents", s.pending)
+			titleFG = tui.ANSIColor(11)
+		}
+		surface.WriteString(abs.X+2, abs.Y, title, tui.Cell{FG: titleFG, BG: tui.ANSIColor(0)})
 	}
 	panel.LayoutFn = func(c *tv.VisualComponent) {
 		w := c.Bounds.W
@@ -105,11 +123,18 @@ func (s *sidebar) addSession(id, title string, pinned bool) {
 	if _, ok := s.sessions[id]; ok {
 		return
 	}
-	node := tv.NewTreeNode(sessionLabel(title, agent.StatusIdle, pinned))
+	ref := nodeRef{sessionID: id, name: title, pinned: pinned}
+	node := tv.NewTreeNode(s.sessionNodeLabel(ref))
 	node.Expanded = true
-	node.Data = nodeRef{sessionID: id, name: title}
+	node.Data = ref
 	s.sessions[id] = node
 	s.tree.AddRoot(node)
+}
+
+// sessionNodeLabel renders a session row from its ref, folding in the live
+// approval-pending state so the ⏳ badge survives renames and pin toggles.
+func (s *sidebar) sessionNodeLabel(ref nodeRef) string {
+	return sessionLabel(ref.name, ref.pinned, s.approvals[ref.sessionID])
 }
 
 // removeSession removes a session node and any of its sub-agent nodes.
@@ -164,11 +189,40 @@ func (s *sidebar) relabelSession(id, title string, pinned bool) {
 	if node == nil {
 		return
 	}
-	if ref, ok := node.Data.(nodeRef); ok {
-		ref.name = title
-		node.Data = ref
+	ref, _ := node.Data.(nodeRef)
+	ref.name = title
+	ref.pinned = pinned
+	node.Data = ref
+	node.Label = s.sessionNodeLabel(ref)
+}
+
+// setApprovalPending sets whether a session has a permission prompt awaiting a
+// decision and re-renders its label. It returns true if the state changed (so
+// the caller can avoid a redundant redraw).
+func (s *sidebar) setApprovalPending(id string, pending bool) bool {
+	node := s.sessions[id]
+	if node == nil || s.approvals[id] == pending {
+		return false
 	}
-	node.Label = sessionLabel(title, agent.StatusIdle, pinned)
+	if pending {
+		s.approvals[id] = true
+	} else {
+		delete(s.approvals, id)
+	}
+	if ref, ok := node.Data.(nodeRef); ok {
+		node.Label = s.sessionNodeLabel(ref)
+	}
+	return true
+}
+
+// setGlobalApprovals updates the total pending-approval count shown in the panel
+// title. It returns true if the count changed.
+func (s *sidebar) setGlobalApprovals(n int) bool {
+	if s.pending == n {
+		return false
+	}
+	s.pending = n
+	return true
 }
 
 // reorder reorders the tree's roots to match order. Sessions absent from order
@@ -195,13 +249,19 @@ func (s *sidebar) reorder(order []string) {
 	s.tree.Roots = roots
 }
 
-// sessionLabel renders a top-level session row. A pinned (favorite) session is
-// prefixed with a ★ marker so favorites are visible at a glance.
-func sessionLabel(title string, status agent.AgentStatus, pinned bool) string {
-	if pinned {
-		return fmt.Sprintf("%s %s %s", statusIcon(status), "★", title)
+// sessionLabel renders a top-level session row. A session with a permission
+// prompt awaiting a decision is prefixed with an ⏳ "approval needed" badge
+// (issue #55); a pinned (favorite) session carries a ★ marker so favorites are
+// visible at a glance.
+func sessionLabel(title string, pinned, approvalPending bool) string {
+	badge := ""
+	if approvalPending {
+		badge = "⏳ "
 	}
-	return fmt.Sprintf("%s %s", statusIcon(status), title)
+	if pinned {
+		return fmt.Sprintf("%s%s %s %s", badge, statusIcon(agent.StatusIdle), "★", title)
+	}
+	return fmt.Sprintf("%s%s %s", badge, statusIcon(agent.StatusIdle), title)
 }
 
 // agentLabel renders a sub-agent row with a status icon and mode marker.
