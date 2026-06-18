@@ -104,7 +104,14 @@ type Workbench struct {
 	handlers   Handlers
 	sidebar    *sidebar
 	monolog    *tv.Layer
-	quit       context.CancelFunc
+	// shutdown is cancelled (via quit) when the UI loop stops. Background
+	// goroutines blocked on a permission prompt select on it so they unblock
+	// instead of leaking when the user quits. See AskPermission.
+	shutdown context.Context
+	quit     context.CancelFunc
+	// promptMu serializes permission prompts so concurrent tool calls present
+	// one modal at a time rather than stacking and clobbering focus.
+	promptMu     sync.Mutex
 	windowConfig config.WindowConfig
 }
 
@@ -126,6 +133,8 @@ func NewWorkbench(models []*config.ModelConfig) *Workbench {
 			MinHeight:   12,
 		},
 	}
+	// Cancelled when the UI loop stops; see the shutdown field and Run.
+	w.shutdown, w.quit = context.WithCancel(context.Background())
 	w.SetModels(models)
 	// Background layer: a filled desktop with a hint.
 	bg := tv.NewComponent(tv.Rect{X: 0, Y: 0, W: app.Width(), H: app.Height()})
@@ -474,8 +483,10 @@ func (w *Workbench) QuitFunc() func() {
 
 // Run starts the event loop. It blocks until the user quits.
 func (w *Workbench) Run() error {
-	ctx, cancel := context.WithCancel(context.Background())
-	w.quit = cancel
+	// Ensure the shutdown context is cancelled however Run returns, so any
+	// goroutine still blocked on a permission prompt unblocks (DecisionDeny)
+	// instead of leaking once the event loop is gone.
+	defer w.quit()
 	// Re-open any persisted sessions (crash recovery / continuation).
 	if w.handlers.Restore != nil {
 		for _, rs := range w.handlers.Restore() {
@@ -491,7 +502,7 @@ func (w *Workbench) Run() error {
 			w.confirmQuit()
 		}
 	})
-	err := w.desktop.Run(ctx)
+	err := w.desktop.Run(w.shutdown)
 	w.app.Close()
 	return err
 }
