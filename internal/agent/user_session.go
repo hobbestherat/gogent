@@ -89,6 +89,12 @@ type UserSession struct {
 	// Task tracking for multi-turn tool calling
 	currentTask *tool.Task
 
+	// compressionCompleter, when set, runs context compression on a separate
+	// (typically smaller/faster) model backend instead of the session's primary
+	// model. When it also reports connector stats, its usage is tracked apart
+	// from the primary model (see FastConnectorStats).
+	compressionCompleter model.Completer
+
 	// Stats
 	tokenCountIn  int
 	tokenCountOut int
@@ -125,6 +131,24 @@ func (s *UserSession) SubAgentConfig() config.SubAgentConfig {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.subAgentCfg
+}
+
+// SetCompressionCompleter routes context-compression summaries to a dedicated
+// completer (typically a small/fast model). When unset, compaction uses the
+// session's own primary model, preserving prior behavior.
+func (s *UserSession) SetCompressionCompleter(c model.Completer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.compressionCompleter = c
+}
+
+// UsesFastCompression reports whether context compression runs on a dedicated
+// (typically smaller/faster) model backend rather than the session's primary
+// model. UIs can use this to indicate that a fast model is active.
+func (s *UserSession) UsesFastCompression() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.compressionCompleter != nil
 }
 
 // SetSystemContextProvider registers a function returning extra system-prompt
@@ -483,8 +507,9 @@ func (s *UserSession) runLoop(agent *Agent, agentID, initialMessage, systemPromp
 // past the model's compression threshold. It summarizes the older part of the
 // conversation (preserving the most recent turns verbatim and never splitting a
 // tool-call from its results) and splices the digest back into the transcript.
-// Summarization uses a stateless completion on the session's own backend, so it
-// never pollutes the live transcript. On any failure it leaves the transcript
+// Summarization uses a stateless completion on the configured compression
+// backend (the fast model when set, else the session's own backend), so it never
+// pollutes the live transcript. On any failure it leaves the transcript
 // untouched rather than risk losing context.
 func (s *UserSession) compactIfNeeded(sess *model.ModelSession, emit func(SessionEvent)) {
 	if sess == nil || sess.Model == nil || !sess.NeedsCompression() {
@@ -497,7 +522,16 @@ func (s *UserSession) compactIfNeeded(sess *model.ModelSession, emit func(Sessio
 		return // boundary keeps everything recent; nothing to compress yet
 	}
 
-	agent := compression.NewCompressionAgent(nil, sess.Model)
+	// Summarize on the configured fast model when one was wired in for the
+	// compression role, otherwise fall back to the session's own backend.
+	completer := model.Completer(sess.Model)
+	s.mu.RLock()
+	if s.compressionCompleter != nil {
+		completer = s.compressionCompleter
+	}
+	s.mu.RUnlock()
+
+	agent := compression.NewCompressionAgent(nil, completer)
 	digest, err := agent.Summarize(older)
 	if err != nil || strings.TrimSpace(digest) == "" {
 		return
@@ -1143,14 +1177,36 @@ func (s *UserSession) GetStats() map[string]interface{} {
 	defer s.mu.RUnlock()
 
 	agents := s.RootAgent.ListAllAgents()
+	fast := s.fastConnectorStatsLocked()
 	return map[string]interface{}{
-		"id":          s.ID,
-		"agent_count": len(agents),
-		"total_turns": s.CountMessages(),
-		"tokens_in":   s.tokenCountIn,
-		"tokens_out":  s.tokenCountOut,
-		"tool_calls":  s.toolCallCount,
+		"id":              s.ID,
+		"agent_count":     len(agents),
+		"total_turns":     s.CountMessages(),
+		"tokens_in":       s.tokenCountIn,
+		"tokens_out":      s.tokenCountOut,
+		"tool_calls":      s.toolCallCount,
+		"fast_tokens_in":  fast.TotalTokensIn,
+		"fast_tokens_out": fast.TotalTokensOut,
 	}
+}
+
+// FastConnectorStats returns the low-level connector statistics for this
+// session's auxiliary/fast model backend (e.g. the compression completer), or a
+// zero snapshot when no fast model is configured. This lets callers report
+// fast-model usage and cost separately from the primary model.
+func (s *UserSession) FastConnectorStats() model.StatsSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.fastConnectorStatsLocked()
+}
+
+// fastConnectorStatsLocked reads the fast-model connector stats. Callers must
+// hold s.mu (read or write).
+func (s *UserSession) fastConnectorStatsLocked() model.StatsSnapshot {
+	if r, ok := s.compressionCompleter.(model.StatsReporter); ok {
+		return r.StatsSnapshot()
+	}
+	return model.StatsSnapshot{}
 }
 
 // AddTokenUsage adds token usage to the session stats

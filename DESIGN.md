@@ -62,7 +62,8 @@ internal/http/         HTTP client; cmd also has a headless HTTP server mode
 
 ## Persistence
 
-- Config: `~/.gogent/config.json` (models, timeouts, sub-agent settings).
+- Config: `~/.gogent/config.json` (models, optional `fast_model` + `model_roles`
+  for auxiliary tasks, timeouts, sub-agent settings).
 - Sessions: JSONL in the sessions directory — live as
   `<iso>_<id>_session.jsonl`, renamed to `..._session_archived.jsonl` on close.
   Non-archived files are restored on startup (crash recovery); re-loading an

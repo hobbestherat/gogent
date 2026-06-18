@@ -157,13 +157,36 @@ type WindowConfig struct {
 	MinHeight int `json:"min_height"`
 }
 
+// Auxiliary model roles. These name the lightweight, latency-sensitive, or
+// high-volume tasks that may run on a smaller/cheaper "fast" model instead of
+// the primary reasoning model. Use them with Config.ModelForRole.
+const (
+	RoleCompression       = "compression"
+	RoleWebFetchSummarize = "web_fetch_summarize"
+	RoleTitle             = "title"
+	RoleJSONRepair        = "json_repair"
+)
+
+// FastModelRef is the sentinel a model_roles entry uses to point at the
+// configured fast_model rather than naming a specific Models[] entry directly.
+const FastModelRef = "fast_model"
+
 // Config represents the full configuration
 type Config struct {
-	DefaultModel string         `json:"default_model"`
-	ModelConfigs []*ModelConfig `json:"models"`
-	SubAgents    SubAgentConfig `json:"sub_agents"`
-	Timeouts     TimeoutConfig  `json:"timeouts"`
-	Window       WindowConfig   `json:"window"`
+	DefaultModel string `json:"default_model"`
+	// FastModel optionally names a Models[] entry (by Name) used for auxiliary
+	// tasks (compression, summarization, JSON repair, …). Empty means auxiliary
+	// tasks run on the primary model, preserving prior behavior.
+	FastModel string `json:"fast_model,omitempty"`
+	// ModelRoles maps an auxiliary role (see the Role* constants) to either the
+	// "fast_model" sentinel (FastModelRef) or a specific Models[] name. A role
+	// absent from this map defaults to the fast model when one is configured,
+	// otherwise to the primary model.
+	ModelRoles   map[string]string `json:"model_roles,omitempty"`
+	ModelConfigs []*ModelConfig    `json:"models"`
+	SubAgents    SubAgentConfig    `json:"sub_agents"`
+	Timeouts     TimeoutConfig     `json:"timeouts"`
+	Window       WindowConfig      `json:"window"`
 }
 
 // LoadConfig loads configuration from the default location
@@ -342,4 +365,55 @@ func (c *Config) GetModelConfig(name string) *ModelConfig {
 		}
 	}
 	return nil
+}
+
+// primaryModel returns the configured default model, falling back to the first
+// configured model when the default name is unknown.
+func (c *Config) primaryModel() *ModelConfig {
+	if c == nil {
+		return nil
+	}
+	if m := c.GetModelConfig(c.DefaultModel); m != nil {
+		return m
+	}
+	if len(c.ModelConfigs) > 0 {
+		return c.ModelConfigs[0]
+	}
+	return nil
+}
+
+// ModelForRole resolves which model serves a given auxiliary role. An explicit
+// model_roles entry takes precedence: the "fast_model" sentinel selects the
+// configured fast model and any other value names a Models[] entry. With no
+// explicit mapping, the role uses the fast model when one is configured,
+// otherwise the primary model. Resolution always falls back to the primary
+// model when a referenced model cannot be found, so a missing or misspelled
+// reference degrades to current behavior rather than breaking the task.
+func (c *Config) ModelForRole(role string) *ModelConfig {
+	if c == nil {
+		return nil
+	}
+	primary := c.primaryModel()
+	fast := c.GetModelConfig(c.FastModel)
+
+	if target, ok := c.ModelRoles[role]; ok {
+		switch target {
+		case "":
+			return primary
+		case FastModelRef:
+			if fast != nil {
+				return fast
+			}
+		default:
+			if m := c.GetModelConfig(target); m != nil {
+				return m
+			}
+		}
+		return primary
+	}
+
+	if fast != nil {
+		return fast
+	}
+	return primary
 }
