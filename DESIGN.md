@@ -75,13 +75,19 @@ internal/http/         HTTP client; cmd also has a headless HTTP server mode
 - Headless HTTP server mode for API-only use (`-http -no-tui`).
 - `-verbose` for extra startup/diagnostic logging.
 
-## System context (AGENTS.md + skills)
+## System context (AGENTS.md + repo map + skills)
 
 Each task loop injects a system-context block built by `internal/gogent`:
 
 - **AGENTS.md** project instructions are discovered (`syscontext.go`) by walking from
   the workspace root up to the filesystem root (outermost first, nearest last) plus a
   global `~/.gogent/AGENTS.md`, concatenated with source headers and size-capped.
+- **Repo map** (`repomap.go`) is a ranked symbol skeleton built at startup: the
+  workspace is walked, top-level Go declarations are extracted with `go/parser`, and
+  each is ranked Aider-style by how often its name is referenced across the tree. The
+  map is grouped by file (most-referenced first) and size-capped, giving the model a
+  cheap project overview without reading every file. Currently Go-only; other languages
+  are a follow-up.
 - **Skills** use progressive disclosure: an index of *active* skills (name +
   description) is listed in the prompt, and a `skill` tool loads a skill's full
   `SKILL.md` on demand, recording per-skill usage. Skills load from `~/.gogent/skills`

@@ -39,6 +39,9 @@ type Gogent struct {
 	// agentsContext is the project AGENTS.md instruction text discovered at
 	// startup, injected into every session's system prompt.
 	agentsContext string
+	// repoMap is the ranked symbol skeleton of the workspace, built at startup
+	// and injected into every session's system prompt alongside agentsContext.
+	repoMap string
 	// sessionTitles records a human-friendly title per session for persistence.
 	sessionTitles map[string]string
 }
@@ -132,6 +135,7 @@ func NewGogentWithWorkspace(homeDir, workspaceRoot string) *Gogent {
 	_ = g.skills.LoadSkills(filepath.Join(homeDir, ".gogent", "skills"))
 	_ = g.skills.LoadSkills(filepath.Join(workspaceRoot, "skills"))
 	g.agentsContext = renderAgentsContext(discoverAgentsDocs(workspaceRoot, filepath.Join(homeDir, ".gogent")))
+	g.repoMap = buildRepoMap(workspaceRoot)
 
 	// Initialize tool registry with file tools
 	g.initializeToolRegistry()

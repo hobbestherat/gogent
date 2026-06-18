@@ -121,6 +121,11 @@ gogent assembles a system-context block for every task:
   the workspace root up to the filesystem root (outermost first, nearest last), plus a
   global `~/.gogent/AGENTS.md`. They're concatenated (size-capped) and injected into
   the agent's context.
+- **Repo map** — at startup gogent walks the workspace, extracts top-level Go
+  declarations, and ranks them by how often each is referenced (Aider-style). The
+  resulting size-capped symbol skeleton is injected into the agent's context so it can
+  navigate larger projects without reading every file first. (Go today; other languages
+  are a follow-up.)
 - **Skills** — drop a folder containing a `SKILL.md` (YAML frontmatter with `name:` and
   `description:`) under `~/.gogent/skills` or `./skills`. Active skills are advertised
   to the model as a name+description index; the model calls the `skill` tool to load a

@@ -76,6 +76,13 @@ func (g *Gogent) buildSystemContext() string {
 		b.WriteString(g.agentsContext)
 	}
 
+	if g.repoMap != "" {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(g.repoMap)
+	}
+
 	if g.skills != nil {
 		active := g.skills.ListActiveSkills()
 		if len(active) > 0 {
