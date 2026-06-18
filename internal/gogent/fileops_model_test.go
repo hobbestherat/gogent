@@ -62,7 +62,7 @@ func TestFileOpsWithModel(t *testing.T) {
 
 		// Read the test file
 		fs := g.GetFileSystem()
-		content, err := fs.Read("model_test.txt")
+		content, err := fs.Read("model_test.txt", fileops.Authorization{})
 		if err != nil {
 			t.Fatalf("Failed to read test file: %v", err)
 		}

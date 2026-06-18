@@ -64,15 +64,20 @@ func (fsys *FileSystem) ensureWithin(resolved, original string) error {
 	return nil
 }
 
-// Read reads a file and returns its contents
-func (fsys *FileSystem) Read(path string) ([]byte, error) {
+// Read reads a file and returns its contents. The Authorization relaxes the
+// workspace boundary for paths that CheckFileAccess approved as external; pass a
+// zero Authorization (or one obtained for a workspace path) to keep file reads
+// confined to the workspace.
+func (fsys *FileSystem) Read(path string, auth Authorization) ([]byte, error) {
 	resolved, err := fsys.resolve(path)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := fsys.ensureWithin(resolved, path); err != nil {
-		return nil, err
+	if !auth.external {
+		if err := fsys.ensureWithin(resolved, path); err != nil {
+			return nil, err
+		}
 	}
 
 	data, err := os.ReadFile(resolved)
@@ -83,15 +88,17 @@ func (fsys *FileSystem) Read(path string) ([]byte, error) {
 	return data, nil
 }
 
-// Write writes content to a file
-func (fsys *FileSystem) Write(path string, content []byte) error {
+// Write writes content to a file. See Read for the Authorization semantics.
+func (fsys *FileSystem) Write(path string, content []byte, auth Authorization) error {
 	resolved, err := fsys.resolve(path)
 	if err != nil {
 		return err
 	}
 
-	if err := fsys.ensureWithin(resolved, path); err != nil {
-		return err
+	if !auth.external {
+		if err := fsys.ensureWithin(resolved, path); err != nil {
+			return err
+		}
 	}
 
 	dir := filepath.Dir(resolved)
@@ -204,9 +211,10 @@ func (fsys *FileSystem) Remove(path string) error {
 	return nil
 }
 
-// ReadFile reads a file and returns its contents as a string
-func (fsys *FileSystem) ReadFile(path string) (string, error) {
-	data, err := fsys.Read(path)
+// ReadFile reads a file and returns its contents as a string. See Read for the
+// Authorization semantics.
+func (fsys *FileSystem) ReadFile(path string, auth Authorization) (string, error) {
+	data, err := fsys.Read(path, auth)
 	if err != nil {
 		return "", err
 	}
