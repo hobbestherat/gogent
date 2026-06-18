@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 
+	"gogent/internal/notify"
 	"gogent/internal/permission"
 
 	tui "github.com/hobbestherat/turbotui"
@@ -19,11 +20,39 @@ import (
 // returns DecisionDeny when the UI is gone, unblocking the agent goroutine.
 // Second, parallel tool calls would each post a modal and steal focus, so
 // prompts are serialized and presented one at a time.
+//
+// A notification is emitted first (issue #59): an approval prompt blocks the
+// agent, so it is exactly the "needs attention" event a user stepping away
+// wants to be pinged for. The permission prompter has no session context, so the
+// focus-suppression toggle is bypassed (focused=false) — approvals always fire.
 func (w *Workbench) AskPermission(req permission.Request) permission.Decision {
+	w.notifyApproval(req)
 	return w.prompt(req, func(req permission.Request, resolve func(permission.Decision)) {
 		w.desktop.Post(func() {
 			showPermissionDialog(w.desktop, req, resolve)
 		})
+	})
+}
+
+// notifyApproval fires an "approval needed" notification when the config allows
+// it. It is called from the agent goroutine, so the emit is marshalled onto the
+// UI thread: that keeps the bell/OSC write serialized with frame rendering
+// (avoids interleaving with the TUI's own stdout writes) and matches how session
+// events are notified. The permission prompter has no session context, so the
+// focus-suppression toggle is bypassed (focused=false) — approvals always fire.
+func (w *Workbench) notifyApproval(req permission.Request) {
+	if w.notify == nil {
+		return
+	}
+	title, _, _ := permissionPrompt(req)
+	body := req.Detail
+	if body == "" {
+		_, body, _ = permissionPrompt(req)
+	}
+	w.desktop.Post(func() {
+		if w.notify.ShouldNotify(notify.ReasonApproval, false) {
+			w.notify.Notify(title, body)
+		}
 	})
 }
 

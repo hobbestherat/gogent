@@ -145,6 +145,15 @@ func main() {
 			SetTimeouts: func(t config.TimeoutConfig) {
 				g.SetTimeouts(t)
 			},
+			GetNotifyConfig: func() config.NotifyConfig {
+				return g.Notifications()
+			},
+			SetNotifyConfig: func(n config.NotifyConfig) {
+				// Persist via the backend and push the live config into the
+				// workbench's notifier so the next notification respects it.
+				g.SetNotifications(n)
+				wb.SetNotifyConfig(n)
+			},
 			GetModels: func() []config.ModelConfig {
 				return g.Models()
 			},
@@ -240,6 +249,10 @@ func main() {
 				}
 			},
 		})
+
+		// Push the persisted notification config into the workbench's live
+		// notifier so the very first notification respects the user's settings.
+		wb.SetNotifyConfig(g.Notifications())
 
 		// Run the TUI in a goroutine.
 		go func() {

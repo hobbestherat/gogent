@@ -20,6 +20,25 @@ func TestGogentCreate(t *testing.T) {
 	}
 }
 
+// TestNotificationsRoundTrip covers the issue #59 config plumbing: Notifications
+// returns the defaults until SetNotifications records an explicit config, which
+// is then returned verbatim. (Persistence to disk is best-effort and not
+// asserted here; the accessor round-trip is the contract the UI relies on.)
+func TestNotificationsRoundTrip(t *testing.T) {
+	g := NewGogent("/tmp/test")
+
+	if !g.Notifications().Enabled {
+		t.Error("Notifications() should default to enabled")
+	}
+
+	custom := config.NotifyConfig{Enabled: true, Native: true, OnComplete: false}
+	g.SetNotifications(custom)
+	got := g.Notifications()
+	if !got.Native || got.OnComplete {
+		t.Errorf("Notifications() = %+v after SetNotifications, want %+v", got, custom)
+	}
+}
+
 func TestGogentCreateUserSession(t *testing.T) {
 	g := NewGogent("/tmp/test")
 	m := model.NewModelConnection()

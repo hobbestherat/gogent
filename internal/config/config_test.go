@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestDefaultEndpointEnvOverride(t *testing.T) {
 	t.Setenv(EnvModelURL, "http://example.test:1234/v1/chat/completions")
@@ -171,5 +174,94 @@ func TestContextWindowDistinctFromMaxTokens(t *testing.T) {
 	threshold := window * 4 / 5
 	if threshold <= m.MaxTokens {
 		t.Errorf("compaction threshold %d should exceed max_tokens %d", threshold, m.MaxTokens)
+	}
+}
+
+// TestDefaultNotifyConfig guards the issue #59 defaults: notifications are on
+// (master + every event), the bell and OSC desktop channels are on, and the
+// native OS notifier is off by default.
+func TestDefaultNotifyConfig(t *testing.T) {
+	cfg := DefaultNotifyConfig()
+	if !cfg.Enabled {
+		t.Error("DefaultNotifyConfig: Enabled should be true")
+	}
+	if !cfg.Bell || !cfg.Desktop {
+		t.Error("DefaultNotifyConfig: bell and desktop channels should be on")
+	}
+	if cfg.Native {
+		t.Error("DefaultNotifyConfig: native notifier should be off (needs an external binary)")
+	}
+	for _, on := range []bool{cfg.OnComplete, cfg.OnError, cfg.OnApproval, cfg.OnClarify} {
+		if !on {
+			t.Error("DefaultNotifyConfig: every per-event toggle should be on")
+		}
+	}
+	if cfg.SuppressWhenFocused {
+		t.Error("DefaultNotifyConfig: SuppressWhenFocused should default off")
+	}
+}
+
+// TestConfigNotifyConfig resolves the effective notification config: a nil
+// pointer (older config.json without a "notify" block) yields the defaults, while
+// an explicit block — even one that disables everything — is honored verbatim.
+func TestConfigNotifyConfig(t *testing.T) {
+	// No notify block -> defaults.
+	c := &Config{}
+	got := c.NotifyConfig()
+	if !got.Enabled || !got.OnComplete {
+		t.Errorf("nil Notify should resolve to defaults, got %+v", got)
+	}
+
+	// Explicit block is honored, including "everything off".
+	off := NotifyConfig{Enabled: false}
+	c.SetNotifyConfig(off)
+	if c.Notify == nil {
+		t.Fatal("SetNotifyConfig should store a non-nil pointer")
+	}
+	got = c.NotifyConfig()
+	if got.Enabled || got.OnComplete || got.Bell {
+		t.Errorf("explicit disabled config should be honored, got %+v", got)
+	}
+
+	// Nil config resolves to defaults too.
+	var nilCfg *Config
+	if nc := nilCfg.NotifyConfig(); !nc.Enabled {
+		t.Error("nil Config should resolve to default notifications")
+	}
+}
+
+// TestNotifyConfigRoundTrip ensures the notify block survives a JSON marshal /
+// unmarshal cycle and that an absent block still resolves to the defaults on
+// load (the backward-compatibility guarantee for issue #59).
+func TestNotifyConfigRoundTrip(t *testing.T) {
+	src := DefaultNotifyConfig()
+	src.Native = true
+	src.OnError = false
+	in := &Config{Notify: &src}
+
+	data, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var out Config
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	got := out.NotifyConfig()
+	if !got.Native || got.OnError {
+		t.Errorf("round-trip lost fields, got %+v", got)
+	}
+
+	// A config blob with no "notify" key loads as nil and resolves to defaults.
+	const legacy = `{"default_model": "x"}`
+	var legacyCfg Config
+	if err := json.Unmarshal([]byte(legacy), &legacyCfg); err != nil {
+		t.Fatalf("legacy unmarshal: %v", err)
+	}
+	if legacyCfg.Notify != nil {
+		t.Errorf("legacy config should leave Notify nil, got %+v", legacyCfg.Notify)
+	}
+	if nc := legacyCfg.NotifyConfig(); !nc.Enabled {
+		t.Error("legacy config should resolve to default (enabled) notifications")
 	}
 }

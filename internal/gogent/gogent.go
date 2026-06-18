@@ -1333,6 +1333,26 @@ func (g *Gogent) SetTimeouts(t config.TimeoutConfig) {
 	}
 }
 
+// Notifications returns the desktop/terminal notification configuration, falling
+// back to the built-in defaults when none is configured (e.g. an older
+// config.json predating the setting). See issue #59.
+func (g *Gogent) Notifications() config.NotifyConfig {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.config.NotifyConfig()
+}
+
+// SetNotifications updates the notification configuration and persists it to
+// disk so it survives restarts.
+func (g *Gogent) SetNotifications(n config.NotifyConfig) {
+	g.mu.Lock()
+	g.config.SetNotifyConfig(n)
+	g.mu.Unlock()
+	if err := g.SaveConfig(); err != nil {
+		fmt.Printf("Warning: Failed to persist config: %v\n", err)
+	}
+}
+
 // Models returns deep copies of the configured models so callers (e.g. the UI
 // model editor) can edit them without mutating the live config.
 func (g *Gogent) Models() []config.ModelConfig {

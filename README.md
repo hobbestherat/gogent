@@ -105,6 +105,46 @@ same actions:
   calls/results, `r` thinking, `e` errors.
 - **Fold / unfold all** — `f` folds every entry, `u` unfolds them.
 - **Clear** — `Esc` removes any active search and filters.
+### Notifications (step away from the terminal)
+
+gogent can ping you when a long task finishes or a session needs your attention,
+so you don't have to watch the screen:
+
+- **Task complete** and **error** — fired when the agent's turn ends.
+- **Approval needed** — a permission prompt is waiting for an answer.
+- **Clarification** — an interactive sub-agent asked a `CLARIFY` question.
+
+Each event can be delivered through three independent channels:
+
+- **Bell** — the terminal bell (`\a`; most terminals map it to a sound, a flash,
+  or a window-urgency hint).
+- **Desktop** — an OSC 9 (iTerm2/Ghostty) and OSC 777 (rxvt-unicode and others)
+  escape sequence. Capable terminals surface it as a desktop notification;
+  others ignore it, so it is always safe to leave on.
+- **Native** — shells out to `notify-send` (Linux/BSDs) or `terminal-notifier`
+  (macOS) when one is on your `$PATH`.
+
+Toggle each channel, each event, and "skip the session I'm already watching"
+under **Config → Notifications…**. The setting lives in the `notify` block of
+`~/.gogent/config.json` and defaults to **on** (bell + desktop, every event). A
+config that predates the setting (no `notify` key) resolves to those defaults,
+so existing installs get notifications automatically.
+
+```json
+{
+  "notify": {
+    "enabled": true,
+    "bell": true,
+    "desktop": true,
+    "native": false,
+    "on_complete": true,
+    "on_error": true,
+    "on_approval": true,
+    "on_clarify": true,
+    "suppress_when_focused": false
+  }
+}
+```
 
 Each model entry has an `api_type` selecting the provider conventions:
 
