@@ -12,14 +12,54 @@ import (
 // AskPermission implements permission.Prompter. It is called from a background
 // (agent-loop) goroutine, so it marshals the modal onto the UI thread and
 // blocks until the user chooses.
+//
+// Two hazards are guarded here. First, the resolving closure only runs while
+// the UI loop is alive, so a prompt still open when the user quits would block
+// forever; AskPermission therefore also selects on the shutdown context and
+// returns DecisionDeny when the UI is gone, unblocking the agent goroutine.
+// Second, parallel tool calls would each post a modal and steal focus, so
+// prompts are serialized and presented one at a time.
 func (w *Workbench) AskPermission(req permission.Request) permission.Decision {
-	result := make(chan permission.Decision, 1)
-	w.desktop.Post(func() {
-		showPermissionDialog(w.desktop, req, func(d permission.Decision) {
-			result <- d
+	return w.prompt(req, func(req permission.Request, resolve func(permission.Decision)) {
+		w.desktop.Post(func() {
+			showPermissionDialog(w.desktop, req, resolve)
 		})
 	})
-	return <-result
+}
+
+// prompt serializes a single permission request and waits for either the UI to
+// resolve it or the workbench to shut down. present is responsible for showing
+// the request to the user (on the UI thread) and calling resolve exactly once
+// with the chosen decision. It is a seam so the queue/shutdown logic can be
+// tested without a live event loop.
+func (w *Workbench) prompt(req permission.Request, present func(permission.Request, func(permission.Decision))) permission.Decision {
+	// One modal at a time: later requests queue here rather than stacking.
+	w.promptMu.Lock()
+	defer w.promptMu.Unlock()
+
+	// Don't post to a dead event loop if we're already shutting down.
+	select {
+	case <-w.shutdown.Done():
+		return permission.DecisionDeny
+	default:
+	}
+
+	result := make(chan permission.Decision, 1)
+	present(req, func(d permission.Decision) {
+		// Buffered + non-blocking so a stray second call can't block the UI.
+		select {
+		case result <- d:
+		default:
+		}
+	})
+
+	select {
+	case d := <-result:
+		return d
+	case <-w.shutdown.Done():
+		// The UI loop stopped before the user answered; deny rather than leak.
+		return permission.DecisionDeny
+	}
 }
 
 // permissionPrompt renders the human-readable question and the "always" label
