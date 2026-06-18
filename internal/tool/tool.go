@@ -3,12 +3,14 @@ package tool
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
 	"gogent/internal/mathexpr"
 	"gogent/internal/permission"
 	"gogent/internal/shell"
+	"gogent/internal/web"
 )
 
 type PermissionDecision string
@@ -43,6 +45,9 @@ type ToolRegistry struct {
 	// WorkspaceRoot is the directory shell commands run in. Empty falls back to
 	// the process working directory.
 	WorkspaceRoot string
+	// NetworkTimeout bounds web_fetch HTTP requests. Zero falls back to a
+	// built-in default (see web.DefaultTimeout).
+	NetworkTimeout time.Duration
 	// Permission gates side-effecting tools (shell, etc.). May be nil.
 	Permission *permission.Service
 }
@@ -80,6 +85,7 @@ func (tr *ToolRegistry) CloneWithout(names ...string) *ToolRegistry {
 	clone := NewToolRegistry()
 	clone.ShellTimeout = tr.ShellTimeout
 	clone.WorkspaceRoot = tr.WorkspaceRoot
+	clone.NetworkTimeout = tr.NetworkTimeout
 	clone.Permission = tr.Permission
 	for name, t := range tr.tools {
 		if excluded[name] {
@@ -229,6 +235,90 @@ func (tr *ToolRegistry) RegisterShellTool() {
 			}, nil
 		},
 	})
+}
+
+// RegisterWebFetchTool registers the web_fetch tool: it downloads an http(s)
+// URL, extracts the main content as readability-style Markdown, caps the size,
+// and serves repeat requests from a short-lived cache. Network access is gated
+// per domain through the permission service (ActionNetwork), so an "always"
+// grant is scoped to a single host. The fetcher (and its cache) is created once
+// here and captured by the tool closure, so it is shared across calls and any
+// sub-agent registries cloned from this one.
+func (tr *ToolRegistry) RegisterWebFetchTool() {
+	fetcher := web.NewFetcher(web.Config{Timeout: tr.NetworkTimeout})
+	tr.Register(&Tool{
+		Name: "web_fetch",
+		Description: "Fetch a web page over http(s) and return its main content as Markdown " +
+			"(readability-extracted, size-capped, short-TTL cached). Prefer this over running " +
+			"curl in the shell for reading docs, API references and error lookups: it returns " +
+			"clean Markdown instead of raw HTML. Network access is gated per domain.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"url":        map[string]interface{}{"type": "string", "description": "Absolute http(s) URL to fetch."},
+				"max_length": map[string]interface{}{"type": "integer", "description": "Optional cap on the number of Markdown characters returned."},
+			},
+			"required": []string{"url"},
+		},
+		Execute: func(args map[string]interface{}, ctx ToolContext) (interface{}, error) {
+			rawURL, ok := args["url"].(string)
+			if !ok || strings.TrimSpace(rawURL) == "" {
+				return nil, fmt.Errorf("url argument is required")
+			}
+			rawURL = strings.TrimSpace(rawURL)
+			u, err := url.Parse(rawURL)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return nil, fmt.Errorf("url must be an absolute http(s) URL")
+			}
+
+			// Gate network access per host so an "always" grant covers one domain.
+			perm := ctx.PermissionService
+			if perm == nil {
+				perm = tr.Permission
+			}
+			if perm != nil {
+				if err := perm.CheckWithDetail(permission.ActionNetwork, u.Host, rawURL); err != nil {
+					return nil, err
+				}
+			}
+
+			res, err := fetcher.Fetch(rawURL)
+			if err != nil {
+				return nil, fmt.Errorf("web_fetch failed: %v", err)
+			}
+
+			markdown, truncated := res.Markdown, res.Truncated
+			if max, ok := intArg(args["max_length"]); ok && max > 0 {
+				if cut, didCut := web.TruncateChars(markdown, max); didCut {
+					markdown, truncated = cut, true
+				}
+			}
+
+			return map[string]interface{}{
+				"url":        res.URL,
+				"title":      res.Title,
+				"markdown":   markdown,
+				"truncated":  truncated,
+				"from_cache": res.FromCache,
+			}, nil
+		},
+	})
+}
+
+// intArg coerces a JSON-decoded argument to an int. JSON numbers decode to
+// float64; integer Go types are accepted defensively for non-JSON callers.
+func intArg(v interface{}) (int, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int(n), true
+	case float32:
+		return int(n), true
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	}
+	return 0, false
 }
 
 type StructuredOutput struct {

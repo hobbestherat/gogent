@@ -18,6 +18,10 @@ gogent gates every side-effecting tool through a single permission service
 - **Shell** — asked once per session; you can choose *Allow once*, *Always*
   (persisted), or *Deny*. Shell commands run with their working directory pinned
   to the workspace root.
+- **Network** — the `web_fetch` tool (GET a URL → readability-extracted Markdown,
+  size-capped and briefly cached) prompts **per domain**, so an *Always* grant is
+  scoped to a single host. Prefer it over `curl` in the shell for reading docs and
+  API references: it returns clean Markdown instead of raw HTML.
 
 Interactive decisions appear as a modal in the TUI. Choosing *Always* persists
 the grant to `~/.gogent/permissions.json`. In headless/non-interactive runs
