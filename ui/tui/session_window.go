@@ -35,6 +35,13 @@ type SessionWindow struct {
 func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect) *SessionWindow {
 	sw := &SessionWindow{wb: wb, id: id, title: title}
 	window := tv.NewWindow(title, bounds, tui.LineSingle)
+	
+	// Enable scalable windows using turbotv options
+	window.Resizable = wb.windowConfig.Resizable
+	window.Minimizable = wb.windowConfig.Minimizable
+	window.MinWidth = wb.windowConfig.MinWidth
+	window.MinHeight = wb.windowConfig.MinHeight
+	
 	window.OnClose = func(_ *tv.Window) { wb.CloseSession(id) }
 	history := tv.NewTextView("", tv.Rect{})
 	history.Wrap = true

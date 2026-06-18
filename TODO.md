@@ -3,47 +3,48 @@
 Outstanding work, roughly in priority order. The first two items are the reason
 gogent is currently **unsafe to run on anything you care about** (see README).
 
-## 1. Permission system (HIGH — currently unsafe)
+## 1. Permission system — DONE
 
-The agent runs tools with effectively no enforcement:
+A single resource+action permission gate now lives in `internal/permission`
+(`Service`), replacing the two old overlapping implementations
+(`internal/fileops/permission.go` was removed; the old action-only
+`internal/permission` was rewritten):
 
-- **Shell tool is completely ungated** (`internal/tool/tool.go` `RegisterShellTool`)
-  — any command the model emits is executed. This is the main danger.
-- **No interactive prompt flow.** `fileops.PermissionService.Assert` returns a
-  `PermissionRequiredError` on "ask", but nothing in the UI ever calls
-  `Ask`/`Reply`, so "ask" effectively just fails the tool instead of prompting.
-- **Two overlapping, duplicated implementations:**
-  - `internal/permission` (`PermissionConfig`, three-level global→session→agent,
-    yes/no/ask) — **not referenced anywhere** outside its own tests.
-  - `internal/fileops/permission.go` (`PermissionService`, rule/effect based) —
-    partially wired into the file tools only.
-- Default allow rule targets `~/.gogent/workspace`, but the real workspace root
-  is the launch cwd, so the rules don't line up with actual resources.
+- **Shell tool is gated** (`tool.RegisterShellTool`): asked once per session
+  (Allow once / Always / Deny), plus a best-effort scan that prompts **per
+  external root folder** for any path a command reaches outside the workspace.
+- **Interactive prompt** is wired in the TUI (`ui/tui/permission_dialog.go`):
+  the agent goroutine blocks on a modal via the `permission.Prompter` interface;
+  "Always" persists to `~/.gogent/permissions.json`.
+- **Scope matches the real workspace root** (launch cwd). Defaults: workspace =
+  allow, outside / shell = ask; headless/non-interactive runs deny on "ask".
 
-To do:
-- [ ] Pick **one** permission model and delete the other.
-- [ ] Gate the **shell tool** (and sub-agent spawning / network) through it.
-- [ ] Wire an interactive **permission prompt** in the TUI (allow / deny / always),
-      backed by `Ask`/`Reply` and persisted to `permissions.json`.
-- [ ] Make permission scope match the real workspace root; sane defaults
-      (workspace = allow, outside = ask, destructive = ask).
-- [ ] Optional sandbox/dry-run mode for untrusted models.
+Remaining / future (moved out of scope here):
+- [ ] Optional OS-level sandbox/dry-run mode for untrusted models (the shell
+      path scan is a guardrail, not containment).
+- [ ] Optional `config.json` block to pre-seed a default posture (today,
+      persisted decisions in `permissions.json` already cover repeat grants).
 
-## 2. Skills support (HIGH — loaded but unused)
+## 2. Skills support (DONE)
 
-Skills are read at startup (`skill.LoadSkills`, printed in `cmd/main.go`) but:
+Skills are loaded by `internal/gogent` (from `~/.gogent/skills` and `./skills`) and
+wired through the agent via progressive disclosure:
 
-- [ ] Skills are **never injected** into the agent system prompt nor exposed as
-      callable tools — `internal/skill` is not used by `internal/agent` or
-      `internal/gogent`.
-- [ ] Wire `activate`/`deactivate` and usage stats into the session/agent.
-- [ ] Surface active skills + stats in the TUI.
-- [ ] Decide on the skill invocation model (auto-context vs. explicit tool).
+- [x] An index of **active** skills (name + description) is injected into the agent
+      system prompt through a system-context provider.
+- [x] A `skill` tool lets the model load a skill's full `SKILL.md` on demand; usage
+      (success/failure) is recorded per skill.
+- [x] `activate`/`deactivate` and usage stats are surfaced in the TUI (Config →
+      Skills…).
+- [x] Invocation model decided: progressive disclosure (index in prompt + `skill`
+      tool), the standard for agent skills.
 
-## 3. System instructions (AGENTS.md) (MEDIUM — planned, not implemented)
+## 3. System instructions (AGENTS.md) (DONE)
 
-- [ ] Implement `AGENTS.md` discovery (walk up from cwd + config dirs), as
-      described in the old design docs. No `SystemContext` exists yet.
+- [x] `AGENTS.md` discovery implemented in `internal/gogent/syscontext.go`: walks from
+      the workspace root up to the filesystem root (outermost first, nearest last) plus
+      a global `~/.gogent/AGENTS.md`, concatenated with source headers and size-capped,
+      then injected into the agent system context.
 
 ## 4. Model-connection library split (MEDIUM)
 
@@ -89,6 +90,13 @@ model config + editor, gated by `api_type` so they only appear where supported:
       be skipped/mocked when no model server is available.
 - [ ] HTTP server mode: document and test the API surface (`/health`, `/message`,
       `/exit`).
+
+## 8. Window scalability — DONE
+
+- [x] Enable `Resizable` on session windows using turbotv's built-in support
+- [x] Enable `Minimizable` on session windows for collapse/expand functionality
+- [x] Add `WindowConfig` to config package with configurable `MinWidth`/`MinHeight`
+- [x] Document window scaling features in README
 
 ## Known issues
 

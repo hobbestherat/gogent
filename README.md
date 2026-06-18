@@ -39,7 +39,29 @@ go build ./...
 ```
 
 Configuration lives in `~/.gogent/config.json`. The default LAN endpoint honors
-the `GOGENT_MODEL_URL` environment variable.
+the `GOGENT_MODEL_URL` environment variable. A sample config file with all
+available options is included at `config.sample.json` in the repository.
+
+### Window scaling
+
+Session windows are **scalable** by default. You can:
+
+- **Drag the bottom-right corner** to resize any session window
+- **Drag the title bar** to move windows around
+- **Minimize/restore** windows using the ▾/▴ button in the title bar
+
+These features are controlled by the `window` section of `config.json`:
+
+```json
+{
+  "window": {
+    "resizable": true,
+    "minimizable": true,
+    "min_width": 50,
+    "min_height": 12
+  }
+}
+```
 
 Each model entry has an `api_type` selecting the provider conventions:
 
@@ -52,6 +74,20 @@ Each model entry has an `api_type` selecting the provider conventions:
 In the model editor, the **Scan** button next to the model id queries the
 backend's listing endpoint and replaces the model-id field with a dropdown of
 the advertised models.
+
+## Skills & project instructions
+
+gogent assembles a system-context block for every task:
+
+- **AGENTS.md** — project instructions are discovered automatically by walking from
+  the workspace root up to the filesystem root (outermost first, nearest last), plus a
+  global `~/.gogent/AGENTS.md`. They're concatenated (size-capped) and injected into
+  the agent's context.
+- **Skills** — drop a folder containing a `SKILL.md` (YAML frontmatter with `name:` and
+  `description:`) under `~/.gogent/skills` or `./skills`. Active skills are advertised
+  to the model as a name+description index; the model calls the `skill` tool to load a
+  skill's full instructions on demand (progressive disclosure). Toggle skills and view
+  usage stats in the TUI under **Config → Skills…**.
 
 ## Status
 

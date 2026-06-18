@@ -145,12 +145,25 @@ func DefaultTimeoutConfig() TimeoutConfig {
 	}
 }
 
+// WindowConfig controls the appearance and behavior of session windows.
+type WindowConfig struct {
+	// Resizable allows users to drag the window corners to resize session windows.
+	Resizable bool `json:"resizable"`
+	// Minimizable allows users to collapse session windows to their title bar.
+	Minimizable bool `json:"minimizable"`
+	// MinWidth is the minimum allowed width for a window.
+	MinWidth int `json:"min_width"`
+	// MinHeight is the minimum allowed height for a window.
+	MinHeight int `json:"min_height"`
+}
+
 // Config represents the full configuration
 type Config struct {
 	DefaultModel string         `json:"default_model"`
 	ModelConfigs []*ModelConfig `json:"models"`
 	SubAgents    SubAgentConfig `json:"sub_agents"`
 	Timeouts     TimeoutConfig  `json:"timeouts"`
+	Window       WindowConfig   `json:"window"`
 }
 
 // LoadConfig loads configuration from the default location
@@ -228,6 +241,12 @@ func GetDefaultConfig() *Config {
 		DefaultModel: "local-lan",
 		SubAgents:    DefaultSubAgentConfig(),
 		Timeouts:     DefaultTimeoutConfig(),
+		Window: WindowConfig{
+			Resizable:   true,
+			Minimizable: true,
+			MinWidth:    50,
+			MinHeight:   12,
+		},
 		ModelConfigs: []*ModelConfig{
 			{
 				Name:        "local-lan",
@@ -299,7 +318,7 @@ func GetDefaultConfig() *Config {
 				Model:       "glm-4.6",
 				APIKey:      "",
 				Temperature: 0.7,
-				MaxTokens:   262144,
+				MaxTokens:   131072,
 				Free:        false,
 			},
 		},

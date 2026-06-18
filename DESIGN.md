@@ -23,7 +23,7 @@ internal/model/        Connector interfaces + HTTP model connection + session
 internal/tool/         Tool registry, shell tool, structured-output tool
 internal/fileops/      Path resolution, file I/O, file mutation
 internal/command/      Shell exec + internal commands (calc/echo/help)
-internal/skill/        SKILL.md loader + registry (see TODO: not wired in)
+internal/skill/        SKILL.md loader + registry (wired via syscontext + skill tool)
 internal/permission/   Resource+action permission gate (shell/file/external/...)
 internal/compression/  Context compression
 internal/http/         HTTP client; cmd also has a headless HTTP server mode
@@ -74,9 +74,19 @@ internal/http/         HTTP client; cmd also has a headless HTTP server mode
 - Headless HTTP server mode for API-only use (`-http -no-tui`).
 - `-verbose` for extra startup/diagnostic logging.
 
-## Known gaps
+## System context (AGENTS.md + skills)
 
-Skills are loaded but not yet wired into the agent — see `TODO.md`.
+Each task loop injects a system-context block built by `internal/gogent`:
+
+- **AGENTS.md** project instructions are discovered (`syscontext.go`) by walking from
+  the workspace root up to the filesystem root (outermost first, nearest last) plus a
+  global `~/.gogent/AGENTS.md`, concatenated with source headers and size-capped.
+- **Skills** use progressive disclosure: an index of *active* skills (name +
+  description) is listed in the prompt, and a `skill` tool loads a skill's full
+  `SKILL.md` on demand, recording per-skill usage. Skills load from `~/.gogent/skills`
+  and `./skills`; they can be toggled in the TUI (Config → Skills…).
+
+## Known gaps
 
 The permission gate (`internal/permission`) authorizes every side-effecting tool:
 workspace file ops are allowed; shell and any out-of-workspace access prompt

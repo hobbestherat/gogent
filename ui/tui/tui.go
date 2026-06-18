@@ -105,6 +105,7 @@ type Workbench struct {
 	sidebar    *sidebar
 	monolog    *tv.Layer
 	quit       context.CancelFunc
+	windowConfig config.WindowConfig
 }
 
 // NewWorkbench creates the workbench and its desktop chrome.
@@ -117,6 +118,13 @@ func NewWorkbench(models []*config.ModelConfig) *Workbench {
 		app:      app,
 		desktop:  tv.NewDesktop(app),
 		sessions: make(map[string]*SessionWindow),
+		// Use default window config (resizable and minimizable by default)
+		windowConfig: config.WindowConfig{
+			Resizable:   true,
+			Minimizable: true,
+			MinWidth:    50,
+			MinHeight:   12,
+		},
 	}
 	w.SetModels(models)
 	// Background layer: a filled desktop with a hint.
