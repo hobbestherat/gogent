@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"sync"
 	"testing"
+	"time"
 
 	"gogent/internal/model"
 )
@@ -162,6 +164,71 @@ func TestUserSessionCountMessages(t *testing.T) {
 	count := userSession.CountMessages()
 	if count != 1 {
 		t.Errorf("Expected 1 message, got %d", count)
+	}
+}
+
+func TestUserSessionGetStatsTotalTurns(t *testing.T) {
+	m := model.NewModelConnection()
+	s := model.NewModelSession("test-stats", m)
+	agent := NewAgent("agent", s)
+	userSession := NewUserSession("session-stats", agent)
+
+	agent.ThoughtTrain.AddTurn([]model.Message{{Role: model.RoleUser, Content: "hi"}}, "Hello!", nil, nil)
+	agent.ThoughtTrain.AddTurn([]model.Message{{Role: model.RoleUser, Content: "bye"}}, "Goodbye!", nil, nil)
+
+	stats := userSession.GetStats()
+	if got := stats["total_turns"]; got != 2 {
+		t.Errorf("Expected total_turns 2, got %v", got)
+	}
+	if got := stats["total_turns"]; got != userSession.CountMessages() {
+		t.Errorf("GetStats total_turns %v disagrees with CountMessages %d", got, userSession.CountMessages())
+	}
+}
+
+// TestUserSessionGetStatsNoDeadlock exercises GetStats concurrently with
+// writers that take the write lock. RWMutex is not reentrant, so the previous
+// GetStats -> CountMessages re-entry would deadlock against an interleaving
+// writer; this test hangs (and is killed by the test timeout) on the old code.
+func TestUserSessionGetStatsNoDeadlock(t *testing.T) {
+	m := model.NewModelConnection()
+	s := model.NewModelSession("test-deadlock", m)
+	agent := NewAgent("agent", s)
+	userSession := NewUserSession("session-deadlock", agent)
+	agent.ThoughtTrain.AddTurn([]model.Message{{Role: model.RoleUser, Content: "hi"}}, "Hello!", nil, nil)
+
+	const iterations = 2000
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			userSession.GetStats()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			userSession.AddTokenUsage(1, 1)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			userSession.SetObserver(nil)
+		}
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("GetStats deadlocked under concurrent writers")
 	}
 }
 
