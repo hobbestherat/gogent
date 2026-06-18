@@ -979,9 +979,10 @@ func (g *Gogent) SendMessageToSessionWithModel(sessionID, agentID, message, mode
 		} else {
 			ag.ThoughtTrain.Resume(newModel)
 		}
-		if selectedConfig.MaxTokens > 0 {
-			ag.ThoughtTrain.SetMaxContextLength(selectedConfig.MaxTokens)
-		}
+		// Calibrate compaction against the model's input context window, not its
+		// max_tokens output cap (they are independent — a sane output cap like 4096
+		// must not be mistaken for the context window).
+		ag.ThoughtTrain.SetMaxContextLength(selectedConfig.ContextWindowOrDefault())
 	}
 
 	// Execute the task loop with multi-turn tool calling support

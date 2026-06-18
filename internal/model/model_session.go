@@ -22,6 +22,11 @@ type ModelSession struct {
 	Callbacks         []func(event CallbackEvent)
 	TokenCallbacks    []TokenCallback
 	mu                sync.Mutex
+	// compressSuppressed is the hysteresis flag for context compaction: once a
+	// compaction runs it stays set until CurrentTokenCount recedes below the
+	// low-water mark, preventing a summarization round-trip every turn. Its zero
+	// value (false) means "armed", so freshly created sessions compact normally.
+	compressSuppressed bool
 
 	// SystemPrompt is prepended (as a system message) to every request.
 	SystemPrompt string
@@ -102,10 +107,17 @@ func (s *ModelSession) ReplaceTranscript(messages []Message) {
 	s.Transcript = append([]Message(nil), messages...)
 }
 
-// SetMaxContextLength sets the maximum context length for this session
+// SetMaxContextLength sets the context window (input token budget) for this
+// session. When the window actually changes — e.g. switching to a model with a
+// different context size — any compaction hysteresis is cleared so the new
+// window is evaluated fresh; re-setting the same value (the common per-turn
+// case) leaves hysteresis intact.
 func (s *ModelSession) SetMaxContextLength(length int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.MaxContextLength != length {
+		s.compressSuppressed = false
+	}
 	s.MaxContextLength = length
 }
 
@@ -151,8 +163,27 @@ func (s *ModelSession) GetTokenCount() int {
 	return s.CurrentTokenCount
 }
 
+// Compression water marks, expressed as fractions of the context window.
+//
+// compaction fires once the running context reaches the high-water mark. After a
+// compaction it stays suppressed until the context recedes below the low-water
+// mark. The band between the two is the hysteresis that keeps compaction from
+// re-arming every turn (a synchronous summarization round-trip each turn) when
+// the post-compaction estimate or real usage still sits near the trigger.
+const (
+	compressionHighWater = 0.8 // trigger compaction
+	compressionLowWater  = 0.5 // re-arm / post-compaction target
+)
+
 // NeedsCompression reports whether the running context has grown past the
-// compression threshold (80% of the configured context window).
+// compression high-water mark (80% of the configured context window).
+//
+// Hysteresis: a successful compaction suppresses further compression until the
+// context drops below the low-water mark (50%). A normal session therefore
+// compacts occasionally (at 80%, settling near 50%), not every turn. If a
+// compaction cannot get the context below 50% — the verbatim recent turns alone
+// are large — compression stays suppressed rather than re-firing futilely each
+// turn; the remedy is a larger context window or fewer kept-recent turns.
 func (s *ModelSession) NeedsCompression() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -160,8 +191,17 @@ func (s *ModelSession) NeedsCompression() bool {
 	if s.MaxContextLength <= 0 {
 		return false
 	}
-	threshold := int(float64(s.MaxContextLength) * 0.8)
-	return s.CurrentTokenCount >= threshold
+	high := int(float64(s.MaxContextLength) * compressionHighWater)
+	low := int(float64(s.MaxContextLength) * compressionLowWater)
+
+	// Re-arm once the context has receded below the low-water mark.
+	if s.compressSuppressed && s.CurrentTokenCount <= low {
+		s.compressSuppressed = false
+	}
+	if s.compressSuppressed {
+		return false
+	}
+	return s.CurrentTokenCount >= high
 }
 
 // EstimateTokens is a rough char/4 heuristic used to size a transcript between a
@@ -191,6 +231,9 @@ func (s *ModelSession) ApplyCompressedTranscript(newTranscript []Message) {
 		after += len(s.SystemPrompt) / 4
 	}
 	s.CurrentTokenCount = after
+	// A compaction just ran: engage hysteresis so NeedsCompression holds off
+	// until the (real, usage-corrected) count recedes below the low-water mark.
+	s.compressSuppressed = true
 	callbacks := append([]func(event CallbackEvent){}, s.Callbacks...)
 	s.mu.Unlock()
 

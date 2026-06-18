@@ -9,8 +9,8 @@ import (
 
 // ModelConfig represents a single model configuration
 type ModelConfig struct {
-	Name        string  `json:"name"`
-	DisplayName string  `json:"display_name"`
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name"`
 	// APIType selects the provider conventions used to talk to this backend
 	// ("openai" for any OpenAI-compatible server, "zai" for the Z.AI platform).
 	// Empty defaults to "openai".
@@ -20,8 +20,33 @@ type ModelConfig struct {
 	APIKey      string  `json:"api_key,omitempty"`
 	Temperature float32 `json:"temperature"`
 	TopP        float32 `json:"top_p,omitempty"`
-	MaxTokens   int     `json:"max_tokens"`
-	Free        bool    `json:"free"`
+	// MaxTokens is the per-request output cap sent as the API's max_tokens field.
+	// It bounds only the model's response length, never the conversation size.
+	MaxTokens int `json:"max_tokens"`
+	// ContextWindow is the model's input context window in tokens — the budget
+	// the whole conversation (system prompt + transcript + tool results) must fit
+	// within. It drives context-compaction thresholds and is deliberately
+	// separate from MaxTokens: a sane output cap (e.g. 4096) must not be mistaken
+	// for the context window. Leave unset (0) to fall back to
+	// ContextWindowOrDefault's conservative default.
+	ContextWindow int  `json:"context_window,omitempty"`
+	Free          bool `json:"free"`
+}
+
+// defaultContextWindow is the conservative built-in context window assumed when a
+// ModelConfig leaves ContextWindow unset. It errs small so a long session on a
+// model with an unknown window compacts sooner rather than overflowing; set
+// context_window explicitly for models with larger windows.
+const defaultContextWindow = 32768
+
+// ContextWindowOrDefault returns the configured input context window, or the
+// conservative built-in default when unset (<=0). Compaction thresholds are
+// calibrated against this value, never against MaxTokens (the output cap).
+func (m *ModelConfig) ContextWindowOrDefault() int {
+	if m == nil || m.ContextWindow <= 0 {
+		return defaultContextWindow
+	}
+	return m.ContextWindow
 }
 
 // SubAgentExecutionModel selects how sub-agents are run.
@@ -279,7 +304,10 @@ func GetDefaultConfig() *Config {
 				APIKey:      "",
 				Temperature: 0.7,
 				MaxTokens:   262144,
-				Free:        true,
+				// Local llama.cpp-style servers expose a configurable context; set
+				// this to the server's actual --ctx-size to calibrate compaction.
+				ContextWindow: 262144,
+				Free:          true,
 			},
 			{
 				Name:        "qemu-host",
@@ -289,7 +317,10 @@ func GetDefaultConfig() *Config {
 				APIKey:      "",
 				Temperature: 0.7,
 				MaxTokens:   262144,
-				Free:        true,
+				// Local llama.cpp-style servers expose a configurable context; set
+				// this to the server's actual --ctx-size to calibrate compaction.
+				ContextWindow: 262144,
+				Free:          true,
 			},
 			{
 				Name:        "localhost",
@@ -299,7 +330,10 @@ func GetDefaultConfig() *Config {
 				APIKey:      "",
 				Temperature: 0.7,
 				MaxTokens:   262144,
-				Free:        true,
+				// Local llama.cpp-style servers expose a configurable context; set
+				// this to the server's actual --ctx-size to calibrate compaction.
+				ContextWindow: 262144,
+				Free:          true,
 			},
 			{
 				Name:        "groq-free",
@@ -309,7 +343,9 @@ func GetDefaultConfig() *Config {
 				APIKey:      "",
 				Temperature: 0.7,
 				MaxTokens:   262144,
-				Free:        false,
+				// Llama 3.3 70B serves a 128K input context window.
+				ContextWindow: 131072,
+				Free:          false,
 			},
 			{
 				Name:        "together-free",
@@ -319,7 +355,9 @@ func GetDefaultConfig() *Config {
 				APIKey:      "",
 				Temperature: 0.7,
 				MaxTokens:   262144,
-				Free:        false,
+				// Llama 3.3 70B serves a 128K input context window.
+				ContextWindow: 131072,
+				Free:          false,
 			},
 			{
 				Name:        "openrouter-free",
@@ -329,7 +367,9 @@ func GetDefaultConfig() *Config {
 				APIKey:      "",
 				Temperature: 0.7,
 				MaxTokens:   262144,
-				Free:        false,
+				// Gemma 3 serves a 128K input context window.
+				ContextWindow: 131072,
+				Free:          false,
 			},
 			{
 				// Z.AI: api_type "zai" supplies the base URL automatically, so
@@ -342,7 +382,9 @@ func GetDefaultConfig() *Config {
 				APIKey:      "",
 				Temperature: 0.7,
 				MaxTokens:   131072,
-				Free:        false,
+				// GLM-4.6 serves a 128K input context window.
+				ContextWindow: 131072,
+				Free:          false,
 			},
 		},
 	}
