@@ -8,6 +8,7 @@ import (
 	"gogent/internal/agent"
 	"gogent/internal/config"
 	"gogent/internal/fileops"
+	"gogent/internal/permission"
 	"gogent/internal/model"
 )
 
@@ -37,7 +38,7 @@ func TestFileOpsWithModel(t *testing.T) {
 	g := NewGogentWithWorkspace(tempDir, workspace)
 
 	// Add default allow rule for all operations
-	g.GetPermissionService().AddRule(fileops.PermissionRule{
+	g.GetPermissionService().AddRule(permission.Rule{
 		Action:   "*",
 		Resource: "*",
 		Effect:   "allow",

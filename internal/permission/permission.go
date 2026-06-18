@@ -1,138 +1,277 @@
+// Package permission provides a single, resource+action-aware authorization
+// gate for every side-effecting tool (file ops, shell, sub-agents, network).
+//
+// A Service evaluates a (action, resource) pair to one of three effects:
+// allow, deny or ask. On "ask" it consults a Prompter (implemented by the UI);
+// the user's decision may be persisted ("always" / "always deny") to
+// permissions.json so the question is not asked again.
 package permission
 
 import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
-// PermissionAction represents an action that can be permitted
-type PermissionAction string
+// Action identifies the kind of operation being gated.
+type Action string
 
 const (
-	PermissionSkill         PermissionAction = "skill"
-	PermissionSystemCommand PermissionAction = "system_command"
-	PermissionNetwork       PermissionAction = "network"
-	PermissionFile          PermissionAction = "file"
-	PermissionTool          PermissionAction = "tool"
+	ActionRead     Action = "read"     // read a file inside the workspace
+	ActionWrite    Action = "write"    // write/edit a file inside the workspace
+	ActionShell    Action = "shell"    // run a shell command (session-wide gate)
+	ActionExternal Action = "external" // touch a path outside the workspace
+	ActionNetwork  Action = "network"  // network access
+	ActionSubagent Action = "subagent" // spawn a sub-agent
 )
 
-// PermissionLevel represents the permission level
-type PermissionLevel string
+// Effect is the resolved policy for a request.
+type Effect string
 
 const (
-	PermissionYes PermissionLevel = "yes"
-	PermissionNo  PermissionLevel = "no"
-	PermissionAsk PermissionLevel = "ask"
+	EffectAllow Effect = "allow"
+	EffectDeny  Effect = "deny"
+	EffectAsk   Effect = "ask"
 )
 
-// PermissionConfig holds the permission configuration
-type PermissionConfig struct {
-	Permissions map[string]PermissionLevel `json:"permissions"`
-	mu          sync.RWMutex
+// Decision is a user's answer to an "ask" prompt.
+type Decision string
+
+const (
+	DecisionAllow      Decision = "allow"       // allow once
+	DecisionDeny       Decision = "deny"        // deny once
+	DecisionAlways     Decision = "always"      // allow and persist
+	DecisionAlwaysDeny Decision = "always_deny" // deny and persist
+)
+
+// Rule is a static policy entry. Action "*" matches any action; Resource
+// supports a trailing "*" wildcard or "*" for all.
+type Rule struct {
+	Action   string `json:"action"`
+	Resource string `json:"resource"`
+	Effect   string `json:"effect"`
 }
 
-// NewPermissionConfig creates a new permission config
-func NewPermissionConfig() *PermissionConfig {
-	return &PermissionConfig{
-		Permissions: make(map[string]PermissionLevel),
+// Request is handed to a Prompter when a decision is needed.
+type Request struct {
+	Action   Action
+	Resource string
+	Detail   string // human context, e.g. the shell command being run
+}
+
+// Prompter asks the user for a decision. It blocks until the user answers and
+// is always invoked off the UI thread, so implementations must marshal to their
+// UI and wait for the reply.
+type Prompter interface {
+	AskPermission(Request) Decision
+}
+
+// DeniedError is returned by Check when an operation is not permitted.
+type DeniedError struct {
+	Action   Action
+	Resource string
+}
+
+func (e *DeniedError) Error() string {
+	if e.Resource == "" {
+		return "permission denied: " + string(e.Action)
+	}
+	return "permission denied: " + string(e.Action) + " on " + e.Resource
+}
+
+// Service is the central permission gate. It is safe for concurrent use.
+type Service struct {
+	mu        sync.Mutex
+	configDir string
+	rules     []Rule
+	saved     map[string]Decision
+	prompter  Prompter
+}
+
+// New creates a Service whose persisted "always" decisions live under
+// configDir/permissions.json. configDir may be empty to disable persistence.
+func New(configDir string) *Service {
+	s := &Service{
+		configDir: configDir,
+		saved:     make(map[string]Decision),
+	}
+	s.load()
+	return s
+}
+
+// SetPrompter installs the interactive prompter. With no prompter, "ask"
+// resolves to deny (safe default for headless runs).
+func (s *Service) SetPrompter(p Prompter) {
+	s.mu.Lock()
+	s.prompter = p
+	s.mu.Unlock()
+}
+
+// AddRule appends a static policy rule.
+func (s *Service) AddRule(r Rule) {
+	s.mu.Lock()
+	s.rules = append(s.rules, r)
+	s.mu.Unlock()
+}
+
+func key(a Action, resource string) string { return string(a) + ":" + resource }
+
+// effect resolves the policy for (action, resource) under the lock.
+func (s *Service) effect(a Action, resource string) Effect {
+	// Persisted decisions win. For path-style actions an allowed ancestor root
+	// covers its descendants.
+	for k, d := range s.saved {
+		ka, kr := splitKey(k)
+		if ka != a {
+			continue
+		}
+		if kr == resource || (isPathAction(a) && pathUnder(resource, kr)) {
+			switch d {
+			case DecisionAlways:
+				return EffectAllow
+			case DecisionAlwaysDeny:
+				return EffectDeny
+			}
+		}
+	}
+	for _, r := range s.rules {
+		if r.Action != "*" && r.Action != string(a) {
+			continue
+		}
+		if wildcardMatch(resource, r.Resource) {
+			return Effect(r.Effect)
+		}
+	}
+	return EffectAsk
+}
+
+// Check authorizes (action, resource), prompting if necessary. It returns nil
+// when allowed and a *DeniedError when denied.
+func (s *Service) Check(a Action, resource string) error {
+	return s.CheckWithDetail(a, resource, "")
+}
+
+// CheckWithDetail is Check with extra human context for the prompt.
+func (s *Service) CheckWithDetail(a Action, resource, detail string) error {
+	s.mu.Lock()
+	eff := s.effect(a, resource)
+	prompter := s.prompter
+	s.mu.Unlock()
+
+	switch eff {
+	case EffectAllow:
+		return nil
+	case EffectDeny:
+		return &DeniedError{Action: a, Resource: resource}
+	}
+
+	if prompter == nil {
+		return &DeniedError{Action: a, Resource: resource}
+	}
+
+	switch prompter.AskPermission(Request{Action: a, Resource: resource, Detail: detail}) {
+	case DecisionAllow:
+		return nil
+	case DecisionAlways:
+		s.persist(a, resource, DecisionAlways)
+		return nil
+	case DecisionAlwaysDeny:
+		s.persist(a, resource, DecisionAlwaysDeny)
+		return &DeniedError{Action: a, Resource: resource}
+	default: // DecisionDeny and anything unexpected
+		return &DeniedError{Action: a, Resource: resource}
 	}
 }
 
-// Load loads the permission config from a file
-func (c *PermissionConfig) Load(path string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (s *Service) persist(a Action, resource string, d Decision) {
+	s.mu.Lock()
+	s.saved[key(a, resource)] = d
+	s.mu.Unlock()
+	s.save()
+}
 
+func (s *Service) configPath() string {
+	if s.configDir == "" {
+		return ""
+	}
+	return filepath.Join(s.configDir, "permissions.json")
+}
+
+type savedFile struct {
+	Saved map[string]Decision `json:"saved"`
+}
+
+func (s *Service) load() {
+	path := s.configPath()
+	if path == "" {
+		return
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		// File doesn't exist, return empty config
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
+		return
 	}
-
-	return json.Unmarshal(data, c)
+	var f savedFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		return
+	}
+	if f.Saved != nil {
+		s.saved = f.Saved
+	}
 }
 
-// Save saves the permission config to a file
-func (c *PermissionConfig) Save(path string) error {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	data, err := json.MarshalIndent(c, "", "  ")
+func (s *Service) save() error {
+	path := s.configPath()
+	if path == "" {
+		return nil
+	}
+	if err := os.MkdirAll(s.configDir, 0755); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	data, err := json.MarshalIndent(savedFile{Saved: s.saved}, "", "  ")
+	s.mu.Unlock()
 	if err != nil {
 		return err
 	}
-
 	return os.WriteFile(path, data, 0644)
 }
 
-// GetPermission gets the permission level for an action
-func (c *PermissionConfig) GetPermission(action PermissionAction) PermissionLevel {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	if level, ok := c.Permissions[string(action)]; ok {
-		return level
+func splitKey(k string) (Action, string) {
+	i := strings.IndexByte(k, ':')
+	if i < 0 {
+		return Action(k), ""
 	}
-	return PermissionAsk // Default to ask if not set
+	return Action(k[:i]), k[i+1:]
 }
 
-// SetPermission sets the permission level for an action
-func (c *PermissionConfig) SetPermission(action PermissionAction, level PermissionLevel) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.Permissions[string(action)] = level
+func isPathAction(a Action) bool {
+	return a == ActionExternal || a == ActionRead || a == ActionWrite
 }
 
-// Evaluate evaluates permission with three-level hierarchy
-// global -> session -> agent
-func (c *PermissionConfig) Evaluate(
-	globalLevel PermissionLevel,
-	sessionLevel PermissionLevel,
-	agentLevel PermissionLevel,
-) PermissionLevel {
-	// Top-down evaluation with short-circuit
-	if globalLevel != PermissionAsk {
-		return globalLevel
+// pathUnder reports whether child is equal to or nested under parent. Both are
+// expected to be cleaned absolute paths.
+func pathUnder(child, parent string) bool {
+	if parent == "" || child == "" {
+		return false
 	}
-	if sessionLevel != PermissionAsk {
-		return sessionLevel
+	if child == parent {
+		return true
 	}
-	return agentLevel
+	rel, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// GetPermissionWithFallback gets permission with fallback to default
-func (c *PermissionConfig) GetPermissionWithFallback(action PermissionAction, defaultLevel PermissionLevel) PermissionLevel {
-	level := c.GetPermission(action)
-	if level == PermissionAsk {
-		return defaultLevel
+func wildcardMatch(value, pattern string) bool {
+	if pattern == "*" {
+		return true
 	}
-	return level
-}
-
-// LoadPermissionConfig loads the permission config from the gogent config directory
-func LoadPermissionConfig(configDir string) (*PermissionConfig, error) {
-	configPath := filepath.Join(configDir, "permissions.json")
-	config := NewPermissionConfig()
-
-	if err := config.Load(configPath); err != nil {
-		return nil, err
+	if strings.HasSuffix(pattern, "*") {
+		return strings.HasPrefix(value, strings.TrimSuffix(pattern, "*"))
 	}
-
-	return config, nil
-}
-
-// SavePermissionConfig saves the permission config to the gogent config directory
-func SavePermissionConfig(configDir string, config *PermissionConfig) error {
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		return err
-	}
-
-	configPath := filepath.Join(configDir, "permissions.json")
-	return config.Save(configPath)
+	return value == pattern
 }

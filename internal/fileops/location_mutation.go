@@ -12,8 +12,12 @@ type LocationMutation struct {
 
 // NewLocationMutation creates a new LocationMutation
 func NewLocationMutation(workspaceRoot string) *LocationMutation {
+	base, err := filepath.Abs(filepath.Clean(workspaceRoot))
+	if err != nil {
+		base = filepath.Clean(workspaceRoot)
+	}
 	return &LocationMutation{
-		workspaceRoot: filepath.Clean(workspaceRoot),
+		workspaceRoot: base,
 	}
 }
 
@@ -38,7 +42,7 @@ func (lm *LocationMutation) IsExternal(path string) (bool, error) {
 	}
 
 	// If path starts with .., it's external
-	return strings.HasPrefix(rel, ".."), nil
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)), nil
 }
 
 // GetResource returns the permission resource (relative path from workspace)

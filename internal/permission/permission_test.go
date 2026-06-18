@@ -1,148 +1,117 @@
 package permission
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 )
 
-func TestPermissionConfigDefaultAsk(t *testing.T) {
-	config := NewPermissionConfig()
+type stubPrompter struct {
+	decision Decision
+	calls    int
+	last     Request
+}
 
-	// Unknown permission should default to ask
-	level := config.GetPermission(PermissionSkill)
-	if level != PermissionAsk {
-		t.Errorf("Expected default ask for unknown permission, got %s", level)
+func (p *stubPrompter) AskPermission(r Request) Decision {
+	p.calls++
+	p.last = r
+	return p.decision
+}
+
+func TestRuleAllow(t *testing.T) {
+	s := New("")
+	s.AddRule(Rule{Action: "write", Resource: "*", Effect: "allow"})
+	if err := s.Check(ActionWrite, "foo.txt"); err != nil {
+		t.Fatalf("expected allow, got %v", err)
 	}
 }
 
-func TestPermissionConfigSetAndGet(t *testing.T) {
-	config := NewPermissionConfig()
-
-	config.SetPermission(PermissionSkill, PermissionYes)
-	config.SetPermission(PermissionSystemCommand, PermissionNo)
-
-	if config.GetPermission(PermissionSkill) != PermissionYes {
-		t.Error("Expected yes for skill")
-	}
-
-	if config.GetPermission(PermissionSystemCommand) != PermissionNo {
-		t.Error("Expected no for system_command")
+func TestRuleDeny(t *testing.T) {
+	s := New("")
+	s.AddRule(Rule{Action: "*", Resource: "secret*", Effect: "deny"})
+	if err := s.Check(ActionRead, "secret.txt"); err == nil {
+		t.Fatalf("expected deny")
 	}
 }
 
-func TestPermissionConfigEvaluate(t *testing.T) {
-	config := NewPermissionConfig()
-
-	tests := []struct {
-		name     string
-		global   PermissionLevel
-		session  PermissionLevel
-		agent    PermissionLevel
-		expected PermissionLevel
-	}{
-		{"global yes ends", PermissionYes, PermissionAsk, PermissionAsk, PermissionYes},
-		{"global no ends", PermissionNo, PermissionAsk, PermissionAsk, PermissionNo},
-		{"global ask goes to session", PermissionAsk, PermissionYes, PermissionAsk, PermissionYes},
-		{"global ask, session no ends", PermissionAsk, PermissionNo, PermissionAsk, PermissionNo},
-		{"all ask, returns agent", PermissionAsk, PermissionAsk, PermissionYes, PermissionYes},
-		{"all yes, returns global", PermissionYes, PermissionYes, PermissionYes, PermissionYes},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := config.Evaluate(tt.global, tt.session, tt.agent)
-			if result != tt.expected {
-				t.Errorf("Expected %s, got %s", tt.expected, result)
-			}
-		})
+func TestAskNoPrompterDenies(t *testing.T) {
+	s := New("")
+	if err := s.Check(ActionShell, ""); err == nil {
+		t.Fatalf("expected deny when no prompter is installed")
 	}
 }
 
-func TestPermissionConfigSaveLoad(t *testing.T) {
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "permissions.json")
-
-	config := NewPermissionConfig()
-	config.SetPermission(PermissionSkill, PermissionYes)
-	config.SetPermission(PermissionSystemCommand, PermissionNo)
-
-	if err := config.Save(configPath); err != nil {
-		t.Errorf("Failed to save: %v", err)
+func TestAskAllowOnce(t *testing.T) {
+	s := New("")
+	p := &stubPrompter{decision: DecisionAllow}
+	s.SetPrompter(p)
+	if err := s.Check(ActionShell, ""); err != nil {
+		t.Fatalf("expected allow, got %v", err)
 	}
-
-	loaded := NewPermissionConfig()
-	if err := loaded.Load(configPath); err != nil {
-		t.Errorf("Failed to load: %v", err)
+	// Allow-once does not persist: a second check asks again.
+	if err := s.Check(ActionShell, ""); err != nil {
+		t.Fatalf("expected allow, got %v", err)
 	}
-
-	if loaded.GetPermission(PermissionSkill) != PermissionYes {
-		t.Error("Expected yes for skill after loading")
-	}
-
-	if loaded.GetPermission(PermissionSystemCommand) != PermissionNo {
-		t.Error("Expected no for system_command after loading")
+	if p.calls != 2 {
+		t.Fatalf("expected 2 prompts, got %d", p.calls)
 	}
 }
 
-func TestPermissionConfigConcurrency(t *testing.T) {
-	config := NewPermissionConfig()
-
-	done := make(chan bool, 100)
-
-	// Concurrent reads
-	for i := 0; i < 50; i++ {
-		go func() {
-			config.GetPermission(PermissionSkill)
-			done <- true
-		}()
+func TestAskAlwaysPersistsInMemory(t *testing.T) {
+	s := New("")
+	p := &stubPrompter{decision: DecisionAlways}
+	s.SetPrompter(p)
+	if err := s.Check(ActionShell, ""); err != nil {
+		t.Fatalf("expected allow, got %v", err)
 	}
-
-	// Concurrent writes
-	for i := 0; i < 50; i++ {
-		go func(n int) {
-			level := PermissionAsk
-			if n%2 == 0 {
-				level = PermissionYes
-			}
-			config.SetPermission(PermissionSkill, level)
-			done <- true
-		}(i)
+	if err := s.Check(ActionShell, ""); err != nil {
+		t.Fatalf("expected cached allow, got %v", err)
 	}
-
-	for i := 0; i < 100; i++ {
-		<-done
-	}
-
-	// Should not panic
-	_ = config.GetPermission(PermissionSkill)
-}
-
-func TestPermissionConfigLoadNonExistent(t *testing.T) {
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "nonexistent.json")
-
-	config := NewPermissionConfig()
-	err := config.Load(configPath)
-
-	if err != nil {
-		t.Errorf("Expected no error for non-existent file, got: %v", err)
+	if p.calls != 1 {
+		t.Fatalf("expected 1 prompt after 'always', got %d", p.calls)
 	}
 }
 
-func TestPermissionConfigLoadInvalid(t *testing.T) {
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "invalid.json")
+func TestAlwaysExternalRootCoversChildren(t *testing.T) {
+	s := New("")
+	p := &stubPrompter{decision: DecisionAlways}
+	s.SetPrompter(p)
+	if err := s.Check(ActionExternal, "/etc"); err != nil {
+		t.Fatalf("expected allow for /etc, got %v", err)
+	}
+	// A child path under the granted root is covered without re-asking.
+	if err := s.Check(ActionExternal, "/etc/hosts"); err != nil {
+		t.Fatalf("expected child allow, got %v", err)
+	}
+	if p.calls != 1 {
+		t.Fatalf("expected 1 prompt, got %d", p.calls)
+	}
+}
 
-	// Write invalid JSON
-	if err := os.WriteFile(configPath, []byte("invalid json"), 0644); err != nil {
-		t.Fatalf("Failed to write test file: %v", err)
+func TestPersistenceRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	p := &stubPrompter{decision: DecisionAlways}
+	s.SetPrompter(p)
+	if err := s.Check(ActionExternal, "/var/data"); err != nil {
+		t.Fatalf("expected allow, got %v", err)
+	}
+	if _, err := filepath.Glob(filepath.Join(dir, "permissions.json")); err != nil {
+		t.Fatalf("glob failed: %v", err)
 	}
 
-	config := NewPermissionConfig()
-	err := config.Load(configPath)
+	// A fresh Service over the same dir loads the persisted decision.
+	s2 := New(dir)
+	if err := s2.Check(ActionExternal, "/var/data/file"); err != nil {
+		t.Fatalf("expected persisted allow, got %v", err)
+	}
+}
 
-	if err == nil {
-		t.Error("Expected error for invalid JSON")
+func TestPromptReceivesDetail(t *testing.T) {
+	s := New("")
+	p := &stubPrompter{decision: DecisionDeny}
+	s.SetPrompter(p)
+	_ = s.CheckWithDetail(ActionShell, "", "rm -rf /tmp/x")
+	if p.last.Detail != "rm -rf /tmp/x" {
+		t.Fatalf("detail not propagated: %q", p.last.Detail)
 	}
 }

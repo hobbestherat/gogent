@@ -130,6 +130,9 @@ func main() {
 		wb = tuipkg.NewWorkbench(g.GetConfig().ModelConfigs)
 		fmt.Println("TUI enabled. Press Ctrl+C to exit.")
 
+		// Route interactive permission prompts to the workbench modal.
+		g.GetPermissionService().SetPrompter(wb)
+
 		wb.SetHandlers(tuipkg.Handlers{
 			// OnCreate builds the backend session and bridges its live events to
 			// the matching session window.

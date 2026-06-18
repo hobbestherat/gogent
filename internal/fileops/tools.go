@@ -2,6 +2,8 @@ package fileops
 
 import (
 	"fmt"
+
+	"gogent/internal/permission"
 )
 
 // FileTool is the interface for file operation tools
@@ -15,22 +17,22 @@ type FileTool interface {
 type ReadTool struct {
 	fileSys    *FileSystem
 	location   *LocationMutation
-	permission *PermissionService
+	permission *permission.Service
 }
 
 // NewReadTool creates a new read tool
-func NewReadTool(fileSys *FileSystem, location *LocationMutation, permission *PermissionService) *ReadTool {
+func NewReadTool(fileSys *FileSystem, location *LocationMutation, perm *permission.Service) *ReadTool {
 	return &ReadTool{
 		fileSys:    fileSys,
 		location:   location,
-		permission: permission,
+		permission: perm,
 	}
 }
 
 func (rt *ReadTool) Name() string { return "read" }
 
 func (rt *ReadTool) Description() string {
-	return "Read a file from the workspace. Supports relative and absolute paths."
+	return "Read a file. The path may be absolute or relative to the workspace root; relative paths are resolved against the workspace root, absolute paths are used as-is."
 }
 
 func (rt *ReadTool) Execute(args map[string]interface{}) (interface{}, error) {
@@ -39,15 +41,7 @@ func (rt *ReadTool) Execute(args map[string]interface{}) (interface{}, error) {
 		return nil, fmt.Errorf("missing path argument")
 	}
 
-	resource, err := rt.location.GetResource(path)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := rt.permission.Assert("read", resource); err != nil {
-		if _, ok := err.(*PermissionRequiredError); ok {
-			return nil, fmt.Errorf("permission required for reading %s", path)
-		}
+	if err := CheckFileAccess(rt.permission, rt.location, false, path); err != nil {
 		return nil, err
 	}
 
@@ -63,22 +57,22 @@ func (rt *ReadTool) Execute(args map[string]interface{}) (interface{}, error) {
 type WriteTool struct {
 	fileMutation *FileMutation
 	location     *LocationMutation
-	permission   *PermissionService
+	permission   *permission.Service
 }
 
 // NewWriteTool creates a new write tool
-func NewWriteTool(fileMutation *FileMutation, location *LocationMutation, permission *PermissionService) *WriteTool {
+func NewWriteTool(fileMutation *FileMutation, location *LocationMutation, perm *permission.Service) *WriteTool {
 	return &WriteTool{
 		fileMutation: fileMutation,
 		location:     location,
-		permission:   permission,
+		permission:   perm,
 	}
 }
 
 func (wt *WriteTool) Name() string { return "write" }
 
 func (wt *WriteTool) Description() string {
-	return "Write content to a file. Supports relative and absolute paths. Returns operation details."
+	return "Write content to a file. The path may be absolute or relative to the workspace root; relative paths are resolved against the workspace root, absolute paths are used as-is. Do not prefix a path with the workspace root if it is already absolute. Returns operation details."
 }
 
 func (wt *WriteTool) Execute(args map[string]interface{}) (interface{}, error) {
@@ -92,27 +86,7 @@ func (wt *WriteTool) Execute(args map[string]interface{}) (interface{}, error) {
 		return nil, fmt.Errorf("missing path argument: content")
 	}
 
-	isExternal, err := wt.location.IsExternal(path)
-	if err != nil {
-		return nil, err
-	}
-
-	if isExternal {
-		resource, _ := wt.location.GetResource(path)
-		if err := wt.permission.Assert("external_directory", resource); err != nil {
-			return nil, fmt.Errorf("external directory access requires permission: %v", err)
-		}
-	}
-
-	resource, err := wt.location.GetResource(path)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := wt.permission.Assert("edit", resource); err != nil {
-		if _, ok := err.(*PermissionRequiredError); ok {
-			return nil, fmt.Errorf("permission required for writing to %s", path)
-		}
+	if err := CheckFileAccess(wt.permission, wt.location, true, path); err != nil {
 		return nil, err
 	}
 
@@ -134,22 +108,22 @@ func (wt *WriteTool) Execute(args map[string]interface{}) (interface{}, error) {
 type EditTool struct {
 	fileMutation *FileMutation
 	location     *LocationMutation
-	permission   *PermissionService
+	permission   *permission.Service
 }
 
 // NewEditTool creates a new edit tool
-func NewEditTool(fileMutation *FileMutation, location *LocationMutation, permission *PermissionService) *EditTool {
+func NewEditTool(fileMutation *FileMutation, location *LocationMutation, perm *permission.Service) *EditTool {
 	return &EditTool{
 		fileMutation: fileMutation,
 		location:     location,
-		permission:   permission,
+		permission:   perm,
 	}
 }
 
 func (et *EditTool) Name() string { return "edit" }
 
 func (et *EditTool) Description() string {
-	return "Edit a file by replacing exact text. Uses conditional write for safety. Returns operation details."
+	return "Edit a file by replacing exact text. The path may be absolute or relative to the workspace root; relative paths are resolved against the workspace root, absolute paths are used as-is. Uses conditional write for safety. Returns operation details."
 }
 
 func (et *EditTool) Execute(args map[string]interface{}) (interface{}, error) {
@@ -168,27 +142,7 @@ func (et *EditTool) Execute(args map[string]interface{}) (interface{}, error) {
 		return nil, fmt.Errorf("missing path argument: replace")
 	}
 
-	isExternal, err := et.location.IsExternal(path)
-	if err != nil {
-		return nil, err
-	}
-
-	if isExternal {
-		resource, _ := et.location.GetResource(path)
-		if err := et.permission.Assert("external_directory", resource); err != nil {
-			return nil, fmt.Errorf("external directory access requires permission: %v", err)
-		}
-	}
-
-	resource, err := et.location.GetResource(path)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := et.permission.Assert("edit", resource); err != nil {
-		if _, ok := err.(*PermissionRequiredError); ok {
-			return nil, fmt.Errorf("permission required for editing %s", path)
-		}
+	if err := CheckFileAccess(et.permission, et.location, true, path); err != nil {
 		return nil, err
 	}
 

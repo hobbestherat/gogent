@@ -24,21 +24,55 @@ type FileSystem struct {
 
 // NewFileSystem creates a new file system service
 func NewFileSystem(workspaceRoot string) *FileSystem {
-	return &FileSystem{
-		basePath: filepath.Clean(workspaceRoot),
+	base, err := filepath.Abs(filepath.Clean(workspaceRoot))
+	if err != nil {
+		base = filepath.Clean(workspaceRoot)
 	}
+	return &FileSystem{
+		basePath: base,
+	}
+}
+
+// resolve turns a caller-supplied path into a cleaned absolute path. Absolute
+// paths are honored as-is; relative paths are resolved against the workspace
+// root. This mirrors how common agent harnesses treat tool paths and avoids
+// re-rooting an absolute path under the workspace (which previously produced
+// phantom directories like <workspace>/Users/...).
+func (fsys *FileSystem) resolve(path string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("empty path")
+	}
+	var joined string
+	if filepath.IsAbs(path) {
+		joined = filepath.Clean(path)
+	} else {
+		joined = filepath.Join(fsys.basePath, path)
+	}
+	resolved, err := filepath.Abs(joined)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve path: %w", err)
+	}
+	return resolved, nil
+}
+
+// ensureWithin returns an error if resolved is outside the workspace root.
+func (fsys *FileSystem) ensureWithin(resolved, original string) error {
+	rel, err := filepath.Rel(fsys.basePath, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("path escapes workspace: %s", original)
+	}
+	return nil
 }
 
 // Read reads a file and returns its contents
 func (fsys *FileSystem) Read(path string) ([]byte, error) {
-	resolved, err := filepath.Abs(filepath.Join(fsys.basePath, path))
+	resolved, err := fsys.resolve(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve path: %w", err)
+		return nil, err
 	}
 
-	rel, err := filepath.Rel(fsys.basePath, resolved)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return nil, fmt.Errorf("path escapes workspace: %s", path)
+	if err := fsys.ensureWithin(resolved, path); err != nil {
+		return nil, err
 	}
 
 	data, err := os.ReadFile(resolved)
@@ -51,14 +85,13 @@ func (fsys *FileSystem) Read(path string) ([]byte, error) {
 
 // Write writes content to a file
 func (fsys *FileSystem) Write(path string, content []byte) error {
-	resolved, err := filepath.Abs(filepath.Join(fsys.basePath, path))
+	resolved, err := fsys.resolve(path)
 	if err != nil {
-		return fmt.Errorf("failed to resolve path: %w", err)
+		return err
 	}
 
-	rel, err := filepath.Rel(fsys.basePath, resolved)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return fmt.Errorf("path escapes workspace: %s", path)
+	if err := fsys.ensureWithin(resolved, path); err != nil {
+		return err
 	}
 
 	dir := filepath.Dir(resolved)
@@ -75,14 +108,13 @@ func (fsys *FileSystem) Write(path string, content []byte) error {
 
 // List lists files and directories in a path
 func (fsys *FileSystem) List(path string) ([]FileInfo, error) {
-	resolved, err := filepath.Abs(filepath.Join(fsys.basePath, path))
+	resolved, err := fsys.resolve(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve path: %w", err)
+		return nil, err
 	}
 
-	rel, err := filepath.Rel(fsys.basePath, resolved)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return nil, fmt.Errorf("path escapes workspace: %s", path)
+	if err := fsys.ensureWithin(resolved, path); err != nil {
+		return nil, err
 	}
 
 	entries, err := os.ReadDir(resolved)
@@ -111,14 +143,13 @@ func (fsys *FileSystem) List(path string) ([]FileInfo, error) {
 
 // Glob matches files using a glob pattern
 func (fsys *FileSystem) Glob(pattern string) ([]string, error) {
-	resolved, err := filepath.Abs(filepath.Join(fsys.basePath, pattern))
+	resolved, err := fsys.resolve(pattern)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve pattern: %w", err)
+		return nil, err
 	}
 
-	rel, err := filepath.Rel(fsys.basePath, resolved)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return nil, fmt.Errorf("pattern escapes workspace: %s", pattern)
+	if err := fsys.ensureWithin(resolved, pattern); err != nil {
+		return nil, err
 	}
 
 	matches, err := filepath.Glob(resolved)
@@ -140,7 +171,12 @@ func (fsys *FileSystem) Glob(pattern string) ([]string, error) {
 
 // Exists checks if a file or directory exists
 func (fsys *FileSystem) Exists(path string) (bool, error) {
-	_, err := os.Stat(filepath.Join(fsys.basePath, path))
+	resolved, err := fsys.resolve(path)
+	if err != nil {
+		return false, err
+	}
+
+	_, err = os.Stat(resolved)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
@@ -152,14 +188,13 @@ func (fsys *FileSystem) Exists(path string) (bool, error) {
 
 // Remove removes a file or directory
 func (fsys *FileSystem) Remove(path string) error {
-	resolved, err := filepath.Abs(filepath.Join(fsys.basePath, path))
+	resolved, err := fsys.resolve(path)
 	if err != nil {
-		return fmt.Errorf("failed to resolve path: %w", err)
+		return err
 	}
 
-	rel, err := filepath.Rel(fsys.basePath, resolved)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return fmt.Errorf("path escapes workspace: %s", path)
+	if err := fsys.ensureWithin(resolved, path); err != nil {
+		return err
 	}
 
 	if err := os.RemoveAll(resolved); err != nil {

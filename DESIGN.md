@@ -21,10 +21,10 @@ internal/gogent/       Gogent singleton: sessions, tool registry, persistence
 internal/agent/        UserSession + Agent tree, ReAct task loop, sub-agents
 internal/model/        Connector interfaces + HTTP model connection + session
 internal/tool/         Tool registry, shell tool, structured-output tool
-internal/fileops/      Path resolution, file I/O, file mutation, permissions
+internal/fileops/      Path resolution, file I/O, file mutation
 internal/command/      Shell exec + internal commands (calc/echo/help)
 internal/skill/        SKILL.md loader + registry (see TODO: not wired in)
-internal/permission/   Stand-alone permission config (see TODO: unused)
+internal/permission/   Resource+action permission gate (shell/file/external/...)
 internal/compression/  Context compression
 internal/http/         HTTP client; cmd also has a headless HTTP server mode
 ```
@@ -76,6 +76,11 @@ internal/http/         HTTP client; cmd also has a headless HTTP server mode
 
 ## Known gaps
 
-The permission system and skills are **not** production-ready — see `TODO.md`.
-gogent currently executes shell and file mutations with no interactive gating.
+Skills are loaded but not yet wired into the agent — see `TODO.md`.
+
+The permission gate (`internal/permission`) authorizes every side-effecting tool:
+workspace file ops are allowed; shell and any out-of-workspace access prompt
+interactively (Allow once / Always / Deny), with "Always" persisted to
+`~/.gogent/permissions.json`. The shell external-path check is a best-effort
+guardrail, not a sandbox; OS-level sandboxing is still future work.
 

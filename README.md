@@ -5,16 +5,29 @@ sub-agents, and a Turbo-Vision-style multi-session TUI.
 
 ---
 
-## ⚠️ DANGER — NO PERMISSION SYSTEM YET ⚠️
+## Permissions & safety
 
-> **gogent currently runs tools (shell, file write/edit/delete) with NO
-> sandboxing and NO permission prompts.**
->
-> It will happily `rm -rf` your home directory, overwrite your files, or run
-> any command the model decides to run — if it feels like it. 🙂
->
-> **Do not point it at anything you care about.** Run it in a throwaway VM or
-> container. You have been warned.
+gogent gates every side-effecting tool through a single permission service
+(`internal/permission`):
+
+- **Files inside the workspace** (the launch directory) — read/write/edit are
+  allowed without prompting.
+- **Anything outside the workspace** — file ops and any shell command that
+  touches an external path prompt for approval, grouped **per external root
+  folder** (e.g. one prompt covers all of `/etc`).
+- **Shell** — asked once per session; you can choose *Allow once*, *Always*
+  (persisted), or *Deny*. Shell commands run with their working directory pinned
+  to the workspace root.
+
+Interactive decisions appear as a modal in the TUI. Choosing *Always* persists
+the grant to `~/.gogent/permissions.json`. In headless/non-interactive runs
+(`--disable-tui`, HTTP server) there is no one to ask, so any "ask" decision is
+**denied** by default — keeping automated runs safe.
+
+> The shell guardrail is best-effort, not a sandbox: a shell is Turing-complete
+> and a determined command can still reach outside the workspace (variables,
+> `eval`, subshells). Treat it as a seatbelt against accidental damage, not as
+> containment. OS-level sandboxing remains a future enhancement.
 
 ---
 

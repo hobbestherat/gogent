@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"gogent/internal/fileops"
+	"gogent/internal/permission"
 	"gogent/internal/shell"
 )
 
@@ -23,7 +23,7 @@ type ToolContext struct {
 	AgentID           string
 	MessageID         string
 	ToolCallID        string
-	PermissionService *fileops.PermissionService
+	PermissionService *permission.Service
 	ToolCallback      func(toolName string, args map[string]interface{}) error
 }
 
@@ -39,6 +39,11 @@ type ToolRegistry struct {
 	// ShellTimeout bounds shell-tool executions. Zero falls back to a built-in
 	// default (see RegisterShellTool).
 	ShellTimeout time.Duration
+	// WorkspaceRoot is the directory shell commands run in. Empty falls back to
+	// the process working directory.
+	WorkspaceRoot string
+	// Permission gates side-effecting tools (shell, etc.). May be nil.
+	Permission *permission.Service
 }
 
 func NewToolRegistry() *ToolRegistry {
@@ -73,6 +78,8 @@ func (tr *ToolRegistry) CloneWithout(names ...string) *ToolRegistry {
 	}
 	clone := NewToolRegistry()
 	clone.ShellTimeout = tr.ShellTimeout
+	clone.WorkspaceRoot = tr.WorkspaceRoot
+	clone.Permission = tr.Permission
 	for name, t := range tr.tools {
 		if excluded[name] {
 			continue
@@ -110,6 +117,11 @@ func (tr *ToolRegistry) ExecuteToolCall(toolCall *ToolCall, ctx ToolContext) (*T
 		}, nil
 	}
 
+	// Make the registry's permission service available to tools that gate
+	// through the context (the agent loop builds a context without it).
+	if ctx.PermissionService == nil {
+		ctx.PermissionService = tr.Permission
+	}
 	// Track tool call
 	if ctx.ToolCallback != nil {
 		ctx.ToolCallback(toolCall.Tool, toolCall.Args)
@@ -265,6 +277,20 @@ func (tr *ToolRegistry) RegisterShellTool() {
 				return nil, fmt.Errorf("command argument is required")
 			}
 
+			// Gate shell execution. The session-wide gate is asked once (the user
+			// may choose "always"); then any path that escapes the workspace is
+			// gated per external root folder.
+			if tr.Permission != nil {
+				if err := tr.Permission.CheckWithDetail(permission.ActionShell, "", command); err != nil {
+					return nil, err
+				}
+				for _, root := range shell.ExternalRoots(command, tr.WorkspaceRoot) {
+					if err := tr.Permission.CheckWithDetail(permission.ActionExternal, root, command); err != nil {
+						return nil, err
+					}
+				}
+			}
+
 			// Honor the configured shell timeout, defaulting to 5 minutes.
 			timeout := tr.ShellTimeout
 			if timeout <= 0 {
@@ -275,6 +301,7 @@ func (tr *ToolRegistry) RegisterShellTool() {
 			result, err := shell.Execute(command, shell.ShellConfig{
 				Timeout:   timeout,
 				MaxOutput: 1024 * 1024,
+				Dir:       tr.WorkspaceRoot,
 			})
 
 			if err != nil {

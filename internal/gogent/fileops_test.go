@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"gogent/internal/fileops"
+	"gogent/internal/permission"
 )
 
 // TestFileOperations performs real model tests for file operations
@@ -27,7 +28,7 @@ func TestFileOperations(t *testing.T) {
 	g := NewGogentWithWorkspace(tempDir, workspace)
 
 	// Add default allow rule for all operations in test
-	g.GetPermissionService().AddRule(fileops.PermissionRule{
+	g.GetPermissionService().AddRule(permission.Rule{
 		Action:   "*",
 		Resource: "*",
 		Effect:   "allow",

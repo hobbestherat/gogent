@@ -16,6 +16,7 @@ import (
 	"gogent/internal/config"
 	"gogent/internal/fileops"
 	"gogent/internal/model"
+	"gogent/internal/permission"
 	"gogent/internal/tool"
 )
 
@@ -26,7 +27,7 @@ type Gogent struct {
 	mu               sync.RWMutex
 	fileSystem       *fileops.FileSystem
 	locationMutation *fileops.LocationMutation
-	permission       *fileops.PermissionService
+	permissions      *permission.Service
 	fileMutation     *fileops.FileMutation
 	toolRegistry     *tool.ToolRegistry
 	config           *config.Config
@@ -111,13 +112,12 @@ func NewGogentWithWorkspace(homeDir, workspaceRoot string) *Gogent {
 	// Initialize file operations services
 	g.fileSystem = fileops.NewFileSystem(workspaceRoot)
 	g.locationMutation = fileops.NewLocationMutation(workspaceRoot)
-	g.permission = fileops.NewPermissionService(homeDir)
-	// Allow all actions on workspace by default (using * to match any file in workspace)
-	g.permission.AddRule(fileops.PermissionRule{
-		Action:   "*",
-		Resource: "*",
-		Effect:   "allow",
-	})
+	g.permissions = permission.New(filepath.Join(homeDir, ".gogent"))
+	// Default posture: file reads/writes inside the workspace are allowed
+	// without prompting. Paths outside the workspace, shell, and sub-agents fall
+	// through to "ask" (resolved interactively, or denied when headless).
+	g.permissions.AddRule(permission.Rule{Action: string(permission.ActionRead), Resource: "*", Effect: string(permission.EffectAllow)})
+	g.permissions.AddRule(permission.Rule{Action: string(permission.ActionWrite), Resource: "*", Effect: string(permission.EffectAllow)})
 	g.fileMutation = fileops.NewFileMutation(g.fileSystem, g.locationMutation)
 
 	// Initialize tool registry with file tools
@@ -153,10 +153,8 @@ func (g *Gogent) initializeToolRegistry() {
 				return nil, fmt.Errorf("path argument is required")
 			}
 
-			permissionService := g.GetPermissionService()
-			err := permissionService.Assert("read", path)
-			if err != nil {
-				return nil, fmt.Errorf("permission check failed: %v", err)
+			if err := fileops.CheckFileAccess(g.permissions, g.locationMutation, false, path); err != nil {
+				return nil, err
 			}
 
 			content, err := g.fileSystem.ReadFile(path)
@@ -190,9 +188,8 @@ func (g *Gogent) initializeToolRegistry() {
 				return nil, fmt.Errorf("content argument is required")
 			}
 
-			permissionService := g.GetPermissionService()
-			if err := permissionService.Assert("write", path); err != nil {
-				return nil, fmt.Errorf("permission check failed: %v", err)
+			if err := fileops.CheckFileAccess(g.permissions, g.locationMutation, true, path); err != nil {
+				return nil, err
 			}
 
 			if err := g.fileMutation.WriteFile(path, content); err != nil {
@@ -228,17 +225,11 @@ func (g *Gogent) initializeToolRegistry() {
 				return nil, fmt.Errorf("replace argument is required")
 			}
 
-			permissionService := g.GetPermissionService()
-			resource, err := g.GetLocationMutation().GetResource(path)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get resource path: %v", err)
-			}
-			err = permissionService.Assert("edit", resource)
-			if err != nil {
-				return nil, fmt.Errorf("permission check failed: %v", err)
+			if err := fileops.CheckFileAccess(g.permissions, g.locationMutation, true, path); err != nil {
+				return nil, err
 			}
 
-			err = g.fileMutation.EditFile(path, find, replace)
+			err := g.fileMutation.EditFile(path, find, replace)
 			if err != nil {
 				return nil, fmt.Errorf("failed to edit file: %v", err)
 			}
@@ -254,6 +245,8 @@ func (g *Gogent) initializeToolRegistry() {
 	if g.config != nil {
 		g.toolRegistry.ShellTimeout = time.Duration(g.config.Timeouts.ToolSecondsOrDefault()) * time.Second
 	}
+	g.toolRegistry.WorkspaceRoot = g.workspaceRoot
+	g.toolRegistry.Permission = g.permissions
 	g.toolRegistry.RegisterShellTool()
 
 	g.toolRegistry.Register(&tool.Tool{
@@ -677,8 +670,8 @@ func (g *Gogent) GetLocationMutation() *fileops.LocationMutation {
 }
 
 // GetPermissionService returns the permission service
-func (g *Gogent) GetPermissionService() *fileops.PermissionService {
-	return g.permission
+func (g *Gogent) GetPermissionService() *permission.Service {
+	return g.permissions
 }
 
 // GetFileMutation returns the file mutation service
@@ -1119,7 +1112,7 @@ func (g *Gogent) ExecuteToolCall(toolCall *tool.ToolCall, sessionID, agentID, me
 		AgentID:           agentID,
 		MessageID:         messageID,
 		ToolCallID:        toolCall.CallID,
-		PermissionService: g.permission,
+		PermissionService: g.permissions,
 	}
 
 	result, err := g.toolRegistry.ExecuteToolCall(toolCall, ctx)
@@ -1220,6 +1213,8 @@ func (g *Gogent) SetTimeouts(t config.TimeoutConfig) {
 	g.mu.Lock()
 	g.config.Timeouts = t
 	g.toolRegistry.ShellTimeout = time.Duration(t.ToolSecondsOrDefault()) * time.Second
+	g.toolRegistry.WorkspaceRoot = g.workspaceRoot
+	g.toolRegistry.Permission = g.permissions
 	sessions := make([]*agent.UserSession, 0, len(g.userSessions))
 	for _, s := range g.userSessions {
 		sessions = append(sessions, s)

@@ -8,7 +8,7 @@ import (
 
 	"gogent/internal/agent"
 	"gogent/internal/config"
-	"gogent/internal/fileops"
+	"gogent/internal/permission"
 	"gogent/internal/model"
 	"gogent/internal/tool"
 )
@@ -41,7 +41,7 @@ func TestToolCallingFlow(t *testing.T) {
 	g := NewGogentWithWorkspace(tempDir, workspace)
 
 	// Allow all actions on workspace
-	g.GetPermissionService().AddRule(fileops.PermissionRule{
+	g.GetPermissionService().AddRule(permission.Rule{
 		Action:   "*",
 		Resource: "*",
 		Effect:   "allow",
@@ -222,7 +222,7 @@ func TestToolExecutionIntegration(t *testing.T) {
 
 	// Create Gogent
 	g := NewGogentWithWorkspace(tempDir, workspace)
-	g.GetPermissionService().AddRule(fileops.PermissionRule{
+	g.GetPermissionService().AddRule(permission.Rule{
 		Action:   "*",
 		Resource: "*",
 		Effect:   "allow",

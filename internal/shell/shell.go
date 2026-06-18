@@ -12,6 +12,8 @@ import (
 type ShellConfig struct {
 	Timeout   time.Duration
 	MaxOutput int
+	// Dir is the working directory for the command. Empty uses the process cwd.
+	Dir string
 }
 
 // DefaultTimeout is the default timeout for shell commands
@@ -30,6 +32,9 @@ func Execute(command string, config ShellConfig) (*ExecuteResult, error) {
 	}
 
 	cmd := exec.Command("sh", "-c", command)
+	if config.Dir != "" {
+		cmd.Dir = config.Dir
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
