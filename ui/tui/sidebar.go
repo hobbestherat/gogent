@@ -101,11 +101,11 @@ func (s *sidebar) reposition(screenW, screenH int) {
 }
 
 // addSession registers a top-level session node.
-func (s *sidebar) addSession(id, title string) {
+func (s *sidebar) addSession(id, title string, pinned bool) {
 	if _, ok := s.sessions[id]; ok {
 		return
 	}
-	node := tv.NewTreeNode(sessionLabel(title, agent.StatusIdle))
+	node := tv.NewTreeNode(sessionLabel(title, agent.StatusIdle, pinned))
 	node.Expanded = true
 	node.Data = nodeRef{sessionID: id, name: title}
 	s.sessions[id] = node
@@ -157,8 +157,50 @@ func (s *sidebar) applySubAgent(sessionID string, ev agent.SessionEvent) {
 	node.Label = agentLabel(ev.Name, ev.Status, ev.Kind)
 }
 
-// sessionLabel renders a top-level session row.
-func sessionLabel(title string, status agent.AgentStatus) string {
+// relabelSession updates a session node's title (rename) and pin marker. It is
+// a no-op for unknown sessions.
+func (s *sidebar) relabelSession(id, title string, pinned bool) {
+	node := s.sessions[id]
+	if node == nil {
+		return
+	}
+	if ref, ok := node.Data.(nodeRef); ok {
+		ref.name = title
+		node.Data = ref
+	}
+	node.Label = sessionLabel(title, agent.StatusIdle, pinned)
+}
+
+// reorder reorders the tree's roots to match order. Sessions absent from order
+// keep their relative positions at the tail; unknown ids in order are skipped.
+func (s *sidebar) reorder(order []string) {
+	if len(order) == 0 {
+		return
+	}
+	roots := make([]*tv.TreeNode, 0, len(s.tree.Roots))
+	seen := make(map[string]bool, len(order))
+	for _, id := range order {
+		node := s.sessions[id]
+		if node == nil || seen[id] {
+			continue
+		}
+		roots = append(roots, node)
+		seen[id] = true
+	}
+	for _, node := range s.tree.Roots {
+		if ref, ok := node.Data.(nodeRef); ok && !seen[ref.sessionID] {
+			roots = append(roots, node)
+		}
+	}
+	s.tree.Roots = roots
+}
+
+// sessionLabel renders a top-level session row. A pinned (favorite) session is
+// prefixed with a ★ marker so favorites are visible at a glance.
+func sessionLabel(title string, status agent.AgentStatus, pinned bool) string {
+	if pinned {
+		return fmt.Sprintf("%s %s %s", statusIcon(status), "★", title)
+	}
 	return fmt.Sprintf("%s %s", statusIcon(status), title)
 }
 

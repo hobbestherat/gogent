@@ -61,7 +61,11 @@ internal/http/         HTTP client; cmd also has a headless HTTP server mode
 - **TUI** (`ui/tui`) — `Workbench` desktop hosting draggable `SessionWindow`s,
   each with a foldable transcript (turbotv `TextView`), per-session model select,
   status line, a right-hand sidebar (session/sub-agent tree), and Config / model
-  / settings dialogs.
+  / settings dialogs. The **Session** menu manages many windows: rename, pin
+  (favorite, floats to the top with a ★), move up/down to reorder, and
+  close-others / close-all. The desktop layout (order, titles, pin state, window
+  bounds) is persisted to `~/.gogent/workbench_layout.json` and restored on the
+  next launch.
 
 ## Persistence
 
@@ -71,6 +75,12 @@ internal/http/         HTTP client; cmd also has a headless HTTP server mode
   `<iso>_<id>_session.jsonl`, renamed to `..._session_archived.jsonl` on close.
   Non-archived files are restored on startup (crash recovery); re-loading an
   archived session is a rename back.
+- Workbench layout: `~/.gogent/workbench_layout.json` — the desktop arrangement
+  (sidebar order, per-session titles, pin/favorite state, window bounds and
+  minimized flag). Re-applied on startup after `RestoreSessions`, so renamed,
+  pinned, reordered and moved/resized windows come back where the user left
+  them. The title here is a UI concern decoupled from the session id; the
+  transcript itself lives in the session JSONL above.
 
 ## Entry points
 
