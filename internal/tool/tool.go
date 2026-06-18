@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"gogent/internal/mathexpr"
 	"gogent/internal/permission"
 	"gogent/internal/shell"
 )
@@ -157,12 +158,8 @@ func (tr *ToolRegistry) RegisterCalcTool() {
 				return nil, fmt.Errorf("expression argument is required")
 			}
 
-			// Clean expression
-			expr := expression
-			expr = strings.ReplaceAll(expr, " ", "")
-
-			// Evaluate using recursive descent parser
-			result, err := evalMath(expr)
+			// Evaluate using the shared, hardened evaluator.
+			result, err := mathexpr.Eval(expression)
 			if err != nil {
 				return nil, fmt.Errorf("calculation error: %v", err)
 			}
@@ -173,85 +170,6 @@ func (tr *ToolRegistry) RegisterCalcTool() {
 			}, nil
 		},
 	})
-}
-
-// evalMath evaluates a mathematical expression
-func evalMath(expr string) (float64, error) {
-	return evalExpr(expr)
-}
-
-// evalExpr handles + and -
-func evalExpr(expr string) (float64, error) {
-	// Find the last + or - that's not in parentheses
-	level := 0
-	for i := len(expr) - 1; i >= 0; i-- {
-		c := expr[i]
-		if c == ')' {
-			level++
-		} else if c == '(' {
-			level--
-		} else if level == 0 && (c == '+' || c == '-') {
-			left, err := evalExpr(expr[:i])
-			if err != nil {
-				return 0, err
-			}
-			right, err := evalExpr(expr[i+1:])
-			if err != nil {
-				return 0, err
-			}
-			if c == '+' {
-				return left + right, nil
-			}
-			return left - right, nil
-		}
-	}
-
-	// Handle parentheses
-	if len(expr) > 0 && expr[0] == '(' && expr[len(expr)-1] == ')' {
-		return evalExpr(expr[1 : len(expr)-1])
-	}
-
-	// Handle * and /
-	level = 0
-	for i := len(expr) - 1; i >= 0; i-- {
-		c := expr[i]
-		if c == ')' {
-			level++
-		} else if c == '(' {
-			level--
-		} else if level == 0 && (c == '*' || c == '/') {
-			left, err := evalExpr(expr[:i])
-			if err != nil {
-				return 0, err
-			}
-			right, err := evalExpr(expr[i+1:])
-			if err != nil {
-				return 0, err
-			}
-			if c == '*' {
-				return left * right, nil
-			}
-			return left / right, nil
-		}
-	}
-
-	// Parse number
-	if len(expr) > 0 {
-		// Try to parse as float
-		var result float64
-		_, err := fmt.Sscanf(expr, "%f", &result)
-		if err == nil {
-			return result, nil
-		}
-		// Try as int
-		var intResult int
-		_, err2 := fmt.Sscanf(expr, "%d", &intResult)
-		if err2 == nil {
-			return float64(intResult), nil
-		}
-		return 0, fmt.Errorf("invalid number: %s", expr)
-	}
-	return 0, fmt.Errorf("empty expression")
 }
 
 func validateArgs(args map[string]interface{}, schema interface{}) error {

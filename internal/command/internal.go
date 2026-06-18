@@ -4,8 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
+
+	"gogent/internal/mathexpr"
 )
 
 // ToolCall represents a tool call from the model
@@ -90,7 +91,7 @@ func (r *CommandRegistry) RegisterBuiltInCommands() {
 			expr := args[0]
 
 			// Parse and evaluate simple math
-			result, err := evalMath(expr)
+			result, err := mathexpr.Eval(expr)
 			if err != nil {
 				return &CommandResult{
 					Success:  false,
@@ -112,9 +113,16 @@ func (r *CommandRegistry) RegisterBuiltInCommands() {
 		Name:        "echo",
 		Description: "Echo arguments",
 		Handler: func(ctx context.Context, args []string) (*CommandResult, error) {
+			if len(args) == 0 {
+				return &CommandResult{
+					Success:  false,
+					Stderr:   "missing arguments",
+					ExitCode: 1,
+				}, errors.New("missing arguments")
+			}
 			return &CommandResult{
 				Success:  true,
-				Stdout:   " " + args[0],
+				Stdout:   " " + strings.Join(args, " "),
 				ExitCode: 0,
 			}, nil
 		},
@@ -137,91 +145,4 @@ func (r *CommandRegistry) RegisterBuiltInCommands() {
 			}, nil
 		},
 	})
-}
-
-// evalMath evaluates a simple mathematical expression using Go's eval
-func evalMath(expr string) (float64, error) {
-	// Clean expression
-	expr = replaceAll(expr, " ", "")
-
-	// For simple cases, use Go's eval
-	// Handle basic cases: numbers, +, -, *, /, ()
-
-	// Simple recursive descent parser
-	return evalExpr(expr)
-}
-
-// evalExpr handles + and -
-func evalExpr(expr string) (float64, error) {
-	// Find the last + or - that's not in parentheses
-	level := 0
-	for i := len(expr) - 1; i >= 0; i-- {
-		c := expr[i]
-		if c == ')' {
-			level++
-		} else if c == '(' {
-			level--
-		} else if level == 0 && (c == '+' || c == '-') {
-			left, err := evalExpr(expr[:i])
-			if err != nil {
-				return 0, err
-			}
-			right, err := evalExpr(expr[i+1:])
-			if err != nil {
-				return 0, err
-			}
-			if c == '+' {
-				return left + right, nil
-			}
-			return left - right, nil
-		}
-	}
-
-	// Handle parentheses
-	if expr[0] == '(' && expr[len(expr)-1] == ')' {
-		return evalExpr(expr[1 : len(expr)-1])
-	}
-
-	// Handle * and /
-	level = 0
-	for i := len(expr) - 1; i >= 0; i-- {
-		c := expr[i]
-		if c == ')' {
-			level++
-		} else if c == '(' {
-			level--
-		} else if level == 0 && (c == '*' || c == '/') {
-			left, err := evalExpr(expr[:i])
-			if err != nil {
-				return 0, err
-			}
-			right, err := evalExpr(expr[i+1:])
-			if err != nil {
-				return 0, err
-			}
-			if c == '*' {
-				return left * right, nil
-			}
-			if right == 0 {
-				return 0, errors.New("division by zero")
-			}
-			return left / right, nil
-		}
-	}
-
-	// It's a number
-	return strconv.ParseFloat(expr, 64)
-}
-
-// replaceAll replaces all occurrences of old with new
-func replaceAll(s, old, new string) string {
-	result := s
-	for {
-		pos := strings.Index(result, old)
-		if pos == -1 {
-			break
-		}
-		result = result[:pos] + new + result[pos+len(old):]
-	}
-	return result
 }
