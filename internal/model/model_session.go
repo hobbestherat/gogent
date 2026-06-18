@@ -203,15 +203,21 @@ func (s *ModelSession) ApplyCompressedTranscript(newTranscript []Message) {
 	}
 }
 
-// Resume resumes the session on a new model backend
+// Resume resumes the session on a new model backend. When the backend actually
+// changes, the running token count is recomputed from the recorded per-turn
+// usage so it no longer reflects the previous model's (possibly differently
+// sized) context window.
 func (s *ModelSession) Resume(newModel Connector) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	prev := s.Model
 	s.Model = newModel
 
-	// Reset token count if different model
-	if newModel != s.Model {
+	// Recompute only when the model backend changes. The comparison must be
+	// against the value captured before the assignment above; comparing against
+	// s.Model after the assignment is trivially false (the original bug).
+	if newModel != prev {
 		newCount := 0
 		for _, turn := range s.History {
 			if turn.Usage != nil {
