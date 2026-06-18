@@ -114,4 +114,39 @@ func TestPromptReceivesDetail(t *testing.T) {
 	if p.last.Detail != "rm -rf /tmp/x" {
 		t.Fatalf("detail not propagated: %q", p.last.Detail)
 	}
+	// CheckWithDetail leaves the requester context empty.
+	if p.last.Context != (RequestContext{}) {
+		t.Fatalf("unexpected context on CheckWithDetail: %+v", p.last.Context)
+	}
+}
+
+// TestPromptReceivesContext verifies CheckWithContext propagates the requesting
+// session/agent to the prompter (issue #55), so the UI can badge and route to it.
+func TestPromptReceivesContext(t *testing.T) {
+	s := New("")
+	p := &stubPrompter{decision: DecisionAllow}
+	s.SetPrompter(p)
+	rc := RequestContext{SessionID: "session-2", Agent: "agent-7"}
+	if err := s.CheckWithContext(rc, ActionShell, "", "ls"); err != nil {
+		t.Fatalf("expected allow, got %v", err)
+	}
+	if p.last.Context != rc {
+		t.Fatalf("context not propagated: got %+v, want %+v", p.last.Context, rc)
+	}
+}
+
+// TestContextNotConsultedWhenResolved confirms the requester context is only
+// attached when the request reaches the prompter: a rule-resolved decision never
+// prompts, so no context is needed and the prompter is not called.
+func TestContextNotConsultedWhenResolved(t *testing.T) {
+	s := New("")
+	s.AddRule(Rule{Action: "*", Resource: "*", Effect: "allow"})
+	p := &stubPrompter{decision: DecisionDeny}
+	s.SetPrompter(p)
+	if err := s.CheckWithContext(RequestContext{SessionID: "s1"}, ActionShell, "", "ls"); err != nil {
+		t.Fatalf("expected rule allow, got %v", err)
+	}
+	if p.calls != 0 {
+		t.Fatalf("prompter consulted despite allow rule: %d calls", p.calls)
+	}
 }

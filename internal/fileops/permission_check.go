@@ -34,7 +34,7 @@ func (a Authorization) AllowsExternal() bool { return a.external }
 // — without it an approved external path would still be rejected as "escapes
 // workspace". A nil service yields a workspace-only Authorization (callers that
 // gate elsewhere still get boundary enforcement).
-func CheckFileAccess(perm *permission.Service, loc *LocationMutation, write bool, path string) (Authorization, error) {
+func CheckFileAccess(perm *permission.Service, loc *LocationMutation, write bool, path string, rc permission.RequestContext) (Authorization, error) {
 	if perm == nil || loc == nil {
 		return Authorization{}, nil
 	}
@@ -49,7 +49,7 @@ func CheckFileAccess(perm *permission.Service, loc *LocationMutation, write bool
 		if err != nil {
 			return Authorization{}, err
 		}
-		if err := perm.CheckWithDetail(permission.ActionExternal, filepath.Dir(abs), path); err != nil {
+		if err := perm.CheckWithContext(rc, permission.ActionExternal, filepath.Dir(abs), path); err != nil {
 			return Authorization{}, err
 		}
 		return Authorization{external: true}, nil
@@ -64,7 +64,7 @@ func CheckFileAccess(perm *permission.Service, loc *LocationMutation, write bool
 	if write {
 		action = permission.ActionWrite
 	}
-	if err := perm.Check(action, resource); err != nil {
+	if err := perm.CheckWithContext(rc, action, resource, ""); err != nil {
 		return Authorization{}, err
 	}
 	return Authorization{}, nil

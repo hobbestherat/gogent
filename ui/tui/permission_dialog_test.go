@@ -17,6 +17,71 @@ func newPromptWorkbench() *Workbench {
 	return w
 }
 
+// TestMarkApprovalCounting verifies the per-session in-flight prompt counter:
+// concurrent prompts for one session accumulate, each resolution decrements, and
+// a session is dropped from the set (so its badge clears) once it reaches zero.
+// A bare workbench has no desktop/sidebar, so markApproval performs only its
+// bookkeeping — exactly what is under test. (issue #55)
+func TestMarkApprovalCounting(t *testing.T) {
+	w := newPromptWorkbench()
+
+	w.markApproval("s1", +1)
+	w.markApproval("s1", +1)
+	w.markApproval("s2", +1)
+	if got := w.approvals["s1"]; got != 2 {
+		t.Fatalf("s1 count = %d, want 2", got)
+	}
+	if got := w.approvals["s2"]; got != 1 {
+		t.Fatalf("s2 count = %d, want 1", got)
+	}
+
+	// One of s1's two prompts resolves: it is still pending (count 1).
+	w.markApproval("s1", -1)
+	if got := w.approvals["s1"]; got != 1 {
+		t.Fatalf("s1 count after one resolve = %d, want 1", got)
+	}
+
+	// Resolve the rest: both sessions drop out of the set entirely.
+	w.markApproval("s1", -1)
+	w.markApproval("s2", -1)
+	if len(w.approvals) != 0 {
+		t.Fatalf("expected empty approval set, got %v", w.approvals)
+	}
+}
+
+// TestMarkApprovalEmptySessionClamps confirms an unknown/headless requester ("")
+// never drives the per-session count negative.
+func TestMarkApprovalEmptySessionClamps(t *testing.T) {
+	w := newPromptWorkbench()
+	w.markApproval("", -1) // resolve with nothing pending
+	if n := w.approvals[""]; n != 0 {
+		t.Fatalf("empty-session count = %d, want 0", n)
+	}
+	w.markApproval("", +1)
+	w.markApproval("", -1)
+	if len(w.approvals) != 0 {
+		t.Fatalf("expected empty approval set, got %v", w.approvals)
+	}
+}
+
+// TestRequesterLine covers the dialog header that names the requesting session
+// and, when present, the sub-agent.
+func TestRequesterLine(t *testing.T) {
+	for _, tc := range []struct {
+		session, agent, want string
+	}{
+		{"", "", ""},
+		{"", "agent-1", ""},
+		{"Session 2", "", "Requested by Session 2"},
+		{"Session 2", "root", "Requested by Session 2"}, // primary agent: not repeated
+		{"Session 2", "agent-7", "Requested by Session 2 · agent agent-7"},
+	} {
+		if got := requesterLine(tc.session, tc.agent); got != tc.want {
+			t.Fatalf("requesterLine(%q,%q) = %q, want %q", tc.session, tc.agent, got, tc.want)
+		}
+	}
+}
+
 // TestPromptResolves verifies a normal answer is returned verbatim.
 func TestPromptResolves(t *testing.T) {
 	for _, tc := range []permission.Decision{

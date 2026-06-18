@@ -41,7 +41,7 @@ func (rt *ReadTool) Execute(args map[string]interface{}) (interface{}, error) {
 		return nil, fmt.Errorf("missing path argument")
 	}
 
-	auth, err := CheckFileAccess(rt.permission, rt.location, false, path)
+	auth, err := CheckFileAccess(rt.permission, rt.location, false, path, permission.RequestContext{})
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +87,7 @@ func (wt *WriteTool) Execute(args map[string]interface{}) (interface{}, error) {
 		return nil, fmt.Errorf("missing path argument: content")
 	}
 
-	auth, err := CheckFileAccess(wt.permission, wt.location, true, path)
+	auth, err := CheckFileAccess(wt.permission, wt.location, true, path, permission.RequestContext{})
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +144,7 @@ func (et *EditTool) Execute(args map[string]interface{}) (interface{}, error) {
 		return nil, fmt.Errorf("missing path argument: replace")
 	}
 
-	auth, err := CheckFileAccess(et.permission, et.location, true, path)
+	auth, err := CheckFileAccess(et.permission, et.location, true, path, permission.RequestContext{})
 	if err != nil {
 		return nil, err
 	}

@@ -80,7 +80,12 @@ internal/notify/       Desktop/terminal notifications (bell + OSC 9/777 + native
   states (final, error, sub-agent clarify) and the permission-prompt path
   (approval) and emits a bell / OSC desktop notification / native notifier so a
   user can step away; per-event and per-channel toggles live under Config →
-  Notifications. Each window's status line shows a live usage readout (issue
+  Notifications. A permission prompt carries a `RequestContext` (the requesting
+  session/agent) so the prompter badges that session's sidebar node with a ⏳
+  marker — plus a global ⏳N count in the sidebar header — for the whole life of
+  the prompt, including time spent queued behind another modal (issue #55). The
+  dialog names the requesting session, and the badged node stays clickable so the
+  user can jump straight to the session that is asking. Each window's status line shows a live usage readout (issue
   #63): state, elapsed + output throughput while a turn generates, cumulative
   tokens/turns, and a context-window gauge that turns amber near the compaction
   threshold and red at it; a `budget` block raises a token-budget alert. The

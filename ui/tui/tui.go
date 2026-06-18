@@ -163,7 +163,12 @@ type Workbench struct {
 	quit     context.CancelFunc
 	// promptMu serializes permission prompts so concurrent tool calls present
 	// one modal at a time rather than stacking and clobbering focus.
-	promptMu     sync.Mutex
+	promptMu sync.Mutex
+	// approvals counts in-flight permission prompts per session id so the
+	// requesting session's sidebar node shows a "needs approval" badge and the
+	// sidebar header shows a global indicator while any prompt is waiting (issue
+	// #55). Guarded by w.mu; the badge refresh is marshalled onto the UI thread.
+	approvals    map[string]int
 	windowConfig config.WindowConfig
 	// budget holds the per-session token-budget configuration used by every
 	// session window's status line for budget alerting (issue #63). It is an
