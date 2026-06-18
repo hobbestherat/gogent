@@ -432,9 +432,10 @@ func (s *UserSession) runLoop(agent *Agent, agentID, initialMessage, systemPromp
 		toolMsgs := make([]model.Message, len(calls))
 
 		// Parallel fast-path: when a single turn asks for several sub-agent
-		// spawns, run them concurrently. Sub-agents are independent and the
-		// agent tree they mutate is mutex-guarded, so this is safe and is what
-		// lets "delegate A, B and C at once" actually run in parallel.
+		// spawns, run them concurrently. Sub-agents are independent and every
+		// agent-tree read and write is mutex-guarded (children are copied under
+		// lock via GetSubAgents, the parent link via GetParent), so this is
+		// safe and is what lets "delegate A, B and C at once" run in parallel.
 		if allSpawnSubAgent(calls) {
 			var wg sync.WaitGroup
 			for i, call := range calls {
@@ -793,7 +794,7 @@ func (s *UserSession) newSubAgent(parentAgentID, name, task string, kind SubAgen
 	}
 
 	depth := 0
-	for p := parent; p != nil; p = p.Parent {
+	for p := parent; p != nil; p = p.GetParent() {
 		depth++
 	}
 	if depth > cfg.MaxDepthOrDefault() {
@@ -879,7 +880,7 @@ func (s *UserSession) SpawnSubAgent(parentAgentID, name, task string, oneShot bo
 	if err != nil {
 		return "", err
 	}
-	parent := child.Parent
+	parent := child.GetParent()
 
 	parent.SetState(StateWaitingForSubAgent)
 	child.SetState(StateThinking)
@@ -948,7 +949,7 @@ func (s *UserSession) LaunchInteractiveAgent(parentAgentID, name, task string) (
 	if err != nil {
 		return "", err
 	}
-	parent := child.Parent
+	parent := child.GetParent()
 
 	ia := &InteractiveAgent{
 		ID:    child.ID,
@@ -1032,7 +1033,7 @@ func (s *UserSession) finishInteractive(ia *InteractiveAgent, status AgentStatus
 	ia.agent.SetState(StateIdle)
 	ia.agent.SetStatus(status)
 	ia.agent.SetResult(result)
-	if parent := ia.agent.Parent; parent != nil {
+	if parent := ia.agent.GetParent(); parent != nil {
 		parent.SetState(StateThinking)
 	}
 	s.emitSubAgent(ia.agent, "", nil)

@@ -81,8 +81,26 @@ func NewAgent(id string, modelSession *model.ModelSession) *Agent {
 func (a *Agent) AddSubAgent(subAgent *Agent) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	subAgent.Parent = a
+	subAgent.setParent(a)
 	a.SubAgents = append(a.SubAgents, subAgent)
+}
+
+// setParent links this agent to its parent. It is called only from AddSubAgent
+// (which holds the parent's mutex) and takes the child's own mutex so the write
+// is published under the same lock that GetParent reads through.
+func (a *Agent) setParent(parent *Agent) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.Parent = parent
+}
+
+// GetParent returns the parent agent, or nil for the root. The read is
+// mutex-guarded so it is safe to call while another goroutine is linking a
+// freshly-spawned child via AddSubAgent.
+func (a *Agent) GetParent() *Agent {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.Parent
 }
 
 // RemoveSubAgent removes a sub-agent
@@ -115,10 +133,13 @@ func (a *Agent) GetSubAgent(id string) *Agent {
 // GetRootAgent returns the root agent of the tree
 func (a *Agent) GetRootAgent() *Agent {
 	current := a
-	for current.Parent != nil {
-		current = current.Parent
+	for {
+		parent := current.GetParent()
+		if parent == nil {
+			return current
+		}
+		current = parent
 	}
-	return current
 }
 
 // GetSubAgents returns a copy of sub-agents
@@ -131,21 +152,25 @@ func (a *Agent) GetSubAgents() []*Agent {
 	return subAgents
 }
 
-// ListAllAgents returns all agents in the tree recursively
+// ListAllAgents returns all agents in the tree recursively. Each level reads its
+// children through the lock-guarded GetSubAgents, so it is safe to call while
+// other goroutines add sub-agents to the tree.
 func (a *Agent) ListAllAgents() []*Agent {
 	result := []*Agent{a}
-	for _, sub := range a.SubAgents {
+	for _, sub := range a.GetSubAgents() {
 		result = append(result, sub.ListAllAgents()...)
 	}
 	return result
 }
 
-// GetAgentByID finds an agent by ID in the tree
+// GetAgentByID finds an agent by ID in the tree. The traversal reads children
+// through GetSubAgents, so it is safe to call while other goroutines add
+// sub-agents to the tree.
 func (a *Agent) GetAgentByID(id string) *Agent {
 	if a.ID == id {
 		return a
 	}
-	for _, sub := range a.SubAgents {
+	for _, sub := range a.GetSubAgents() {
 		if found := sub.GetAgentByID(id); found != nil {
 			return found
 		}
