@@ -2,9 +2,10 @@ package shell
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os/exec"
-	"strings"
+	"syscall"
 	"time"
 )
 
@@ -31,46 +32,31 @@ func Execute(command string, config ShellConfig) (*ExecuteResult, error) {
 		config.MaxOutput = DefaultMaxOutput
 	}
 
-	cmd := exec.Command("sh", "-c", command)
+	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	if config.Dir != "" {
 		cmd.Dir = config.Dir
 	}
+	// Run the command in its own process group so that, on timeout, we can kill
+	// the whole group (sh -c and all of its children) rather than orphaning the
+	// grandchildren spawned by the shell.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		// Negative PID targets the process group led by the child.
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	done := make(chan error, 1)
-	go func() {
-		done <- cmd.Run()
-	}()
+	// Run blocks until the process has exited and os/exec has finished copying
+	// output, so the buffers are only read after writes are complete (no race).
+	err := cmd.Run()
 
-	select {
-	case err := <-done:
-		if err != nil {
-			// Command failed or timed out
-			errMsg := err.Error()
-			if strings.Contains(errMsg, "deadline exceeded") || strings.Contains(errMsg, "timeout") {
-				return &ExecuteResult{
-					Stdout:  stdout.String(),
-					Stderr:  stderr.String(),
-					Timeout: true,
-				}, nil
-			}
-			return &ExecuteResult{
-				Stdout:   stdout.String(),
-				Stderr:   stderr.String(),
-				ExitCode: 1,
-				Error:    errMsg,
-			}, nil
-		}
-		return &ExecuteResult{
-			Stdout:   stdout.String(),
-			Stderr:   stderr.String(),
-			ExitCode: 0,
-			Timeout:  false,
-		}, nil
-	case <-time.After(config.Timeout):
-		cmd.Process.Kill()
+	if ctx.Err() == context.DeadlineExceeded {
 		return &ExecuteResult{
 			Stdout:  stdout.String(),
 			Stderr:  stderr.String(),
@@ -78,6 +64,20 @@ func Execute(command string, config ShellConfig) (*ExecuteResult, error) {
 			Error:   fmt.Sprintf("command timed out after %v", config.Timeout),
 		}, nil
 	}
+	if err != nil {
+		return &ExecuteResult{
+			Stdout:   stdout.String(),
+			Stderr:   stderr.String(),
+			ExitCode: 1,
+			Error:    err.Error(),
+		}, nil
+	}
+	return &ExecuteResult{
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		ExitCode: 0,
+		Timeout:  false,
+	}, nil
 }
 
 // ExecuteResult represents the result of a shell command execution
