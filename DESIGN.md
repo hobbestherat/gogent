@@ -27,6 +27,7 @@ internal/skill/        SKILL.md loader + registry (wired via syscontext + skill 
 internal/permission/   Resource+action permission gate (shell/file/external/...)
 internal/compression/  Context compression
 internal/http/         HTTP client; cmd also has a headless HTTP server mode
+internal/notify/       Desktop/terminal notifications (bell + OSC 9/777 + native)
 ```
 
 ## Core components
@@ -65,12 +66,16 @@ internal/http/         HTTP client; cmd also has a headless HTTP server mode
   (favorite, floats to the top with a ★), move up/down to reorder, and
   close-others / close-all. The desktop layout (order, titles, pin state, window
   bounds) is persisted to `~/.gogent/workbench_layout.json` and restored on the
-  next launch.
+  next launch. A `notify.Notifier` watches the `SessionEvent` stream for terminal
+  states (final, error, sub-agent clarify) and the permission-prompt path
+  (approval) and emits a bell / OSC desktop notification / native notifier so a
+  user can step away; per-event and per-channel toggles live under Config →
+  Notifications.
 
 ## Persistence
 
 - Config: `~/.gogent/config.json` (models, optional `fast_model` + `model_roles`
-  for auxiliary tasks, timeouts, sub-agent settings).
+  for auxiliary tasks, timeouts, sub-agent settings, notification settings).
 - Sessions: JSONL in the sessions directory — live as
   `<iso>_<id>_session.jsonl`, renamed to `..._session_archived.jsonl` on close.
   Non-archived files are restored on startup (crash recovery); re-loading an

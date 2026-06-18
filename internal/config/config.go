@@ -182,6 +182,53 @@ type WindowConfig struct {
 	MinHeight int `json:"min_height"`
 }
 
+// NotifyConfig controls desktop/terminal notifications emitted when a long task
+// finishes or a session needs attention (issue #59). Each delivery channel
+// (bell, OSC desktop notification, native OS notifier) and each event type can
+// be toggled independently.
+type NotifyConfig struct {
+	// Enabled is the master switch; when false no notification is emitted
+	// regardless of the per-event toggles below.
+	Enabled bool `json:"enabled"`
+	// Channels. These are independent so a user can, say, take the bell but skip
+	// the desktop popup.
+	Bell    bool `json:"bell"`    // terminal bell (\a)
+	Desktop bool `json:"desktop"` // OSC 9 / OSC 777 desktop notification
+	Native  bool `json:"native"`  // shell out to notify-send / terminal-notifier
+	// Per-event toggles. A notification fires only when its toggle is on.
+	OnComplete bool `json:"on_complete"` // a task finished
+	OnError    bool `json:"on_error"`    // a task errored
+	OnApproval bool `json:"on_approval"` // a permission prompt needs an answer
+	OnClarify  bool `json:"on_clarify"`  // a sub-agent asked a question (CLARIFY)
+	// SuppressWhenFocused skips notifications whose originating session is the
+	// currently focused window, so a session you are already watching does not
+	// also ding. Approval prompts are never suppressed this way (they block the
+	// agent and always need a response).
+	SuppressWhenFocused bool `json:"suppress_when_focused"`
+}
+
+// DefaultNotifyConfig returns sensible defaults: notifications on for every
+// event via the bell and OSC desktop sequences, with the native OS notifier off
+// (it needs an external binary the user may not have installed).
+func DefaultNotifyConfig() NotifyConfig {
+	return NotifyConfig{
+		Enabled:             true,
+		Bell:                true,
+		Desktop:             true,
+		Native:              false,
+		OnComplete:          true,
+		OnError:             true,
+		OnApproval:          true,
+		OnClarify:           true,
+		SuppressWhenFocused: false,
+	}
+}
+
+// notifyPtr returns a pointer to n. It exists because Go does not allow taking
+// the address of a function-call result, so GetDefaultConfig cannot spell
+// &DefaultNotifyConfig() inline.
+func notifyPtr(n NotifyConfig) *NotifyConfig { return &n }
+
 // Auxiliary model roles. These name the lightweight, latency-sensitive, or
 // high-volume tasks that may run on a smaller/cheaper "fast" model instead of
 // the primary reasoning model. Use them with Config.ModelForRole.
@@ -212,6 +259,30 @@ type Config struct {
 	SubAgents    SubAgentConfig    `json:"sub_agents"`
 	Timeouts     TimeoutConfig     `json:"timeouts"`
 	Window       WindowConfig      `json:"window"`
+	// Notify holds the desktop/terminal notification settings. It is a pointer
+	// so a config.json that predates the setting (missing the "notify" key)
+	// resolves to the built-in defaults rather than a zero "everything off"
+	// value — see NotifyConfig.
+	Notify *NotifyConfig `json:"notify,omitempty"`
+}
+
+// NotifyConfig returns the effective notification configuration, substituting
+// DefaultNotifyConfig when none is configured (a nil pointer, e.g. an older
+// config.json without a "notify" block). This keeps the feature on by default
+// for existing users while still letting them opt out by setting enabled:false.
+func (c *Config) NotifyConfig() NotifyConfig {
+	if c == nil || c.Notify == nil {
+		return DefaultNotifyConfig()
+	}
+	return *c.Notify
+}
+
+// SetNotifyConfig records the notification configuration.
+func (c *Config) SetNotifyConfig(n NotifyConfig) {
+	if c == nil {
+		return
+	}
+	c.Notify = &n
 }
 
 // LoadConfig loads configuration from the default location
@@ -289,6 +360,7 @@ func GetDefaultConfig() *Config {
 		DefaultModel: "local-lan",
 		SubAgents:    DefaultSubAgentConfig(),
 		Timeouts:     DefaultTimeoutConfig(),
+		Notify:       notifyPtr(DefaultNotifyConfig()),
 		Window: WindowConfig{
 			Resizable:   true,
 			Minimizable: true,

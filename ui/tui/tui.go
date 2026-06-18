@@ -15,6 +15,8 @@ import (
 	"gogent/internal/agent"
 	"gogent/internal/config"
 	"gogent/internal/gogent"
+	"gogent/internal/notify"
+	"os"
 	"strings"
 	"sync"
 
@@ -54,6 +56,11 @@ type Handlers struct {
 	// timeout configuration. May be nil.
 	GetTimeouts func() config.TimeoutConfig
 	SetTimeouts func(config.TimeoutConfig)
+	// GetNotifyConfig / SetNotifyConfig read and persist the desktop/terminal
+	// notification configuration (issue #59). SetNotifyConfig also pushes the new
+	// config into the workbench's live notifier. May be nil.
+	GetNotifyConfig func() config.NotifyConfig
+	SetNotifyConfig func(config.NotifyConfig)
 	// GetModels returns editable copies of the configured models; UpdateModel
 	// persists changes to one model (matched by Name). May be nil.
 	GetModels   func() []config.ModelConfig
@@ -125,6 +132,11 @@ type Workbench struct {
 	// one modal at a time rather than stacking and clobbering focus.
 	promptMu     sync.Mutex
 	windowConfig config.WindowConfig
+	// notify emits desktop/terminal notifications on terminal session events
+	// (task complete, error, clarification, approval). It owns the terminal
+	// output (os.Stdout); SetNotifyConfig keeps its config in sync with the
+	// persisted setting.
+	notify *notify.Notifier
 }
 
 // NewWorkbench creates the workbench and its desktop chrome.
@@ -145,6 +157,10 @@ func NewWorkbench(models []*config.ModelConfig) *Workbench {
 			MinWidth:    50,
 			MinHeight:   12,
 		},
+		// Desktop/terminal notifications write their escape sequences to the same
+		// terminal the TUI renders to. Defaults are used until the backend pushes
+		// the persisted config in via SetNotifyConfig.
+		notify: notify.New(config.DefaultNotifyConfig(), os.Stdout),
 	}
 	// Cancelled when the UI loop stops; see the shutdown field and Run.
 	w.shutdown, w.quit = context.WithCancel(context.Background())
@@ -202,6 +218,16 @@ func (w *Workbench) modelByDisplayName(name string) *config.ModelConfig {
 // SetHandlers registers the backend callbacks.
 func (w *Workbench) SetHandlers(h Handlers) {
 	w.handlers = h
+}
+
+// SetNotifyConfig updates the live notification configuration (and so what the
+// next emitted notification respects). The persisted copy is the backend's
+// responsibility (the SetNotifyConfig handler); this only updates the in-process
+// notifier.
+func (w *Workbench) SetNotifyConfig(cfg config.NotifyConfig) {
+	if w.notify != nil {
+		w.notify.SetConfig(cfg)
+	}
 }
 
 // rebuildMenu (re)constructs the menu bar, including the dynamic Session list.
@@ -293,7 +319,7 @@ func (w *Workbench) settingsItems() []*tv.MenuItem {
 	if cur.AllowRecursive {
 		recursive = "on"
 	}
-	return []*tv.MenuItem{
+	items := []*tv.MenuItem{
 		tv.NewMenuItem("&Sub-agents…", func() { w.showSettingsDialog() }).
 			WithShortcut("Ctrl+,", tui.KeyRune, ',', true),
 		tv.NewMenuItem("&Models…", func() { w.showModelEditor() }),
@@ -302,6 +328,21 @@ func (w *Workbench) settingsItems() []*tv.MenuItem {
 		tv.NewMenuItem("Mode: "+mode, func() { w.showSettingsDialog() }),
 		tv.NewMenuItem("Recursive: "+recursive, func() { w.showSettingsDialog() }),
 	}
+	// Notification settings (issue #59). Surfaced only when the backend wired the
+	// accessors; a one-line summary mirrors the sub-agent mode/recursive lines.
+	if w.handlers.GetNotifyConfig != nil && w.handlers.SetNotifyConfig != nil {
+		nc := w.handlers.GetNotifyConfig()
+		state := "off"
+		if nc.Enabled {
+			state = "on"
+		}
+		items = append(items,
+			tv.NewMenuItem("----------", nil),
+			tv.NewMenuItem("&Notifications…", func() { w.showNotificationsDialog() }),
+			tv.NewMenuItem("Notifications: "+state, func() { w.showNotificationsDialog() }),
+		)
+	}
+	return items
 }
 func (w *Workbench) confirmQuit() {
 	tv.ShowConfirmYesNo(w.desktop, "Quit Gogent", "Are you sure you want to quit?", func(yes bool) {
@@ -839,7 +880,53 @@ func (w *Workbench) EmitSessionEvent(id string, ev agent.SessionEvent) {
 		if sw != nil {
 			sw.apply(ev)
 		}
+		w.maybeNotify(id, ev)
 	})
+}
+
+// eventNotification maps a session event to a notification reason and body. It
+// returns ok=false for events that are not notification-worthy: non-terminal
+// events, an error with no underlying error, or a sub-agent event that is not a
+// "waiting for clarification" state. Pure so it can be unit tested.
+func eventNotification(ev agent.SessionEvent) (reason notify.Reason, title, body string, ok bool) {
+	switch ev.Type {
+	case agent.SessionEventFinal:
+		return notify.ReasonComplete, "Task complete", firstLine(ev.Text), true
+	case agent.SessionEventError:
+		if ev.Err == nil {
+			return "", "", "", false
+		}
+		return notify.ReasonError, "Task error", firstLine(ev.Err.Error()), true
+	case agent.SessionEventSubAgent:
+		// A sub-agent in the "waiting" status has asked a CLARIFY question.
+		if ev.Status != agent.StatusWaiting {
+			return "", "", "", false
+		}
+		body := firstLine(ev.Result)
+		if body == "" {
+			body = firstLine(ev.Text)
+		}
+		return notify.ReasonClarify, "Clarification needed", body, true
+	}
+	return "", "", "", false
+}
+
+// maybeNotify fires a desktop/terminal notification for terminal session events
+// (task complete, error, sub-agent clarification), gated by the notification
+// config and the focused-session suppression. It runs on the UI thread (called
+// from EmitSessionEvent) so the focus check is accurate.
+func (w *Workbench) maybeNotify(id string, ev agent.SessionEvent) {
+	if w.notify == nil {
+		return
+	}
+	reason, title, body, ok := eventNotification(ev)
+	if !ok {
+		return
+	}
+	focused := w.ActiveID() == id
+	if w.notify.ShouldNotify(reason, focused) {
+		w.notify.Notify(title, body)
+	}
 }
 
 // QuitFunc returns a function that requests the UI to shut down.
@@ -894,4 +981,18 @@ func childLines(text string) []string {
 		return []string{""}
 	}
 	return raw
+}
+
+// notifyBodyMaxRunes caps a notification body so a long final answer or error
+// does not produce an enormous popup; the first line is the useful signal.
+const notifyBodyMaxRunes = 120
+
+// firstLine returns the trimmed first line of s, capped at notifyBodyMaxRunes
+// runes, for use as a one-line notification body.
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		s = s[:i]
+	}
+	return truncateRunes(s, notifyBodyMaxRunes)
 }
