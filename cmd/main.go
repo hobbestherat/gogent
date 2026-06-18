@@ -1,9 +1,12 @@
 package main
 
 import (
+	"crypto/subtle"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -258,21 +261,84 @@ func toChatMessages(msgs []model.Message) []tuipkg.ChatMessage {
 	return out
 }
 
-func startHTTPServer(host string, port int, g *gogent.Gogent) {
+// HTTP server tunables. The read/header timeouts and body cap bound slow-client
+// (slowloris) and oversized-body attacks. WriteTimeout is intentionally left
+// unset: the /message handler runs an expensive, multi-turn model loop whose
+// response can legitimately take minutes, and a fixed write deadline would
+// truncate valid answers. Slowloris is mitigated on the read side, which is
+// where it applies.
+const (
+	httpReadHeaderTimeout = 10 * time.Second
+	httpReadTimeout       = 30 * time.Second
+	httpIdleTimeout       = 120 * time.Second
+	httpMaxRequestBody    = 1 << 20 // 1 MiB
+)
+
+// httpBackend is the minimal slice of *gogent.Gogent the HTTP handlers need.
+// Defining it as an interface keeps the handlers decoupled from the full Gogent
+// and lets them be unit-tested with a fake.
+type httpBackend interface {
+	// SendMessage runs the agent task loop for the default HTTP session and
+	// returns the final assistant response.
+	SendMessage(message, modelName string) (*model.CompletionResponse, error)
+	// Stats returns aggregate counters for the default HTTP session, or nil.
+	Stats() map[string]interface{}
+}
+
+// gogentBackend adapts a *gogent.Gogent to the httpBackend interface.
+type gogentBackend struct{ g *gogent.Gogent }
+
+func (b gogentBackend) SendMessage(message, modelName string) (*model.CompletionResponse, error) {
+	return b.g.SendMessageToSessionWithModel("default", "root", message, modelName)
+}
+
+func (b gogentBackend) Stats() map[string]interface{} {
+	if s := b.g.GetUserSession("default"); s != nil {
+		return s.GetStats()
+	}
+	return nil
+}
+
+// writeJSON encodes v as JSON with the given status. Using the encoder (instead
+// of hand-formatting) guarantees valid JSON even when model output contains
+// quotes, newlines or backslashes.
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("http: encode response: %v", err)
+	}
+}
+
+// isLoopbackAddr reports whether a RemoteAddr ("host:port") is a loopback
+// address, used to gate the /exit kill switch to local callers.
+func isLoopbackAddr(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// newHTTPHandler builds the headless API. shutdown is invoked by an authorized
+// /exit request; exitToken (from $GOGENT_HTTP_TOKEN), when set, additionally
+// authorizes non-local callers that present a matching X-Gogent-Token header.
+func newHTTPHandler(backend httpBackend, exitToken string, shutdown func()) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"status":"healthy"}`)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "healthy"})
 	})
 
 	mux.HandleFunc("/message", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
+		// Bound the request body so a malicious client can't exhaust memory.
+		r.Body = http.MaxBytesReader(w, r.Body, httpMaxRequestBody)
 		if err := r.ParseForm(); err != nil {
 			http.Error(w, "Invalid form", http.StatusBadRequest)
 			return
@@ -290,46 +356,80 @@ func startHTTPServer(host string, port int, g *gogent.Gogent) {
 			modelName = r.FormValue("model")
 		}
 
-		// Send message through Gogent to agent
-		resp, err := g.SendMessageToSessionWithModel("default", "root", message, modelName)
-		if err != nil {
-			fmt.Fprintf(w, `{"success":false,"error":"%s"}`, err.Error())
-			return
+		// Run the (long) model loop off the request goroutine so we can abandon
+		// it the moment the client disconnects, instead of writing to a dead
+		// connection. The loop itself keeps running in the background — true
+		// propagation of cancellation into the model layer is a follow-up.
+		type result struct {
+			resp *model.CompletionResponse
+			err  error
 		}
+		done := make(chan result, 1)
+		go func() {
+			resp, err := backend.SendMessage(message, modelName)
+			done <- result{resp, err}
+		}()
 
-		fmt.Fprintf(w, `{"success":true,"message":"%s"}`, resp.Content)
+		select {
+		case <-r.Context().Done():
+			return
+		case res := <-done:
+			if res.err != nil {
+				writeJSON(w, http.StatusOK, map[string]any{"success": false, "error": res.err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"success": true, "message": res.resp.Content})
+		}
 	})
 
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-
-		// Get tool logs
+		// Copy tool logs (non-nil so it always encodes as a JSON array).
 		toolLogsMu.Lock()
 		logs := make([]string, len(toolLogs))
 		copy(logs, toolLogs)
 		toolLogsMu.Unlock()
 
-		// Get stats
-		session := g.GetUserSession("default")
-		var stats map[string]interface{}
-		if session != nil {
-			stats = session.GetStats()
-		}
-
-		fmt.Fprintf(w, `{"tool_logs":%v,"stats":%v}`, logs, stats)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"tool_logs": logs,
+			"stats":     backend.Stats(),
+		})
 	})
 
 	mux.HandleFunc("/exit", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"success":true,"message":"Shutdown initiated"}`)
-		go func() {
-			syscall.Kill(syscall.Getpid(), syscall.SIGINT)
-		}()
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		// Gate the kill switch: local callers always pass; remote callers must
+		// present the configured token. Without either, refuse.
+		authorized := isLoopbackAddr(r.RemoteAddr)
+		if !authorized && exitToken != "" {
+			tok := r.Header.Get("X-Gogent-Token")
+			authorized = subtle.ConstantTimeCompare([]byte(tok), []byte(exitToken)) == 1
+		}
+		if !authorized {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{"success": true, "message": "Shutdown initiated"})
+		go shutdown()
+	})
+
+	return mux
+}
+
+func startHTTPServer(host string, port int, g *gogent.Gogent) {
+	handler := newHTTPHandler(gogentBackend{g}, os.Getenv("GOGENT_HTTP_TOKEN"), func() {
+		syscall.Kill(syscall.Getpid(), syscall.SIGINT)
 	})
 
 	server := &http.Server{
-		Addr:    fmt.Sprintf("%s:%d", host, port),
-		Handler: mux,
+		Addr:              fmt.Sprintf("%s:%d", host, port),
+		Handler:           handler,
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		ReadTimeout:       httpReadTimeout,
+		IdleTimeout:       httpIdleTimeout,
 	}
 
 	fmt.Printf("HTTP server listening on http://%s:%d\n", host, port)
@@ -337,7 +437,7 @@ func startHTTPServer(host string, port int, g *gogent.Gogent) {
 	fmt.Println("  GET  /health - Health check")
 	fmt.Println("  POST /message - Send message (form-data: message=...)")
 	fmt.Println("  GET  /status - Get tool execution logs and stats")
-	fmt.Println("  GET  /exit - Exit server")
+	fmt.Println("  POST /exit - Exit server (local-only, or X-Gogent-Token)")
 
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Printf("HTTP server error: %v", err)
