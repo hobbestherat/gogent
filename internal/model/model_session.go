@@ -1,7 +1,6 @@
 package model
 
 import (
-	"fmt"
 	"sync"
 )
 
@@ -58,13 +57,6 @@ const (
 type CompressionInfo struct {
 	Before int
 	After  int
-}
-
-// CompressionResult represents the result of compression
-type CompressionResult struct {
-	Content    string
-	TokenCount int
-	Method     string
 }
 
 // NewModelSession creates a new model session
@@ -159,134 +151,56 @@ func (s *ModelSession) GetTokenCount() int {
 	return s.CurrentTokenCount
 }
 
-// NeedsCompression checks if compression is needed
+// NeedsCompression reports whether the running context has grown past the
+// compression threshold (80% of the configured context window).
 func (s *ModelSession) NeedsCompression() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Trigger compression when at 80% of limit
+	if s.MaxContextLength <= 0 {
+		return false
+	}
 	threshold := int(float64(s.MaxContextLength) * 0.8)
 	return s.CurrentTokenCount >= threshold
 }
 
-// Compress compresses the context using smart compression
-func (s *ModelSession) Compress() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if len(s.History) <= 1 {
-		return nil // Keep at least one turn
-	}
-
-	// Build messages from history
-	messages := s.buildMessagesFromHistory()
-
-	// Get compressed result
-	compressed, err := s.performCompression(messages)
-	if err != nil {
-		// Fall back to simple compression if smart compression fails
-		return s.simpleCompress()
-	}
-
-	// Recalculate token count
-	newCount := compressed.TokenCount
-	s.CurrentTokenCount = newCount
-
-	// Notify callbacks
-	for _, cb := range s.Callbacks {
-		cb(CallbackEvent{
-			Type:          EventCompression,
-			Compression:   &CompressionInfo{Before: s.CurrentTokenCount, After: newCount},
-			CurrentTokens: newCount,
-		})
-	}
-
-	return nil
-}
-
-// performCompression performs smart compression
-func (s *ModelSession) performCompression(messages []Message) (*CompressionResult, error) {
-	// For now, fall back to simple compression
-	// In production, would integrate with compression package
-	return s.simpleCompressResult(messages)
-}
-
-// simpleCompressResult does simple compression and returns result
-func (s *ModelSession) simpleCompressResult(messages []Message) (*CompressionResult, error) {
-	// Keep last message
-	if len(messages) <= 1 {
-		return &CompressionResult{
-			Content:    s.buildConversationSummary(messages),
-			TokenCount: s.estimateTokenCount(messages),
-			Method:     "simple_last_only",
-		}, nil
-	}
-
-	lastMsg := messages[len(messages)-1]
-	return &CompressionResult{
-		Content:    fmt.Sprintf("Latest:\n%s", lastMsg.Content),
-		TokenCount: len(lastMsg.Content) / 4,
-		Method:     "simple_latest_only",
-	}, nil
-}
-
-// simpleCompress does simple compression (old behavior)
-func (s *ModelSession) simpleCompress() error {
-	if len(s.History) <= 1 {
-		return nil
-	}
-
-	lastTurn := s.History[len(s.History)-1]
-	s.History = []Turn{s.History[0], lastTurn}
-
-	newCount := 0
-	for _, turn := range s.History {
-		if turn.Usage != nil {
-			newCount += turn.Usage.TotalTokens
-		}
-	}
-	s.CurrentTokenCount = newCount
-
-	return nil
-}
-
-// buildMessagesFromHistory builds messages from history turns
-func (s *ModelSession) buildMessagesFromHistory() []Message {
-	messages := []Message{}
-	for _, turn := range s.History {
-		for _, msg := range turn.Request {
-			messages = append(messages, msg)
-		}
-		if turn.Response != "" {
-			messages = append(messages, Message{
-				Role:    RoleAssistant,
-				Content: turn.Response,
-			})
-		}
-	}
-	return messages
-}
-
-// buildConversationSummary builds a summary of messages
-func (s *ModelSession) buildConversationSummary(messages []Message) string {
-	var summary string
-	for _, msg := range messages {
-		if msg.Role == RoleUser {
-			summary += fmt.Sprintf("[User]: %s\n", msg.Content)
-		} else if msg.Role == RoleAssistant {
-			summary += fmt.Sprintf("[Assistant]: %s\n", msg.Content)
-		}
-	}
-	return summary
-}
-
-// estimateTokenCount estimates token count
-func (s *ModelSession) estimateTokenCount(messages []Message) int {
+// EstimateTokens is a rough char/4 heuristic used to size a transcript between a
+// compression pass and the next real (usage-reporting) send.
+func EstimateTokens(messages []Message) int {
 	total := 0
-	for _, msg := range messages {
-		total += len(msg.Content) / 4
+	for _, m := range messages {
+		total += len(m.Content) / 4
+		for _, tc := range m.ToolCalls {
+			total += len(tc.Function.Arguments) / 4
+		}
 	}
 	return total
+}
+
+// ApplyCompressedTranscript replaces the transcript with its compressed form and
+// updates the token estimate, emitting EventCompression with the real
+// before-count (captured before mutation) and the post-compression estimate. The
+// system prompt is owned separately and is intentionally never part of the
+// transcript, so compression cannot affect it.
+func (s *ModelSession) ApplyCompressedTranscript(newTranscript []Message) {
+	s.mu.Lock()
+	before := s.CurrentTokenCount
+	s.Transcript = append([]Message(nil), newTranscript...)
+	after := EstimateTokens(newTranscript)
+	if s.SystemPrompt != "" {
+		after += len(s.SystemPrompt) / 4
+	}
+	s.CurrentTokenCount = after
+	callbacks := append([]func(event CallbackEvent){}, s.Callbacks...)
+	s.mu.Unlock()
+
+	for _, cb := range callbacks {
+		cb(CallbackEvent{
+			Type:          EventCompression,
+			Compression:   &CompressionInfo{Before: before, After: after},
+			CurrentTokens: after,
+		})
+	}
 }
 
 // Resume resumes the session on a new model backend

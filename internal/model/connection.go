@@ -276,6 +276,11 @@ func (c *ModelConnection) complete(messages []Message, stream bool, tools []Tool
 		}
 		temperature = c.Config.Temperature
 	}
+	// Clamp to the provider's max_tokens ceiling; some backends (e.g. Z.AI) 400
+	// on out-of-range values instead of capping them.
+	if c.spec.maxTokensLimit > 0 && maxTokens > c.spec.maxTokensLimit {
+		maxTokens = c.spec.maxTokensLimit
+	}
 	reqBody := CompletionRequest{
 		Messages:      messages,
 		Stream:        stream,

@@ -142,6 +142,8 @@ func (sw *SessionWindow) apply(ev agent.SessionEvent) {
 	case agent.SessionEventFinal:
 		sw.addAssistant(ev.Text)
 		sw.setBusy(false)
+	case agent.SessionEventCompaction:
+		sw.addCompaction(ev.Step, ev.Text)
 	case agent.SessionEventError:
 		if ev.Err != nil {
 			sw.addError(ev.Err.Error())
@@ -177,6 +179,16 @@ func (sw *SessionWindow) addThought(text string) {
 	}
 	header := sw.history.AddColored("thought", colorNote)
 	for _, line := range childLines(text) {
+		header.AddColored(line, colorNote)
+	}
+	header.SetCollapsed(true)
+}
+
+// addCompaction appends a collapsed note recording a context-compression pass;
+// the structured summary is folded inside.
+func (sw *SessionWindow) addCompaction(estTokens int, digest string) {
+	header := sw.history.AddColored(fmt.Sprintf("context compacted (~%d tokens)", estTokens), colorNote)
+	for _, line := range childLines(digest) {
 		header.AddColored(line, colorNote)
 	}
 	header.SetCollapsed(true)

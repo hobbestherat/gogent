@@ -45,6 +45,10 @@ type providerSpec struct {
 	// chat-completions and model-listing endpoints.
 	chatPath   string
 	modelsPath string
+	// maxTokensLimit is the largest value the provider accepts for the
+	// max_tokens (output) parameter; requests above it are clamped. 0 means no
+	// known limit (don't clamp), which suits local servers.
+	maxTokensLimit int
 }
 
 var providerSpecs = map[APIType]providerSpec{
@@ -59,6 +63,8 @@ var providerSpecs = map[APIType]providerSpec{
 		defaultBaseURL: "https://api.z.ai/api/paas/v4",
 		chatPath:       "/chat/completions",
 		modelsPath:     "/models",
+		// Z.AI rejects max_tokens outside [1, 131072] with a 400.
+		maxTokensLimit: 131072,
 	},
 }
 

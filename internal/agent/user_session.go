@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"gogent/internal/compression"
 	"gogent/internal/config"
 	"gogent/internal/model"
 	"gogent/internal/tool"
@@ -31,6 +32,9 @@ const (
 	SessionEventError SessionEventType = "error"
 	// SessionEventSubAgent reports a sub-agent lifecycle change (spawned/finished).
 	SessionEventSubAgent SessionEventType = "subagent"
+	// SessionEventCompaction reports that the context was compressed; Text holds
+	// the structured summary and Step carries the post-compaction token estimate.
+	SessionEventCompaction SessionEventType = "compaction"
 )
 
 // SessionEvent is a single observable update from a running task loop. UIs use
@@ -346,6 +350,7 @@ func (s *UserSession) runLoop(agent *Agent, agentID, initialMessage, systemPromp
 	emit(SessionEvent{Type: SessionEventThinking, Step: 0})
 
 	// First request carries the user message.
+	s.compactIfNeeded(sess, emit)
 	resp, err := sess.SendWithTools(
 		[]model.Message{{Role: model.RoleUser, Content: initialMessage}},
 		tools,
@@ -393,6 +398,7 @@ func (s *UserSession) runLoop(agent *Agent, agentID, initialMessage, systemPromp
 			wg.Wait()
 			sess.AppendToolResults(toolMsgs)
 			emit(SessionEvent{Type: SessionEventThinking, Step: step + 1})
+			s.compactIfNeeded(sess, emit)
 			resp, err = sess.SendWithTools(nil, tools)
 			if err != nil {
 				emit(SessionEvent{Type: SessionEventError, Err: err})
@@ -428,6 +434,7 @@ func (s *UserSession) runLoop(agent *Agent, agentID, initialMessage, systemPromp
 		// Feed results back and ask the model to continue.
 		sess.AppendToolResults(toolMsgs)
 		emit(SessionEvent{Type: SessionEventThinking, Step: step + 1})
+		s.compactIfNeeded(sess, emit)
 		resp, err = sess.SendWithTools(nil, tools)
 		if err != nil {
 			emit(SessionEvent{Type: SessionEventError, Err: err})
@@ -441,6 +448,39 @@ func (s *UserSession) runLoop(agent *Agent, agentID, initialMessage, systemPromp
 	}
 
 	return responses, nil
+}
+
+// compactIfNeeded compresses the session transcript in place when it has grown
+// past the model's compression threshold. It summarizes the older part of the
+// conversation (preserving the most recent turns verbatim and never splitting a
+// tool-call from its results) and splices the digest back into the transcript.
+// Summarization uses a stateless completion on the session's own backend, so it
+// never pollutes the live transcript. On any failure it leaves the transcript
+// untouched rather than risk losing context.
+func (s *UserSession) compactIfNeeded(sess *model.ModelSession, emit func(SessionEvent)) {
+	if sess == nil || sess.Model == nil || !sess.NeedsCompression() {
+		return
+	}
+
+	transcript := sess.GetTranscript()
+	older, recent := compression.SafeSplit(transcript, compression.DefaultKeepRecentTurns)
+	if len(older) == 0 {
+		return // boundary keeps everything recent; nothing to compress yet
+	}
+
+	agent := compression.NewCompressionAgent(nil, sess.Model)
+	digest, err := agent.Summarize(older)
+	if err != nil || strings.TrimSpace(digest) == "" {
+		return
+	}
+
+	digestMsg := model.Message{
+		Role:    model.RoleUser,
+		Content: "[Earlier conversation summarized to save context]\n\n" + digest,
+	}
+	newTranscript := append([]model.Message{digestMsg}, recent...)
+	sess.ApplyCompressedTranscript(newTranscript)
+	emit(SessionEvent{Type: SessionEventCompaction, Step: sess.GetTokenCount(), Text: digest})
 }
 
 // allSpawnSubAgent reports whether a turn's tool calls are all one-shot

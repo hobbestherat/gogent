@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -72,6 +73,46 @@ func TestNewModelConnectionFromConfigBaseURL(t *testing.T) {
 	}
 	if want := "https://api.z.ai/api/paas/v4/models"; zconn.modelsURL() != want {
 		t.Errorf("zai models URL = %q, want %q", zconn.modelsURL(), want)
+	}
+}
+
+func TestZAIMaxTokensClamp(t *testing.T) {
+	var gotMaxTokens int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req CompletionRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		gotMaxTokens = req.MaxTokens
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(CompletionResponse{Content: "ok", Role: RoleAssistant, FinishReason: "stop"})
+	}))
+	defer server.Close()
+
+	// Z.AI rejects max_tokens above 131072, so an over-large config value must
+	// be clamped before the request is sent.
+	conn := NewModelConnectionFromConfig(&config.ModelConfig{
+		APIType:   "zai",
+		Endpoint:  server.URL,
+		Model:     "glm-4.6",
+		MaxTokens: 262144,
+	})
+	if _, err := conn.Complete([]Message{{Role: RoleUser, Content: "hi"}}); err != nil {
+		t.Fatalf("Complete failed: %v", err)
+	}
+	if gotMaxTokens != 131072 {
+		t.Errorf("zai max_tokens = %d, want clamped to 131072", gotMaxTokens)
+	}
+
+	// OpenAI provider has no known ceiling, so the value passes through.
+	oconn := NewModelConnectionFromConfig(&config.ModelConfig{
+		Endpoint:  server.URL,
+		Model:     "m",
+		MaxTokens: 262144,
+	})
+	if _, err := oconn.Complete([]Message{{Role: RoleUser, Content: "hi"}}); err != nil {
+		t.Fatalf("Complete failed: %v", err)
+	}
+	if gotMaxTokens != 262144 {
+		t.Errorf("openai max_tokens = %d, want unchanged 262144", gotMaxTokens)
 	}
 }
 

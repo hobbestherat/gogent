@@ -1,121 +1,124 @@
 package compression
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
 	"gogent/internal/model"
 )
 
-// CompressionResult represents the result of compression
-type CompressionResult struct {
-	Content    string
-	TokenCount int
-	Method     string
-}
+// DefaultKeepRecentTurns is how many trailing user→assistant turns are kept
+// verbatim when compressing; older context is summarized.
+const DefaultKeepRecentTurns = 3
 
-// Config holds compression configuration
+// Config holds compression tuning. Zero values fall back to defaults.
 type Config struct {
-	// ModelURL is the URL to use for compression (if not set, uses same model as session)
-	ModelURL string
-	// MaxCompressedTokens is the target token count after compression
+	// MaxCompressedTokens is the target size of the generated summary (advisory;
+	// passed to the model as guidance).
 	MaxCompressedTokens int
-	// KeepRecentTurns is how many recent turns to keep uncompressed
+	// KeepRecentTurns is how many recent user→assistant turns stay uncompressed.
 	KeepRecentTurns int
 }
 
-// CompressionAgent handles context compression using model summarization
+// KeepRecentTurnsOrDefault returns the configured recent-turn count or the
+// built-in default when unset.
+func (c *Config) KeepRecentTurnsOrDefault() int {
+	if c == nil || c.KeepRecentTurns <= 0 {
+		return DefaultKeepRecentTurns
+	}
+	return c.KeepRecentTurns
+}
+
+// CompressionAgent summarizes an older slice of a conversation into a structured
+// digest. It talks to the model through a stateless model.Completer, so it never
+// mutates any live session transcript (no feedback loop).
 type CompressionAgent struct {
-	config       *Config
-	modelSession *model.ModelSession
+	config    *Config
+	completer model.Completer
 }
 
-// NewCompressionAgent creates a new compression agent
-func NewCompressionAgent(config *Config, modelSession *model.ModelSession) *CompressionAgent {
-	if config == nil {
-		config = &Config{
-			MaxCompressedTokens: 4000,
-			KeepRecentTurns:     2,
-		}
-	}
-	if config.MaxCompressedTokens == 0 {
-		config.MaxCompressedTokens = 4000
-	}
-	if config.KeepRecentTurns == 0 {
-		config.KeepRecentTurns = 2
-	}
-
-	return &CompressionAgent{
-		config:       config,
-		modelSession: modelSession,
-	}
+// NewCompressionAgent creates an agent that summarizes via the given stateless
+// completer (typically the session's own model backend).
+func NewCompressionAgent(config *Config, completer model.Completer) *CompressionAgent {
+	return &CompressionAgent{config: config, completer: completer}
 }
 
-// SmartCompress performs intelligent context compression
-func (ca *CompressionAgent) SmartCompress(messages []model.Message) (*CompressionResult, error) {
-	if len(messages) <= 2 {
-		// Not enough messages to compress
-		return ca.buildSimpleResult(messages, "no_compression_needed")
-	}
-
-	// Keep recent turns uncompressed
-	recent := ca.getLastTurns(messages, ca.config.KeepRecentTurns)
-	older := messages[:len(messages)-len(recent)]
-
-	// Compress older messages
-	compressedOlder, err := ca.compressMessages(older)
-	if err != nil {
-		return nil, fmt.Errorf("failed to compress older messages: %w", err)
-	}
-
-	// Combine with recent turns
-	result := &CompressionResult{
-		Content: fmt.Sprintf("%s\n\n## Recent Activity\n%s",
-			compressedOlder,
-			ca.buildConversationSummary(recent)),
-		Method: "smart_sequential",
-	}
-
-	// Estimate token count
-	result.TokenCount = ca.estimateTokens(result.Content)
-
-	return result, nil
-}
-
-// compressMessages compresses a list of messages using model summarization
-func (ca *CompressionAgent) compressMessages(messages []model.Message) (string, error) {
-	if len(messages) == 0 {
+// Summarize turns an older slice of conversation messages into the structured
+// markdown digest (Goal / Constraints / Progress / …). It issues a single
+// stateless completion; the caller splices the returned text back into the
+// transcript.
+func (ca *CompressionAgent) Summarize(older []model.Message) (string, error) {
+	if len(older) == 0 {
 		return "", nil
 	}
-
-	prompt := ca.buildCompressionPrompt(messages)
-
-	// Send to model for summarization
-	resp, err := ca.modelSession.Send([]model.Message{
-		{Role: model.RoleUser, Content: prompt},
-	})
+	prompt := ca.buildCompressionPrompt(older)
+	resp, err := ca.completer.Complete([]model.Message{{Role: model.RoleUser, Content: prompt}})
 	if err != nil {
 		return "", err
 	}
-
-	return resp.Content, nil
+	return strings.TrimSpace(resp.Content), nil
 }
 
-// buildCompressionPrompt builds a prompt for context compression
-func (ca *CompressionAgent) buildCompressionPrompt(messages []model.Message) string {
-	return `You are an expert at compressing conversation context while preserving important information.
+// SafeSplit partitions a transcript into an older slice to summarize and a recent
+// slice to keep verbatim. It keeps the last keepRecentTurns user→assistant turns
+// and never splits between an assistant tool-call message and its tool results:
+// the split point is moved earlier to a clean turn boundary so the recent slice
+// is always self-contained for an OpenAI-style API.
+func SafeSplit(messages []model.Message, keepRecentTurns int) (older, recent []model.Message) {
+	if keepRecentTurns <= 0 {
+		keepRecentTurns = DefaultKeepRecentTurns
+	}
+	if len(messages) == 0 {
+		return nil, nil
+	}
 
-## Your Task
-Summarize the conversation history below into a structured format that preserves:
-- Key goals and objectives
-- Important decisions and why they were made
-- Critical technical facts and constraints
-- Next steps and pending actions
-- Relevant file paths and why they matter
+	// Walk back, counting user messages as turn starts, to find where the recent
+	// slice begins.
+	split := len(messages)
+	turns := 0
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == model.RoleUser {
+			turns++
+			split = i
+			if turns >= keepRecentTurns {
+				break
+			}
+		}
+	}
+
+	// Ensure the boundary is safe: messages[split] must be a clean turn start (a
+	// user message) so we never strand an assistant tool_calls message away from
+	// its role:"tool" results.
+	split = clampToUserBoundary(messages, split)
+
+	if split <= 0 {
+		return nil, messages
+	}
+	return messages[:split], messages[split:]
+}
+
+// clampToUserBoundary moves idx back to the nearest user message at or before it,
+// so a split there never separates tool_calls from their tool results.
+func clampToUserBoundary(messages []model.Message, idx int) int {
+	if idx >= len(messages) {
+		idx = len(messages) - 1
+	}
+	for idx > 0 && messages[idx].Role != model.RoleUser {
+		idx--
+	}
+	return idx
+}
+
+// buildCompressionPrompt builds the structured-summary prompt for an older slice.
+func (ca *CompressionAgent) buildCompressionPrompt(messages []model.Message) string {
+	limit := ""
+	if ca.config != nil && ca.config.MaxCompressedTokens > 0 {
+		limit = fmt.Sprintf("\n- Keep the whole summary under roughly %d tokens.", ca.config.MaxCompressedTokens)
+	}
+	return `You are compressing earlier conversation context while preserving everything the assistant needs to continue the task.
 
 ## Format
-Output exactly the following structure. Keep every section, even when empty.
+Output exactly the following structure. Keep every section, even when empty (use "(none)").
 Use terse bullets, not prose paragraphs.
 
 ### Goal
@@ -147,119 +150,31 @@ Use terse bullets, not prose paragraphs.
 - [file or directory path: why it matters, or "(none)"]
 
 ## Instructions
-- Keep every section above, even when empty
-- Use terse bullets, not prose paragraphs  
-- Preserve exact file paths, commands, error strings, and identifiers when known
-- Do not mention the summarization process
-- Focus on what the model needs to know for the next turn
+- Preserve exact file paths, commands, error strings, and identifiers when known.
+- Do not mention the summarization process or these instructions.
+- Focus on what the model needs to know for the next turn.` + limit + `
 
-## Conversation History
-` + ca.buildConversationSummary(messages)
+## Conversation To Summarize
+` + renderConversation(messages)
 }
 
-// buildConversationSummary builds a summary of the conversation
-func (ca *CompressionAgent) buildConversationSummary(messages []model.Message) string {
-	var summary string
+// renderConversation renders messages as a readable transcript for summarization.
+func renderConversation(messages []model.Message) string {
+	var b strings.Builder
 	for _, msg := range messages {
-		if msg.Role == model.RoleUser {
-			summary += fmt.Sprintf("[User]: %s\n", msg.Content)
-		} else if msg.Role == model.RoleAssistant {
-			summary += fmt.Sprintf("[Assistant]: %s\n", msg.Content)
-		}
-	}
-	return summary
-}
-
-// getLastTurns keeps the last N user-assistant pairs
-func (ca *CompressionAgent) getLastTurns(messages []model.Message, pairs int) []model.Message {
-	var result []model.Message
-	count := 0
-	for i := len(messages) - 1; i >= 0; i-- {
-		result = append([]model.Message{messages[i]}, result...)
-		if messages[i].Role == model.RoleUser {
-			count++
-			if count >= pairs {
-				break
+		role := string(msg.Role)
+		content := strings.TrimSpace(msg.Content)
+		switch msg.Role {
+		case model.RoleTool:
+			fmt.Fprintf(&b, "[tool result]: %s\n", content)
+		default:
+			if content != "" {
+				fmt.Fprintf(&b, "[%s]: %s\n", role, content)
 			}
 		}
-	}
-	return result
-}
-
-// estimateTokens estimates token count (rough heuristic: 4 chars per token)
-func (ca *CompressionAgent) estimateTokens(text string) int {
-	return len(text) / 4
-}
-
-// buildSimpleResult builds a simple result without compression
-func (ca *CompressionAgent) buildSimpleResult(messages []model.Message, method string) (*CompressionResult, error) {
-	content := ca.buildConversationSummary(messages)
-	return &CompressionResult{
-		Content:    content,
-		TokenCount: ca.estimateTokens(content),
-		Method:     method,
-	}, nil
-}
-
-// ParseStructuredOutput parses the model's structured output response
-func (ca *CompressionAgent) ParseStructuredOutput(content string) map[string]interface{} {
-	// This is a simplified parser - in production would use proper JSON parsing
-	result := make(map[string]interface{})
-
-	// Try to extract JSON from triple backticks
-	if extracted := extractJSON(content); extracted != "" {
-		json.Unmarshal([]byte(extracted), &result)
-	}
-
-	return result
-}
-
-func extractJSON(text string) string {
-	start := -1
-	end := -1
-
-	for i := 0; i < len(text)-2; i++ {
-		if text[i] == '`' && text[i+1] == '`' && text[i+2] == '`' {
-			if start == -1 {
-				start = i + 3
-			} else {
-				end = i
-				break
-			}
+		for _, tc := range msg.ToolCalls {
+			fmt.Fprintf(&b, "[%s calls %s]: %s\n", role, tc.Function.Name, tc.Function.Arguments)
 		}
 	}
-
-	if start != -1 && end != -1 && end > start {
-		jsonStr := text[start:end]
-		if idx := strings.Index(jsonStr, "{"); idx != -1 {
-			return extractJSONFrom(jsonStr[idx:])
-		}
-	}
-
-	if idx := strings.Index(text, "{"); idx != -1 {
-		return extractJSONFrom(text[idx:])
-	}
-
-	return ""
-}
-
-func extractJSONFrom(text string) string {
-	braceCount := 0
-	start := -1
-
-	for i, ch := range text {
-		if ch == '{' {
-			if braceCount == 0 {
-				start = i
-			}
-			braceCount++
-		} else if ch == '}' {
-			braceCount--
-			if braceCount == 0 && start != -1 {
-				return text[start : i+1]
-			}
-		}
-	}
-
-	return ""
+	return b.String()
 }
