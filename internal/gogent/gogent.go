@@ -534,6 +534,14 @@ func (g *Gogent) CreateUserSession(id string, rootAgent *agent.Agent) *agent.Use
 	userSession.SetSubAgentConfig(g.config.SubAgents)
 	userSession.SetSubAgentTimeout(time.Duration(g.config.Timeouts.SubAgentSecondsOrDefault()) * time.Second)
 	userSession.SetSystemContextProvider(g.buildSystemContext)
+	// Route context compression to the configured fast model when its role
+	// resolves to a model other than the session's primary one; otherwise leave
+	// it unset so compaction keeps using the primary model (no behavior change).
+	if g.config != nil {
+		if m := g.config.ModelForRole(config.RoleCompression); m != nil && m.Name != g.config.DefaultModel {
+			userSession.SetCompressionCompleter(g.buildConnection(m))
+		}
+	}
 	// Hand the root agent a tool registry filtered to the active execution model
 	// so the model is only offered the coordination tools it is instructed to use.
 	rootAgent.SetToolRegistry(g.toolRegistryForMode(g.config.SubAgents))
@@ -563,6 +571,21 @@ func (g *Gogent) buildConnection(cfg *config.ModelConfig) *model.ModelConnection
 		conn.SetTimeout(time.Duration(g.config.Timeouts.ModelSecondsOrDefault()) * time.Second)
 	}
 	return conn
+}
+
+// CompleterForRole resolves the model backend for an auxiliary task role (see
+// the config.Role* constants) and returns a ready completer for it. Roles mapped
+// to the fast model — or defaulted to it when a fast model is configured — get
+// the small/fast backend; otherwise the primary model is used. It always returns
+// a usable completer, so callers (web_fetch summarization, JSON repair, title
+// generation, …) need no fallback of their own.
+func (g *Gogent) CompleterForRole(role string) model.Completer {
+	if g.config != nil {
+		if m := g.config.ModelForRole(role); m != nil {
+			return g.buildConnection(m)
+		}
+	}
+	return g.defaultConnection()
 }
 
 // NewSession creates a fully-wired user session (root agent + model session)
@@ -866,7 +889,7 @@ func (g *Gogent) AggregateStats() map[string]int {
 	}
 	g.mu.RUnlock()
 
-	total := map[string]int{"tokens_in": 0, "tokens_out": 0, "tool_calls": 0}
+	total := map[string]int{"tokens_in": 0, "tokens_out": 0, "tool_calls": 0, "fast_tokens_in": 0, "fast_tokens_out": 0}
 	for _, s := range sessions {
 		stats := s.GetStats()
 		if v, ok := stats["tokens_in"].(int); ok {
@@ -877,6 +900,12 @@ func (g *Gogent) AggregateStats() map[string]int {
 		}
 		if v, ok := stats["tool_calls"].(int); ok {
 			total["tool_calls"] += v
+		}
+		if v, ok := stats["fast_tokens_in"].(int); ok {
+			total["fast_tokens_in"] += v
+		}
+		if v, ok := stats["fast_tokens_out"].(int); ok {
+			total["fast_tokens_out"] += v
 		}
 	}
 	return total

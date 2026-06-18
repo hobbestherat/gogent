@@ -224,6 +224,10 @@ func main() {
 		fmt.Printf("Total Tokens In: %d\n", stats["tokens_in"])
 		fmt.Printf("Total Tokens Out: %d\n", stats["tokens_out"])
 		fmt.Printf("Tool Calls: %d\n", stats["tool_calls"])
+		if stats["fast_tokens_in"] > 0 || stats["fast_tokens_out"] > 0 {
+			fmt.Printf("Fast Model Tokens In: %d\n", stats["fast_tokens_in"])
+			fmt.Printf("Fast Model Tokens Out: %d\n", stats["fast_tokens_out"])
+		}
 	}()
 
 	sig := <-sigChan

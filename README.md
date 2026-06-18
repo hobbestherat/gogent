@@ -75,6 +75,37 @@ In the model editor, the **Scan** button next to the model id queries the
 backend's listing endpoint and replaces the model-id field with a dropdown of
 the advertised models.
 
+### Fast model for auxiliary tasks
+
+A secondary, smaller/cheaper/faster model can handle lightweight auxiliary work
+(context compression today; web-fetch summarization, title generation, and JSON
+repair as they land) so the primary model is reserved for the actual reasoning.
+Point `fast_model` at a `models[]` entry by name; an optional `model_roles` map
+overrides individual roles. When `fast_model` is unset, every task runs on the
+primary model (no behavior change). Fast-model token usage is tracked separately
+in the session stats (`fast_tokens_in` / `fast_tokens_out`).
+
+```json
+{
+  "default_model": "opus",
+  "fast_model": "haiku-fast",
+  "model_roles": {
+    "compression": "fast_model",
+    "title": "fast_model"
+  },
+  "models": [
+    { "name": "opus", "model": "claude-opus-4-8", "max_tokens": 32000 },
+    { "name": "haiku-fast", "model": "claude-haiku-4-5", "max_tokens": 4096 }
+  ]
+}
+```
+
+Each `model_roles` value is either the `"fast_model"` sentinel or a specific
+`models[]` name. A role absent from the map defaults to the fast model when one
+is configured; map a role to the primary model's name to pin it back to the
+primary. Recognized roles: `compression`, `web_fetch_summarize`, `title`,
+`json_repair`.
+
 ## Skills & project instructions
 
 gogent assembles a system-context block for every task:
