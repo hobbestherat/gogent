@@ -688,12 +688,14 @@ func makeToolResultMessage(call tool.ToolCall, result string) model.Message {
 	}
 }
 
-// toolDefsFromRegistry converts the agent's tool registry into native tool defs.
+// toolDefsFromRegistry converts the agent's tool registry into native tool defs,
+// advertising only the currently enabled tools (a disabled tool is hidden from
+// the model so it neither sees nor attempts to call it).
 func toolDefsFromRegistry(reg *tool.ToolRegistry) []model.ToolDef {
 	if reg == nil {
 		return nil
 	}
-	tools := reg.List()
+	tools := reg.ListEnabled()
 	defs := make([]model.ToolDef, 0, len(tools))
 	for _, t := range tools {
 		defs = append(defs, model.ToolDef{

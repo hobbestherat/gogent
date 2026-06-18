@@ -20,6 +20,7 @@ import (
 	"gogent/internal/config"
 	"gogent/internal/gogent"
 	"gogent/internal/model"
+	"gogent/internal/tool"
 	tuipkg "gogent/ui/tui"
 )
 
@@ -167,6 +168,7 @@ func main() {
 						Name:        s.Name,
 						Description: s.Description,
 						Active:      reg.IsSkillActive(s.Name),
+						Content:     s.Content,
 					}
 					if st := reg.GetSkillStats(s.Name); st != nil {
 						info.Success = st.Success
@@ -186,6 +188,33 @@ func main() {
 					reg.ActivateSkill(name)
 				} else {
 					reg.DeactivateSkill(name)
+				}
+			},
+			GetTools: func() []tuipkg.ToolInfo {
+				reg := g.GetToolRegistry()
+				if reg == nil {
+					return nil
+				}
+				tools := reg.List()
+				out := make([]tuipkg.ToolInfo, 0, len(tools))
+				for _, t := range tools {
+					info := tuipkg.ToolInfo{
+						Name:        t.Name,
+						Description: t.Description,
+						InputSchema: tool.SchemaJSON(t.InputSchema),
+						Enabled:     reg.IsEnabled(t.Name),
+						Invocations: reg.Invocations(t.Name),
+					}
+					if last := reg.LastUsed(t.Name); !last.IsZero() {
+						info.LastUsed = last.Format("2006-01-02 15:04")
+					}
+					out = append(out, info)
+				}
+				return out
+			},
+			SetToolEnabled: func(name string, enabled bool) {
+				if reg := g.GetToolRegistry(); reg != nil {
+					reg.SetEnabled(name, enabled)
 				}
 			},
 			Restore: func() []tuipkg.RestoredSession {

@@ -172,8 +172,9 @@ gogent assembles a system-context block for every task:
 - **Skills** — drop a folder containing a `SKILL.md` (YAML frontmatter with `name:` and
   `description:`) under `~/.gogent/skills` or `./skills`. Active skills are advertised
   to the model as a name+description index; the model calls the `skill` tool to load a
-  skill's full instructions on demand (progressive disclosure). Toggle skills and view
-  usage stats in the TUI under **Config → Skills…**.
+  skill's full instructions on demand (progressive disclosure). Browse and toggle
+  skills, view usage stats and read the full `SKILL.md`, and inspect or enable/disable
+  the registered tools, in the TUI under **Config → Resources…**.
 
 ## Status
 

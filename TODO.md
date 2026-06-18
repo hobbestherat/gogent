@@ -34,8 +34,8 @@ wired through the agent via progressive disclosure:
       system prompt through a system-context provider.
 - [x] A `skill` tool lets the model load a skill's full `SKILL.md` on demand; usage
       (success/failure) is recorded per skill.
-- [x] `activate`/`deactivate` and usage stats are surfaced in the TUI (Config →
-      Skills…).
+- [x] `activate`/`deactivate` and usage stats are surfaced in the TUI's Resources
+      browser (Config → Resources…), alongside the registered tools.
 - [x] Invocation model decided: progressive disclosure (index in prompt + `skill`
       tool), the standard for agent skills.
 

@@ -118,6 +118,8 @@ Each task loop injects a system-context block built by `internal/gogent`:
   startup): a live `git status --short --branch` summary (`internal/vcs`) is added
   each loop, so the model always sees the current branch and working-tree state and
   can checkpoint with the `git` tool without first having to ask.
+  and `./skills`; they can be toggled in the TUI (Config → Resources…), which is also
+  where the registered tools (and, once MCP lands, MCP servers) are browsed and toggled.
 
 ## Known gaps
 
