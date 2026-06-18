@@ -154,6 +154,15 @@ func main() {
 				g.SetNotifications(n)
 				wb.SetNotifyConfig(n)
 			},
+			GetBudget: func() config.BudgetConfig {
+				return g.Budget()
+			},
+			SetBudget: func(b config.BudgetConfig) {
+				// Persist via the backend and push the live config into the
+				// workbench so the next status refresh reflects it.
+				g.SetBudget(b)
+				wb.SetBudgetConfig(b)
+			},
 			GetModels: func() []config.ModelConfig {
 				return g.Models()
 			},
@@ -253,6 +262,9 @@ func main() {
 		// Push the persisted notification config into the workbench's live
 		// notifier so the very first notification respects the user's settings.
 		wb.SetNotifyConfig(g.Notifications())
+		// Push the persisted token-budget config so the status gauge's budget
+		// alert (if any) is active from the first turn.
+		wb.SetBudgetConfig(g.Budget())
 
 		// Run the TUI in a goroutine.
 		go func() {

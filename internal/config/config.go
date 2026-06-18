@@ -229,6 +229,33 @@ func DefaultNotifyConfig() NotifyConfig {
 // &DefaultNotifyConfig() inline.
 func notifyPtr(n NotifyConfig) *NotifyConfig { return &n }
 
+// BudgetConfig holds the per-session usage budget that drives the context-window
+// / status-bar budget alert (issue #63, the UI side of #28). A zero value
+// (TokenBudget <= 0) disables budget alerting entirely, which is the default for
+// existing configs that predate the setting — budget alerting is opt-in.
+type BudgetConfig struct {
+	// TokenBudget is the per-session cumulative token budget (prompt + completion
+	// tokens) at/over which the status line raises a budget alert. Zero means no
+	// budget; each session is compared against this figure independently.
+	TokenBudget int `json:"token_budget,omitempty"`
+	// WarnFraction (0..1) is the fraction of TokenBudget at which the gauge turns
+	// amber before the limit is hit. <=0 falls back to the built-in default.
+	WarnFraction float64 `json:"warn_fraction,omitempty"`
+}
+
+// defaultBudgetWarnFraction is the fraction of the token budget at which the
+// status gauge turns amber (the red "exceeded" alert fires at the full budget).
+const defaultBudgetWarnFraction = 0.8
+
+// WarnFractionOrDefault returns the configured warn fraction, or the built-in
+// default when unset (<=0). Values outside (0,1] are clamped to the default.
+func (b BudgetConfig) WarnFractionOrDefault() float64 {
+	if b.WarnFraction <= 0 || b.WarnFraction > 1 {
+		return defaultBudgetWarnFraction
+	}
+	return b.WarnFraction
+}
+
 // Auxiliary model roles. These name the lightweight, latency-sensitive, or
 // high-volume tasks that may run on a smaller/cheaper "fast" model instead of
 // the primary reasoning model. Use them with Config.ModelForRole.
@@ -259,6 +286,10 @@ type Config struct {
 	SubAgents    SubAgentConfig    `json:"sub_agents"`
 	Timeouts     TimeoutConfig     `json:"timeouts"`
 	Window       WindowConfig      `json:"window"`
+	// Budget holds the per-session token-budget settings that drive the
+	// status-bar budget alert (issue #63). A zero value disables alerting, so an
+	// older config.json without a "budget" key simply leaves the feature off.
+	Budget BudgetConfig `json:"budget"`
 	// Notify holds the desktop/terminal notification settings. It is a pointer
 	// so a config.json that predates the setting (missing the "notify" key)
 	// resolves to the built-in defaults rather than a zero "everything off"

@@ -80,12 +80,18 @@ internal/notify/       Desktop/terminal notifications (bell + OSC 9/777 + native
   states (final, error, sub-agent clarify) and the permission-prompt path
   (approval) and emits a bell / OSC desktop notification / native notifier so a
   user can step away; per-event and per-channel toggles live under Config →
-  Notifications.
+  Notifications. Each window's status line shows a live usage readout (issue
+  #63): state, elapsed + output throughput while a turn generates, cumulative
+  tokens/turns, and a context-window gauge that turns amber near the compaction
+  threshold and red at it; a `budget` block raises a token-budget alert. The
+  gauge/elapsed refresh on every `SessionEventUsage` and once per second (a UI
+  ticker that only redraws while some session is busy) via `refreshStatus`.
 
 ## Persistence
 
 - Config: `~/.gogent/config.json` (models, optional `fast_model` + `model_roles`
-  for auxiliary tasks, timeouts, sub-agent settings, notification settings).
+  for auxiliary tasks, timeouts, sub-agent settings, notification settings,
+  token-budget settings).
 - Sessions: JSONL in the sessions directory — live as
   `<iso>_<id>_session.jsonl`, renamed to `..._session_archived.jsonl` on close.
   Non-archived files are restored on startup (crash recovery); re-loading an

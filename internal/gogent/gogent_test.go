@@ -39,6 +39,25 @@ func TestNotificationsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestBudgetRoundTrip covers the issue #63 budget plumbing: Budget() defaults to
+// the zero (alerting-off) value until SetBudget records an explicit one, which is
+// then returned verbatim. (Persistence to disk is best-effort and not asserted
+// here; the accessor round-trip is the contract the UI relies on.)
+func TestBudgetRoundTrip(t *testing.T) {
+	g := NewGogent("/tmp/test")
+
+	if g.Budget().TokenBudget != 0 {
+		t.Error("Budget() should default to zero (alerting off)")
+	}
+
+	custom := config.BudgetConfig{TokenBudget: 50000, WarnFraction: 0.9}
+	g.SetBudget(custom)
+	got := g.Budget()
+	if got.TokenBudget != 50000 || got.WarnFraction != 0.9 {
+		t.Errorf("Budget() = %+v after SetBudget, want %+v", got, custom)
+	}
+}
+
 func TestGogentCreateUserSession(t *testing.T) {
 	g := NewGogent("/tmp/test")
 	m := model.NewModelConnection()
