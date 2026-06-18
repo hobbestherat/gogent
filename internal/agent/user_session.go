@@ -35,7 +35,32 @@ const (
 	// SessionEventCompaction reports that the context was compressed; Text holds
 	// the structured summary and Step carries the post-compaction token estimate.
 	SessionEventCompaction SessionEventType = "compaction"
+	// SessionEventUsage carries a fresh SessionStats snapshot, emitted after each
+	// model round-trip so UIs can render live per-session token/turn/context usage
+	// (e.g. a status bar) without polling the session.
+	SessionEventUsage SessionEventType = "usage"
 )
+
+// SessionStats is a point-in-time, mutex-free snapshot of a session's per-session
+// statistics. It is what UIs render as a compact status line (tokens, turns,
+// context usage) and is carried by SessionEventUsage.
+type SessionStats struct {
+	// Turns is the number of completed user turns (top-level task loops).
+	Turns int
+	// TokensIn / TokensOut are the cumulative prompt/completion token totals for
+	// the session's primary model, including tokens spent by its sub-agents.
+	TokensIn  int
+	TokensOut int
+	// ToolCalls is the total number of tool executions in the session.
+	ToolCalls int
+	// ContextTokens is the root agent's current context size in tokens; the
+	// figure a status bar shows as a percentage of ContextWindow and the
+	// early-warning before context compaction (see issue #4).
+	ContextTokens int
+	// ContextWindow is the root agent's configured context budget in tokens. Zero
+	// means unknown, in which case ContextTokens carries no percentage.
+	ContextWindow int
+}
 
 // SessionEvent is a single observable update from a running task loop. UIs use
 // these to render live, foldable detail (thoughts, tool calls, results).
@@ -54,6 +79,9 @@ type SessionEvent struct {
 	Name    string
 	Status  AgentStatus
 	Kind    SubAgentKind
+
+	// Stats carries a fresh SessionStats snapshot on SessionEventUsage.
+	Stats SessionStats
 }
 
 // SessionObserver receives SessionEvents as a task loop progresses. It is always
@@ -99,6 +127,9 @@ type UserSession struct {
 	tokenCountIn  int
 	tokenCountOut int
 	toolCallCount int
+	// turnCount is the number of completed top-level task loops (one per user
+	// turn). It backs the SessionStats.Turns figure shown in the status bar.
+	turnCount int
 }
 
 // NewUserSession creates a new user session
@@ -115,6 +146,7 @@ func NewUserSession(id string, agent *Agent) *UserSession {
 		tokenCountIn:  0,
 		tokenCountOut: 0,
 		toolCallCount: 0,
+		turnCount:     0,
 	}
 }
 
@@ -373,6 +405,11 @@ func (s *UserSession) ExecuteTaskLoop(agentID string, initialMessage string) ([]
 		return nil, fmt.Errorf("agent %s has no model session", agentID)
 	}
 
+	// One user turn == one top-level task loop.
+	s.mu.Lock()
+	s.turnCount++
+	s.mu.Unlock()
+
 	tools := toolDefsFromRegistry(agent.ToolRegistry)
 	return s.runLoop(agent, agentID, initialMessage, buildAgentSystemPrompt(len(tools) > 0, s.SubAgentConfig()))
 }
@@ -413,6 +450,7 @@ func (s *UserSession) runLoop(agent *Agent, agentID, initialMessage, systemPromp
 		return responses, err
 	}
 	responses = append(responses, resp)
+	s.emitUsage(emit)
 
 	const maxSteps = 25
 	for step := 0; step < maxSteps; step++ {
@@ -459,6 +497,7 @@ func (s *UserSession) runLoop(agent *Agent, agentID, initialMessage, systemPromp
 				return responses, err
 			}
 			responses = append(responses, resp)
+			s.emitUsage(emit)
 			continue
 		}
 
@@ -495,6 +534,7 @@ func (s *UserSession) runLoop(agent *Agent, agentID, initialMessage, systemPromp
 			return responses, err
 		}
 		responses = append(responses, resp)
+		s.emitUsage(emit)
 	}
 
 	if resp != nil {
@@ -1222,6 +1262,38 @@ func (s *UserSession) AddTokenUsage(promptTokens, completionTokens int) {
 	defer s.mu.Unlock()
 	s.tokenCountIn += promptTokens
 	s.tokenCountOut += completionTokens
+}
+
+// Snapshot returns a mutex-free, point-in-time view of the session's per-session
+// statistics (the data a UI renders as a compact status line). The scalar
+// counters are copied under the session lock; the context figures are then read
+// from the root agent's model session under its own lock. The two reads are
+// sequential rather than nested, which keeps this safe to call from the task
+// loop right after a model round-trip (no lock held there) and avoids the
+// UserSession→ModelSession vs ModelSession→UserSession ordering inversion the
+// token-callback path already lives with.
+func (s *UserSession) Snapshot() SessionStats {
+	s.mu.RLock()
+	out := SessionStats{
+		Turns:     s.turnCount,
+		TokensIn:  s.tokenCountIn,
+		TokensOut: s.tokenCountOut,
+		ToolCalls: s.toolCallCount,
+	}
+	root := s.RootAgent
+	s.mu.RUnlock()
+	if root != nil && root.ThoughtTrain != nil {
+		out.ContextTokens = root.ThoughtTrain.GetTokenCount()
+		out.ContextWindow = root.ThoughtTrain.GetMaxContextLength()
+	}
+	return out
+}
+
+// emitUsage emits a SessionEventUsage carrying a fresh stats snapshot. It is
+// called from the task loop after each model round-trip so a UI's status bar
+// updates on every usage report.
+func (s *UserSession) emitUsage(emit func(SessionEvent)) {
+	emit(SessionEvent{Type: SessionEventUsage, Stats: s.Snapshot()})
 }
 
 // ConnectorStats aggregates the low-level model-connector statistics across all

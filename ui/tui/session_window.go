@@ -9,6 +9,7 @@ import (
 	"gogent/internal/config"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // SessionWindow is a single chat session rendered in its own window/layer.
@@ -29,19 +30,24 @@ type SessionWindow struct {
 	// its result can be appended as a child when it returns.
 	pendingTool *tv.TextEntry
 	busy        bool
+	// statusState is the current left-hand status text (idle/working.../thinking
+	// ... (step N)); statusStats holds the latest per-session stats snapshot.
+	// refreshStatus composes the two into the single bottom status line.
+	statusState string
+	statusStats agent.SessionStats
 }
 
 // newSessionWindow builds the window, its widgets and their layout/handlers.
 func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect) *SessionWindow {
 	sw := &SessionWindow{wb: wb, id: id, title: title}
 	window := tv.NewWindow(title, bounds, tui.LineSingle)
-	
+
 	// Enable scalable windows using turbotv options
 	window.Resizable = wb.windowConfig.Resizable
 	window.Minimizable = wb.windowConfig.Minimizable
 	window.MinWidth = wb.windowConfig.MinWidth
 	window.MinHeight = wb.windowConfig.MinHeight
-	
+
 	window.OnClose = func(_ *tv.Window) { wb.CloseSession(id) }
 	history := tv.NewTextView("", tv.Rect{})
 	history.Wrap = true
@@ -60,6 +66,7 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect) *SessionW
 	sw.modelLabel = modelLabel
 	sw.modelSelect = modelSelect
 	sw.status = status
+	sw.statusState = "idle"
 	window.AddContent(history)
 	window.AddContent(input)
 	window.AddContent(sendButton)
@@ -83,6 +90,9 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect) *SessionW
 		status.Component.SetBounds(tv.Rect{X: 0, Y: ht - inputH - 1, W: wd, H: 1})
 		input.Component.SetBounds(tv.Rect{X: 0, Y: ht - inputH, W: wd - 10, H: inputH})
 		sendButton.Component.SetBounds(tv.Rect{X: wd - 9, Y: ht - inputH, W: 8, H: 1})
+		// Reflow the status line to the new width so its stats truncate/expand
+		// with the window on resize.
+		sw.refreshStatus()
 	}
 	submit := func() {
 		text := strings.TrimSpace(input.GetText())
@@ -124,22 +134,34 @@ func (sw *SessionWindow) selectedModelConfig() *config.ModelConfig {
 func (sw *SessionWindow) setBusy(busy bool) {
 	sw.busy = busy
 	if busy {
-		sw.status.SetText("working...")
+		sw.statusState = "working..."
 		sw.status.FG = colorInfo
 		sw.sendButton.SetLabel("...")
 	} else {
-		sw.status.SetText("idle")
+		sw.statusState = "idle"
 		sw.status.FG = colorNote
 		sw.sendButton.SetLabel("Send")
 	}
+	sw.refreshStatus()
+}
+
+// refreshStatus rebuilds the bottom status line from the current state text and
+// per-session stats, sized to the label's current width so it truncates
+// gracefully on narrow windows.
+func (sw *SessionWindow) refreshStatus() {
+	sw.status.SetText(formatStatusLine(sw.statusState, sw.statusStats, sw.status.Component.Bounds.W))
 }
 
 // apply renders a single backend session event into the transcript.
 func (sw *SessionWindow) apply(ev agent.SessionEvent) {
 	switch ev.Type {
 	case agent.SessionEventThinking:
-		sw.status.SetText(fmt.Sprintf("thinking... (step %d)", ev.Step))
+		sw.statusState = fmt.Sprintf("thinking... (step %d)", ev.Step)
 		sw.status.FG = colorInfo
+		sw.refreshStatus()
+	case agent.SessionEventUsage:
+		sw.statusStats = ev.Stats
+		sw.refreshStatus()
 	case agent.SessionEventAssistantStep:
 		sw.addThought(ev.Text)
 	case agent.SessionEventToolCall:
@@ -269,4 +291,94 @@ func formatArgs(args map[string]interface{}) []string {
 		}
 	}
 	return out
+}
+
+// statusSep joins the state and each stat segment in the status line.
+const statusSep = " · "
+
+// formatStatusLine composes the bottom status line for a session window:
+//
+//	‹state› · <in>/<out> tok · <n> turns · ctx <pct>%
+//
+// The state sits on the left with the compact stats following it. Segments with
+// no meaningful value yet (zero tokens/turns, or an unknown context window) are
+// omitted, so a fresh, idle session shows just its state. On narrow windows the
+// right-most stat segments are dropped first — the state (the most important
+// signal) always stays visible — and as a last resort the state itself is
+// truncated to width. Width is measured in display cells; the separator is a
+// single-cell middle dot.
+func formatStatusLine(state string, stats agent.SessionStats, width int) string {
+	state = strings.TrimSpace(state)
+	if width <= 0 {
+		return state
+	}
+	line := state
+	if runeLen(line) > width {
+		return truncateRunes(line, width)
+	}
+	for _, seg := range statusSegments(stats) {
+		add := statusSep + seg
+		if runeLen(line)+runeLen(add) <= width {
+			line += add
+		} else {
+			break
+		}
+	}
+	return line
+}
+
+// statusSegments renders the compact stat segments in display order. Zero-value
+// segments are omitted.
+func statusSegments(stats agent.SessionStats) []string {
+	var segs []string
+	if stats.TokensIn > 0 || stats.TokensOut > 0 {
+		segs = append(segs, formatTokens(stats.TokensIn)+"/"+formatTokens(stats.TokensOut)+" tok")
+	}
+	if stats.Turns > 0 {
+		segs = append(segs, fmt.Sprintf("%d turns", stats.Turns))
+	}
+	if stats.ContextWindow > 0 {
+		segs = append(segs, fmt.Sprintf("ctx %d%%", contextPercent(stats.ContextTokens, stats.ContextWindow)))
+	}
+	return segs
+}
+
+// formatTokens renders a token count compactly with k/M suffixes (e.g. 12300 ->
+// "12.3k"). Values under a thousand are shown verbatim.
+func formatTokens(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+// contextPercent returns context usage as a whole percentage of the window,
+// clamped to [0, 100]. A non-positive window yields 0.
+func contextPercent(tokens, window int) int {
+	if window <= 0 {
+		return 0
+	}
+	if p := tokens * 100 / window; p < 100 {
+		return p
+	}
+	return 100
+}
+
+// runeLen returns the number of display cells (runes) in s.
+func runeLen(s string) int { return utf8.RuneCountInString(s) }
+
+// truncateRunes returns the first max runes of s, for the rare very-narrow
+// window where even the state does not fit.
+func truncateRunes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(s) <= max {
+		return s
+	}
+	return string([]rune(s)[:max])
 }
