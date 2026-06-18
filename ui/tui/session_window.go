@@ -9,6 +9,7 @@ import (
 	"gogent/internal/config"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -36,6 +37,14 @@ type SessionWindow struct {
 	// refreshStatus composes the two into the single bottom status line.
 	statusState string
 	statusStats agent.SessionStats
+	// turnStart / turnStartOut anchor the live elapsed timer and output
+	// throughput shown while a turn is generating. turnStart is the zero time
+	// when the session is idle. budgetAlerted latches the one-time "budget
+	// exceeded" transcript note so it fires once per breach (cumulative token
+	// usage is monotonic, so a breach never self-clears).
+	turnStart      time.Time
+	turnStartOut   int
+	budgetAlerted  bool
 }
 
 // newSessionWindow builds the window, its widgets and their layout/handlers.
@@ -148,26 +157,74 @@ func (sw *SessionWindow) selectedModelConfig() *config.ModelConfig {
 	return sw.wb.modelByDisplayName(sw.modelSelect.Value())
 }
 
-// setBusy updates the status line and busy flag.
+// setBusy updates the status line and busy flag, anchoring the live elapsed
+// timer to the turn's start (and clearing it when the turn ends). The status
+// colour is left to refreshStatus, which folds in the context/budget severity.
 func (sw *SessionWindow) setBusy(busy bool) {
 	sw.busy = busy
 	if busy {
 		sw.statusState = "working..."
-		sw.status.FG = colorInfo
 		sw.sendButton.SetLabel("...")
+		sw.turnStart = time.Now()
+		sw.turnStartOut = sw.statusStats.TokensOut
 	} else {
 		sw.statusState = "idle"
-		sw.status.FG = colorNote
 		sw.sendButton.SetLabel("Send")
+		sw.turnStart = time.Time{}
+		sw.turnStartOut = 0
 	}
 	sw.refreshStatus()
 }
 
-// refreshStatus rebuilds the bottom status line from the current state text and
-// per-session stats, sized to the label's current width so it truncates
-// gracefully on narrow windows.
+// refreshStatus rebuilds the bottom status line from the current state text,
+// per-session stats and the live elapsed/throughput figures, sized to the
+// label's current width so it truncates gracefully on narrow windows. It also
+// sets the status colour (severity over idle/working) and raises the one-time
+// budget-exceeded transcript note on the threshold crossing.
 func (sw *SessionWindow) refreshStatus() {
-	sw.status.SetText(formatStatusLine(sw.statusState, sw.statusStats, sw.status.Component.Bounds.W))
+	budget := sw.wb.budgetConfig()
+	live := sw.liveStats()
+	sw.status.FG = statusColor(!sw.busy, sw.statusStats, budget)
+	sw.status.SetText(formatStatusLine(sw.statusState, sw.statusStats, live, budget, sw.status.Component.Bounds.W))
+	sw.alertBudgetIfNewlyExceeded(budget)
+}
+
+// liveStats computes the transient generation-time figures (elapsed since the
+// turn started and the output-token throughput) shown only while a turn is in
+// flight. It returns a zero value when idle or before the turn has started.
+func (sw *SessionWindow) liveStats() liveStats {
+	if !sw.busy || sw.turnStart.IsZero() {
+		return liveStats{}
+	}
+	elapsed := time.Since(sw.turnStart)
+	out := liveStats{elapsed: elapsed}
+	if produced := sw.statusStats.TokensOut - sw.turnStartOut; elapsed > 0 && produced > 0 {
+		out.tokensPerSec = float64(produced) / elapsed.Seconds()
+	}
+	return out
+}
+
+// alertBudgetIfNewlyExceeded records a one-line transcript note the first time a
+// session's cumulative token usage crosses its configured budget, and clears the
+// latch if usage ever drops back below it (it cannot for cumulative tokens, but
+// the guard keeps the logic honest if the budget is later lowered).
+func (sw *SessionWindow) alertBudgetIfNewlyExceeded(budget config.BudgetConfig) {
+	exceeded := budgetStatus(sw.statusStats, budget) == budgetExceeded
+	switch {
+	case exceeded && !sw.budgetAlerted:
+		sw.budgetAlerted = true
+		used := sw.statusStats.TokensIn + sw.statusStats.TokensOut
+		sw.transcript.add(&transcriptRecord{
+			kind:   kindSystem,
+			header: "[Budget] token budget exceeded",
+			color:  colorError,
+			lines: styledChildLines(
+				fmt.Sprintf("Cumulative usage %d tok reached the configured budget of %d tok.", used, budget.TokenBudget),
+				colorError),
+		})
+	case !exceeded:
+		sw.budgetAlerted = false
+	}
 }
 
 // apply renders a single backend session event into the transcript.
@@ -175,7 +232,6 @@ func (sw *SessionWindow) apply(ev agent.SessionEvent) {
 	switch ev.Type {
 	case agent.SessionEventThinking:
 		sw.statusState = fmt.Sprintf("thinking... (step %d)", ev.Step)
-		sw.status.FG = colorInfo
 		sw.refreshStatus()
 	case agent.SessionEventUsage:
 		sw.statusStats = ev.Stats
@@ -423,18 +479,50 @@ func formatArgs(args map[string]interface{}) []string {
 // statusSep joins the state and each stat segment in the status line.
 const statusSep = " · "
 
+// gaugeCells is the width of the context-usage bar in display cells (e.g.
+// "▰▰▰▱▱▱").
+const gaugeCells = 6
+
+// Context-usage thresholds for the status gauge's colour, expressed as
+// percentages of the configured context window. contextCriticalPct intentionally
+// matches the model session's compaction high-water mark (80%): the gauge turns
+// red exactly when a compaction pass is about to fire, giving a visual warning
+// just before context is compressed (issues #4 / #63).
+const (
+	contextWarnPct     = 60 // amber: approaching the compaction threshold
+	contextCriticalPct = 80 // red: at/over the compaction threshold
+)
+
+// liveStats carries the transient, generation-time figures shown only while a
+// turn is in flight: the elapsed time since the turn started and the output-token
+// throughput. A zero liveStats renders no live segments.
+type liveStats struct {
+	elapsed      time.Duration
+	tokensPerSec float64
+}
+
+// budgetLevel summarises how close a session's cumulative token usage is to its
+// configured budget, for colouring and alerting the status line.
+type budgetLevel int
+
+const (
+	budgetOK budgetLevel = iota
+	budgetApproaching // >= the warn fraction of the budget
+	budgetExceeded    // >= the full budget
+)
+
 // formatStatusLine composes the bottom status line for a session window:
 //
-//	‹state› · <in>/<out> tok · <n> turns · ctx <pct>%
+//	‹state› · [budget!] · ‹elapsed› · ‹N t/s› · <in>/<out> tok · <n> turns · ctx ▰▰▱▱▱▱ <pct>%
 //
 // The state sits on the left with the compact stats following it. Segments with
-// no meaningful value yet (zero tokens/turns, or an unknown context window) are
-// omitted, so a fresh, idle session shows just its state. On narrow windows the
-// right-most stat segments are dropped first — the state (the most important
-// signal) always stays visible — and as a last resort the state itself is
-// truncated to width. Width is measured in display cells; the separator is a
-// single-cell middle dot.
-func formatStatusLine(state string, stats agent.SessionStats, width int) string {
+// no meaningful value yet (no turn in flight, zero tokens/turns, or an unknown
+// context window) are omitted, so a fresh, idle session shows just its state. On
+// narrow windows the right-most stat segments are dropped first — the state (the
+// most important signal) always stays visible — and as a last resort the state
+// itself is truncated to width. Width is measured in display cells; the
+// separator is a single-cell middle dot.
+func formatStatusLine(state string, stats agent.SessionStats, live liveStats, budget config.BudgetConfig, width int) string {
 	state = strings.TrimSpace(state)
 	if width <= 0 {
 		return state
@@ -443,7 +531,7 @@ func formatStatusLine(state string, stats agent.SessionStats, width int) string 
 	if runeLen(line) > width {
 		return truncateRunes(line, width)
 	}
-	for _, seg := range statusSegments(stats) {
+	for _, seg := range statusSegments(stats, live, budget) {
 		add := statusSep + seg
 		if runeLen(line)+runeLen(add) <= width {
 			line += add
@@ -454,10 +542,21 @@ func formatStatusLine(state string, stats agent.SessionStats, width int) string 
 	return line
 }
 
-// statusSegments renders the compact stat segments in display order. Zero-value
-// segments are omitted.
-func statusSegments(stats agent.SessionStats) []string {
+// statusSegments renders the compact stat segments in display order: a budget
+// breach marker and the live elapsed/throughput first (so they survive longest
+// when the line is narrowed), then the cumulative token/turn/context figures.
+// Zero-value segments are omitted.
+func statusSegments(stats agent.SessionStats, live liveStats, budget config.BudgetConfig) []string {
 	var segs []string
+	if budgetStatus(stats, budget) == budgetExceeded {
+		segs = append(segs, "budget!")
+	}
+	if d := formatDuration(live.elapsed); d != "" {
+		segs = append(segs, d)
+		if tps := formatTokensPerSec(live.tokensPerSec); tps != "" {
+			segs = append(segs, tps)
+		}
+	}
 	if stats.TokensIn > 0 || stats.TokensOut > 0 {
 		segs = append(segs, formatTokens(stats.TokensIn)+"/"+formatTokens(stats.TokensOut)+" tok")
 	}
@@ -465,9 +564,108 @@ func statusSegments(stats agent.SessionStats) []string {
 		segs = append(segs, fmt.Sprintf("%d turns", stats.Turns))
 	}
 	if stats.ContextWindow > 0 {
-		segs = append(segs, fmt.Sprintf("ctx %d%%", contextPercent(stats.ContextTokens, stats.ContextWindow)))
+		segs = append(segs, contextSegment(stats))
 	}
 	return segs
+}
+
+// contextSegment renders the context-usage segment as a bar plus percentage,
+// e.g. "ctx ▰▰▱▱▱▱ 38%".
+func contextSegment(stats agent.SessionStats) string {
+	return fmt.Sprintf("ctx %s %d%%",
+		contextGauge(stats.ContextTokens, stats.ContextWindow),
+		contextPercent(stats.ContextTokens, stats.ContextWindow))
+}
+
+// contextGauge renders the context-usage bar (filled "▰" then empty "▱") scaled
+// to gaugeCells. Usage at or over the window fills every cell; any nonzero usage
+// fills at least one cell (so a little usage is visible rather than reading as
+// empty); an unknown window (<=0) or zero usage yields an all-empty bar.
+func contextGauge(tokens, window int) string {
+	filled := 0
+	if window > 0 && tokens > 0 {
+		filled = (tokens*gaugeCells + window/2) / window // rounded to nearest cell
+		if filled > gaugeCells {
+			filled = gaugeCells
+		}
+		if filled < 0 {
+			filled = 0
+		}
+		if filled == 0 { // nonzero usage should show at least one cell
+			filled = 1
+		}
+	}
+	return strings.Repeat("▰", filled) + strings.Repeat("▱", gaugeCells-filled)
+}
+
+// statusColor picks the status line's foreground colour. Severity wins over the
+// idle/working state: a budget breach or context at the compaction threshold
+// turns the whole line red, an approaching budget or context turns it amber, and
+// otherwise it follows the state (dim grey when idle, blue when working). The
+// colour is the at-a-glance warning the issue asks for — it stays even when a
+// narrow line drops the text that explains it.
+func statusColor(idle bool, stats agent.SessionStats, budget config.BudgetConfig) tui.Color {
+	switch budgetStatus(stats, budget) {
+	case budgetExceeded:
+		return colorError
+	case budgetApproaching:
+		return colorTool
+	}
+	pct := contextPercent(stats.ContextTokens, stats.ContextWindow)
+	if pct >= contextCriticalPct {
+		return colorError
+	}
+	if pct >= contextWarnPct {
+		return colorTool
+	}
+	if idle {
+		return colorNote
+	}
+	return colorInfo
+}
+
+// budgetStatus classifies a session's cumulative token usage against the
+// configured budget. A disabled budget (TokenBudget <= 0) always reports OK.
+func budgetStatus(stats agent.SessionStats, budget config.BudgetConfig) budgetLevel {
+	if budget.TokenBudget <= 0 {
+		return budgetOK
+	}
+	used := stats.TokensIn + stats.TokensOut
+	if used >= budget.TokenBudget {
+		return budgetExceeded
+	}
+	if float64(used) >= budget.WarnFractionOrDefault()*float64(budget.TokenBudget) {
+		return budgetApproaching
+	}
+	return budgetOK
+}
+
+// formatDuration renders an elapsed duration compactly for the status line:
+// under a minute as "Ns", a minute or more as "MmSSs" (e.g. "1m03s"). A
+// non-positive duration yields "" so callers can omit it.
+func formatDuration(d time.Duration) string {
+	if d <= 0 {
+		return ""
+	}
+	secs := int(d.Seconds())
+	if secs < 60 {
+		return fmt.Sprintf("%ds", secs)
+	}
+	return fmt.Sprintf("%dm%02ds", secs/60, secs%60)
+}
+
+// formatTokensPerSec renders an output-throughput figure as "N t/s" (rounded to
+// a whole token). Throughput under one token per second renders "<1 t/s"; a
+// non-positive figure yields "" so callers can omit it.
+func formatTokensPerSec(tps float64) string {
+	if tps <= 0 {
+		return ""
+	}
+	n := int(tps + 0.5)
+	if n < 1 {
+		return "<1 t/s"
+	}
+	return fmt.Sprintf("%d t/s", n)
 }
 
 // formatTokens renders a token count compactly with k/M suffixes (e.g. 12300 ->

@@ -20,6 +20,8 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	tui "github.com/hobbestherat/turbotui"
 	tv "github.com/hobbestherat/turbotui/turbotv"
@@ -62,6 +64,12 @@ type Handlers struct {
 	// config into the workbench's live notifier. May be nil.
 	GetNotifyConfig func() config.NotifyConfig
 	SetNotifyConfig func(config.NotifyConfig)
+	// GetBudget / SetBudget read and persist the per-session token-budget
+	// configuration that drives the status-bar budget alert (issue #63).
+	// SetBudget also pushes the new config into the workbench so the next status
+	// refresh reflects it. May be nil.
+	GetBudget func() config.BudgetConfig
+	SetBudget func(config.BudgetConfig)
 	// GetModels returns editable copies of the configured models; UpdateModel
 	// persists changes to one model (matched by Name). May be nil.
 	GetModels   func() []config.ModelConfig
@@ -157,6 +165,13 @@ type Workbench struct {
 	// one modal at a time rather than stacking and clobbering focus.
 	promptMu     sync.Mutex
 	windowConfig config.WindowConfig
+	// budget holds the per-session token-budget configuration used by every
+	// session window's status line for budget alerting (issue #63). It is an
+	// atomic.Value (storing config.BudgetConfig) so the read path refreshStatus
+	// takes on the UI thread — including from within a window's LayoutFn, which
+	// can run while the workbench lock is held (applyLayout) — never contends on
+	// w.mu and so cannot self-deadlock.
+	budget atomic.Value
 	// notify emits desktop/terminal notifications on terminal session events
 	// (task complete, error, clarification, approval). It owns the terminal
 	// output (os.Stdout); SetNotifyConfig keeps its config in sync with the
@@ -253,6 +268,24 @@ func (w *Workbench) SetNotifyConfig(cfg config.NotifyConfig) {
 	if w.notify != nil {
 		w.notify.SetConfig(cfg)
 	}
+}
+
+// SetBudgetConfig updates the live token-budget configuration used by the
+// session status lines for budget alerting (issue #63). The persisted copy is the
+// backend's responsibility (the SetBudget handler); this only updates the
+// in-process value read by refreshStatus.
+func (w *Workbench) SetBudgetConfig(b config.BudgetConfig) {
+	w.budget.Store(b)
+}
+
+// budgetConfig returns the current token-budget configuration, or the zero value
+// (alerting off) before the first SetBudgetConfig. Lock-free so it is safe to
+// call from within a window's LayoutFn while the workbench lock is held.
+func (w *Workbench) budgetConfig() config.BudgetConfig {
+	if v := w.budget.Load(); v != nil {
+		return v.(config.BudgetConfig)
+	}
+	return config.BudgetConfig{}
 }
 
 // rebuildMenu (re)constructs the menu bar, including the dynamic Session list.
@@ -1046,9 +1079,57 @@ func (w *Workbench) Run() error {
 			w.confirmQuit()
 		}
 	})
+	// Live-status ticker: while any session is generating, refresh its status
+	// line once a second so the elapsed timer and throughput tick. Idle
+	// workbenches do no work (and no redraw) per tick. Stops with the UI loop.
+	go w.runStatusTicker(w.shutdown)
 	err := w.desktop.Run(w.shutdown)
 	w.app.Close()
 	return err
+}
+
+// statusTickInterval is how often the live-status ticker refreshes busy
+// sessions' status lines (the elapsed timer / throughput). One second matches
+// the precision the status line shows.
+const statusTickInterval = time.Second
+
+// runStatusTicker refreshes the status lines of sessions that are currently
+// generating once per tick, so the elapsed timer and tokens/sec advance live
+// (issue #63). It stops when ctx is cancelled (the UI loop shutting down). The
+// per-session busy check and redraw run on the UI thread via Post, so an idle
+// workbench performs no redraws.
+func (w *Workbench) runStatusTicker(ctx context.Context) {
+	ticker := time.NewTicker(statusTickInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			w.desktop.Post(w.tickBusyStatuses)
+		}
+	}
+}
+
+// tickBusyStatuses refreshes every generating session's status line (so the
+// elapsed timer and throughput advance) and redraws only when at least one
+// session is busy — an idle workbench is left untouched. Runs on the UI thread.
+func (w *Workbench) tickBusyStatuses() {
+	w.mu.Lock()
+	busy := make([]*SessionWindow, 0, len(w.sessions))
+	for _, sw := range w.sessions {
+		if sw.busy {
+			busy = append(busy, sw)
+		}
+	}
+	w.mu.Unlock()
+	if len(busy) == 0 {
+		return
+	}
+	for _, sw := range busy {
+		sw.refreshStatus()
+	}
+	w.desktop.Redraw()
 }
 
 // childLines splits text into lines for foldable children, preserving structure.

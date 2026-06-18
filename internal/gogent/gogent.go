@@ -1463,6 +1463,26 @@ func (g *Gogent) SetNotifications(n config.NotifyConfig) {
 	}
 }
 
+// Budget returns the per-session token-budget configuration that drives the
+// status-bar budget alert (issue #63, the UI side of #28). A zero TokenBudget
+// means alerting is off.
+func (g *Gogent) Budget() config.BudgetConfig {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.config.Budget
+}
+
+// SetBudget updates the token-budget configuration and persists it to disk so it
+// survives restarts. The UI picks the new value up on its next status refresh.
+func (g *Gogent) SetBudget(b config.BudgetConfig) {
+	g.mu.Lock()
+	g.config.Budget = b
+	g.mu.Unlock()
+	if err := g.SaveConfig(); err != nil {
+		fmt.Printf("Warning: Failed to persist config: %v\n", err)
+	}
+}
+
 // Models returns deep copies of the configured models so callers (e.g. the UI
 // model editor) can edit them without mutating the live config.
 func (g *Gogent) Models() []config.ModelConfig {

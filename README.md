@@ -221,6 +221,27 @@ tokens. Context compaction is calibrated against `context_window` (it fires at
 to your model's real window so long sessions compact at the right point. When
 omitted it falls back to a conservative built-in default.
 
+The bottom status line of each session window carries a live usage readout
+(issue #63): the current state, an elapsed timer and output throughput while a
+turn is generating, cumulative tokens and turns, and a context-window gauge
+(`ctx ▰▰▰▱▱▱ 38%`). The gauge turns amber as context approaches the compaction
+threshold and red at it (the same ~80% point), so you get a visual warning just
+before a compaction pass. A per-session token budget can optionally raise a
+budget alert; configure it under the `budget` key:
+
+```json
+"budget": {
+  "token_budget": 200000,
+  "warn_fraction": 0.8
+}
+```
+
+`token_budget` is the per-session cumulative (prompt + completion) token count at
+which the status line turns amber (at the `warn_fraction`) and red (at the full
+budget) and records a one-line transcript note; a zero/omitted budget disables
+alerting (the default). Cost budgets are not yet supported — that needs
+per-model pricing (tracked as a follow-up).
+
 ## Skills & project instructions
 
 gogent assembles a system-context block for every task:

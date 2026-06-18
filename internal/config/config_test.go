@@ -265,3 +265,60 @@ func TestNotifyConfigRoundTrip(t *testing.T) {
 		t.Error("legacy config should resolve to default (enabled) notifications")
 	}
 }
+
+// TestBudgetWarnFractionOrDefault covers the accessor's fallback and clamping:
+// unset (<=0) and out-of-range (>1) values resolve to the built-in default,
+// while an in-range value is returned verbatim.
+func TestBudgetWarnFractionOrDefault(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		f    float64
+		want float64
+	}{
+		{"unset zero", 0, defaultBudgetWarnFraction},
+		{"negative", -0.2, defaultBudgetWarnFraction},
+		{"over one", 1.5, defaultBudgetWarnFraction},
+		{"explicit in range", 0.66, 0.66},
+		{"boundary one", 1, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := BudgetConfig{TokenBudget: 1000, WarnFraction: tc.f}
+			if got := b.WarnFractionOrDefault(); got != tc.want {
+				t.Errorf("WarnFractionOrDefault() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBudgetConfigZeroIsOff confirms a BudgetConfig with no token budget is the
+// "alerting off" default, and that a budget block round-trips through JSON.
+func TestBudgetConfigZeroIsOff(t *testing.T) {
+	var zero BudgetConfig
+	if zero.TokenBudget != 0 {
+		t.Errorf("zero BudgetConfig should have no token budget, got %d", zero.TokenBudget)
+	}
+
+	// A populated budget survives a marshal/unmarshal cycle.
+	in := &Config{Budget: BudgetConfig{TokenBudget: 50000, WarnFraction: 0.9}}
+	data, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var out Config
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Budget.TokenBudget != 50000 || out.Budget.WarnFraction != 0.9 {
+		t.Errorf("round-trip lost budget fields, got %+v", out.Budget)
+	}
+
+	// A legacy config blob with no "budget" key loads as the zero (off) value.
+	const legacy = `{"default_model": "x"}`
+	var legacyCfg Config
+	if err := json.Unmarshal([]byte(legacy), &legacyCfg); err != nil {
+		t.Fatalf("legacy unmarshal: %v", err)
+	}
+	if legacyCfg.Budget.TokenBudget != 0 {
+		t.Errorf("legacy config should leave budget off, got %+v", legacyCfg.Budget)
+	}
+}
