@@ -172,13 +172,6 @@ func (tr *ToolRegistry) RegisterCalcTool() {
 	})
 }
 
-func validateArgs(args map[string]interface{}, schema interface{}) error {
-	if args == nil {
-		return fmt.Errorf("args cannot be nil")
-	}
-	return nil
-}
-
 // RegisterShellTool registers the shell tool for executing shell commands
 func (tr *ToolRegistry) RegisterShellTool() {
 	tr.Register(&Tool{
