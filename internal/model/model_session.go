@@ -163,6 +163,16 @@ func (s *ModelSession) GetTokenCount() int {
 	return s.CurrentTokenCount
 }
 
+// GetMaxContextLength returns the configured context window (input token budget)
+// the conversation is calibrated against. It is the read side of
+// SetMaxContextLength, exposed so UIs can report context usage without reaching
+// into the session's fields.
+func (s *ModelSession) GetMaxContextLength() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.MaxContextLength
+}
+
 // Compression water marks, expressed as fractions of the context window.
 //
 // compaction fires once the running context reaches the high-water mark. After a
