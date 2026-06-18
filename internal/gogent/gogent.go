@@ -166,11 +166,12 @@ func (g *Gogent) initializeToolRegistry() {
 				return nil, fmt.Errorf("path argument is required")
 			}
 
-			if err := fileops.CheckFileAccess(g.permissions, g.locationMutation, false, path); err != nil {
+			auth, err := fileops.CheckFileAccess(g.permissions, g.locationMutation, false, path)
+			if err != nil {
 				return nil, err
 			}
 
-			content, err := g.fileSystem.ReadFile(path)
+			content, err := g.fileSystem.ReadFile(path, auth)
 			if err != nil {
 				return nil, fmt.Errorf("failed to read file: %v", err)
 			}
@@ -201,11 +202,12 @@ func (g *Gogent) initializeToolRegistry() {
 				return nil, fmt.Errorf("content argument is required")
 			}
 
-			if err := fileops.CheckFileAccess(g.permissions, g.locationMutation, true, path); err != nil {
+			auth, err := fileops.CheckFileAccess(g.permissions, g.locationMutation, true, path)
+			if err != nil {
 				return nil, err
 			}
 
-			if err := g.fileMutation.WriteFile(path, content); err != nil {
+			if err := g.fileMutation.WriteFile(path, content, auth); err != nil {
 				return nil, fmt.Errorf("failed to write file: %v", err)
 			}
 
@@ -238,11 +240,12 @@ func (g *Gogent) initializeToolRegistry() {
 				return nil, fmt.Errorf("replace argument is required")
 			}
 
-			if err := fileops.CheckFileAccess(g.permissions, g.locationMutation, true, path); err != nil {
+			auth, err := fileops.CheckFileAccess(g.permissions, g.locationMutation, true, path)
+			if err != nil {
 				return nil, err
 			}
 
-			err := g.fileMutation.EditFile(path, find, replace)
+			err = g.fileMutation.EditFile(path, find, replace, auth)
 			if err != nil {
 				return nil, fmt.Errorf("failed to edit file: %v", err)
 			}

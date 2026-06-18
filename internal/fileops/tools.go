@@ -41,11 +41,12 @@ func (rt *ReadTool) Execute(args map[string]interface{}) (interface{}, error) {
 		return nil, fmt.Errorf("missing path argument")
 	}
 
-	if err := CheckFileAccess(rt.permission, rt.location, false, path); err != nil {
+	auth, err := CheckFileAccess(rt.permission, rt.location, false, path)
+	if err != nil {
 		return nil, err
 	}
 
-	content, err := rt.fileSys.Read(path)
+	content, err := rt.fileSys.Read(path, auth)
 	if err != nil {
 		return nil, err
 	}
@@ -86,11 +87,12 @@ func (wt *WriteTool) Execute(args map[string]interface{}) (interface{}, error) {
 		return nil, fmt.Errorf("missing path argument: content")
 	}
 
-	if err := CheckFileAccess(wt.permission, wt.location, true, path); err != nil {
+	auth, err := CheckFileAccess(wt.permission, wt.location, true, path)
+	if err != nil {
 		return nil, err
 	}
 
-	result, err := wt.fileMutation.Write(path, []byte(content))
+	result, err := wt.fileMutation.Write(path, []byte(content), auth)
 	if err != nil {
 		return nil, err
 	}
@@ -142,11 +144,12 @@ func (et *EditTool) Execute(args map[string]interface{}) (interface{}, error) {
 		return nil, fmt.Errorf("missing path argument: replace")
 	}
 
-	if err := CheckFileAccess(et.permission, et.location, true, path); err != nil {
+	auth, err := CheckFileAccess(et.permission, et.location, true, path)
+	if err != nil {
 		return nil, err
 	}
 
-	current, err := et.fileMutation.fileSys.Read(path)
+	current, err := et.fileMutation.fileSys.Read(path, auth)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
@@ -158,7 +161,7 @@ func (et *EditTool) Execute(args map[string]interface{}) (interface{}, error) {
 		return nil, fmt.Errorf("no changes made: find text not found in file")
 	}
 
-	result, err := et.fileMutation.WriteIfUnchanged(path, current, []byte(newContent))
+	result, err := et.fileMutation.WriteIfUnchanged(path, current, []byte(newContent), auth)
 	if err != nil {
 		if _, ok := err.(*StaleContentError); ok {
 			return nil, fmt.Errorf("file changed while editing: %s", path)

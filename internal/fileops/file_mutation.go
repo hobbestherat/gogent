@@ -43,14 +43,15 @@ func NewFileMutation(fileSys *FileSystem, location *LocationMutation) *FileMutat
 	}
 }
 
-// Write writes content to a file (unconditional)
-func (fm *FileMutation) Write(path string, content []byte) (*WriteResult, error) {
+// Write writes content to a file (unconditional). The Authorization is forwarded
+// to the underlying file system so an approved external path can be written.
+func (fm *FileMutation) Write(path string, content []byte, auth Authorization) (*WriteResult, error) {
 	existed, err := fm.fileSys.Exists(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check if file exists: %w", err)
 	}
 
-	if err := fm.fileSys.Write(path, content); err != nil {
+	if err := fm.fileSys.Write(path, content, auth); err != nil {
 		return nil, fmt.Errorf("failed to write file: %w", err)
 	}
 
@@ -67,9 +68,10 @@ func (fm *FileMutation) Write(path string, content []byte) (*WriteResult, error)
 	}, nil
 }
 
-// WriteIfUnchanged writes content only if the file hasn't changed
-func (fm *FileMutation) WriteIfUnchanged(path string, expected []byte, content []byte) (*WriteResult, error) {
-	current, err := fm.fileSys.Read(path)
+// WriteIfUnchanged writes content only if the file hasn't changed. The
+// Authorization is forwarded to the underlying reads/writes.
+func (fm *FileMutation) WriteIfUnchanged(path string, expected []byte, content []byte, auth Authorization) (*WriteResult, error) {
+	current, err := fm.fileSys.Read(path, auth)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
@@ -78,7 +80,7 @@ func (fm *FileMutation) WriteIfUnchanged(path string, expected []byte, content [
 		return nil, &StaleContentError{Path: path}
 	}
 
-	return fm.Write(path, content)
+	return fm.Write(path, content, auth)
 }
 
 // Remove removes a file
@@ -86,12 +88,13 @@ func (fm *FileMutation) Remove(path string) error {
 	return fm.fileSys.Remove(path)
 }
 
-// WriteTextPreservingBOM writes text while preserving UTF-8 BOM
-func (fm *FileMutation) WriteTextPreservingBOM(path string, content string) (*WriteResult, error) {
+// WriteTextPreservingBOM writes text while preserving UTF-8 BOM. The
+// Authorization is forwarded to the underlying reads/writes.
+func (fm *FileMutation) WriteTextPreservingBOM(path string, content string, auth Authorization) (*WriteResult, error) {
 	hasBOM := false
 	existed, err := fm.fileSys.Exists(path)
 	if err == nil && existed {
-		current, _ := fm.fileSys.Read(path)
+		current, _ := fm.fileSys.Read(path, auth)
 		if len(current) >= 3 && current[0] == 0xEF && current[1] == 0xBB && current[2] == 0xBF {
 			hasBOM = true
 		}
@@ -101,25 +104,27 @@ func (fm *FileMutation) WriteTextPreservingBOM(path string, content string) (*Wr
 		content = "\uFEFF" + content
 	}
 
-	return fm.Write(path, []byte(content))
+	return fm.Write(path, []byte(content), auth)
 }
 
-// WriteFile writes content to a file
-func (fm *FileMutation) WriteFile(path string, content string) error {
-	_, err := fm.WriteTextPreservingBOM(path, content)
+// WriteFile writes content to a file. The Authorization is forwarded to the
+// underlying writes.
+func (fm *FileMutation) WriteFile(path string, content string, auth Authorization) error {
+	_, err := fm.WriteTextPreservingBOM(path, content, auth)
 	return err
 }
 
-// EditFile edits a file by replacing text
-func (fm *FileMutation) EditFile(path, find, replace string) error {
-	current, err := fm.fileSys.Read(path)
+// EditFile edits a file by replacing text. The Authorization is forwarded to the
+// underlying reads/writes.
+func (fm *FileMutation) EditFile(path, find, replace string, auth Authorization) error {
+	current, err := fm.fileSys.Read(path, auth)
 	if err != nil {
 		return fmt.Errorf("failed to read file: %w", err)
 	}
 
 	updated := strings.ReplaceAll(string(current), find, replace)
 
-	return fm.WriteFile(path, updated)
+	return fm.WriteFile(path, updated, auth)
 }
 
 // replaceString replaces all occurrences of old with new
