@@ -19,6 +19,7 @@ import (
 	"gogent/internal/permission"
 	"gogent/internal/skill"
 	"gogent/internal/tool"
+	"gogent/internal/vcs"
 )
 
 // Gogent is the main entry point for the agent system
@@ -42,6 +43,10 @@ type Gogent struct {
 	// repoMap is the ranked symbol skeleton of the workspace, built at startup
 	// and injected into every session's system prompt alongside agentsContext.
 	repoMap string
+	// gitRepo records whether the workspace is inside a git working tree,
+	// detected once at startup. When true, a live `git status` summary is
+	// injected into every session's system prompt.
+	gitRepo bool
 	// sessionTitles records a human-friendly title per session for persistence.
 	sessionTitles map[string]string
 }
@@ -136,6 +141,7 @@ func NewGogentWithWorkspace(homeDir, workspaceRoot string) *Gogent {
 	_ = g.skills.LoadSkills(filepath.Join(workspaceRoot, "skills"))
 	g.agentsContext = renderAgentsContext(discoverAgentsDocs(workspaceRoot, filepath.Join(homeDir, ".gogent")))
 	g.repoMap = buildRepoMap(workspaceRoot)
+	g.gitRepo = vcs.IsRepo(workspaceRoot)
 
 	// Initialize tool registry with file tools
 	g.initializeToolRegistry()
@@ -270,6 +276,7 @@ func (g *Gogent) initializeToolRegistry() {
 	g.toolRegistry.Permission = g.permissions
 	g.toolRegistry.RegisterShellTool()
 	g.toolRegistry.RegisterWebFetchTool()
+	g.toolRegistry.RegisterGitTool()
 
 	g.toolRegistry.Register(&tool.Tool{
 		Name:        "spawn_subagent",
@@ -1315,6 +1322,7 @@ func (g *Gogent) SetTimeouts(t config.TimeoutConfig) {
 	// then refresh every session's root registry so running sessions pick it up.
 	g.toolRegistry.RegisterShellTool()
 	g.toolRegistry.RegisterWebFetchTool()
+	g.toolRegistry.RegisterGitTool()
 	subAgentTO := time.Duration(t.SubAgentSecondsOrDefault()) * time.Second
 	for _, s := range sessions {
 		s.SetSubAgentTimeout(subAgentTO)

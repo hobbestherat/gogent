@@ -22,6 +22,12 @@ gogent gates every side-effecting tool through a single permission service
   size-capped and briefly cached) prompts **per domain**, so an *Always* grant is
   scoped to a single host. Prefer it over `curl` in the shell for reading docs and
   API references: it returns clean Markdown instead of raw HTML.
+- **Git** — the native `git` tool (`status`/`diff`/`log`/`commit`/`create_branch`/
+  `restore`) runs git directly (no shell quoting, output returned structured) so the
+  agent can inspect its diff and checkpoint work. Read-only operations run freely;
+  mutating ones (commit/create_branch/restore) are gated like shell. When the
+  workspace is a repo, a live `git status` is also injected into the prompt so the
+  model always sees its working-tree state. Prefer it over `git` through the shell.
 
 Interactive decisions appear as a modal in the TUI. Choosing *Always* persists
 the grant to `~/.gogent/permissions.json`. In headless/non-interactive runs

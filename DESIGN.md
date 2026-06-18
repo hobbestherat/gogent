@@ -20,7 +20,8 @@ ui/tui/                Workbench desktop, per-session windows, sidebar, dialogs
 internal/gogent/       Gogent singleton: sessions, tool registry, persistence
 internal/agent/        UserSession + Agent tree, ReAct task loop, sub-agents
 internal/model/        Connector interfaces + HTTP model connection + session
-internal/tool/         Tool registry, shell tool, structured-output tool
+internal/tool/         Tool registry, shell/git/web tools, structured-output tool
+internal/vcs/          Thin, safe git wrapper (backs the git tool + git-status context)
 internal/fileops/      Path resolution, file I/O, file mutation
 internal/command/      Shell exec + internal commands (calc/echo/help)
 internal/skill/        SKILL.md loader + registry (wired via syscontext + skill tool)
@@ -51,13 +52,18 @@ internal/http/         HTTP client; cmd also has a headless HTTP server mode
   transport serves generic servers (`openai`) and the Z.AI platform (`zai`); a
   bare base URL is normalized into the concrete endpoints. Connections are
   rebuilt per send, so model/endpoint edits take effect on the next turn.
-- **Tools** (`internal/tool`, `internal/fileops`, `internal/web`) — `read`,
-  `write`, `edit`, `shell`, `web_fetch`, `spawn_subagent`, agent-control tools,
-  and `structured_output`. File ops resolve paths against the workspace root (the
-  launch cwd) and run through a keyed-mutex file mutator. `web_fetch` downloads an
-  http(s) URL and returns readability-style Markdown (size-capped, short-TTL
-  cached, gated per domain via `ActionNetwork`); the HTML→Markdown reduction is a
-  dependency-free, stdlib-only extractor (`internal/web`).
+- **Tools** (`internal/tool`, `internal/fileops`, `internal/web`, `internal/vcs`) —
+  `read`, `write`, `edit`, `shell`, `web_fetch`, `git`, `spawn_subagent`,
+  agent-control tools, and `structured_output`. File ops resolve paths against the
+  workspace root (the launch cwd) and run through a keyed-mutex file mutator.
+  `web_fetch` downloads an http(s) URL and returns readability-style Markdown
+  (size-capped, short-TTL cached, gated per domain via `ActionNetwork`); the
+  HTML→Markdown reduction is a dependency-free, stdlib-only extractor
+  (`internal/web`). `git` is a dispatched wrapper over the git binary
+  (`status`/`diff`/`log`/`commit`/`create_branch`/`restore`) backed by
+  `internal/vcs`, which runs git with explicit argument vectors (no shell, no
+  injection surface) and disabled interactive prompts; mutating operations are
+  gated via `ActionShell`, read-only ones run freely.
 - **TUI** (`ui/tui`) — `Workbench` desktop hosting draggable `SessionWindow`s,
   each with a foldable transcript (turbotv `TextView`), per-session model select,
   status line, a right-hand sidebar (session/sub-agent tree), and Config / model
@@ -105,6 +111,10 @@ Each task loop injects a system-context block built by `internal/gogent`:
   description) is listed in the prompt, and a `skill` tool loads a skill's full
   `SKILL.md` on demand, recording per-skill usage. Skills load from `~/.gogent/skills`
   and `./skills`; they can be toggled in the TUI (Config → Skills…).
+- **Git status** is injected when the workspace is a git repo (detected once at
+  startup): a live `git status --short --branch` summary (`internal/vcs`) is added
+  each loop, so the model always sees the current branch and working-tree state and
+  can checkpoint with the `git` tool without first having to ask.
 
 ## Known gaps
 
