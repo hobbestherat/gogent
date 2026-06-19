@@ -35,6 +35,13 @@ type ModelSession struct {
 	// messages in order. Unlike History it is what actually gets re-sent to the
 	// model, so the model always sees its own prior outputs and tool results.
 	Transcript []Message
+	// transcriptEpoch increments each time the transcript is replaced wholesale
+	// (via ReplaceTranscript or ApplyCompressedTranscript) and is left untouched
+	// by append-only growth. Persistence compares it against the epoch observed
+	// at the last save to detect that a previously recorded "messages already on
+	// disk" frontier no longer lines up with the in-memory transcript, so it can
+	// rebuild the file instead of appending stale deltas (issue #21).
+	transcriptEpoch uint64
 }
 
 // CallbackEvent types
@@ -94,6 +101,25 @@ func (s *ModelSession) GetTranscript() []Message {
 	return out
 }
 
+// TranscriptLen returns the number of messages in the canonical transcript
+// without copying it. It is the cheap read side used by persistence bookkeeping
+// (issue #21) where only the length, not the contents, is needed.
+func (s *ModelSession) TranscriptLen() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.Transcript)
+}
+
+// TranscriptEpoch returns a value that changes whenever the transcript is
+// replaced wholesale (compaction or restore-seeding) and stays stable across
+// append-only growth. See the transcriptEpoch field doc for why persistence
+// tracks it (issue #21).
+func (s *ModelSession) TranscriptEpoch() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.transcriptEpoch
+}
+
 // AppendMessages adds messages to the transcript without sending a request.
 func (s *ModelSession) AppendMessages(messages ...Message) {
 	s.mu.Lock()
@@ -106,6 +132,7 @@ func (s *ModelSession) ReplaceTranscript(messages []Message) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Transcript = append([]Message(nil), messages...)
+	s.transcriptEpoch++
 }
 
 // SetMaxContextLength sets the context window (input token budget) for this
@@ -237,6 +264,7 @@ func (s *ModelSession) ApplyCompressedTranscript(newTranscript []Message) {
 	s.mu.Lock()
 	before := s.CurrentTokenCount
 	s.Transcript = append([]Message(nil), newTranscript...)
+	s.transcriptEpoch++
 	after := EstimateTokens(newTranscript)
 	if s.SystemPrompt != "" {
 		after += len(s.SystemPrompt) / 4
