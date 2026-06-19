@@ -1,0 +1,29 @@
+version: "2"
+
+linters:
+  # "standard" enables errcheck, govet, ineffassign, staticcheck and unused.
+  default: standard
+  enable:
+    - bodyclose # HTTP response bodies must be closed
+    - gosec # security checks, incl. G204 (subprocess) and G304 (file inclusion)
+    - wrapcheck # errors crossing package boundaries should be wrapped
+
+  exclusions:
+    generated: lax
+    rules:
+      # Tests routinely ignore errors, read fixture paths and run helper
+      # binaries; the strict checks add noise without catching real defects.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+          - wrapcheck
+      # The shell and command packages exist to launch subprocesses and the
+      # fileops package reads caller-supplied paths after a permission check.
+      - path: internal/(shell|command|fileops)/
+        linters:
+          - gosec
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
