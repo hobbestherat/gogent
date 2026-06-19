@@ -28,6 +28,13 @@ gogent gates every side-effecting tool through a single permission service
   mutating ones (commit/create_branch/restore) are gated like shell. When the
   workspace is a repo, a live `git status` is also injected into the prompt so the
   model always sees its working-tree state. Prefer it over `git` through the shell.
+- **MCP servers** — each [Model Context Protocol](https://modelcontextprotocol.info/)
+  server declared under `mcp_servers` is dialed at startup, its tools discovered via
+  `tools/list`, and each registered under an `mcp__<server>__<tool>` name so the
+  agent can call it like any built-in. Launching a server is gated **per server**
+  through `ActionMCP`, so an *Always* grant is scoped to one server and a config
+  synced from elsewhere cannot silently spawn processes; a denied, disabled or
+  unreachable server is skipped with a warning instead of blocking startup.
 
 - **Review edits** — an optional tier (Settings → *Review edits before applying*,
   off by default) that defers every `write`/`edit` until you approve it. The TUI
@@ -60,6 +67,26 @@ go build ./...
 Configuration lives in `~/.gogent/config.json`. The default LAN endpoint honors
 the `GOGENT_MODEL_URL` environment variable. A sample config file with all
 available options is included at `config.sample.json` in the repository.
+
+### MCP servers
+
+Extend the agent's tool set with [MCP](https://modelcontextprotocol.info/) servers
+by adding an `mcp_servers` array to `config.json`. Two transports are supported —
+a launched subprocess (`stdio`, the default) and `http`/`streamable-http`:
+
+```json
+{
+  "mcp_servers": [
+    { "name": "fs", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/data"] },
+    { "name": "github", "transport": "http", "url": "https://example.com/mcp", "headers": { "Authorization": "Bearer YOUR_TOKEN" } }
+  ]
+}
+```
+
+Each server's tools appear as `mcp__<name>__<tool>`. Add `"disabled": true` to keep
+an entry without connecting it. Launching is gated through the permission service
+(see **MCP servers** above), so in headless runs add an `mcp` allow rule to
+`~/.gogent/permissions.json` or the servers will be denied.
 
 ### Window scaling
 

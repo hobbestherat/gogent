@@ -294,6 +294,27 @@ const (
 // configured fast_model rather than naming a specific Models[] entry directly.
 const FastModelRef = "fast_model"
 
+// MCPServerConfig declares one Model Context Protocol (MCP) server whose tools
+// gogent surfaces through its own tool registry (issue #36). Transport selects
+// the wire — "stdio" (default, a launched subprocess) or "http"/"streamable-http"
+// — and the remaining fields are transport-specific. Launching a server is gated
+// through the permission service, so adding an entry here advertises a server but
+// does not silently run it.
+type MCPServerConfig struct {
+	Name string `json:"name"`
+	// Transport is "stdio" (default) or "http"/"streamable-http".
+	Transport string `json:"transport,omitempty"`
+	// Command/Args/Env configure a stdio server.
+	Command string            `json:"command,omitempty"`
+	Args    []string          `json:"args,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+	// URL/Headers configure an http server.
+	URL     string            `json:"url,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
+	// Disabled skips this server entirely without removing its configuration.
+	Disabled bool `json:"disabled,omitempty"`
+}
+
 // Config represents the full configuration
 type Config struct {
 	DefaultModel string `json:"default_model"`
@@ -324,6 +345,10 @@ type Config struct {
 	// (false) preserves the prior behavior of applying edits immediately, so an
 	// older config.json without the key is unaffected.
 	ReviewEdits bool `json:"review_edits,omitempty"`
+	// MCPServers lists the Model Context Protocol servers whose tools are added
+	// to the registry at startup (issue #36). Empty (the default) leaves MCP off,
+	// so an older config.json without the key is unaffected.
+	MCPServers []MCPServerConfig `json:"mcp_servers,omitempty"`
 }
 
 // NotifyConfig returns the effective notification configuration, substituting
