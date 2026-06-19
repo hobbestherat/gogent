@@ -161,6 +161,66 @@ func (fm *FileMutation) currentContent(path string, auth Authorization) (string,
 	return strings.TrimPrefix(string(data), "\uFEFF"), nil
 }
 
+// EditOp is a single find→replace within a multi-edit. ReplaceAll relaxes the
+// uniqueness rule for that one edit (see editContent).
+type EditOp struct {
+	Find       string
+	Replace    string
+	ReplaceAll bool
+}
+
+// PreviewMultiEdit returns the file's current content and the content a
+// MultiEditFile would produce by applying edits in order, without writing
+// anything. Each edit honours editContent's uniqueness rule against the running
+// result of the prior edits, so an ambiguous or missing match is rejected at
+// preview time rather than being half-applied.
+func (fm *FileMutation) PreviewMultiEdit(path string, edits []EditOp, auth Authorization) (before, after string, err error) {
+	before, err = fm.currentContent(path, auth)
+	if err != nil {
+		return "", "", err
+	}
+	after, err = multiEditContent(before, edits)
+	if err != nil {
+		return "", "", err
+	}
+	return before, after, nil
+}
+
+// MultiEditFile applies a batch of find→replace edits to a file in order. The
+// batch is all-or-nothing: if any edit is ambiguous or its find text is absent,
+// nothing is written and the file is left untouched. The Authorization is
+// forwarded to the underlying reads/writes.
+func (fm *FileMutation) MultiEditFile(path string, edits []EditOp, auth Authorization) error {
+	current, err := fm.fileSys.Read(path, auth)
+	if err != nil {
+		return fmt.Errorf("failed to read file: %w", err)
+	}
+
+	updated, err := multiEditContent(string(current), edits)
+	if err != nil {
+		return err
+	}
+
+	return fm.WriteFile(path, updated, auth)
+}
+
+// multiEditContent folds edits over content in order, each applied to the result
+// of the previous one. It fails (returning the original unchanged) the moment any
+// edit cannot be applied, so a caller never persists a partially-applied batch.
+func multiEditContent(content string, edits []EditOp) (string, error) {
+	if len(edits) == 0 {
+		return "", fmt.Errorf("no edits provided")
+	}
+	for i, e := range edits {
+		updated, err := editContent(content, e.Find, e.Replace, e.ReplaceAll)
+		if err != nil {
+			return "", fmt.Errorf("edit %d: %w", i+1, err)
+		}
+		content = updated
+	}
+	return content, nil
+}
+
 // EditFile edits a file by replacing text. Unless replaceAll is set the find
 // text must occur exactly once (see editContent). The Authorization is forwarded
 // to the underlying reads/writes.

@@ -87,8 +87,11 @@ internal/clipboard/    System clipboard (OSC 52 + native pbcopy/xclip/wl-copy)
   model/endpoint edits take effect on the next turn.
 - **Tools** (`internal/tool`, `internal/fileops`, `internal/web`, `internal/vcs`,
   `internal/diagnostics`) —
-  `read`, `write`, `edit`, `grep`, `glob`, `list`, `shell`, `web_fetch`, `git`,
-  `diagnostics`, `spawn_subagent`, agent-control tools, and `structured_output`.
+  `read`, `write`, `edit`, `multi_edit`, `apply_patch`, `grep`, `glob`, `list`,
+  `shell`, `web_fetch`, `git`, `diagnostics`, `spawn_subagent`, agent-control
+  tools, and `structured_output`. `multi_edit` applies a batch of exact
+  find→replace edits to one file atomically; `apply_patch` applies a unified-diff
+  `*** Begin Patch` envelope that can add/update/delete several files at once.
   File ops resolve
   paths against the workspace root (the launch cwd) and run through a keyed-mutex
   file mutator. `grep`/`glob`/`list` are read-only, workspace-confined search tools
