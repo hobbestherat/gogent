@@ -70,6 +70,15 @@ func main() {
 		}
 	}
 
+	// The security audit trail (permission decisions, tool calls) is always
+	// file-backed — it is a durable post-incident artifact, not screen output, so
+	// it goes to a file in both TUI and headless mode (issue #51).
+	if au, err := diag.NewAuditFile(filepath.Join(homeDir, ".gogent", "audit.log")); err == nil {
+		g.SetAudit(au)
+	} else {
+		log.Printf("open audit log: %v", err)
+	}
+
 	skillRegistry := g.GetSkillRegistry()
 	skills := skillRegistry.ListSkills()
 	fmt.Printf("\nLoaded %d skills:\n", len(skills))

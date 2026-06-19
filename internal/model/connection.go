@@ -443,6 +443,7 @@ type ModelStats struct {
 	TimeoutCount               int
 	ContextWindowOverflowCount int
 	RefusalCount               int
+	RateLimitCount             int
 	GenericErrorCount          int
 }
 
@@ -1157,6 +1158,7 @@ func (c *ModelConnection) analyzeError(statusCode int, response string) *ModelEr
 		}
 	case 429:
 		c.Stats.Mutex.Lock()
+		c.Stats.RateLimitCount++
 		c.Stats.Mutex.Unlock()
 		return &ModelError{
 			Type:           ErrorRateLimit,

@@ -41,19 +41,19 @@ func (g *Gogent) StartMCPServers() {
 		// scoped to a single server.
 		if g.permissions != nil {
 			if err := g.permissions.CheckWithDetail(permission.ActionMCP, sc.Name, mcpLaunchDetail(sc)); err != nil {
-				fmt.Printf("Warning: MCP server %q not started: %v\n", sc.Name, err)
+				g.logger().Warn("mcp server not started", "server", sc.Name, "error", err)
 				continue
 			}
 		}
 
 		client, err := mcp.Dial(mcpServerConfig(sc))
 		if err != nil {
-			fmt.Printf("Warning: MCP server %q failed to start: %v\n", sc.Name, err)
+			g.logger().Warn("mcp server failed to start", "server", sc.Name, "error", err)
 			continue
 		}
 		tools, err := client.ListTools()
 		if err != nil {
-			fmt.Printf("Warning: MCP server %q tools/list failed: %v\n", sc.Name, err)
+			g.logger().Warn("mcp server tools/list failed", "server", sc.Name, "error", err)
 			_ = client.Close()
 			continue
 		}
@@ -64,7 +64,7 @@ func (g *Gogent) StartMCPServers() {
 		g.mcpClients = append(g.mcpClients, client)
 		g.mu.Unlock()
 		registered = true
-		fmt.Printf("MCP server %q: registered %d tool(s)\n", sc.Name, len(tools))
+		g.logger().Info("mcp server registered tools", "server", sc.Name, "tools", len(tools))
 	}
 
 	if registered {

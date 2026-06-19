@@ -94,6 +94,11 @@ func (e *DeniedError) Error() string {
 	return "permission denied: " + string(e.Action) + " on " + e.Resource
 }
 
+// AuditSink records the outcome of a resolved permission check so it can be
+// written to an append-only audit trail (issue #51). allowed reports whether the
+// request was authorized. It must not block; it is called on the request path.
+type AuditSink func(rc RequestContext, action Action, resource string, allowed bool)
+
 // Service is the central permission gate. It is safe for concurrent use.
 type Service struct {
 	mu        sync.Mutex
@@ -101,6 +106,7 @@ type Service struct {
 	rules     []Rule
 	saved     map[string]Decision
 	prompter  Prompter
+	audit     AuditSink
 }
 
 // New creates a Service whose persisted "always" decisions live under
@@ -119,6 +125,14 @@ func New(configDir string) *Service {
 func (s *Service) SetPrompter(p Prompter) {
 	s.mu.Lock()
 	s.prompter = p
+	s.mu.Unlock()
+}
+
+// SetAuditSink installs the sink that records resolved permission decisions. A
+// nil sink (the default) disables auditing.
+func (s *Service) SetAuditSink(sink AuditSink) {
+	s.mu.Lock()
+	s.audit = sink
 	s.mu.Unlock()
 }
 
@@ -175,11 +189,18 @@ func (s *Service) CheckWithDetail(a Action, resource, detail string) error {
 // (and sub-agent) is asking, so the prompter can alert and route the user to the
 // requesting session. The context is carried only when the request reaches the
 // prompter; persisted and rule-based decisions are session-agnostic.
-func (s *Service) CheckWithContext(rc RequestContext, a Action, resource, detail string) error {
+func (s *Service) CheckWithContext(rc RequestContext, a Action, resource, detail string) (err error) {
 	s.mu.Lock()
 	eff := s.effect(a, resource)
 	prompter := s.prompter
+	sink := s.audit
 	s.mu.Unlock()
+
+	// Record the resolved decision on the audit trail, however it is reached
+	// (rule, persisted, or interactive prompt). err==nil means allowed.
+	if sink != nil {
+		defer func() { sink(rc, a, resource, err == nil) }()
+	}
 
 	switch eff {
 	case EffectAllow:

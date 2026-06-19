@@ -334,3 +334,39 @@ func TestModelConnectionWithEmptyURL(t *testing.T) {
 		t.Errorf("Expected ErrorConnection, got %v", modelErr.Type)
 	}
 }
+
+// TestAnalyzeErrorCounters verifies analyzeError classifies each status and bumps
+// the matching ModelStats counter — including the 429 rate-limit case, whose
+// counter was previously left at zero by a no-op Lock/Unlock pair (issue #51).
+func TestAnalyzeErrorCounters(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   int
+		response string
+		wantType ModelErrorType
+		counter  func(*ModelStats) int
+	}{
+		{"rate_limit", 429, "slow down", ErrorRateLimit, func(s *ModelStats) int { return s.RateLimitCount }},
+		{"context_overflow", 400, "context length exceeded", ErrorContextOverflow, func(s *ModelStats) int { return s.ContextWindowOverflowCount }},
+		{"refusal", 403, "content refusal", ErrorRefusal, func(s *ModelStats) int { return s.RefusalCount }},
+		{"timeout", 504, "gateway", ErrorTimeout, func(s *ModelStats) int { return s.TimeoutCount }},
+		{"generic", 500, "boom", ErrorGeneric, func(s *ModelStats) int { return s.GenericErrorCount }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewModelConnection()
+			me := c.analyzeError(tt.status, tt.response)
+			if me.Type != tt.wantType {
+				t.Errorf("type = %q, want %q", me.Type, tt.wantType)
+			}
+			stats := c.GetStats()
+			if got := tt.counter(stats); got != 1 {
+				t.Errorf("specific counter = %d, want 1", got)
+			}
+			// Every error path also bumps the overall error count exactly once.
+			if stats.ErrorCount != 1 {
+				t.Errorf("ErrorCount = %d, want 1", stats.ErrorCount)
+			}
+		})
+	}
+}
