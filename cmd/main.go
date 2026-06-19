@@ -19,6 +19,7 @@ import (
 	"gogent/internal/agent"
 	"gogent/internal/command"
 	"gogent/internal/config"
+	"gogent/internal/diag"
 	"gogent/internal/gogent"
 	"gogent/internal/model"
 	"gogent/internal/stats"
@@ -55,6 +56,17 @@ func main() {
 	// Create Gogent instance (loads skills + AGENTS.md and owns the registry)
 	g := gogent.NewGogent(homeDir)
 	fmt.Printf("\nWorking directory (file & shell ops): %s\n", g.GetWorkspaceRoot())
+
+	// In TUI mode, redirect diagnostics to a log file so warnings/errors never
+	// get written to stdout and corrupt the alternate screen (issue #17).
+	// Headless mode keeps the stderr default. A failed open falls back to stderr.
+	if !*disableTUI {
+		if lg, err := diag.NewFile(filepath.Join(homeDir, ".gogent", "gogent.log")); err == nil {
+			g.SetLogger(lg)
+		} else {
+			log.Printf("open diagnostic log: %v", err)
+		}
+	}
 
 	skillRegistry := g.GetSkillRegistry()
 	skills := skillRegistry.ListSkills()

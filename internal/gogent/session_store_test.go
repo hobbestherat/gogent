@@ -1,8 +1,12 @@
 package gogent
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gogent/internal/agent"
@@ -95,5 +99,51 @@ func TestSessionStoreAdoptContinues(t *testing.T) {
 	loaded2, _ := store2.ListActive()
 	if len(loaded2[0].Transcripts["root"]) != 2 {
 		t.Fatalf("expected 2 messages after continuation, got %d", len(loaded2[0].Transcripts["root"]))
+	}
+}
+
+// failingWriter is an io.Writer that always errors, so json.Encoder.Encode can't
+// flush a record — used to prove encode errors are surfaced, not swallowed.
+type failingWriter struct{}
+
+func (failingWriter) Write(p []byte) (int, error) {
+	return 0, errors.New("disk full")
+}
+
+// TestEncodeTranscriptSurfacesErrors guards issue #17: previously each
+// enc.Encode result was dropped with "_ =", so a failed encode vanished while
+// Save reported success. Now the failure is aggregated and returned.
+func TestEncodeTranscriptSurfacesErrors(t *testing.T) {
+	us := buildSessionWithTranscript("session-x", []model.Message{
+		{Role: model.RoleUser, Content: "hello"},
+	})
+
+	err := encodeTranscript(json.NewEncoder(failingWriter{}), us, "Session X", "2026-01-01T00:00:00Z")
+	if err == nil {
+		t.Fatal("expected an encode error, got nil (error was swallowed)")
+	}
+	if !strings.Contains(err.Error(), "encode session meta") {
+		t.Errorf("expected the error to identify the failing record, got: %v", err)
+	}
+}
+
+// TestEncodeTranscriptWritesRecords is the positive counterpart: a working sink
+// receives the meta line plus one line per transcript message.
+func TestEncodeTranscriptWritesRecords(t *testing.T) {
+	us := buildSessionWithTranscript("session-x", []model.Message{
+		{Role: model.RoleUser, Content: "hello"},
+		{Role: model.RoleAssistant, Content: "hi"},
+	})
+
+	var buf bytes.Buffer
+	if err := encodeTranscript(json.NewEncoder(&buf), us, "Session X", "2026-01-01T00:00:00Z"); err != nil {
+		t.Fatalf("encodeTranscript: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 3 { // 1 meta + 2 messages
+		t.Fatalf("expected 3 JSONL records, got %d (%q)", len(lines), buf.String())
+	}
+	if !strings.Contains(lines[0], `"kind":"meta"`) || !strings.Contains(lines[0], "Session X") {
+		t.Errorf("unexpected meta line: %s", lines[0])
 	}
 }

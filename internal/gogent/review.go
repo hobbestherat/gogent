@@ -69,7 +69,7 @@ func (g *Gogent) SetReviewEdits(enabled bool) {
 	}
 	g.mu.Unlock()
 	if err := g.SaveConfig(); err != nil {
-		fmt.Printf("Warning: Failed to persist config: %v\n", err)
+		g.warnf("Failed to persist config: %v", err)
 	}
 }
 

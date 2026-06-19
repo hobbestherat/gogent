@@ -3,6 +3,7 @@ package gogent
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -92,7 +93,9 @@ func sanitizeID(id string) string {
 
 // Save (re)writes the full transcript of every agent in the session. It writes
 // to a temp file and renames it into place so a crash can't leave a half-written
-// file behind.
+// file behind. Any per-record marshal failure is aggregated and returned rather
+// than silently dropped, so Save never reports success while a transcript line
+// went missing (issue #17).
 func (s *SessionStore) Save(us *agent.UserSession, title string) error {
 	if s == nil || us == nil || us.RootAgent == nil {
 		return nil
@@ -103,16 +106,8 @@ func (s *SessionStore) Save(us *agent.UserSession, title string) error {
 
 	created := time.Unix(us.CreatedAt, 0).UTC().Format(time.RFC3339)
 	var buf strings.Builder
-	enc := json.NewEncoder(&buf)
-	_ = enc.Encode(jsonlRecord{Kind: "meta", SessionID: us.ID, Title: title, CreatedAt: created})
-	for _, a := range us.RootAgent.ListAllAgents() {
-		if a.ThoughtTrain == nil {
-			continue
-		}
-		for _, m := range a.ThoughtTrain.GetTranscript() {
-			m := m
-			_ = enc.Encode(jsonlRecord{Kind: "message", AgentID: a.ID, Message: &m})
-		}
+	if err := encodeTranscript(json.NewEncoder(&buf), us, title, created); err != nil {
+		return err
 	}
 
 	tmp := path + ".tmp"
@@ -120,6 +115,29 @@ func (s *SessionStore) Save(us *agent.UserSession, title string) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// encodeTranscript writes the session meta header followed by every agent's
+// transcript as JSONL records into enc. It joins any per-record marshal error
+// (instead of swallowing it) so a single unencodable message can't silently
+// vanish from the persisted transcript.
+func encodeTranscript(enc *json.Encoder, us *agent.UserSession, title, created string) error {
+	var errs error
+	if err := enc.Encode(jsonlRecord{Kind: "meta", SessionID: us.ID, Title: title, CreatedAt: created}); err != nil {
+		errs = errors.Join(errs, fmt.Errorf("encode session meta: %w", err))
+	}
+	for _, a := range us.RootAgent.ListAllAgents() {
+		if a.ThoughtTrain == nil {
+			continue
+		}
+		for _, m := range a.ThoughtTrain.GetTranscript() {
+			m := m
+			if err := enc.Encode(jsonlRecord{Kind: "message", AgentID: a.ID, Message: &m}); err != nil {
+				errs = errors.Join(errs, fmt.Errorf("encode message for agent %s: %w", a.ID, err))
+			}
+		}
+	}
+	return errs
 }
 
 // Archive renames a session's live file to the archived suffix so it is not
