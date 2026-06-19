@@ -12,6 +12,12 @@ gogent gates every side-effecting tool through a single permission service
 
 - **Files inside the workspace** (the launch directory) — read/write/edit are
   allowed without prompting.
+- **Codebase search** — the `grep`, `glob`, and `list` tools are read-only and
+  confined to the workspace, so they run **without any prompt** (unlike shelling
+  out to `grep`/`rg`, which prompts each time). `grep` searches file contents for
+  a regex and returns `file:line` references you can pass straight to `read`;
+  `glob` finds files by name and `list` lists a directory. Prefer them over the
+  shell for search.
 - **Anything outside the workspace** — file ops and any shell command that
   touches an external path prompt for approval, grouped **per external root
   folder** (e.g. one prompt covers all of `/etc`).
