@@ -294,6 +294,8 @@ func main() {
 					log.Printf("save layout: %v", err)
 				}
 			},
+			OnUndo:   func(sessionID string) (string, error) { return g.UndoLastTurn(sessionID) },
+			OnRewind: func(sessionID string, turns int) (string, error) { return g.Rewind(sessionID, turns) },
 		})
 
 		// Push the persisted notification config into the workbench's live
