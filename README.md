@@ -235,6 +235,20 @@ colours*, and **Save** to persist the palette as your preferred theme — it is
 re-applied to the running UI immediately and restored on the next launch.
 *Reset* returns to the default palette.
 
+### Discovering actions
+
+Every action is reachable without hunting through menus:
+
+- **Keybinding help** — press **`?`** (while a transcript or the sidebar is
+  focused, not a text input) or *Help → Keybindings* to open a cheatsheet of
+  every binding, grouped by context. It is rendered from the same command table
+  that drives the palette, so it can never drift from the real keys.
+- **Command palette** — press **Ctrl+K** (or **`:`** when an input is not
+  focused, or *Help → Command Palette*) to open a fuzzy-searchable list of every
+  action: new/close/rename session, switch model, open the Resources /
+  Statistics / Saved-Sessions browsers, transcript filters, settings editors and
+  more. Type to filter, ↑/↓ to move, Enter to run.
+
 ### Session management
 
 When you run many sessions at once, the **Session** menu (and the right-hand

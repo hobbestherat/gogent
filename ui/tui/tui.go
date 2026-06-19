@@ -440,9 +440,13 @@ func (w *Workbench) rebuildMenu() {
 		tv.NewSubMenu("&View", w.viewItems()...),
 		tv.NewSubMenu("&Config", w.settingsItems()...),
 		tv.NewSubMenu("&Help",
+			tv.NewMenuItem("Command &Palette…", func() { w.showCommandPalette() }).
+				WithShortcut("Ctrl+K", tui.KeyRune, 'k', true),
+			tv.NewMenuItem("&Keybindings (?)…", func() { w.showHelpOverlay() }),
+			tv.NewMenuItem("----------", nil),
 			tv.NewMenuItem("&About", func() {
 				tv.ShowConfirmYesNo(w.desktop, "Gogent",
-					"Gogent multi-session TUI.\nEach session is its own window; fold thoughts & tool calls with the >/v markers.\nFocus a transcript to search ('/'), filter by type (a/t/r/e) and fold/unfold (f/u); the View menu lists the same.", nil)
+					"Gogent multi-session TUI.\nEach session is its own window; fold thoughts & tool calls with the >/v markers.\nPress ? for the keybinding cheatsheet or Ctrl+K for the command palette.", nil)
 			}),
 		),
 	)
@@ -1291,8 +1295,23 @@ func (w *Workbench) Run() error {
 		w.NewSession()
 	}
 	w.desktop.SetUnhandledKeyFn(func(event tui.TypeEvent) {
-		if event.Key == tui.KeyRune && (event.Rune == 'c' || event.Rune == 'C') && event.Ctrl {
-			w.confirmQuit()
+		if event.Key != tui.KeyRune || event.Alt {
+			return
+		}
+		if event.Ctrl {
+			if event.Rune == 'c' || event.Rune == 'C' {
+				w.confirmQuit()
+			}
+			return
+		}
+		// '?' and ':' open the help overlay and command palette respectively, but
+		// only when they reach the desktop unconsumed — i.e. focus is on a
+		// transcript/sidebar, not a text input where they are literal characters.
+		switch event.Rune {
+		case '?':
+			w.showHelpOverlay()
+		case ':':
+			w.showCommandPalette()
 		}
 	})
 	// Live-status ticker: while any session is generating, refresh its status
