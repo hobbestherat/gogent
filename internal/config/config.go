@@ -225,6 +225,10 @@ type WindowConfig struct {
 	Resizable bool `json:"resizable"`
 	// Minimizable allows users to collapse session windows to their title bar.
 	Minimizable bool `json:"minimizable"`
+	// Maximizable allows users to expand session windows to fill the available
+	// desktop (minus the reserved "Sessions & Agents" sidebar) and restore them
+	// back via the maximize/restore button in the title bar (issue #105).
+	Maximizable bool `json:"maximizable"`
 	// MinWidth is the minimum allowed width for a window.
 	MinWidth int `json:"min_width"`
 	// MinHeight is the minimum allowed height for a window.
@@ -551,6 +555,7 @@ func GetDefaultConfig() *Config {
 		Window: WindowConfig{
 			Resizable:   true,
 			Minimizable: true,
+			Maximizable: true,
 			MinWidth:    50,
 			MinHeight:   12,
 		},

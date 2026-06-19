@@ -101,6 +101,7 @@ Remaining / future:
 
 - [x] Enable `Resizable` on session windows using turbotv's built-in support
 - [x] Enable `Minimizable` on session windows for collapse/expand functionality
+- [x] Enable `Maximizable` on session windows (maximize/restore button; fills desktop minus the sidebar)
 - [x] Add `WindowConfig` to config package with configurable `MinWidth`/`MinHeight`
 - [x] Document window scaling features in README
 
