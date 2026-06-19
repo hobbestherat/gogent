@@ -325,7 +325,9 @@ gogent assembles a system-context block for every task:
   to the model as a name+description index; the model calls the `skill` tool to load a
   skill's full instructions on demand (progressive disclosure). Browse and toggle
   skills, view usage stats and read the full `SKILL.md`, and inspect or enable/disable
-  the registered tools, in the TUI under **Config → Resources…**.
+  the registered tools, in the TUI under **Config → Resources…**. The skills
+  directories are a trust boundary: symlinks are not followed and only files inside the
+  directory are read, so symlink a shared skill with a real file rather than a link.
 
 ## Status
 
