@@ -333,6 +333,22 @@ const (
 // configured fast_model rather than naming a specific Models[] entry directly.
 const FastModelRef = "fast_model"
 
+// DiagnosticsConfig configures the `diagnostics` tool (issue #42), which runs the
+// project's compiler/linter and returns structured errors. The zero value leaves
+// the tool working out of the box with the Go default (`go vet ./...`), so an
+// older config.json without a "diagnostics" key is unaffected; the fields only
+// customize the command and how its output is classified.
+type DiagnosticsConfig struct {
+	// Command is the argument vector run to produce diagnostics. Empty defaults
+	// to ["go", "vet", "./..."]. Use, e.g. ["go", "build", "./..."] to typecheck
+	// only, or any linter that emits `path:line:col: message` lines.
+	Command []string `json:"command,omitempty"`
+	// WarningPattern, when set, is a regular expression tested against each
+	// parsed message; a match marks the diagnostic a warning rather than an
+	// error. Empty treats every diagnostic as an error.
+	WarningPattern string `json:"warning_pattern,omitempty"`
+}
+
 // MCPServerConfig declares one Model Context Protocol (MCP) server whose tools
 // gogent surfaces through its own tool registry (issue #36). Transport selects
 // the wire — "stdio" (default, a launched subprocess) or "http"/"streamable-http"
@@ -392,6 +408,9 @@ type Config struct {
 	// to the registry at startup (issue #36). Empty (the default) leaves MCP off,
 	// so an older config.json without the key is unaffected.
 	MCPServers []MCPServerConfig `json:"mcp_servers,omitempty"`
+	// Diagnostics configures the `diagnostics` tool (issue #42). The zero value
+	// keeps the Go default, so an older config.json without the key is unaffected.
+	Diagnostics DiagnosticsConfig `json:"diagnostics,omitempty"`
 }
 
 // NotifyConfig returns the effective notification configuration, substituting

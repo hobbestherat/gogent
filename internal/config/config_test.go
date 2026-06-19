@@ -323,6 +323,42 @@ func TestBudgetConfigZeroIsOff(t *testing.T) {
 	}
 }
 
+// TestDiagnosticsConfigRoundTrip confirms a configured diagnostics command and
+// warning pattern survive a JSON marshal/unmarshal cycle, and that a legacy
+// config blob with no "diagnostics" key loads as the zero value (the tool then
+// applies its Go default).
+func TestDiagnosticsConfigRoundTrip(t *testing.T) {
+	in := &Config{Diagnostics: DiagnosticsConfig{
+		Command:        []string{"go", "build", "./..."},
+		WarningPattern: "^printf:",
+	}}
+	data, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var out Config
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(out.Diagnostics.Command) != 3 || out.Diagnostics.Command[1] != "build" {
+		t.Errorf("round-trip lost command, got %+v", out.Diagnostics.Command)
+	}
+	if out.Diagnostics.WarningPattern != "^printf:" {
+		t.Errorf("round-trip lost warning_pattern, got %q", out.Diagnostics.WarningPattern)
+	}
+
+	// A legacy config blob with no "diagnostics" key loads as the zero value, so
+	// the tool falls back to its built-in default (issue #42 backward compat).
+	const legacy = `{"default_model": "x"}`
+	var legacyCfg Config
+	if err := json.Unmarshal([]byte(legacy), &legacyCfg); err != nil {
+		t.Fatalf("legacy unmarshal: %v", err)
+	}
+	if len(legacyCfg.Diagnostics.Command) != 0 || legacyCfg.Diagnostics.WarningPattern != "" {
+		t.Errorf("legacy config should leave diagnostics empty, got %+v", legacyCfg.Diagnostics)
+	}
+}
+
 func TestIsReasoningModel(t *testing.T) {
 	on := true
 	off := false

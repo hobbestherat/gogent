@@ -74,6 +74,29 @@ func TestAskAlwaysPersistsInMemory(t *testing.T) {
 	}
 }
 
+// TestDiagnosticsGrantDoesNotBlessShell confirms a dedicated ActionDiagnostics
+// gate is independent of ActionShell: an "always" grant for diagnostics must not
+// also bless the shell tool (and vice versa). This is why diagnostics gets its
+// own action rather than reusing ActionShell (issue #42).
+func TestDiagnosticsGrantDoesNotBlessShell(t *testing.T) {
+	s := New("")
+	p := &stubPrompter{decision: DecisionAlways}
+	s.SetPrompter(p)
+
+	// Approving diagnostics "always" caches the grant…
+	if err := s.Check(ActionDiagnostics, ""); err != nil {
+		t.Fatalf("expected diagnostics allow, got %v", err)
+	}
+	// …but the shell tool must still reach the prompter rather than be covered by
+	// that grant. (The stub answers Always, so shell is allowed too — what matters
+	// is that it prompted at all.)
+	before := p.calls
+	_ = s.Check(ActionShell, "")
+	if p.calls != before+1 {
+		t.Errorf("shell should still prompt after a diagnostics grant: prompts before=%d after=%d", before, p.calls)
+	}
+}
+
 func TestAlwaysExternalRootCoversChildren(t *testing.T) {
 	s := New("")
 	p := &stubPrompter{decision: DecisionAlways}
