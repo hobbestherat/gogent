@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"gogent/internal/agent"
+	"gogent/internal/config"
 	"gogent/internal/stats"
 
 	tui "github.com/hobbestherat/turbotui"
@@ -205,11 +206,12 @@ func (s *sidebar) setGlobalApprovals(n int) {
 }
 
 // refreshOverallStats rebuilds the Overall panel's data from a Statistics report
-// joined with the sidebar's own session / sub-agent node counts. It only updates
-// the stored struct; the caller owns the redraw (mirrors SessionWindow's
+// joined with the sidebar's own session / sub-agent node counts and the focused
+// session's active model config (issue #107's model / endpoint rows). It only
+// updates the stored struct; the caller owns the redraw (mirrors SessionWindow's
 // refreshStatus contract). Runs on the UI thread.
-func (s *sidebar) refreshOverallStats(report stats.Report) {
-	s.overall = buildOverallStats(report, len(s.sessions), len(s.agents))
+func (s *sidebar) refreshOverallStats(report stats.Report, model *config.ModelConfig) {
+	s.overall = buildOverallStats(report, len(s.sessions), len(s.agents), model)
 }
 
 // drawOverall renders the bottom aggregate-stats band: a separator under the

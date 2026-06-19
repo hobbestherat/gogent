@@ -717,6 +717,9 @@ func (w *Workbench) Focus(id string) {
 	w.desktop.RemoveLayer(sw.layer)
 	w.desktop.AddLayer(sw.layer)
 	w.desktop.SetFocus(sw.input)
+	// The Overall panel's "model"/"api" rows follow the focused session (issue
+	// #107); refresh before the redraw below so the new model shows immediately.
+	w.refreshOverall()
 	w.desktop.Redraw()
 }
 
@@ -1297,15 +1300,29 @@ func (w *Workbench) scheduleOverallRefresh() {
 	w.statsRefresh.Reset(overallRefreshCoalesce)
 }
 
-// refreshOverall rebuilds the Overall panel from a fresh Statistics report. It
-// only updates the sidebar's stored aggregate; the caller owns the redraw
-// (mirrors SessionWindow's refreshStatus contract). No-op without a sidebar or
-// statistics handler. Runs on the UI thread.
+// refreshOverall rebuilds the Overall panel from a fresh Statistics report and
+// the focused session's active model config. It only updates the sidebar's stored
+// aggregate; the caller owns the redraw (mirrors SessionWindow's refreshStatus
+// contract). No-op without a sidebar or statistics handler. Runs on the UI thread.
 func (w *Workbench) refreshOverall() {
 	if w.sidebar == nil || w.handlers.GetStatistics == nil {
 		return
 	}
-	w.sidebar.refreshOverallStats(w.handlers.GetStatistics())
+	w.sidebar.refreshOverallStats(w.handlers.GetStatistics(), w.activeModelConfig())
+}
+
+// activeModelConfig returns the model config selected in the focused (top-most)
+// session window, or nil when no session is open or its model is unknown. It
+// drives the Overall panel's "model" / "api" rows (issue #107). Runs on the UI
+// thread (drawn from Focus / event / ticker refresh paths).
+func (w *Workbench) activeModelConfig() *config.ModelConfig {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	sw := w.sessions[w.activeIDLocked()]
+	if sw == nil {
+		return nil
+	}
+	return sw.selectedModelConfig()
 }
 
 // statusTickInterval is how often the live-status ticker refreshes busy
