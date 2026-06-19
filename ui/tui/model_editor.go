@@ -11,6 +11,43 @@ import (
 	tv "github.com/hobbestherat/turbotui/turbotv"
 )
 
+// modelEditor layout constants: the field labels occupy labelW cells from X=2,
+// and the boxed fields (and the model Select) start at boxX. boxW is derived as
+// width - boxX - 3 so the fields and the trailing Scan button fit the dialog.
+const (
+	modelEditorLabelW = 16
+	modelEditorBoxX   = 2 + modelEditorLabelW
+)
+
+// modelEditorWidth picks the model-editor dialog width so the widest Select
+// option (longestOption cells) fits its box without clipping, clamped to the
+// available screen width (issue #108). The Select needs two extra cells for its
+// value padding and ▼ glyph, and boxW = width - modelEditorBoxX - 3, so the
+// minimum non-clipping width is longestOption + 2 + modelEditorBoxX + 3. A
+// baseline minimum keeps the dialog from collapsing for short names.
+func modelEditorWidth(longestOption, screen int) int {
+	const minWidth = 64
+	width := longestOption + 2 + modelEditorBoxX + 3
+	if width < minWidth {
+		width = minWidth
+	}
+	if screen > 0 && width > screen {
+		width = screen
+	}
+	return width
+}
+
+// longestRuneLen returns the display width (in cells) of the widest string in ss.
+func longestRuneLen(ss []string) int {
+	max := 0
+	for _, s := range ss {
+		if l := runeLen(s); l > max {
+			max = l
+		}
+	}
+	return max
+}
+
 // showModelEditor opens a modal editor for the configured model backends. A
 // Select switches between models; the text fields below edit the selected
 // model's endpoint, model id, API key, temperature and max tokens. Edits are
@@ -27,15 +64,9 @@ func (w *Workbench) showModelEditor() {
 		return
 	}
 
-	const width = 64
 	const height = 18
-	const labelW = 16
-	const boxX = 2 + labelW
-	boxW := width - boxX - 3
-	x, y := centeredDialog(w, width, height)
-
-	dialog := tv.NewDialog("Model Settings", x, y, width, height)
-	dialog.Window.ShowClose = false
+	const labelW = modelEditorLabelW
+	const boxX = modelEditorBoxX
 
 	names := make([]string, len(models))
 	for i, m := range models {
@@ -45,6 +76,15 @@ func (w *Workbench) showModelEditor() {
 		}
 		names[i] = fmt.Sprintf("%s (%s)", label, m.Name)
 	}
+
+	// Size the dialog so the widest option label fits the boxed fields without
+	// clipping, clamped to the screen (issue #108).
+	width := modelEditorWidth(longestRuneLen(names), w.app.Width())
+	boxW := width - boxX - 3
+	x, y := centeredDialog(w, width, height)
+
+	dialog := tv.NewDialog("Model Settings", x, y, width, height)
+	dialog.Window.ShowClose = false
 
 	// field builds a labelled text field, registers it on the dialog, and
 	// returns its box for later get/set.

@@ -296,6 +296,19 @@ func (w *Workbench) SetModels(models []*config.ModelConfig) {
 	}
 }
 
+// longestModelNameWidth returns the display width (in cells) of the widest model
+// name offered in the window-header selector, used to size that dropdown so the
+// active name is not truncated (issue #108).
+func (w *Workbench) longestModelNameWidth() int {
+	max := 0
+	for _, n := range w.modelNames {
+		if l := runeLen(n); l > max {
+			max = l
+		}
+	}
+	return max
+}
+
 // modelByDisplayName returns the model config matching a select label.
 func (w *Workbench) modelByDisplayName(name string) *config.ModelConfig {
 	for _, m := range w.models {

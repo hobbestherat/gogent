@@ -138,10 +138,7 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 			return
 		}
 		inputH := 3
-		selW := 24
-		if selW > wd-9 {
-			selW = wd - 9
-		}
+		selW := headerSelectWidth(sw.wb.longestModelNameWidth(), wd)
 		modelLabel.Component.SetBounds(tv.Rect{X: 0, Y: 0, W: 6, H: 1})
 		modelSelect.Component.SetBounds(tv.Rect{X: 7, Y: 0, W: selW, H: 1})
 		history.Component.SetBounds(tv.Rect{X: 0, Y: 1, W: wd, H: ht - inputH - 2})
@@ -825,6 +822,27 @@ func contextPercent(tokens, window int) int {
 		return p
 	}
 	return 100
+}
+
+// headerSelectWidth sizes the window-header model dropdown (issue #108). It grows
+// to fit the longest model name plus two cells for the Select's value padding and
+// ▼ glyph, never shrinking below a sensible minimum, and is clamped to the room
+// available in the window (leaving space for the "Model" label and a small right
+// margin). The caller's window-width guard guarantees windowWidth >= 4, so the
+// clamp keeps the control at least one cell wide.
+func headerSelectWidth(longestName, windowWidth int) int {
+	const minW = 24
+	w := minW
+	if want := longestName + 2; want > w {
+		w = want
+	}
+	if max := windowWidth - 9; w > max {
+		w = max
+	}
+	if w < 1 {
+		w = 1
+	}
+	return w
 }
 
 // runeLen returns the number of display cells (runes) in s.
