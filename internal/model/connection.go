@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -41,11 +42,127 @@ type ToolCall struct {
 }
 
 type Message struct {
-	Role       Role       `json:"role"`
-	Content    string     `json:"content"`
+	Role    Role   `json:"role"`
+	Content string `json:"content"`
+	// Images carries any image attachments on the message (multimodal input).
+	// It is kept separate from the scalar Content text so the rest of gogent can
+	// keep reading Content as "the text"; the two are fused into an OpenAI-style
+	// content-parts array on the wire (see MarshalJSON) and split back apart on
+	// the way in (see UnmarshalJSON). Empty for the overwhelmingly common
+	// text-only message, in which case the wire form is byte-identical to before.
+	Images     []ImageURL `json:"-"`
 	Name       string     `json:"name,omitempty"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
+// ImageURL is a single image attachment, matching OpenAI's image_url content
+// part. URL is either a remote http(s) URL or an inline RFC 2397 data URL
+// ("data:image/png;base64,...") for a pasted/dropped image (see DataURL). Detail
+// is an optional provider rendering hint ("low" | "high" | "auto").
+type ImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// contentPart is the wire shape of one element of an OpenAI multimodal content
+// array: a text part (Text set) or an image_url part (ImageURL set).
+type contentPart struct {
+	Type     string    `json:"type"`
+	Text     string    `json:"text,omitempty"`
+	ImageURL *ImageURL `json:"image_url,omitempty"`
+}
+
+// MarshalJSON encodes the message for the OpenAI-compatible wire format. With no
+// images attached it emits the plain object whose content is a scalar string —
+// byte-for-byte what every text-only message has always sent. When images are
+// present, content instead becomes an array of parts: a leading text part (when
+// Content is non-empty) followed by one image_url part per image, which is how
+// OpenAI expresses vision input and the shape the Anthropic adapter translates.
+func (m Message) MarshalJSON() ([]byte, error) {
+	wire := struct {
+		Role       Role        `json:"role"`
+		Content    interface{} `json:"content"`
+		Name       string      `json:"name,omitempty"`
+		ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
+		ToolCallID string      `json:"tool_call_id,omitempty"`
+	}{Role: m.Role, Name: m.Name, ToolCalls: m.ToolCalls, ToolCallID: m.ToolCallID}
+
+	if len(m.Images) == 0 {
+		wire.Content = m.Content
+	} else {
+		parts := make([]contentPart, 0, len(m.Images)+1)
+		if m.Content != "" {
+			parts = append(parts, contentPart{Type: "text", Text: m.Content})
+		}
+		for i := range m.Images {
+			img := m.Images[i]
+			parts = append(parts, contentPart{Type: "image_url", ImageURL: &img})
+		}
+		wire.Content = parts
+	}
+	return json.Marshal(wire)
+}
+
+// UnmarshalJSON decodes a message whose content may be either a scalar string
+// (the common text-only case, and how transcripts have always been persisted) or
+// an OpenAI multimodal parts array. Text parts are concatenated into Content and
+// image_url parts collected into Images, so callers keep reading Content as "the
+// text" regardless of which shape arrived.
+func (m *Message) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Role       Role            `json:"role"`
+		Content    json.RawMessage `json:"content"`
+		Name       string          `json:"name,omitempty"`
+		ToolCalls  []ToolCall      `json:"tool_calls,omitempty"`
+		ToolCallID string          `json:"tool_call_id,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*m = Message{Role: raw.Role, Name: raw.Name, ToolCalls: raw.ToolCalls, ToolCallID: raw.ToolCallID}
+
+	trimmed := bytes.TrimSpace(raw.Content)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return nil
+	}
+	if trimmed[0] != '[' {
+		// Scalar string content (or a malformed scalar, surfaced as an error).
+		return json.Unmarshal(trimmed, &m.Content)
+	}
+	var parts []contentPart
+	if err := json.Unmarshal(trimmed, &parts); err != nil {
+		return err
+	}
+	var text strings.Builder
+	for _, p := range parts {
+		if p.Type == "image_url" {
+			if p.ImageURL != nil {
+				m.Images = append(m.Images, *p.ImageURL)
+			}
+			continue
+		}
+		text.WriteString(p.Text) // "text" parts, and unknown parts degrade to their text
+	}
+	m.Content = text.String()
+	return nil
+}
+
+// DataURL builds an RFC 2397 base64 data: URL from a MIME type and raw image
+// bytes — the canonical way to embed a pasted or dropped image inline in a
+// message without a separate upload.
+func DataURL(mimeType string, data []byte) string {
+	return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data)
+}
+
+// UserImageMessage builds a user turn carrying optional text plus one or more
+// images. Each image reference is an http(s) URL or a data: URL (see DataURL).
+func UserImageMessage(text string, imageURLs ...string) Message {
+	m := Message{Role: RoleUser, Content: text}
+	for _, u := range imageURLs {
+		m.Images = append(m.Images, ImageURL{URL: u})
+	}
+	return m
 }
 
 // FunctionDef describes a callable function exposed to the model.
