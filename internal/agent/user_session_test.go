@@ -248,3 +248,101 @@ func TestUserSessionNotFound(t *testing.T) {
 		t.Errorf("Expected NotFoundError, got %T", err)
 	}
 }
+
+// newEventTestSession builds a minimal session for exercising the
+// coordinator event channel directly.
+func newEventTestSession(id string) *UserSession {
+	m := model.NewModelConnection()
+	ms := model.NewModelSession(id, m)
+	return NewUserSession(id, NewAgent("root", ms))
+}
+
+func TestNextAgentEventDeliversBufferedEvent(t *testing.T) {
+	s := newEventTestSession("evt-buffered")
+
+	s.pushAgentEvent(AgentEvent{AgentID: "a1", Type: AgentEventCompleted, Text: "done"})
+
+	ev, ok := s.NextAgentEvent(time.Second)
+	if !ok {
+		t.Fatal("expected an event, got timeout")
+	}
+	if ev.AgentID != "a1" || ev.Type != AgentEventCompleted {
+		t.Errorf("unexpected event: %+v", ev)
+	}
+}
+
+func TestNextAgentEventTimesOut(t *testing.T) {
+	s := newEventTestSession("evt-timeout")
+
+	if _, ok := s.NextAgentEvent(10 * time.Millisecond); ok {
+		t.Error("expected timeout when no events are queued")
+	}
+}
+
+// TestNextAgentEventTerminalNotDroppedWhenFull is the regression test for
+// issue #27: a terminal event pushed while the buffer is full must still be
+// observable, so a coordinator waiting for completion never blocks forever.
+func TestNextAgentEventTerminalNotDroppedWhenFull(t *testing.T) {
+	s := newEventTestSession("evt-full")
+
+	// Saturate the buffer with clarify events that nobody is reading.
+	for i := 0; i < cap(s.agentEvents)+8; i++ {
+		s.pushAgentEvent(AgentEvent{AgentID: "noise", Type: AgentEventClarify})
+	}
+
+	// The terminal completion event overflows the buffer but must survive.
+	s.pushAgentEvent(AgentEvent{AgentID: "worker", Type: AgentEventCompleted, Text: "SUCCESS"})
+
+	// Drain until we observe the terminal event. A non-positive timeout would
+	// block forever if it had been dropped, so bound each wait.
+	var got *AgentEvent
+	for i := 0; i < cap(s.agentEvents)+16; i++ {
+		ev, ok := s.NextAgentEvent(time.Second)
+		if !ok {
+			break
+		}
+		if ev.Type == AgentEventCompleted && ev.AgentID == "worker" {
+			got = &ev
+			break
+		}
+	}
+	if got == nil {
+		t.Fatal("terminal completion event was dropped when the buffer was full")
+	}
+	if got.Text != "SUCCESS" {
+		t.Errorf("unexpected terminal event text: %q", got.Text)
+	}
+}
+
+// TestNextAgentEventDrainsBufferBeforeOverflow verifies buffered events are
+// returned ahead of spilled terminal events, and both are eventually observed.
+func TestNextAgentEventDrainsBufferBeforeOverflow(t *testing.T) {
+	s := newEventTestSession("evt-order")
+
+	n := cap(s.agentEvents)
+	for i := 0; i < n; i++ {
+		s.pushAgentEvent(AgentEvent{AgentID: "buffered", Type: AgentEventCompleted})
+	}
+	// This one cannot fit and spills into pendingTerminal.
+	s.pushAgentEvent(AgentEvent{AgentID: "spilled", Type: AgentEventFailed})
+
+	buffered, spilled := 0, 0
+	for i := 0; i < n+1; i++ {
+		ev, ok := s.NextAgentEvent(time.Second)
+		if !ok {
+			t.Fatalf("timed out after %d events", buffered+spilled)
+		}
+		switch ev.AgentID {
+		case "buffered":
+			if spilled > 0 {
+				t.Error("spilled event returned before buffer was fully drained")
+			}
+			buffered++
+		case "spilled":
+			spilled++
+		}
+	}
+	if buffered != n || spilled != 1 {
+		t.Errorf("expected %d buffered and 1 spilled, got %d and %d", n, buffered, spilled)
+	}
+}

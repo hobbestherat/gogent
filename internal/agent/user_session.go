@@ -120,6 +120,11 @@ type UserSession struct {
 	// Interactive (experimental) sub-agent bookkeeping.
 	interactive map[string]*InteractiveAgent
 	agentEvents chan AgentEvent
+	// pendingTerminal holds terminal (completed/failed) events that did not fit
+	// in agentEvents when it was full. Terminal events must never be dropped, or
+	// a coordinator's wait_agent_event blocks forever on an event that was
+	// discarded (issue #27). Guarded by mu; drained by NextAgentEvent.
+	pendingTerminal []AgentEvent
 
 	// Task tracking for multi-turn tool calling
 	currentTask *tool.Task
@@ -1191,18 +1196,53 @@ func (s *UserSession) finishInteractive(ia *InteractiveAgent, status AgentStatus
 	s.pushAgentEvent(AgentEvent{AgentID: ia.ID, Name: ia.Name, Type: evType, Text: result})
 }
 
-// pushAgentEvent delivers a coordinator event, dropping it if the buffer is full
-// rather than blocking the sub-agent goroutine.
+// pushAgentEvent delivers a coordinator event without blocking the sub-agent
+// goroutine. Non-terminal (clarify) events are best-effort and dropped when the
+// buffer is full, since the coordinator can still recover them via agent_status.
+// Terminal (completed/failed) events are never dropped: when the buffer is full
+// they spill into pendingTerminal, which NextAgentEvent drains (issue #27).
 func (s *UserSession) pushAgentEvent(ev AgentEvent) {
 	select {
 	case s.agentEvents <- ev:
+		return
 	default:
 	}
+	if ev.Type == AgentEventClarify {
+		return
+	}
+	s.mu.Lock()
+	s.pendingTerminal = append(s.pendingTerminal, ev)
+	s.mu.Unlock()
+}
+
+// popPendingTerminal removes and returns the oldest spilled terminal event, if
+// any.
+func (s *UserSession) popPendingTerminal() (AgentEvent, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.pendingTerminal) == 0 {
+		return AgentEvent{}, false
+	}
+	ev := s.pendingTerminal[0]
+	s.pendingTerminal = s.pendingTerminal[1:]
+	return ev, true
 }
 
 // NextAgentEvent blocks for the next interactive sub-agent event, up to timeout.
 // A non-positive timeout waits indefinitely. The boolean is false on timeout.
 func (s *UserSession) NextAgentEvent(timeout time.Duration) (AgentEvent, bool) {
+	// Drain buffered events first, then any terminal events that spilled over
+	// when the buffer was full, before blocking. This guarantees a terminal
+	// event is always observable and the coordinator never waits forever for one
+	// that was discarded (issue #27).
+	select {
+	case ev := <-s.agentEvents:
+		return ev, true
+	default:
+	}
+	if ev, ok := s.popPendingTerminal(); ok {
+		return ev, true
+	}
 	if timeout <= 0 {
 		ev := <-s.agentEvents
 		return ev, true
