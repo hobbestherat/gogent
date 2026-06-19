@@ -300,6 +300,21 @@ func (s *ModelSession) Resume(newModel Connector) {
 	// against the value captured before the assignment above; comparing against
 	// s.Model after the assignment is trivially false (the original bug).
 	if newModel != prev {
+		// Carry the outgoing backend's accumulated usage counters into the fresh
+		// connector. The new connection starts with zeroed stats, so without this
+		// the session's connector-level token / request / error totals would
+		// appear to reset to zero on every model switch — and gogent rebuilds the
+		// connection on each send, so they reset on essentially every turn (issue
+		// #146). The per-turn token count is recomputed from History below.
+		if prev != nil && newModel != nil {
+			if from, ok := prev.(StatsReporter); ok {
+				if to, ok := newModel.(StatsReporter); ok {
+					if dst := to.GetStats(); dst != nil {
+						dst.Carry(from.StatsSnapshot())
+					}
+				}
+			}
+		}
 		newCount := 0
 		for _, turn := range s.History {
 			if turn.Usage != nil {
