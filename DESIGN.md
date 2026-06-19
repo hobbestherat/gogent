@@ -107,6 +107,11 @@ internal/notify/       Desktop/terminal notifications (bell + OSC 9/777 + native
   pinned, reordered and moved/resized windows come back where the user left
   them. The title here is a UI concern decoupled from the session id; the
   transcript itself lives in the session JSONL above.
+- Diagnostics: warnings and errors go through `internal/diag`, never raw
+  `fmt.Printf` to stdout. In TUI mode they append to `~/.gogent/gogent.log` (a
+  file, so they can't corrupt the alternate screen); in headless mode they go to
+  stderr. Skill-load and session-encode failures are surfaced here instead of
+  being swallowed.
 
 ## Entry points
 

@@ -1,6 +1,7 @@
 package skill
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -50,38 +51,51 @@ func (r *SkillRegistry) LoadSkills(dir string) error {
 	return r.loadSkillsRecursive(dir)
 }
 
-// loadSkillsRecursive loads skills from a directory recursively
+// loadSkillsRecursive loads skills from a directory recursively. A skill that
+// fails to read or parse no longer vanishes silently: its error is aggregated
+// (alongside any sibling failures) and returned, while the rest still load
+// (issue #17). A missing directory is a no-op rather than an error, since the
+// skills directories are optional.
 func (r *SkillRegistry) loadSkillsRecursive(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil // optional skills directory not present
+		}
 		return fmt.Errorf("failed to read directory %s: %w", dir, err)
 	}
 
+	var errs error
 	for _, entry := range entries {
 		if entry.IsDir() {
 			// Check for SKILL.md in directory
 			skillPath := filepath.Join(dir, entry.Name(), "SKILL.md")
-			if info, err := os.Stat(skillPath); err == nil && !info.IsDir() {
-				r.loadSkillFile(skillPath, entry.Name())
+			if info, statErr := os.Stat(skillPath); statErr == nil && !info.IsDir() {
+				if err := r.loadSkillFile(skillPath, entry.Name()); err != nil {
+					errs = errors.Join(errs, fmt.Errorf("skill %s: %w", entry.Name(), err))
+				}
 			}
 			// Recurse into subdirectories
-			r.loadSkillsRecursive(filepath.Join(dir, entry.Name()))
+			if err := r.loadSkillsRecursive(filepath.Join(dir, entry.Name())); err != nil {
+				errs = errors.Join(errs, err)
+			}
 		}
 	}
 
-	return nil
+	return errs
 }
 
-// loadSkillFile loads a single skill file
-func (r *SkillRegistry) loadSkillFile(path string, name string) {
+// loadSkillFile loads a single skill file, returning any read or parse error so
+// the caller can surface it instead of dropping the skill without a trace.
+func (r *SkillRegistry) loadSkillFile(path string, name string) error {
 	content, err := os.ReadFile(path)
 	if err != nil {
-		return
+		return fmt.Errorf("read %s: %w", path, err)
 	}
 
 	description, err := parseFrontmatter(string(content))
 	if err != nil {
-		return
+		return fmt.Errorf("parse %s: %w", path, err)
 	}
 
 	r.skills[name] = &Skill{
@@ -99,6 +113,7 @@ func (r *SkillRegistry) loadSkillFile(path string, name string) {
 
 	// Activate by default
 	r.activeSkills[name] = true
+	return nil
 }
 
 // GetSkill gets a skill by name

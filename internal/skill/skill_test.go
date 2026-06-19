@@ -1,9 +1,23 @@
 package skill
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// writeSkillFixture creates dir/SKILL.md with the given content, for the
+// load-error tests below.
+func writeSkillFixture(t *testing.T, dir, content string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+}
 
 func TestSkillRegistryLoadSkills(t *testing.T) {
 	registry := NewSkillRegistry()
@@ -200,5 +214,42 @@ func TestSkillRegistryConcurrency(t *testing.T) {
 	stats := registry.GetSkillStats("calc")
 	if stats == nil {
 		t.Error("Expected stats for calc")
+	}
+}
+
+// TestLoadSkillsSurfacesParseErrors guards issue #17: an unreadable or
+// unparseable skill used to vanish silently (loadSkillFile returned nothing).
+// Now its error is returned, and — because errors are aggregated, not fatal —
+// the well-formed sibling still loads.
+func TestLoadSkillsSurfacesParseErrors(t *testing.T) {
+	dir := t.TempDir()
+	writeSkillFixture(t, filepath.Join(dir, "good"),
+		"---\nname: good\ndescription: A good skill\n---\n# Good\n")
+	// Missing the required description → parseFrontmatter fails.
+	writeSkillFixture(t, filepath.Join(dir, "bad"),
+		"---\nname: bad\n---\n# Bad\n")
+
+	reg := NewSkillRegistry()
+	err := reg.LoadSkills(dir)
+	if err == nil {
+		t.Fatal("expected an error for the unparseable skill, got nil")
+	}
+	if !strings.Contains(err.Error(), "bad") {
+		t.Errorf("expected the error to name the bad skill, got: %v", err)
+	}
+	if reg.GetSkill("good") == nil {
+		t.Error("expected the well-formed skill to still load alongside the bad one")
+	}
+	if reg.GetSkill("bad") != nil {
+		t.Error("the unparseable skill must not be registered")
+	}
+}
+
+// TestLoadSkillsMissingDirIsNotAnError: the skills directories are optional, so
+// their absence is a no-op (nil error), not a noisy failure.
+func TestLoadSkillsMissingDirIsNotAnError(t *testing.T) {
+	reg := NewSkillRegistry()
+	if err := reg.LoadSkills(filepath.Join(t.TempDir(), "does-not-exist")); err != nil {
+		t.Errorf("loading a missing optional skills dir should be a no-op, got: %v", err)
 	}
 }

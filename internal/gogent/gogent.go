@@ -15,6 +15,7 @@ import (
 	"gogent/internal/agent"
 	"gogent/internal/command"
 	"gogent/internal/config"
+	"gogent/internal/diag"
 	"gogent/internal/fileops"
 	"gogent/internal/model"
 	"gogent/internal/permission"
@@ -39,6 +40,11 @@ type Gogent struct {
 	homeDir          string
 	store            *SessionStore
 	skills           *skill.SkillRegistry
+	// log routes diagnostics (warnings, errors) to a sink that never corrupts
+	// the TUI's alternate screen: a file in TUI mode, stderr when headless
+	// (issue #17). Defaults to stderr; the TUI entry point redirects it via
+	// SetLogger.
+	log *diag.Logger
 	// agentsContext is the project AGENTS.md instruction text discovered at
 	// startup, injected into every session's system prompt.
 	agentsContext string
@@ -105,10 +111,14 @@ func NewGogentWithWorkspace(homeDir, workspaceRoot string) *Gogent {
 		workspaceRoot = filepath.Join(homeDir, ".gogent", "workspace")
 	}
 
+	// Diagnostics default to stderr (headless); the TUI entry point redirects
+	// them to a log file via SetLogger so they never hit the alternate screen.
+	log := diag.Stderr()
+
 	// Load config
 	cfg, err := config.LoadConfig(homeDir)
 	if err != nil {
-		fmt.Printf("Warning: Failed to load config: %v, using defaults\n", err)
+		log.Warnf("Failed to load config: %v, using defaults", err)
 		cfg = config.GetDefaultConfig()
 	}
 
@@ -122,13 +132,14 @@ func NewGogentWithWorkspace(homeDir, workspaceRoot string) *Gogent {
 		sessionTitles: make(map[string]string),
 
 		reviewApprovedAll: make(map[string]bool),
+		log:               log,
 	}
 
 	// Session transcript persistence (best-effort; a nil store disables it).
 	if store, err := NewSessionStore(filepath.Join(homeDir, ".gogent", "sessions")); err == nil {
 		g.store = store
 	} else {
-		fmt.Printf("Warning: session persistence disabled: %v\n", err)
+		log.Warnf("session persistence disabled: %v", err)
 	}
 
 	// Initialize file operations services
@@ -144,10 +155,15 @@ func NewGogentWithWorkspace(homeDir, workspaceRoot string) *Gogent {
 
 	// Load skills (user + built-in) and discover project AGENTS.md instructions
 	// before building the tool registry so the skill tool and system-context
-	// provider can see them.
+	// provider can see them. A skill that fails to read or parse is surfaced as
+	// a warning instead of vanishing silently (issue #17).
 	g.skills = skill.NewSkillRegistry()
-	_ = g.skills.LoadSkills(filepath.Join(homeDir, ".gogent", "skills"))
-	_ = g.skills.LoadSkills(filepath.Join(workspaceRoot, "skills"))
+	if err := g.skills.LoadSkills(filepath.Join(homeDir, ".gogent", "skills")); err != nil {
+		log.Warnf("load user skills: %v", err)
+	}
+	if err := g.skills.LoadSkills(filepath.Join(workspaceRoot, "skills")); err != nil {
+		log.Warnf("load workspace skills: %v", err)
+	}
 	g.agentsContext = renderAgentsContext(discoverAgentsDocs(workspaceRoot, filepath.Join(homeDir, ".gogent")))
 	g.repoMap = buildRepoMap(workspaceRoot)
 	g.gitRepo = vcs.IsRepo(workspaceRoot)
@@ -156,6 +172,30 @@ func NewGogentWithWorkspace(homeDir, workspaceRoot string) *Gogent {
 	g.initializeToolRegistry()
 
 	return g
+}
+
+// SetLogger redirects gogent's diagnostics to lg. The TUI entry point uses it to
+// route warnings/errors to a log file (so they never corrupt the alternate
+// screen); headless mode keeps the stderr default. It is meant to be called once
+// at startup, before sessions generate. A nil argument is ignored.
+func (g *Gogent) SetLogger(lg *diag.Logger) {
+	if lg == nil {
+		return
+	}
+	g.mu.Lock()
+	g.log = lg
+	g.mu.Unlock()
+}
+
+// warnf emits a warning through the configured logger, snapshotting it under the
+// registry lock since warnings fire from multiple goroutines.
+func (g *Gogent) warnf(format string, args ...any) {
+	g.mu.RLock()
+	lg := g.log
+	g.mu.RUnlock()
+	if lg != nil {
+		lg.Warnf(format, args...)
+	}
 }
 
 // GetConfig returns the current configuration
@@ -669,7 +709,7 @@ func (g *Gogent) RemoveSession(id string) {
 	// Archive the on-disk transcript so it is not auto-restored next start.
 	if g.store != nil && id != "default" {
 		if err := g.store.Archive(id); err != nil {
-			fmt.Printf("Warning: failed to archive session %s: %v\n", id, err)
+			g.warnf("failed to archive session %s: %v", id, err)
 		}
 	}
 }
@@ -698,7 +738,7 @@ func (g *Gogent) persistSession(id string) {
 		title = id
 	}
 	if err := g.store.Save(us, title); err != nil {
-		fmt.Printf("Warning: failed to persist session %s: %v\n", id, err)
+		g.warnf("failed to persist session %s: %v", id, err)
 	}
 }
 
@@ -729,7 +769,7 @@ func (g *Gogent) RestoreSessions() []LoadedSession {
 	}
 	loaded, err := g.store.ListActive()
 	if err != nil {
-		fmt.Printf("Warning: failed to list sessions: %v\n", err)
+		g.warnf("failed to list sessions: %v", err)
 		return nil
 	}
 	var restored []LoadedSession
@@ -1422,7 +1462,7 @@ func (g *Gogent) SetSubAgentSettings(cfg config.SubAgentConfig) {
 	}
 
 	if err := g.SaveConfig(); err != nil {
-		fmt.Printf("Warning: Failed to persist config: %v\n", err)
+		g.warnf("Failed to persist config: %v", err)
 	}
 }
 
@@ -1473,7 +1513,7 @@ func (g *Gogent) SetTimeouts(t config.TimeoutConfig) {
 	}
 
 	if err := g.SaveConfig(); err != nil {
-		fmt.Printf("Warning: Failed to persist config: %v\n", err)
+		g.warnf("Failed to persist config: %v", err)
 	}
 }
 
@@ -1493,7 +1533,7 @@ func (g *Gogent) SetNotifications(n config.NotifyConfig) {
 	g.config.SetNotifyConfig(n)
 	g.mu.Unlock()
 	if err := g.SaveConfig(); err != nil {
-		fmt.Printf("Warning: Failed to persist config: %v\n", err)
+		g.warnf("Failed to persist config: %v", err)
 	}
 }
 
@@ -1513,7 +1553,7 @@ func (g *Gogent) SetBudget(b config.BudgetConfig) {
 	g.config.Budget = b
 	g.mu.Unlock()
 	if err := g.SaveConfig(); err != nil {
-		fmt.Printf("Warning: Failed to persist config: %v\n", err)
+		g.warnf("Failed to persist config: %v", err)
 	}
 }
 
@@ -1552,7 +1592,7 @@ func (g *Gogent) UpdateModel(updated config.ModelConfig) error {
 		return fmt.Errorf("model %q not found", updated.Name)
 	}
 	if err := g.SaveConfig(); err != nil {
-		fmt.Printf("Warning: Failed to persist config: %v\n", err)
+		g.warnf("Failed to persist config: %v", err)
 	}
 	return nil
 }
