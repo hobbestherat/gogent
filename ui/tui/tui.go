@@ -194,6 +194,12 @@ type Workbench struct {
 	// output (os.Stdout); SetNotifyConfig keeps its config in sync with the
 	// persisted setting.
 	notify *notify.Notifier
+	// statsRefresh coalesces Overall-panel recomputations: a burst of session
+	// events arms it once and rapid follow-ups Reset it, so the panel refreshes
+	// at most ~250ms after the burst settles instead of once per event (issues
+	// #22 / #53). Lazily created and only touched on the UI thread; its AfterFunc
+	// goroutine just Posts the refresh back to the UI thread.
+	statsRefresh *time.Timer
 }
 
 // NewWorkbench creates the workbench and its desktop chrome.
@@ -549,6 +555,9 @@ func (w *Workbench) openWindow(id, title string) *SessionWindow {
 	if w.sidebar != nil {
 		w.sidebar.addSession(id, title, pinned)
 	}
+	// The Overall panel's session count changed; refresh it so the count is right
+	// on the immediate repaint rather than the next coalesced event refresh.
+	w.refreshOverall()
 	return sw
 }
 
@@ -658,6 +667,9 @@ func (w *Workbench) CloseSession(id string) {
 	if w.sidebar != nil {
 		w.sidebar.removeSession(id)
 	}
+	// The Overall panel's session/sub-agent counts changed; refresh before the
+	// repaint below so the closed session's figures drop immediately.
+	w.refreshOverall()
 	if w.handlers.OnClose != nil {
 		w.handlers.OnClose(id)
 	}
@@ -1008,6 +1020,10 @@ func (w *Workbench) EmitSessionEvent(id string, ev agent.SessionEvent) {
 			sw.apply(ev)
 		}
 		w.maybeNotify(id, ev)
+		// An event may have moved the aggregate (usage tokens/requests, a sub-agent
+		// spawn, an error); coalesce the Overall-panel refresh rather than paying
+		// for one per event (issue #53 / redraw note in #22).
+		w.scheduleOverallRefresh()
 	})
 }
 
@@ -1074,6 +1090,14 @@ func (w *Workbench) Run() error {
 	// Persist the final desktop arrangement (including window moves/resizes the
 	// user made this session) when the loop stops, so it is restored next launch.
 	defer w.persistLayout()
+	// Stop the coalesced Overall-panel refresh timer so it cannot Post after the
+	// loop is gone (a stray Post on a stopped desktop is benign, but stopping is
+	// tidy). Lazily created, so guard nil.
+	defer func() {
+		if w.statsRefresh != nil {
+			w.statsRefresh.Stop()
+		}
+	}()
 	// Re-open any persisted sessions (crash recovery / continuation), then
 	// re-apply the saved workbench layout (titles, pin/order, window bounds).
 	if w.handlers.Restore != nil {
@@ -1100,9 +1124,52 @@ func (w *Workbench) Run() error {
 	// line once a second so the elapsed timer and throughput tick. Idle
 	// workbenches do no work (and no redraw) per tick. Stops with the UI loop.
 	go w.runStatusTicker(w.shutdown)
+	// Populate the Overall panel's first frame from the current aggregate so it
+	// is not blank before the first session event arrives.
+	w.refreshOverall()
 	err := w.desktop.Run(w.shutdown)
 	w.app.Close()
 	return err
+}
+
+// overallRefreshCoalesce bounds how often the Overall panel recomputes its
+// aggregate during a burst of session events: events arriving faster than this
+// collapse into a single recomputation, so a fast event stream cannot thrash the
+// sidebar redraw (the TUI redraw note in issue #22; the panel itself is #53).
+const overallRefreshCoalesce = 250 * time.Millisecond
+
+// scheduleOverallRefresh (re)arms a single coalesced refresh of the Overall
+// panel. The first session event after an idle period arms the timer; rapid
+// follow-up events Reset it, so only one refresh fires ~250ms after the burst
+// settles. It is a no-op when there is no sidebar or statistics handler. All
+// callers run on the UI thread (event Post callbacks, the status ticker, session
+// open/close), so the lazy creation and Reset are single-threaded; the AfterFunc
+// goroutine only Posts back to the UI thread.
+func (w *Workbench) scheduleOverallRefresh() {
+	if w.sidebar == nil || w.handlers.GetStatistics == nil {
+		return
+	}
+	if w.statsRefresh == nil {
+		w.statsRefresh = time.AfterFunc(overallRefreshCoalesce, func() {
+			w.desktop.Post(func() {
+				w.refreshOverall()
+				w.desktop.Redraw()
+			})
+		})
+		return
+	}
+	w.statsRefresh.Reset(overallRefreshCoalesce)
+}
+
+// refreshOverall rebuilds the Overall panel from a fresh Statistics report. It
+// only updates the sidebar's stored aggregate; the caller owns the redraw
+// (mirrors SessionWindow's refreshStatus contract). No-op without a sidebar or
+// statistics handler. Runs on the UI thread.
+func (w *Workbench) refreshOverall() {
+	if w.sidebar == nil || w.handlers.GetStatistics == nil {
+		return
+	}
+	w.sidebar.refreshOverallStats(w.handlers.GetStatistics())
 }
 
 // statusTickInterval is how often the live-status ticker refreshes busy
@@ -1146,6 +1213,9 @@ func (w *Workbench) tickBusyStatuses() {
 	for _, sw := range busy {
 		sw.refreshStatus()
 	}
+	// While work is in flight the aggregate keeps moving (tokens stream in), so
+	// refresh the Overall panel on the same 1s tick as the status lines.
+	w.refreshOverall()
 	w.desktop.Redraw()
 }
 
