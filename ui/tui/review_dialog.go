@@ -86,13 +86,20 @@ func showReviewDialog(desktop *tv.Desktop, req gogent.EditReviewRequest, request
 	headerY := 1
 	if label := requesterLine(requester, req.AgentID); label != "" {
 		r := tv.NewLabel(truncate(label, width-4), tv.Rect{X: 2, Y: 1, W: width - 4, H: 1})
-		r.FG = colorUser
+		r.FG = dialogTextFG(colorUser)
 		r.BG = tv.DefaultTheme.DialogBG
 		dialog.Window.AddContent(r)
 		headerY = 2
 	}
 
+	// The diff view wraps long lines (paths, long additions) instead of clipping
+	// them, and uses the dialog colours so the per-line diff colours stay legible
+	// on the dialog background (issue #98).
 	diffView := tv.NewTextView("", tv.Rect{X: 1, Y: headerY, W: width - 2, H: height - headerY - 4})
+	diffView.Wrap = true
+	diffView.FG = tv.DefaultTheme.DialogFG
+	diffView.BG = tv.DefaultTheme.DialogBG
+	diffView.FocusFG = tv.DefaultTheme.MnemonicFG
 	renderDiff(diffView, req.Diff)
 	dialog.Window.AddContent(diffView)
 
@@ -141,11 +148,11 @@ func showReviewDialog(desktop *tv.Desktop, req gogent.EditReviewRequest, request
 // scannable at a glance.
 func renderDiff(view *tv.TextView, diff string) {
 	if strings.TrimSpace(diff) == "" {
-		view.AddColored("(no changes)", colorNote)
+		view.AddColored("(no changes)", dialogTextFG(colorNote))
 		return
 	}
 	for _, line := range strings.Split(diff, "\n") {
-		view.AddColored(line, diffLineColor(line))
+		view.AddColored(line, dialogTextFG(diffLineColor(line)))
 	}
 }
 

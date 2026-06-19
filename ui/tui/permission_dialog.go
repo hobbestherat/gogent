@@ -237,7 +237,7 @@ func showPermissionDialog(desktop *tv.Desktop, req permission.Request, requester
 	// (possibly scrolling) body.
 	if requesterHdr != "" {
 		r := tv.NewLabel(truncate(requesterHdr, width-4), tv.Rect{X: 2, Y: 1, W: width - 4, H: 1})
-		r.FG = colorUser
+		r.FG = dialogTextFG(colorUser)
 		r.BG = tv.DefaultTheme.DialogBG
 		dialog.Window.AddContent(r)
 	}
@@ -253,7 +253,7 @@ func showPermissionDialog(desktop *tv.Desktop, req permission.Request, requester
 	body.BG = tv.DefaultTheme.DialogBG
 	body.FocusFG = tv.DefaultTheme.MnemonicFG
 	for _, line := range bodyLines {
-		body.AddColored(line.text, line.color)
+		body.AddColored(line.text, dialogTextFG(line.color))
 	}
 	dialog.Window.AddContent(body)
 

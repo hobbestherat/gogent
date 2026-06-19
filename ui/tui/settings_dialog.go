@@ -66,7 +66,7 @@ func newNumField(text string, value, x, y, labelW, boxW int) *numField {
 // which is why the dialog opens reflecting the persisted config.
 func (w *Workbench) showSettingsDialog() {
 	if w.handlers.GetSettings == nil || w.handlers.SetSettings == nil {
-		tv.ShowConfirmYesNo(w.desktop, "Settings", "Sub-agent settings are unavailable.", nil)
+		showConfirmDialog(w.desktop, "Settings", "Sub-agent settings are unavailable.", nil)
 		return
 	}
 	cur := w.handlers.GetSettings()

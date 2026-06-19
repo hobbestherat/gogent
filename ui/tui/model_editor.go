@@ -55,12 +55,12 @@ func longestRuneLen(ss []string) int {
 // only when the user presses Save.
 func (w *Workbench) showModelEditor() {
 	if w.handlers.GetModels == nil || w.handlers.UpdateModel == nil {
-		tv.ShowConfirmYesNo(w.desktop, "Models", "Model editing is unavailable.", nil)
+		showConfirmDialog(w.desktop, "Models", "Model editing is unavailable.", nil)
 		return
 	}
 	models := w.handlers.GetModels()
 	if len(models) == 0 {
-		tv.ShowConfirmYesNo(w.desktop, "Models", "No models are configured.", nil)
+		showConfirmDialog(w.desktop, "Models", "No models are configured.", nil)
 		return
 	}
 
@@ -179,7 +179,7 @@ func (w *Workbench) showModelEditor() {
 	}
 	scanModels = func() {
 		if w.handlers.ScanModels == nil {
-			tv.ShowConfirmYesNo(w.desktop, "Scan", "Model scanning is unavailable.", nil)
+			showConfirmDialog(w.desktop, "Scan", "Model scanning is unavailable.", nil)
 			return
 		}
 		store(cur)
@@ -190,7 +190,7 @@ func (w *Workbench) showModelEditor() {
 			ids, err := w.handlers.ScanModels(draft)
 			w.desktop.Post(func() {
 				if err != nil {
-					tv.ShowConfirmYesNo(w.desktop, "Scan", "Failed to list models:\n"+err.Error(), nil)
+					showConfirmDialog(w.desktop, "Scan", "Failed to list models:\n"+err.Error(), nil)
 					return
 				}
 				if target != cur {
@@ -227,7 +227,7 @@ func (w *Workbench) showModelEditor() {
 		w.desktop.RemoveLayer(layer)
 		w.rebuildMenu()
 		if failed != "" {
-			tv.ShowConfirmYesNo(w.desktop, "Models", "Some models failed to save:\n"+failed, nil)
+			showConfirmDialog(w.desktop, "Models", "Some models failed to save:\n"+failed, nil)
 		}
 	}
 	cancel := func() { w.desktop.RemoveLayer(layer) }

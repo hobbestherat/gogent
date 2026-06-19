@@ -20,7 +20,7 @@ import (
 // opened at once; Esc or Close dismisses it.
 func (w *Workbench) showSessionsDialog() {
 	if w.handlers.ListSavedSessions == nil || w.handlers.OpenSavedSession == nil {
-		tv.ShowConfirmYesNo(w.desktop, "Saved Sessions", "Saved-session browsing is unavailable.", nil)
+		showConfirmDialog(w.desktop, "Saved Sessions", "Saved-session browsing is unavailable.", nil)
 		return
 	}
 
@@ -132,7 +132,7 @@ func (w *Workbench) showSessionsDialog() {
 		}
 		rs, ok := w.handlers.OpenSavedSession(m.File, false)
 		if !ok {
-			tv.ShowConfirmYesNo(w.desktop, "Saved Sessions", "Could not load that session.", nil)
+			showConfirmDialog(w.desktop, "Saved Sessions", "Could not load that session.", nil)
 			return
 		}
 		w.OpenAnalysisSession(rs)
@@ -145,7 +145,7 @@ func (w *Workbench) showSessionsDialog() {
 		}
 		rs, ok := w.handlers.OpenSavedSession(m.File, true)
 		if !ok {
-			tv.ShowConfirmYesNo(w.desktop, "Saved Sessions",
+			showConfirmDialog(w.desktop, "Saved Sessions",
 				"That session is already open or could not be loaded.", nil)
 			return
 		}

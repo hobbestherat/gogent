@@ -441,7 +441,7 @@ func (w *Workbench) rebuildMenu() {
 		tv.NewSubMenu("&Config", w.settingsItems()...),
 		tv.NewSubMenu("&Help",
 			tv.NewMenuItem("&About", func() {
-				tv.ShowConfirmYesNo(w.desktop, "Gogent",
+				showConfirmDialog(w.desktop, "Gogent",
 					"Gogent multi-session TUI.\nEach session is its own window; fold thoughts & tool calls with the >/v markers.\nFocus a transcript to search ('/'), filter by type (a/t/r/e) and fold/unfold (f/u); the View menu lists the same.", nil)
 			}),
 		),
@@ -592,7 +592,7 @@ func (w *Workbench) sessionTitle(id string) string {
 // the capped live view (issue #62).
 func (w *Workbench) exportActive(format string) {
 	if w.handlers.GetTranscript == nil {
-		tv.ShowConfirmYesNo(w.desktop, "Export Session", "Export is unavailable.", nil)
+		showConfirmDialog(w.desktop, "Export Session", "Export is unavailable.", nil)
 		return
 	}
 	id := w.ActiveID()
@@ -609,11 +609,11 @@ func (w *Workbench) exportActive(format string) {
 	if err != nil {
 		msg = label + " export failed:\n" + err.Error()
 	}
-	tv.ShowConfirmYesNo(w.desktop, "Export Session", msg, nil)
+	showConfirmDialog(w.desktop, "Export Session", msg, nil)
 }
 
 func (w *Workbench) confirmQuit() {
-	tv.ShowConfirmYesNo(w.desktop, "Quit Gogent", "Are you sure you want to quit?", func(yes bool) {
+	showConfirmDialog(w.desktop, "Quit Gogent", "Are you sure you want to quit?", func(yes bool) {
 		if yes && w.quit != nil {
 			w.quit()
 		}

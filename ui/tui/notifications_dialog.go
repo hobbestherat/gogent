@@ -14,7 +14,7 @@ import (
 // Values are written back only on OK.
 func (w *Workbench) showNotificationsDialog() {
 	if w.handlers.GetNotifyConfig == nil || w.handlers.SetNotifyConfig == nil {
-		tv.ShowConfirmYesNo(w.desktop, "Settings", "Notification settings are unavailable.", nil)
+		showConfirmDialog(w.desktop, "Settings", "Notification settings are unavailable.", nil)
 		return
 	}
 	cur := w.handlers.GetNotifyConfig()
