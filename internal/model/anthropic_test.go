@@ -62,7 +62,7 @@ func TestAnthropicBuildBody(t *testing.T) {
 		},
 	}
 
-	raw, err := anthropicAdapter{}.buildBody(req)
+	raw, err := buildBodyBytes(anthropicAdapter{}, req)
 	if err != nil {
 		t.Fatalf("buildBody: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestAnthropicBuildBody(t *testing.T) {
 }
 
 func TestAnthropicBuildBodyDefaultsMaxTokens(t *testing.T) {
-	raw, err := anthropicAdapter{}.buildBody(CompletionRequest{
+	raw, err := buildBodyBytes(anthropicAdapter{}, CompletionRequest{
 		Model:    "claude-x",
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
 	})

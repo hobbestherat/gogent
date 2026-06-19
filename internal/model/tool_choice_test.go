@@ -69,7 +69,7 @@ func TestBuildRequestToolChoiceAutoOnWire(t *testing.T) {
 	if req.ToolChoice == nil || req.ToolChoice.Mode != ToolChoiceAuto {
 		t.Fatalf("ToolChoice = %+v, want auto", req.ToolChoice)
 	}
-	raw, err := openAIAdapter{}.buildBody(req)
+	raw, err := buildBodyBytes(openAIAdapter{}, req)
 	if err != nil {
 		t.Fatalf("buildBody: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestAnthropicToolChoiceEncoding(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw, err := anthropicAdapter{}.buildBody(CompletionRequest{
+			raw, err := buildBodyBytes(anthropicAdapter{}, CompletionRequest{
 				Model:      "claude-x",
 				Messages:   []Message{{Role: RoleUser, Content: "hi"}},
 				Tools:      tools,
@@ -141,7 +141,7 @@ func TestAnthropicToolChoiceEncoding(t *testing.T) {
 // Without tools, no tool_choice is emitted even if one is set (Anthropic rejects
 // a tool_choice with no tools).
 func TestAnthropicToolChoiceOmittedWithoutTools(t *testing.T) {
-	raw, err := anthropicAdapter{}.buildBody(CompletionRequest{
+	raw, err := buildBodyBytes(anthropicAdapter{}, CompletionRequest{
 		Model:      "claude-x",
 		Messages:   []Message{{Role: RoleUser, Content: "hi"}},
 		ToolChoice: &ToolChoice{Mode: ToolChoiceAuto},

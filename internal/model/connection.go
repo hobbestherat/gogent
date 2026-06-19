@@ -313,7 +313,7 @@ func (u *TokenUsage) UnmarshalJSON(data []byte) error {
 		PromptTokensDetails *struct {
 			CachedTokens int `json:"cached_tokens"`
 		} `json:"prompt_tokens_details"`
-		PromptCacheHitTokens     int `json:"prompt_cache_hit_tokens"`
+		PromptCacheHitTokens    int `json:"prompt_cache_hit_tokens"`
 		CompletionTokensDetails *struct {
 			ReasoningTokens int `json:"reasoning_tokens"`
 		} `json:"completion_tokens_details"`
@@ -446,6 +446,18 @@ const (
 	defaultRetryBaseDelay = 500 * time.Millisecond
 	defaultRetryMaxDelay  = 30 * time.Second
 )
+
+// reqBodyPool reuses the bytes.Buffer that backs the marshaled request body.
+// A transcript grows turn over turn, so without pooling each send would
+// allocate (and then GC) a fresh, ever-larger JSON buffer; the pool lets one
+// buffer expand once and be reused across sends. sync.Pool is GC-aware, so an
+// idle buffer is reclaimed after a couple of cycles rather than held forever.
+var reqBodyPool = sync.Pool{
+	New: func() any { return new(bytes.Buffer) },
+}
+
+func acquireReqBodyBuf() *bytes.Buffer  { return reqBodyPool.Get().(*bytes.Buffer) }
+func releaseReqBodyBuf(b *bytes.Buffer) { reqBodyPool.Put(b) }
 
 // DefaultModelURL is the connector's neutral fallback endpoint: a local
 // OpenAI-compatible server on the conventional port. This is intentionally
@@ -694,13 +706,21 @@ func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []
 func (c *ModelConnection) complete(ctx context.Context, messages []Message, stream bool, tools []ToolDef) (*CompletionResponse, error) {
 	reqBody := c.buildRequest(messages, stream, tools)
 
-	jsonData, err := c.wireAdapter().buildBody(reqBody)
-	if err != nil {
+	// Marshal the request body ONCE, before the retry loop. Only the socket send
+	// needs retrying, so re-marshaling the (potentially large) transcript on every
+	// attempt would needlessly multiply the marshal cost (issue #20). The body is
+	// marshaled into a pooled buffer that is reused across sends rather than
+	// re-allocated each turn; the bytes stay live for the whole loop and the
+	// buffer is returned to the pool when complete returns.
+	bodyBuf := acquireReqBodyBuf()
+	defer releaseReqBodyBuf(bodyBuf)
+	if err := c.wireAdapter().buildBody(reqBody, bodyBuf); err != nil {
 		return nil, &ModelError{
 			Type:    ErrorGeneric,
 			Message: fmt.Sprintf("failed to marshal request: %v", err),
 		}
 	}
+	jsonData := bodyBuf.Bytes()
 
 	attempts := c.maxAttempts
 	if attempts < 1 {
@@ -800,13 +820,17 @@ func (c *ModelConnection) complete(ctx context.Context, messages []Message, stre
 func (c *ModelConnection) completeStream(ctx context.Context, messages []Message, tools []ToolDef, streamCh chan<- StreamResponse) (string, error) {
 	reqBody := c.buildRequest(messages, true, tools)
 
-	jsonData, err := c.wireAdapter().buildBody(reqBody)
-	if err != nil {
+	// Marshal into a pooled buffer (issue #20): the bytes stay live through the
+	// single request send and the buffer is returned to the pool on return.
+	bodyBuf := acquireReqBodyBuf()
+	defer releaseReqBodyBuf(bodyBuf)
+	if err := c.wireAdapter().buildBody(reqBody, bodyBuf); err != nil {
 		return "", &ModelError{
 			Type:    ErrorGeneric,
 			Message: fmt.Sprintf("failed to marshal request: %v", err),
 		}
 	}
+	jsonData := bodyBuf.Bytes()
 
 	req, err := http.NewRequestWithContext(ctx, "POST", c.URL, bytes.NewReader(jsonData))
 	if err != nil {

@@ -383,6 +383,18 @@ func (s *ModelSession) SendWithToolsCtx(ctx context.Context, messages []Message,
 	s.Transcript = append(s.Transcript, messages...)
 
 	// Build the full request: system prompt (if any) + entire transcript.
+	//
+	// The system prompt is intentionally kept out of the transcript (so
+	// compaction cannot drop or rewrite it), so it has to be prepended here.
+	// That means a fresh slice copy of the transcript each turn — O(K) over a
+	// K-message session. It is a shallow struct-header copy (the message
+	// strings/slices are not duplicated), so the per-turn cost is small relative
+	// to marshaling the body. Eliminating it entirely would mean prepending the
+	// system message at marshal time (a per-adapter "2-slice writer" or a
+	// System field threaded down to the adapter) rather than producing one
+	// combined []Message; that is a larger change tracked as a follow-up to
+	// issue #20. The expensive part — re-marshaling the body — is already
+	// addressed by marshaling once per send into a pooled buffer (connection.go).
 	fullMessages := make([]Message, 0, len(s.Transcript)+1)
 	if s.SystemPrompt != "" {
 		fullMessages = append(fullMessages, Message{Role: RoleSystem, Content: s.SystemPrompt})

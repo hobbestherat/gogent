@@ -161,7 +161,7 @@ func TestAnthropicBuildBodyWithImages(t *testing.T) {
 		Model:    "claude-sonnet-4-6",
 		Messages: []Message{UserImageMessage("look", pngDataURL, "https://example.com/a.png")},
 	}
-	raw, err := anthropicAdapter{}.buildBody(req)
+	raw, err := buildBodyBytes(anthropicAdapter{}, req)
 	if err != nil {
 		t.Fatalf("buildBody: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestOpenAIBuildBodyWithImages(t *testing.T) {
 		Model:    "gpt-4o",
 		Messages: []Message{UserImageMessage("hi", pngDataURL)},
 	}
-	raw, err := openAIAdapter{}.buildBody(req)
+	raw, err := buildBodyBytes(openAIAdapter{}, req)
 	if err != nil {
 		t.Fatalf("buildBody: %v", err)
 	}
