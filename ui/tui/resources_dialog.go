@@ -56,14 +56,19 @@ func (w *Workbench) showResourcesDialog() {
 	if paneH < 3 {
 		paneH = 3
 	}
+	// The list only needs room for the checkbox + name + a short usage tail; cap
+	// it so the wider, line-wrapping detail pane gets the surplus width.
 	listW := width/2 - 2
+	if listW > 34 {
+		listW = 34
+	}
 	if listW < 18 {
 		listW = 18
 	}
 	detailX := listX + listW + 1
 	detailW := width - detailX - 2
-	if detailW < 18 {
-		detailW = 18
+	if detailW < 24 {
+		detailW = 24
 	}
 
 	// Category tabs + search box.
@@ -88,8 +93,13 @@ func (w *Workbench) showResourcesDialog() {
 	list := tv.NewTree(tv.Rect{X: listX, Y: listY, W: listW, H: paneH})
 	list.FG = tv.DefaultTheme.DialogFG
 	list.BG = tv.DefaultTheme.DialogBG
-	list.SelFG = tv.DefaultTheme.SelectionFG
-	list.SelBG = tv.DefaultTheme.SelectionBG
+	// The stock default theme paints the selection with the same colours as the
+	// dialog background, so the focused row is invisible; fall back to an
+	// inverted dialog bar in that case (themes with an already-distinct selection
+	// pass through unchanged).
+	list.SelFG, list.SelBG = selectionColorsFor(
+		tv.DefaultTheme.DialogFG, tv.DefaultTheme.DialogBG,
+		tv.DefaultTheme.SelectionFG, tv.DefaultTheme.SelectionBG)
 	dialog.Window.AddContent(list)
 
 	detail := tv.NewTextView("", tv.Rect{X: detailX, Y: listY, W: detailW, H: paneH})
@@ -98,7 +108,9 @@ func (w *Workbench) showResourcesDialog() {
 	detail.BG = tv.DefaultTheme.DialogBG
 	dialog.Window.AddContent(detail)
 
-	dialog.Window.AddContent(dialogLabel("Tab move · Enter toggle · Esc close",
+	// Selecting (arrows/click) only moves focus and updates the detail pane;
+	// toggling on/off is a distinct Space/Enter gesture, so the hint says so.
+	dialog.Window.AddContent(dialogLabel("↑↓ select · Space/Enter toggle · Esc close",
 		tv.Rect{X: 2, Y: height - 3, W: width - 16, H: 1}))
 
 	var layer *tv.Layer
@@ -157,7 +169,12 @@ func (w *Workbench) showResourcesDialog() {
 			w.desktop.Redraw()
 		}
 	}
-	list.OnActivate = func(n *tv.TreeNode) {
+
+	// toggleSelected flips the selected item's on/off state via the backend, then
+	// reloads and re-renders. It no-ops for a non-togglable item or empty list, so
+	// it is safe to bind to both Space and Enter.
+	toggleSelected := func() {
+		n := list.Selected()
 		if n == nil {
 			return
 		}
@@ -179,6 +196,12 @@ func (w *Workbench) showResourcesDialog() {
 		allSkills = loadSkillItems(w.handlers.GetSkills)
 		render()
 	}
+
+	// Selecting (arrows/click) only moves focus; toggling on/off is a distinct,
+	// explicit Space/Enter gesture. The tree fires OnActivate on Enter and on a
+	// repeat click of the already-selected row, so leaving OnActivate nil makes a
+	// click select without toggling, while Space/Enter are intercepted to toggle.
+	bindToggleKeys(list, toggleSelected)
 	catSel.OnChange = func(idx int) {
 		curKind = resourceKind(idx)
 		allTools = loadToolItems(w.handlers.GetTools)
@@ -202,9 +225,11 @@ func (w *Workbench) showResourcesDialog() {
 }
 
 // resourcesDialogSize picks a browser size that fills a good chunk of a large
-// terminal while still fitting (and staying useful) on a small one.
+// terminal while still fitting (and staying useful) on a small one. The cap is
+// generous so the detail pane has room to show a full SKILL.md legibly; small
+// terminals clamp down to the floors.
 func resourcesDialogSize(screenW, screenH int) (width, height int) {
-	width, height = 78, 22
+	width, height = 96, 32
 	if w := screenW - 2; width > w {
 		width = w
 	}
@@ -218,6 +243,36 @@ func resourcesDialogSize(screenW, screenH int) (width, height int) {
 		height = 14
 	}
 	return width, height
+}
+
+// selectionColorsFor returns the list's selection colours given the dialog's and
+// the theme's selection colours. turbotui's stock default theme sets SelectionBG
+// and SelectionFG to the same values as DialogBG and DialogFG, so a selected row
+// would render invisibly; when the two collide we invert the dialog colours for a
+// guaranteed-contrast highlight bar. Themes whose selection already differs from
+// the dialog — the high-contrast accent, or the no-colour default — pass through
+// unchanged.
+func selectionColorsFor(dialogFG, dialogBG, selFG, selBG tui.Color) (tui.Color, tui.Color) {
+	if selFG == dialogFG && selBG == dialogBG {
+		return dialogBG, dialogFG
+	}
+	return selFG, selBG
+}
+
+// bindToggleKeys makes Space and Enter on the list invoke toggle (the Resources
+// browser's explicit on/off action), while delegating every other key — arrow
+// navigation, and Escape so it can bubble up to close the dialog — to the tree's
+// own handler. Splitting it out keeps the key binding independent of the dialog's
+// closures so it can be exercised directly.
+func bindToggleKeys(list *tv.Tree, toggle func()) {
+	treeType := list.Component.OnTypeFn
+	list.Component.OnTypeFn = func(_ *tv.VisualComponent, event tui.TypeEvent) bool {
+		if event.Key == tui.KeyEnter || (event.Key == tui.KeyRune && event.Rune == ' ') {
+			toggle()
+			return true
+		}
+		return treeType(list.Component, event)
+	}
 }
 
 // loadToolItems maps the backend's tool list into browser items, sorted by name
@@ -256,7 +311,7 @@ func loadSkillItems(get func() []SkillInfo) []resourceItem {
 			kind:      resourceSkills,
 			name:      s.Name,
 			desc:      s.Description,
-			detail:    skillDetail(s.Name, s.Description, s.Active, s.Success, s.Failure, s.TotalCalls, s.Content),
+			detail:    skillDetail(s.Name, s.Description, s.Path, s.Active, s.Success, s.Failure, s.TotalCalls, s.Content),
 			enabled:   s.Active,
 			canToggle: true,
 			usage:     skillUsage(s.Success, s.Failure),
@@ -291,16 +346,23 @@ func filterResources(items []resourceItem, query string) []resourceItem {
 	return out
 }
 
-// resourceListLabel renders one row of the list: a padded name, an optional
-// usage tail, and an "(off)" marker when a togglable item is disabled.
+// resourceListLabel renders one list row: a leading on/off checkbox for
+// togglable items (so enabled/disabled is obvious at a glance), the padded
+// name, and an optional usage tail. Toggling itself is a separate Space/Enter
+// gesture, so a click on the row only selects it.
 func resourceListLabel(it resourceItem) string {
 	const nameW = 22
-	label := padName(it.name, nameW)
+	box := "   " // non-togglable: a blank slot keeps names aligned with checkbox rows
+	if it.canToggle {
+		if it.enabled {
+			box = "[x]"
+		} else {
+			box = "[ ]"
+		}
+	}
+	label := box + " " + padName(it.name, nameW)
 	if it.usage != "" {
 		label += " " + it.usage
-	}
-	if it.canToggle && !it.enabled {
-		label += "  (off)"
 	}
 	return label
 }
@@ -350,9 +412,9 @@ func toolDetail(name, desc, schema string, enabled bool, invocations int, lastUs
 	return b.String()
 }
 
-// skillDetail renders the side-pane text for a skill, including the full
-// SKILL.md preview.
-func skillDetail(name, desc string, active bool, success, failure, total int, content string) string {
+// skillDetail renders the side-pane text for a skill: header, state, usage, the
+// on-disk path and the full SKILL.md preview.
+func skillDetail(name, desc, path string, active bool, success, failure, total int, content string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Skill: %s\n", name)
 	if active {
@@ -361,6 +423,9 @@ func skillDetail(name, desc string, active bool, success, failure, total int, co
 		b.WriteString("State: inactive\n")
 	}
 	fmt.Fprintf(&b, "Usage: %d ok / %d fail (%d total)\n", success, failure, total)
+	if p := strings.TrimSpace(path); p != "" {
+		fmt.Fprintf(&b, "File: %s\n", p)
+	}
 	b.WriteString("\nDescription\n")
 	b.WriteString(strings.TrimSpace(desc))
 	if c := strings.TrimSpace(content); c != "" {

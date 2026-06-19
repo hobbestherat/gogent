@@ -157,6 +157,8 @@ type SkillInfo struct {
 	TotalCalls  int
 	// Content holds the raw SKILL.md text for the Resources browser preview.
 	Content string
+	// Path is the on-disk SKILL.md location, shown in the Resources browser detail.
+	Path string
 }
 
 // ToolInfo is a UI-facing view of a registered tool and its usage stats. The
