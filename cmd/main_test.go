@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -16,17 +17,22 @@ import (
 // fakeBackend is a programmable httpBackend for exercising the handlers without
 // a live model.
 type fakeBackend struct {
-	content string
-	err     error
-	stats   map[string]interface{}
-	block   chan struct{} // when non-nil, SendMessage blocks until closed
-	called  int
-	mu      sync.Mutex
+	content     string
+	err         error
+	stats       map[string]interface{}
+	block       chan struct{} // when non-nil, SendMessage blocks until closed
+	called      int
+	lastSession string   // session id of the most recent SendMessage
+	lastStats   string   // session id of the most recent Stats
+	sessions    []string // every session id SendMessage was called with
+	mu          sync.Mutex
 }
 
-func (f *fakeBackend) SendMessage(ctx context.Context, message, modelName string) (*model.CompletionResponse, error) {
+func (f *fakeBackend) SendMessage(ctx context.Context, sessionID, message, modelName string) (*model.CompletionResponse, error) {
 	f.mu.Lock()
 	f.called++
+	f.lastSession = sessionID
+	f.sessions = append(f.sessions, sessionID)
 	f.mu.Unlock()
 	if f.block != nil {
 		// Honor the request context so a client disconnect aborts the loop
@@ -43,7 +49,12 @@ func (f *fakeBackend) SendMessage(ctx context.Context, message, modelName string
 	return &model.CompletionResponse{Content: f.content}, nil
 }
 
-func (f *fakeBackend) Stats() map[string]interface{} { return f.stats }
+func (f *fakeBackend) Stats(sessionID string) map[string]interface{} {
+	f.mu.Lock()
+	f.lastStats = sessionID
+	f.mu.Unlock()
+	return f.stats
+}
 
 func newTestServer(t *testing.T, b httpBackend, token string, shutdown func()) *httptest.Server {
 	t.Helper()
@@ -356,6 +367,180 @@ func TestExitGuardRemote(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestMessageRoutesPerClientSession is the core isolation regression for issue
+// #25: distinct clients must land in distinct backend sessions rather than all
+// multiplexing onto "default".
+func TestMessageRoutesPerClientSession(t *testing.T) {
+	cases := []struct {
+		name  string
+		body  string
+		setup func(*http.Request)
+		want  string
+	}{
+		{"default when unset", "message=hi", nil, "default"},
+		{"header", "message=hi", func(r *http.Request) { r.Header.Set(httpSessionHeader, "alice") }, "alice"},
+		{"cookie", "message=hi", func(r *http.Request) {
+			r.AddCookie(&http.Cookie{Name: httpSessionCookie, Value: "bob"})
+		}, "bob"},
+		{"form field", "message=hi&session=carol", nil, "carol"},
+		{"header beats cookie+form", "message=hi&session=carol", func(r *http.Request) {
+			r.Header.Set(httpSessionHeader, "alice")
+			r.AddCookie(&http.Cookie{Name: httpSessionCookie, Value: "bob"})
+		}, "alice"},
+		{"sanitized", "message=hi", func(r *http.Request) { r.Header.Set(httpSessionHeader, "a/b c") }, "a_b_c"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &fakeBackend{content: "ok"}
+			srv := newTestServer(t, b, "", nil)
+			defer srv.Close()
+
+			req, _ := http.NewRequest(http.MethodPost, srv.URL+"/message", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			if tc.setup != nil {
+				tc.setup(req)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+
+			if b.lastSession != tc.want {
+				t.Fatalf("session = %q, want %q", b.lastSession, tc.want)
+			}
+		})
+	}
+}
+
+// TestConcurrentClientsDistinctSessions verifies that many simultaneous clients
+// each reach their own session id without the handler serializing them onto one.
+func TestConcurrentClientsDistinctSessions(t *testing.T) {
+	b := &fakeBackend{content: "ok"}
+	srv := newTestServer(t, b, "", nil)
+	defer srv.Close()
+
+	const n = 16
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			req, _ := http.NewRequest(http.MethodPost, srv.URL+"/message", strings.NewReader("message=hi"))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set(httpSessionHeader, "client-"+strconv.Itoa(i))
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Errorf("request %d: %v", i, err)
+				return
+			}
+			resp.Body.Close()
+		}(i)
+	}
+	wg.Wait()
+
+	seen := map[string]bool{}
+	for _, s := range b.sessions {
+		seen[s] = true
+	}
+	if len(seen) != n {
+		t.Fatalf("distinct sessions = %d, want %d (clients multiplexed onto fewer sessions)", len(seen), n)
+	}
+}
+
+func TestStatusUsesClientSession(t *testing.T) {
+	b := &fakeBackend{stats: map[string]interface{}{"tokens_in": 1}}
+	srv := newTestServer(t, b, "", nil)
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/status", nil)
+	req.Header.Set(httpSessionHeader, "dave")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if b.lastStats != "dave" {
+		t.Fatalf("Stats session = %q, want %q", b.lastStats, "dave")
+	}
+}
+
+func TestSanitizeSessionID(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"alice", "alice"},
+		{"a-b_c.d", "a-b_c.d"},
+		{"a/b c", "a_b_c"},
+		{"../../etc/passwd", ".._.._etc_passwd"},
+		{"", "default"},
+		{"!@#", "___"},
+		{strings.Repeat("x", 200), strings.Repeat("x", 128)},
+	}
+	for _, tc := range cases {
+		if got := sanitizeSessionID(tc.in); got != tc.want {
+			t.Errorf("sanitizeSessionID(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestHTTPSessionRegistryEvicts exercises both bounds: the LRU cap reclaims the
+// least-recently-used session when a new one pushes past maxItems, and the TTL
+// reclaims sessions idle past maxIdle.
+func TestHTTPSessionRegistryEvicts(t *testing.T) {
+	var created, evicted []string
+	now := time.Unix(1000, 0)
+	reg := &httpSessionRegistry{
+		seen:     make(map[string]time.Time),
+		create:   func(id string) { created = append(created, id) },
+		evict:    func(id string) { evicted = append(evicted, id) },
+		maxIdle:  time.Minute,
+		maxItems: 2,
+		now:      func() time.Time { return now },
+	}
+	tick := func() { now = now.Add(time.Second) }
+
+	reg.touch("a")
+	tick()
+	reg.touch("b")
+	tick()
+	// "c" pushes past the cap of 2, evicting the LRU ("a").
+	reg.touch("c") // a:1000, b:1001, c:1002 -> evict a
+	if len(evicted) != 1 || evicted[0] != "a" {
+		t.Fatalf("LRU eviction = %v, want [a]", evicted)
+	}
+
+	// Refresh "b" so it is much newer than "c", then advance the clock to a point
+	// where "c" is idle past the TTL but "b" is not: only "c" should be reclaimed.
+	now = time.Unix(1050, 0)
+	reg.touch("b")            // b:1050, c:1002
+	now = time.Unix(1070, 0) // c idle 68s (>60s), b idle 20s (<=60s)
+	reg.touch("d")
+
+	wantCreated := []string{"a", "b", "c", "d"}
+	if strings.Join(created, ",") != strings.Join(wantCreated, ",") {
+		t.Fatalf("created = %v, want %v", created, wantCreated)
+	}
+	// "c" went idle past the TTL; "b" was refreshed and survives.
+	if !contains(evicted, "c") {
+		t.Fatalf("expected TTL eviction of c, got %v", evicted)
+	}
+	if contains(evicted, "b") {
+		t.Fatalf("warm session b was evicted: %v", evicted)
+	}
+}
+
+func contains(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
 }
 
 func TestIsLoopbackAddr(t *testing.T) {

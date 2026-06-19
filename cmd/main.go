@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -385,26 +386,111 @@ const (
 // Defining it as an interface keeps the handlers decoupled from the full Gogent
 // and lets them be unit-tested with a fake.
 type httpBackend interface {
-	// SendMessage runs the agent task loop for the default HTTP session and
-	// returns the final assistant response. ctx cancels the loop when the client
+	// SendMessage runs the agent task loop for the given client session and
+	// returns the final assistant response. Each session id maps to its own
+	// isolated UserSession, so concurrent clients neither serialize nor see each
+	// other's transcript (issue #25). ctx cancels the loop when the client
 	// disconnects (issue #24).
-	SendMessage(ctx context.Context, message, modelName string) (*model.CompletionResponse, error)
-	// Stats returns aggregate counters for the default HTTP session, or nil.
-	Stats() map[string]interface{}
+	SendMessage(ctx context.Context, sessionID, message, modelName string) (*model.CompletionResponse, error)
+	// Stats returns aggregate counters for the given client session, or nil.
+	Stats(sessionID string) map[string]interface{}
 }
 
-// gogentBackend adapts a *gogent.Gogent to the httpBackend interface.
-type gogentBackend struct{ g *gogent.Gogent }
+// HTTP per-client session bounds. Idle client sessions are evicted after the
+// TTL and the live count is capped, so a flood of one-shot clients can neither
+// keep stale transcripts in memory nor grow the session map without bound
+// (issue #25).
+const (
+	httpSessionTTL = 30 * time.Minute
+	httpSessionMax = 256
+)
 
-func (b gogentBackend) SendMessage(ctx context.Context, message, modelName string) (*model.CompletionResponse, error) {
-	return b.g.SendMessageToSessionWithModel(ctx, "default", "root", message, modelName)
+// gogentBackend adapts a *gogent.Gogent to the httpBackend interface, routing
+// each client session id to its own backend UserSession and bounding their
+// number/age via the registry.
+type gogentBackend struct {
+	g        *gogent.Gogent
+	sessions *httpSessionRegistry
 }
 
-func (b gogentBackend) Stats() map[string]interface{} {
-	if s := b.g.GetUserSession("default"); s != nil {
+func newGogentBackend(g *gogent.Gogent) gogentBackend {
+	return gogentBackend{
+		g: g,
+		sessions: &httpSessionRegistry{
+			seen:     make(map[string]time.Time),
+			maxIdle:  httpSessionTTL,
+			maxItems: httpSessionMax,
+			now:      time.Now,
+			create:   func(id string) { g.NewEphemeralSession(id) },
+			evict:    func(id string) { g.RemoveSession(id) },
+		},
+	}
+}
+
+func (b gogentBackend) SendMessage(ctx context.Context, sessionID, message, modelName string) (*model.CompletionResponse, error) {
+	b.sessions.touch(sessionID)
+	return b.g.SendMessageToSessionWithModel(ctx, sessionID, "root", message, modelName)
+}
+
+func (b gogentBackend) Stats(sessionID string) map[string]interface{} {
+	if s := b.g.GetUserSession(sessionID); s != nil {
 		return s.GetStats()
 	}
 	return nil
+}
+
+// httpSessionRegistry tracks the per-client sessions the headless HTTP server
+// creates and bounds them by idle TTL and an LRU cap (issue #25). create lazily
+// builds the backend session on first use; evict reclaims one that has expired
+// or been pushed out of the cap. It is safe for concurrent use.
+type httpSessionRegistry struct {
+	mu       sync.Mutex
+	seen     map[string]time.Time // session id -> last access
+	create   func(id string)
+	evict    func(id string)
+	maxIdle  time.Duration
+	maxItems int
+	now      func() time.Time
+}
+
+// touch records access to a session id, lazily creating it on first sight and
+// reclaiming idle/over-cap sessions. The just-touched id is never evicted.
+func (r *httpSessionRegistry) touch(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.now()
+
+	// Reclaim sessions idle past the TTL.
+	for sid, last := range r.seen {
+		if sid != id && now.Sub(last) > r.maxIdle {
+			r.evict(sid)
+			delete(r.seen, sid)
+		}
+	}
+
+	if _, exists := r.seen[id]; !exists {
+		r.create(id)
+	}
+	r.seen[id] = now
+
+	// Enforce the LRU cap, evicting the least-recently-used session (other than
+	// the one just touched) until we are back under the limit.
+	for len(r.seen) > r.maxItems {
+		oldest, oldestAt := "", now
+		for sid, last := range r.seen {
+			if sid == id {
+				continue
+			}
+			if oldest == "" || last.Before(oldestAt) {
+				oldest, oldestAt = sid, last
+			}
+		}
+		if oldest == "" {
+			break
+		}
+		r.evict(oldest)
+		delete(r.seen, oldest)
+	}
 }
 
 // writeJSON encodes v as JSON with the given status. Using the encoder (instead
@@ -416,6 +502,56 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		log.Printf("http: encode response: %v", err)
 	}
+}
+
+// HTTP headers/fields a client uses to name its session. A request that names
+// none falls back to the shared "default" session.
+const (
+	httpSessionHeader = "X-Gogent-Session"
+	httpSessionCookie = "gogent_session"
+	httpSessionForm   = "session"
+)
+
+// clientSessionID derives the session id for a request so concurrent clients get
+// isolated transcripts (issue #25). It prefers the header, then a cookie, then a
+// form/query field, and falls back to "default". ParseForm must have been called
+// for the form field to be visible on a POST body.
+func clientSessionID(r *http.Request) string {
+	if v := r.Header.Get(httpSessionHeader); v != "" {
+		return sanitizeSessionID(v)
+	}
+	if c, err := r.Cookie(httpSessionCookie); err == nil && c.Value != "" {
+		return sanitizeSessionID(c.Value)
+	}
+	if v := r.FormValue(httpSessionForm); v != "" {
+		return sanitizeSessionID(v)
+	}
+	return "default"
+}
+
+// sanitizeSessionID reduces a client-supplied id to a bounded, safe token
+// (alphanumerics plus -_.), so a hostile id can neither blow up memory nor leak
+// into a filesystem path. An id that sanitizes to empty falls back to "default".
+func sanitizeSessionID(s string) string {
+	const maxLen = 128
+	if len(s) > maxLen {
+		s = s[:maxLen]
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "default"
+	}
+	return b.String()
 }
 
 // isLoopbackAddr reports whether a RemoteAddr ("host:port") is a loopback
@@ -464,6 +600,10 @@ func newHTTPHandler(backend httpBackend, exitToken string, shutdown func()) http
 			modelName = r.FormValue("model")
 		}
 
+		// Route the request to the caller's own session so concurrent clients are
+		// isolated rather than multiplexed onto one shared transcript (issue #25).
+		sessionID := clientSessionID(r)
+
 		// Run the (long) model loop off the request goroutine so we can abandon
 		// it the moment the client disconnects, instead of writing to a dead
 		// connection. The request context is threaded into the loop so a
@@ -475,7 +615,7 @@ func newHTTPHandler(backend httpBackend, exitToken string, shutdown func()) http
 		}
 		done := make(chan result, 1)
 		go func() {
-			resp, err := backend.SendMessage(r.Context(), message, modelName)
+			resp, err := backend.SendMessage(r.Context(), sessionID, message, modelName)
 			done <- result{resp, err}
 		}()
 
@@ -500,7 +640,7 @@ func newHTTPHandler(backend httpBackend, exitToken string, shutdown func()) http
 
 		writeJSON(w, http.StatusOK, map[string]any{
 			"tool_logs": logs,
-			"stats":     backend.Stats(),
+			"stats":     backend.Stats(clientSessionID(r)),
 		})
 	})
 
@@ -529,7 +669,7 @@ func newHTTPHandler(backend httpBackend, exitToken string, shutdown func()) http
 }
 
 func startHTTPServer(host string, port int, g *gogent.Gogent) {
-	handler := newHTTPHandler(gogentBackend{g}, os.Getenv("GOGENT_HTTP_TOKEN"), func() {
+	handler := newHTTPHandler(newGogentBackend(g), os.Getenv("GOGENT_HTTP_TOKEN"), func() {
 		syscall.Kill(syscall.Getpid(), syscall.SIGINT)
 	})
 
@@ -545,7 +685,8 @@ func startHTTPServer(host string, port int, g *gogent.Gogent) {
 	fmt.Println("Endpoints:")
 	fmt.Println("  GET  /health - Health check")
 	fmt.Println("  POST /message - Send message (form-data: message=...)")
-	fmt.Println("  GET  /status - Get tool execution logs and stats")
+	fmt.Println("                  Set X-Gogent-Session (or cookie/session field) for an isolated session")
+	fmt.Println("  GET  /status - Get tool execution logs and stats (per X-Gogent-Session)")
 	fmt.Println("  POST /exit - Exit server (local-only, or X-Gogent-Token)")
 
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
