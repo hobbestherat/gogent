@@ -236,9 +236,18 @@ Each model entry has an `api_type` selecting the provider conventions:
   internal OpenAI-shaped types, so tools and prompt-cache accounting work
   unchanged. Extended thinking is not yet exposed for this provider.
 
-Other OpenAI-compatible gateways (Google's Gemini OpenAI-compat layer,
-OpenRouter, Azure OpenAI) work under `openai` by pointing `endpoint` at their
-base URL and setting `api_key`.
+- `openrouter` — the [OpenRouter](https://openrouter.ai) gateway. Leave
+  `endpoint` empty to use the built-in base URL (`https://openrouter.ai/api/v1`)
+  and just set `api_key`. It is OpenAI-compatible (bearer auth, same wire
+  format) but additionally sends the recommended `HTTP-Referer` / `X-Title`
+  attribution headers used for app ranking and free-tier prioritization.
+
+Other OpenAI-compatible gateways (Google's Gemini OpenAI-compat layer, Azure
+OpenAI) work under `openai` by pointing `endpoint` at their base URL and setting
+`api_key`. Authentication is a per-provider policy: the key is sent as an
+`Authorization: Bearer` token by default, or as `x-api-key` (Anthropic), an
+Azure `api-key` header, or a URL query parameter, so providers that share the
+OpenAI wire format can still authenticate differently.
 
 In the model editor, the **Scan** button next to the model id queries the
 backend's listing endpoint and replaces the model-id field with a dropdown of

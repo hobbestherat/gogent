@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"strings"
 )
 
@@ -16,17 +15,20 @@ import (
 //
 //   - buildBody marshals an internal CompletionRequest into the provider's
 //     request JSON,
-//   - authHeaders supplies the provider's auth/version request headers,
 //   - parseResponse maps a blocking response back into a CompletionResponse,
 //   - parseStream maps a streaming (SSE) response onto the internal delta channel.
 //
-// OpenAI-compatible providers (incl. Z.AI, Gemini's OpenAI-compat layer and
-// local servers) share openAIAdapter; genuinely different protocols get their
-// own. The adapter is selected from the APIType (see adapterFor), which is the
-// seam to extend for a new provider family.
+// Authentication is deliberately NOT an adapter concern: it lives on the
+// providerSpec (see providerSpec.authHeaders) because providers that share one
+// wire adapter still authenticate differently (OpenAI bearer vs. Azure api-key
+// vs. Gemini query-param), and some add static headers (OpenRouter attribution).
+//
+// OpenAI-compatible providers (incl. Z.AI, OpenRouter, Gemini's OpenAI-compat
+// layer and local servers) share openAIAdapter; genuinely different protocols
+// get their own. The adapter is selected from the APIType (see adapterFor),
+// which is the seam to extend for a new provider family.
 type adapter interface {
 	buildBody(req CompletionRequest) ([]byte, error)
-	authHeaders(apiKey string) http.Header
 	parseResponse(body []byte) (*CompletionResponse, error)
 	parseStream(body io.Reader, streamCh chan<- StreamResponse) (string, *TokenUsage, error)
 }
@@ -50,14 +52,6 @@ type openAIAdapter struct{}
 
 func (openAIAdapter) buildBody(req CompletionRequest) ([]byte, error) {
 	return json.Marshal(req)
-}
-
-func (openAIAdapter) authHeaders(apiKey string) http.Header {
-	h := http.Header{}
-	if apiKey != "" {
-		h.Set("Authorization", "Bearer "+apiKey)
-	}
-	return h
 }
 
 func (openAIAdapter) parseResponse(body []byte) (*CompletionResponse, error) {
@@ -85,20 +79,11 @@ func (openAIAdapter) parseStream(body io.Reader, streamCh chan<- StreamResponse)
 // ---------------------------------------------------------------------------
 
 // anthropicVersion is the Messages API version pinned via the anthropic-version
-// header (required on every request).
+// header (required on every request); the Anthropic providerSpec attaches it as
+// an extra header (see providerSpecs).
 const anthropicVersion = "2023-06-01"
 
 type anthropicAdapter struct{}
-
-func (anthropicAdapter) authHeaders(apiKey string) http.Header {
-	h := http.Header{}
-	h.Set("anthropic-version", anthropicVersion)
-	if apiKey != "" {
-		// Anthropic authenticates with x-api-key, not an Authorization bearer.
-		h.Set("x-api-key", apiKey)
-	}
-	return h
-}
 
 // anthropicRequest is the POST /v1/messages body. Unlike chat-completions it
 // hoists the system prompt to the top level, requires max_tokens, and carries
