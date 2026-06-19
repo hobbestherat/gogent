@@ -355,6 +355,27 @@ func main() {
 			},
 			OnUndo:   func(sessionID string) (string, error) { return g.UndoLastTurn(sessionID) },
 			OnRewind: func(sessionID string, turns int) (string, error) { return g.Rewind(sessionID, turns) },
+			// Plan mode (issue #43): toggle the session flag and execute an approved
+			// plan with the full tool set, mirroring OnSend's goroutine + event
+			// emission so the result flows back into the session window.
+			OnSetPlanMode: func(sessionID string, on bool) { g.SetPlanMode(sessionID, on) },
+			OnApprovePlan: func(sessionID string) {
+				defer func() {
+					if r := recover(); r != nil {
+						wb.EmitSessionEvent(sessionID, agent.SessionEvent{
+							Type: agent.SessionEventError,
+							Err:  fmt.Errorf("plan execution panicked: %v", r),
+						})
+					}
+				}()
+				_, err := g.ExecuteApprovedPlan(context.Background(), sessionID, "root")
+				if err != nil {
+					wb.EmitSessionEvent(sessionID, agent.SessionEvent{
+						Type: agent.SessionEventError,
+						Err:  err,
+					})
+				}
+			},
 			// @-file mention bridge (issue #46): the completer lists workspace files
 			// and expansion reads the chosen ones, both confined to the workspace via
 			// the existing FileSystem service.

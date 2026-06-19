@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"strings"
 
 	"gogent/internal/agent"
 	"gogent/internal/config"
@@ -36,6 +37,10 @@ type sidebar struct {
 
 	sessions map[string]*tv.TreeNode // sessionID -> root node
 	agents   map[string]*tv.TreeNode // agentID  -> sub-agent node
+	// todos holds the checklist child nodes rendered under each session (issue
+	// #43), keyed by session id. applyTodo rebuilds a session's set on every
+	// update; the nodes are tracked here so the previous set can be removed first.
+	todos map[string][]*tv.TreeNode
 
 	// approvals tracks which sessions currently have a permission prompt waiting,
 	// so their node keeps the "needs approval" badge across unrelated relabels
@@ -66,6 +71,7 @@ func newSidebar(wb *Workbench) *sidebar {
 		wb:           wb,
 		sessions:     make(map[string]*tv.TreeNode),
 		agents:       make(map[string]*tv.TreeNode),
+		todos:        make(map[string][]*tv.TreeNode),
 		approvals:    make(map[string]bool),
 		overallBandH: overallBandHeight,
 	}
@@ -180,6 +186,7 @@ func (s *sidebar) removeSession(id string) {
 	s.tree.Roots = roots
 	delete(s.sessions, id)
 	delete(s.approvals, id)
+	delete(s.todos, id)
 }
 
 // setApproval toggles the "needs approval" badge on a session node (issue #55)
@@ -268,6 +275,72 @@ func (s *sidebar) applySubAgent(sessionID string, ev agent.SessionEvent) {
 		node.Data = ref
 	}
 	node.Label = agentLabel(ev.Name, ev.Status, ev.Kind)
+}
+
+// applyTodo rebuilds a session's checklist child nodes from a todo update (issue
+// #43). The previous set is removed from the session node before the new one is
+// appended, so the list reflects the latest todo tool call. An empty list clears
+// the nodes. Runs on the UI thread (called from EmitSessionEvent).
+func (s *sidebar) applyTodo(sessionID string, items []agent.TodoItem) {
+	parent := s.sessions[sessionID]
+	if parent == nil {
+		return
+	}
+	if old := s.todos[sessionID]; len(old) > 0 {
+		parent.Children = excludeNodes(parent.Children, old)
+	}
+	if len(items) == 0 {
+		delete(s.todos, sessionID)
+		return
+	}
+	nodes := make([]*tv.TreeNode, 0, len(items))
+	for _, it := range items {
+		node := tv.NewTreeNode(todoLabel(it))
+		node.Data = nodeRef{sessionID: sessionID, name: it.Content}
+		parent.Add(node)
+		nodes = append(nodes, node)
+	}
+	s.todos[sessionID] = nodes
+}
+
+// excludeNodes returns children with every node in remove dropped. It allocates
+// a fresh slice so the caller can reassign the parent's Children safely.
+func excludeNodes(children, remove []*tv.TreeNode) []*tv.TreeNode {
+	if len(remove) == 0 {
+		return children
+	}
+	drop := make(map[*tv.TreeNode]bool, len(remove))
+	for _, n := range remove {
+		drop[n] = true
+	}
+	out := make([]*tv.TreeNode, 0, len(children))
+	for _, c := range children {
+		if !drop[c] {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// todoLabel renders one checklist row: a status glyph followed by the content.
+func todoLabel(it agent.TodoItem) string {
+	content := strings.TrimSpace(it.Content)
+	if content == "" {
+		content = "(empty)"
+	}
+	return fmt.Sprintf("%s %s", todoStatusIcon(it.Status), content)
+}
+
+// todoStatusIcon maps a todo status to a compact glyph for the sidebar.
+func todoStatusIcon(status agent.TodoStatus) string {
+	switch status {
+	case agent.TodoInProgress:
+		return "▶"
+	case agent.TodoCompleted:
+		return "✓"
+	default:
+		return "☐"
+	}
 }
 
 // relabelSession updates a session node's title (rename) and pin marker. It is

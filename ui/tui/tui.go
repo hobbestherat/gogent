@@ -139,6 +139,12 @@ type Handlers struct {
 	// OnRewind reverts the last n turns (n <= 0 reverts all) for a session (issue
 	// #41), returning a human-readable summary. May be nil.
 	OnRewind func(sessionID string, turns int) (summary string, err error)
+	// OnSetPlanMode toggles plan mode for a session (issue #43). May be nil.
+	OnSetPlanMode func(sessionID string, on bool)
+	// OnApprovePlan executes a session's pending plan with the full tool set
+	// (issue #43). It runs on a background goroutine; progress flows back as
+	// session events. May be nil.
+	OnApprovePlan func(sessionID string)
 }
 
 // RestoredSession describes a session to be re-opened from persisted state.
@@ -437,6 +443,14 @@ func (w *Workbench) rebuildMenu() {
 			tv.NewMenuItem("Export &Markdown…", func() { w.exportActive("md") }),
 			tv.NewMenuItem("Export &JSON…", func() { w.exportActive("json") }),
 		)
+		// Plan-mode approval (issue #43): surface it when the backend wires the
+		// handler. The action reports when there is no plan to approve.
+		if w.handlers.OnApprovePlan != nil {
+			sessionItems = append(sessionItems,
+				tv.NewMenuItem("----------", nil),
+				tv.NewMenuItem("&Approve Plan", func() { w.approveActivePlan() }),
+			)
+		}
 	}
 	if len(order) > 0 {
 		sessionItems = append(sessionItems, tv.NewMenuItem("----------", nil))
@@ -639,6 +653,25 @@ func (w *Workbench) exportActive(format string) {
 		msg = label + " export failed:\n" + err.Error()
 	}
 	w.showConfirm("Export Session", msg, nil)
+}
+
+// approveActivePlan executes the active session's pending plan (issue #43). It
+// marks the window busy for the executing turn and hands off to the backend's
+// OnApprovePlan handler (which runs the loop on a background goroutine). It
+// reports when there is no plan to approve rather than calling the handler.
+func (w *Workbench) approveActivePlan() {
+	id := w.ActiveID()
+	if id == "" {
+		return
+	}
+	w.mu.Lock()
+	sw := w.sessions[id]
+	w.mu.Unlock()
+	if sw == nil || !sw.planPending {
+		w.showConfirm("Approve Plan", "No plan is awaiting approval.\nUse /plan to plan a task first, then approve the result.", nil)
+		return
+	}
+	sw.startApprovedTurn()
 }
 
 func (w *Workbench) confirmQuit() {
@@ -1277,6 +1310,9 @@ func (w *Workbench) EmitSessionEvent(id string, ev agent.SessionEvent) {
 		w.mu.Unlock()
 		if ev.Type == agent.SessionEventSubAgent && w.sidebar != nil {
 			w.sidebar.applySubAgent(id, ev)
+		}
+		if ev.Type == agent.SessionEventTodo && w.sidebar != nil {
+			w.sidebar.applyTodo(id, ev.Todos)
 		}
 		if sw != nil {
 			sw.apply(ev)
