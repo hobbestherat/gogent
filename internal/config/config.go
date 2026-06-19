@@ -517,9 +517,13 @@ func GetDefaultConfig() *Config {
 				Free:          false,
 			},
 			{
+				// OpenRouter: api_type "openrouter" supplies the base URL and the
+				// recommended HTTP-Referer / X-Title attribution headers; only an
+				// API key (and model) are needed.
 				Name:        "openrouter-free",
 				DisplayName: "OpenRouter (gemma-3-27b-it)",
-				Endpoint:    "https://openrouter.ai/api/v1/chat/completions",
+				APIType:     "openrouter",
+				Endpoint:    "",
 				Model:       "google/gemma-3-27b-it:free",
 				APIKey:      "",
 				Temperature: 0.7,

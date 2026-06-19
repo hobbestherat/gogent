@@ -328,28 +328,33 @@ func NewModelConnectionFromConfig(modelConfig *config.ModelConfig) *ModelConnect
 		retryMaxDelay:  defaultRetryMaxDelay,
 	}
 
-	// Add the provider's auth header(s) if a key is present. The exact headers
-	// are adapter-specific (OpenAI bearer vs. Anthropic x-api-key + version).
+	// Attach the provider's auth when a key is present. The exact scheme is
+	// spec-driven (OpenAI/OpenRouter bearer, Anthropic x-api-key + version, Azure
+	// api-key, or a Gemini-style query parameter); see providerSpec.authHeaders.
 	if modelConfig.APIKey != "" {
 		conn.client.Transport = &APIKeyRoundTripper{
-			apiKey:    modelConfig.APIKey,
-			headers:   conn.adapter.authHeaders(modelConfig.APIKey),
-			transport: conn.client.Transport,
+			apiKey:     modelConfig.APIKey,
+			headers:    spec.authHeaders(modelConfig.APIKey),
+			queryParam: spec.authQuery(),
+			transport:  conn.client.Transport,
 		}
 	}
 
 	return conn
 }
 
-// APIKeyRoundTripper injects a provider's auth/version headers into every
-// request. headers holds the adapter-resolved set (e.g. Authorization: Bearer …
-// for OpenAI, or x-api-key + anthropic-version for Anthropic); when it is nil it
+// APIKeyRoundTripper injects a provider's auth into every request. headers holds
+// the spec-resolved set (e.g. Authorization: Bearer … for OpenAI, x-api-key +
+// anthropic-version for Anthropic, or attribution headers for OpenRouter) and,
+// when queryParam is set, the key is instead/also placed in that URL query
+// parameter (Gemini's ?key=). When headers is empty and queryParam is unset it
 // falls back to the OpenAI bearer scheme using apiKey, so a bare
 // APIKeyRoundTripper{apiKey: …} keeps working.
 type APIKeyRoundTripper struct {
-	apiKey    string
-	headers   http.Header
-	transport http.RoundTripper
+	apiKey     string
+	headers    http.Header
+	queryParam string
+	transport  http.RoundTripper
 }
 
 func (rt *APIKeyRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -362,8 +367,13 @@ func (rt *APIKeyRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 				req.Header.Set(k, v)
 			}
 		}
-	} else if rt.apiKey != "" {
+	} else if rt.apiKey != "" && rt.queryParam == "" {
 		req.Header.Set("Authorization", "Bearer "+rt.apiKey)
+	}
+	if rt.queryParam != "" && rt.apiKey != "" {
+		q := req.URL.Query()
+		q.Set(rt.queryParam, rt.apiKey)
+		req.URL.RawQuery = q.Encode()
 	}
 	return rt.transport.RoundTrip(req)
 }
