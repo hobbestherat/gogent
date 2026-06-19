@@ -4,6 +4,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	tui "github.com/hobbestherat/turbotui"
+	tv "github.com/hobbestherat/turbotui/turbotv"
 )
 
 // sameStrings reports whether two string slices hold the same values in order,
@@ -53,8 +56,8 @@ func TestFilterResources(t *testing.T) {
 	}
 }
 
-// TestResourceListLabel covers name padding, the usage tail and the (off) marker
-// for disabled togglable items.
+// TestResourceListLabel covers the on/off checkbox prefix, name padding, the
+// usage tail and long-name truncation.
 func TestResourceListLabel(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -62,24 +65,29 @@ func TestResourceListLabel(t *testing.T) {
 		want string
 	}{
 		{
-			"enabled tool no usage",
+			"enabled tool checked box",
 			resourceItem{kind: resourceTools, name: "calc", enabled: true, canToggle: true},
-			"calc" + strings.Repeat(" ", 22-4),
+			"[x] calc" + strings.Repeat(" ", 22-4),
 		},
 		{
 			"enabled tool with usage",
 			resourceItem{kind: resourceTools, name: "shell", enabled: true, canToggle: true, usage: "used:12"},
-			"shell" + strings.Repeat(" ", 22-5) + " used:12",
+			"[x] shell" + strings.Repeat(" ", 22-5) + " used:12",
 		},
 		{
-			"disabled tool marked off",
+			"disabled tool empty box",
 			resourceItem{kind: resourceTools, name: "shell", enabled: false, canToggle: true, usage: "used:1"},
-			"shell" + strings.Repeat(" ", 22-5) + " used:1  (off)",
+			"[ ] shell" + strings.Repeat(" ", 22-5) + " used:1",
+		},
+		{
+			"non-togglable aligned no box",
+			resourceItem{kind: resourceMCP, name: "server", canToggle: false},
+			"    server" + strings.Repeat(" ", 22-6),
 		},
 		{
 			"long name truncated to width",
 			resourceItem{kind: resourceTools, name: "a-very-long-tool-name-here", enabled: true, canToggle: true},
-			"a-very-long-tool-name-here"[:22],
+			"[x] " + "a-very-long-tool-name-here"[:22],
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -121,14 +129,16 @@ func TestToolDetail(t *testing.T) {
 	}
 }
 
-// TestSkillDetail covers the header, active/inactive state, the usage line and
-// the SKILL.md preview.
+// TestSkillDetail covers the header, active/inactive state, the usage line, the
+// on-disk file path and the SKILL.md preview.
 func TestSkillDetail(t *testing.T) {
-	got := skillDetail("writer", "Writing helper.", true, 3, 1, 4, "---\nname: writer\n---\nBody text.")
+	got := skillDetail("writer", "Writing helper.", "/home/u/.gogent/skills/writer/SKILL.md",
+		true, 3, 1, 4, "---\nname: writer\n---\nBody text.")
 	for _, want := range []string{
 		"Skill: writer",
 		"State: active",
 		"Usage: 3 ok / 1 fail (4 total)",
+		"File: /home/u/.gogent/skills/writer/SKILL.md",
 		"Description",
 		"Writing helper.",
 		"SKILL.md",
@@ -139,13 +149,16 @@ func TestSkillDetail(t *testing.T) {
 		}
 	}
 
-	// Inactive + empty content omits the preview.
-	inactive := skillDetail("writer", "Writing helper.", false, 0, 0, 0, "")
+	// Inactive + empty content/empty path omit the preview and the file line.
+	inactive := skillDetail("writer", "Writing helper.", "", false, 0, 0, 0, "")
 	if !strings.Contains(inactive, "State: inactive") {
 		t.Errorf("expected inactive state:\n%s", inactive)
 	}
 	if strings.Contains(inactive, "SKILL.md") {
 		t.Errorf("empty content should omit SKILL.md preview:\n%s", inactive)
+	}
+	if strings.Contains(inactive, "File:") {
+		t.Errorf("empty path should omit the file line:\n%s", inactive)
 	}
 }
 
@@ -202,9 +215,9 @@ func TestLoadToolItems(t *testing.T) {
 	if items[0].name != "alpha" || items[1].name != "zebra" {
 		t.Fatalf("expected sorted order alpha,zebra; got %s,%s", items[0].name, items[1].name)
 	}
-	// alpha is disabled → its label carries the (off) marker.
-	if !strings.Contains(resourceListLabel(items[0]), "(off)") {
-		t.Errorf("disabled item should be marked (off): %q", resourceListLabel(items[0]))
+	// alpha is disabled → its label carries an empty checkbox.
+	if label := resourceListLabel(items[0]); !strings.Contains(label, "[ ]") || strings.Contains(label, "[x]") {
+		t.Errorf("disabled item should show [ ] checkbox: %q", label)
 	}
 	// The enabled tool's detail embeds its schema.
 	if !strings.Contains(items[1].detail, `"type":"object"`) {
@@ -261,9 +274,9 @@ func TestResourcesDialogSize(t *testing.T) {
 		screenW, H   int
 		wantW, wantH int
 	}{
-		{"large screen caps at 78x22", 200, 100, 78, 22},
-		{"fits narrow terminal", 70, 30, 68, 22},
-		{"short terminal floors height", 120, 16, 78, 14},
+		{"large screen caps at 96x32", 200, 100, 96, 32},
+		{"fits narrow terminal", 70, 30, 68, 28},
+		{"short terminal floors height", 120, 16, 96, 14},
 		{"tiny terminal floors both", 50, 20, 60, 18},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -305,5 +318,92 @@ func TestSortResourceItems(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("sortResourceItems = %v, want %v", got, want)
+	}
+}
+
+// TestSelectionColorsFor covers the collision fallback (invert the dialog
+// colours so a selected row is visible) and passthrough for themes whose
+// selection already differs from the dialog chrome.
+func TestSelectionColorsFor(t *testing.T) {
+	black := tui.ANSIColor(0)
+	white := tui.ANSIColor(7)
+	accent := tui.ANSIColor(11)
+	def := tui.DefaultColor()
+	for _, tc := range []struct {
+		name                              string
+		dialogFG, dialogBG, selFG, selBG  tui.Color
+		wantFG, wantBG                    tui.Color
+	}{
+		{
+			"collision inverts dialog colours",
+			black, white, black, white, // selection == dialog → invisible
+			white, black,
+		},
+		{
+			"distinct background passes through",
+			black, white, black, accent,
+			black, accent,
+		},
+		{
+			"distinct foreground passes through",
+			black, white, accent, white,
+			accent, white,
+		},
+		{
+			"no-colour defaults stay default",
+			def, def, def, def,
+			def, def,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gotFG, gotBG := selectionColorsFor(tc.dialogFG, tc.dialogBG, tc.selFG, tc.selBG)
+			if gotFG != tc.wantFG || gotBG != tc.wantBG {
+				t.Errorf("selectionColorsFor = (FG %+v, BG %+v), want (FG %+v, BG %+v)",
+					gotFG, gotBG, tc.wantFG, tc.wantBG)
+			}
+		})
+	}
+}
+
+// TestBindToggleKeys verifies that Space and Enter are the explicit toggle
+// gesture, while Escape bubbles up (so the dialog can close) and arrow
+// navigation is delegated to the tree — none of which toggle.
+func TestBindToggleKeys(t *testing.T) {
+	list := tv.NewTree(tv.Rect{X: 0, Y: 0, W: 20, H: 5})
+	list.AddRoot(tv.NewTreeNode("alpha"))
+	var toggled int
+	bindToggleKeys(list, func() { toggled++ })
+	c := list.Component
+
+	for name, ev := range map[string]tui.TypeEvent{
+		"space": {Key: tui.KeyRune, Rune: ' '},
+		"enter": {Key: tui.KeyEnter},
+	} {
+		toggled = 0
+		if !c.BubbleType(ev) {
+			t.Errorf("%s: expected the key to be consumed", name)
+		}
+		if toggled != 1 {
+			t.Errorf("%s: expected toggle to fire once, got %d", name, toggled)
+		}
+	}
+
+	// Escape is not consumed here (it must bubble to the dialog to close it) and
+	// never toggles.
+	toggled = 0
+	if c.BubbleType(tui.TypeEvent{Key: tui.KeyEscape}) {
+		t.Errorf("Escape should bubble up to the dialog, not be consumed by the list")
+	}
+	if toggled != 0 {
+		t.Errorf("Escape must not toggle, got %d", toggled)
+	}
+
+	// Arrow navigation delegates to the tree (consumed) without toggling.
+	toggled = 0
+	if !c.BubbleType(tui.TypeEvent{Key: tui.KeyDown}) {
+		t.Errorf("Down should be delegated to the tree and consumed")
+	}
+	if toggled != 0 {
+		t.Errorf("Down must not toggle, got %d", toggled)
 	}
 }

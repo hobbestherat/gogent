@@ -229,6 +229,7 @@ func main() {
 						Description: s.Description,
 						Active:      reg.IsSkillActive(s.Name),
 						Content:     s.Content,
+						Path:        s.Path,
 					}
 					if st := reg.GetSkillStats(s.Name); st != nil {
 						info.Success = st.Success
