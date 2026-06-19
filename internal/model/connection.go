@@ -65,13 +65,30 @@ type CompletionRequest struct {
 	Stream        bool           `json:"stream"`
 	StreamOptions *StreamOptions `json:"stream_options,omitempty"`
 	N             int            `json:"n,omitempty"`
-	Temperature   float32        `json:"temperature,omitempty"`
-	TopP          float32        `json:"top_p,omitempty"`
-	MaxTokens     int            `json:"max_tokens,omitempty"`
-	ContextLength int            `json:"context_length,omitempty"`
-	Model         string         `json:"model,omitempty"`
-	Tools         []ToolDef      `json:"tools,omitempty"`
-	ToolChoice    string         `json:"tool_choice,omitempty"`
+	// Numeric sampling/limit params are pointers so a deliberate zero (e.g.
+	// temperature 0) is expressible and distinguishable from "unset" — a plain
+	// float32/int with omitempty silently drops a valid 0.
+	Temperature *float32 `json:"temperature,omitempty"`
+	TopP        *float32 `json:"top_p,omitempty"`
+	MaxTokens   *int     `json:"max_tokens,omitempty"`
+	// MaxCompletionTokens is the output cap for OpenAI reasoning models
+	// (o-series, GPT-5), which reject the legacy max_tokens. Exactly one of
+	// MaxTokens / MaxCompletionTokens is set per request (see buildRequest).
+	MaxCompletionTokens *int `json:"max_completion_tokens,omitempty"`
+	// ReasoningEffort and Thinking are reasoning-model controls, emitted only
+	// for providers that understand them (see providerSpec capabilities).
+	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
+	Thinking        *ThinkingParam `json:"thinking,omitempty"`
+	ContextLength   int            `json:"context_length,omitempty"`
+	Model           string         `json:"model,omitempty"`
+	Tools           []ToolDef      `json:"tools,omitempty"`
+	ToolChoice      string         `json:"tool_choice,omitempty"`
+}
+
+// ThinkingParam is the Z.AI/Anthropic-style chain-of-thought toggle, sent as
+// thinking:{"type":"enabled"|"disabled"}.
+type ThinkingParam struct {
+	Type string `json:"type"`
 }
 
 // StreamOptions mirrors OpenAI's stream_options. include_usage asks the backend
@@ -110,6 +127,12 @@ type TokenUsage struct {
 	// top-level as prompt_cache_hit_tokens. UnmarshalJSON reads either form. The
 	// own tag keeps it round-tripping through gogent's persistence.
 	CachedTokens int `json:"cached_tokens,omitempty"`
+	// ReasoningTokens is the count of output tokens a reasoning model spent on
+	// internal chain-of-thought. It is a subset of CompletionTokens (already
+	// billed within it), reported under
+	// usage.completion_tokens_details.reasoning_tokens. UnmarshalJSON lifts it
+	// out; the own tag keeps it round-tripping through gogent's persistence.
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 }
 
 // UnmarshalJSON parses provider token usage, normalizing the cached-prompt-token
@@ -123,7 +146,10 @@ func (u *TokenUsage) UnmarshalJSON(data []byte) error {
 		PromptTokensDetails *struct {
 			CachedTokens int `json:"cached_tokens"`
 		} `json:"prompt_tokens_details"`
-		PromptCacheHitTokens int `json:"prompt_cache_hit_tokens"`
+		PromptCacheHitTokens     int `json:"prompt_cache_hit_tokens"`
+		CompletionTokensDetails *struct {
+			ReasoningTokens int `json:"reasoning_tokens"`
+		} `json:"completion_tokens_details"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -134,6 +160,9 @@ func (u *TokenUsage) UnmarshalJSON(data []byte) error {
 		u.CachedTokens = raw.PromptTokensDetails.CachedTokens
 	case raw.PromptCacheHitTokens > 0:
 		u.CachedTokens = raw.PromptCacheHitTokens
+	}
+	if raw.CompletionTokensDetails != nil && raw.CompletionTokensDetails.ReasoningTokens > 0 {
+		u.ReasoningTokens = raw.CompletionTokensDetails.ReasoningTokens
 	}
 	return nil
 }
@@ -379,25 +408,65 @@ func (c *ModelConnection) CompleteWithStats(messages []Message) (*CompletionResp
 // streaming additionally requests a final usage chunk via stream_options.
 func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []ToolDef) CompletionRequest {
 	maxTokens := 4096
-	var temperature float32
+	var temperature, topP float32
+	var reasoningEffort string
+	var thinking *bool
 	if c.Config != nil {
 		if c.Config.MaxTokens > 0 {
 			maxTokens = c.Config.MaxTokens
 		}
 		temperature = c.Config.Temperature
+		topP = c.Config.TopP
+		reasoningEffort = c.Config.ReasoningEffort
+		thinking = c.Config.Thinking
 	}
 	// Clamp to the provider's max_tokens ceiling; some backends (e.g. Z.AI) 400
 	// on out-of-range values instead of capping them.
 	if c.spec.maxTokensLimit > 0 && maxTokens > c.spec.maxTokensLimit {
 		maxTokens = c.spec.maxTokensLimit
 	}
+
 	reqBody := CompletionRequest{
-		Messages:    messages,
-		Stream:      stream,
-		MaxTokens:   maxTokens,
-		Temperature: temperature,
-		Tools:       tools,
+		Messages: messages,
+		Stream:   stream,
+		Tools:    tools,
 	}
+
+	reasoning := c.Config.IsReasoningModel()
+
+	// Output-token cap: reasoning models on some providers (OpenAI o-series /
+	// GPT-5) reject max_tokens and require max_completion_tokens.
+	mt := maxTokens
+	if reasoning && c.spec.reasoningTokenParam == "max_completion_tokens" {
+		reqBody.MaxCompletionTokens = &mt
+	} else {
+		reqBody.MaxTokens = &mt
+	}
+
+	// Sampling params. Omit them for reasoning models on providers that reject a
+	// custom temperature (OpenAI reasoning tiers); otherwise send temperature
+	// (pointer, so a deliberate 0 survives) and top_p when configured.
+	if !(reasoning && c.spec.reasoningRejectsTemperature) {
+		t := temperature
+		reqBody.Temperature = &t
+		if topP > 0 {
+			p := topP
+			reqBody.TopP = &p
+		}
+	}
+
+	// Reasoning controls, emitted only where the provider understands them.
+	if reasoningEffort != "" && c.spec.supportsReasoningEffort {
+		reqBody.ReasoningEffort = reasoningEffort
+	}
+	if thinking != nil && c.spec.supportsThinking {
+		state := "disabled"
+		if *thinking {
+			state = "enabled"
+		}
+		reqBody.Thinking = &ThinkingParam{Type: state}
+	}
+
 	if len(tools) > 0 {
 		reqBody.ToolChoice = "auto"
 	}

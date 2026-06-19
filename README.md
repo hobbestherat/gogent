@@ -244,6 +244,21 @@ tokens. Context compaction is calibrated against `context_window` (it fires at
 to your model's real window so long sessions compact at the right point. When
 omitted it falls back to a conservative built-in default.
 
+Reasoning models add two optional per-model fields, surfaced in the model editor
+and threaded into the request only where the provider understands them:
+
+- `reasoning_effort` — forwarded as the API's `reasoning_effort`
+  (`minimal`/`low`/`medium`/`high`, plus `none`/`max`/`xhigh` on Z.AI GLM-5.2).
+- `thinking` — a boolean toggling chain-of-thought on providers with an explicit
+  switch (Z.AI GLM-4.5+, sent as `thinking: {type: enabled|disabled}`). Omit it
+  to leave the provider default.
+
+Setting either marks the model as a reasoning model: on OpenAI o-series / GPT-5
+the output cap is sent as `max_completion_tokens` (they reject `max_tokens`) and
+the rejected `temperature` is dropped, so the most capable tiers no longer 400
+on the first request. Providers report `reasoning_tokens` (a subset of the
+output tokens) under `completion_tokens_details`, which gogent now parses.
+
 The bottom status line of each session window carries a live usage readout
 (issue #63): the current state, an elapsed timer and output throughput while a
 turn is generating, cumulative tokens and turns, and a context-window gauge

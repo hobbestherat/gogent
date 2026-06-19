@@ -29,8 +29,32 @@ type ModelConfig struct {
 	// separate from MaxTokens: a sane output cap (e.g. 4096) must not be mistaken
 	// for the context window. Leave unset (0) to fall back to
 	// ContextWindowOrDefault's conservative default.
-	ContextWindow int  `json:"context_window,omitempty"`
-	Free          bool `json:"free"`
+	ContextWindow int `json:"context_window,omitempty"`
+	// ReasoningEffort, when set, is forwarded as the reasoning_effort request
+	// parameter for providers that support it (OpenAI o-series / GPT-5, Z.AI
+	// GLM). Recognized values are provider-specific — commonly
+	// minimal|low|medium|high, plus none|max|xhigh on Z.AI GLM-5.2. Setting it
+	// also marks the model as a reasoning model, which switches the output-token
+	// parameter to max_completion_tokens and drops the (rejected) temperature on
+	// OpenAI reasoning tiers. Empty omits the parameter.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// Thinking toggles chain-of-thought reasoning on providers that expose an
+	// explicit switch (Z.AI GLM-4.5+, sent as thinking:{type:enabled|disabled}).
+	// nil leaves the parameter unset (provider default); a non-nil value forces
+	// it on/off and, like ReasoningEffort, marks the model as a reasoning model.
+	Thinking *bool `json:"thinking,omitempty"`
+	Free     bool  `json:"free"`
+}
+
+// IsReasoningModel reports whether the config opts into any reasoning control
+// (reasoning effort or an explicit thinking toggle). It is the signal that the
+// model expects the reasoning-model request encoding (max_completion_tokens,
+// temperature handling) rather than the legacy chat-completions shape.
+func (m *ModelConfig) IsReasoningModel() bool {
+	if m == nil {
+		return false
+	}
+	return m.ReasoningEffort != "" || m.Thinking != nil
 }
 
 // defaultContextWindow is the conservative built-in context window assumed when a

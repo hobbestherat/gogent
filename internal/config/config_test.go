@@ -322,3 +322,26 @@ func TestBudgetConfigZeroIsOff(t *testing.T) {
 		t.Errorf("legacy config should leave budget off, got %+v", legacyCfg.Budget)
 	}
 }
+
+func TestIsReasoningModel(t *testing.T) {
+	on := true
+	off := false
+	cases := []struct {
+		name string
+		m    *ModelConfig
+		want bool
+	}{
+		{"nil", nil, false},
+		{"plain", &ModelConfig{Model: "gpt-4o"}, false},
+		{"effort", &ModelConfig{ReasoningEffort: "high"}, true},
+		{"thinking on", &ModelConfig{Thinking: &on}, true},
+		{"thinking off still reasoning", &ModelConfig{Thinking: &off}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.m.IsReasoningModel(); got != c.want {
+				t.Errorf("IsReasoningModel() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
