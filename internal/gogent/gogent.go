@@ -245,6 +245,7 @@ func (g *Gogent) initializeToolRegistry() {
 	// Register file operation tools
 	g.toolRegistry.Register(&tool.Tool{
 		Name:        "read",
+		ReadOnly:    true,
 		Description: "Read a file from the workspace. Use this when the user asks you to read, view, or display a file.",
 		InputSchema: map[string]interface{}{
 			"type":       "object",
@@ -396,7 +397,8 @@ func (g *Gogent) initializeToolRegistry() {
 	// file:line results the model can pass straight back to read. They build on
 	// the existing FileSystem primitives (Glob/List) plus the Grep primitive.
 	g.toolRegistry.Register(&tool.Tool{
-		Name: "grep",
+		Name:     "grep",
+		ReadOnly: true,
 		Description: "Search file contents across the workspace for a regular expression (Go regex syntax). " +
 			"Read-only and workspace-confined, so it runs without a permission prompt — prefer it over " +
 			"shelling out to grep/rg. It returns file:line references the read tool can open. " +
@@ -438,6 +440,7 @@ func (g *Gogent) initializeToolRegistry() {
 
 	g.toolRegistry.Register(&tool.Tool{
 		Name:        "glob",
+		ReadOnly:    true,
 		Description: "List files in the workspace whose path matches a glob pattern (shell-style *, ?, [abc]; it does not cross directory boundaries, so prefer grep for recursive content search). Read-only and workspace-confined, so it runs without a permission prompt. Use it to discover files by name before reading them.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
@@ -466,6 +469,7 @@ func (g *Gogent) initializeToolRegistry() {
 
 	g.toolRegistry.Register(&tool.Tool{
 		Name:        "list",
+		ReadOnly:    true,
 		Description: "List the files and subdirectories immediately inside a workspace directory. Read-only and workspace-confined, so it runs without a permission prompt. Use it to explore a directory's layout before reading specific files.",
 		InputSchema: map[string]interface{}{
 			"type": "object",

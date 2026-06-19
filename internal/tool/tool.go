@@ -44,6 +44,14 @@ type Tool struct {
 	Description string
 	InputSchema interface{}
 	Execute     func(args map[string]interface{}, context ToolContext) (interface{}, error)
+	// ReadOnly marks a tool as read-only/idempotent: it inspects the workspace
+	// (or a remote resource) without mutating shared state, so several such calls
+	// from one turn can run concurrently without racing on files or on call
+	// ordering. Side-effecting tools (write, edit, shell, ...) leave it false and
+	// are executed serially. Unknown/dynamic tools (e.g. MCP) default to false,
+	// the safe choice. It is the property the parallel tool-call fast-path keys on
+	// (issue #50).
+	ReadOnly bool
 }
 
 type ToolRegistry struct {
@@ -360,6 +368,7 @@ func (tr *ToolRegistry) RegisterCalcTool() {
 	tr.Register(&Tool{
 		Name:        "calc",
 		Description: "Calculate mathematical expressions like 5+5 or 10*20/5. Returns the result of the calculation.",
+		ReadOnly:    true,
 		InputSchema: map[string]interface{}{
 			"type":       "object",
 			"properties": map[string]interface{}{"expression": map[string]interface{}{"type": "string"}},
@@ -455,7 +464,8 @@ func (tr *ToolRegistry) RegisterShellTool() {
 func (tr *ToolRegistry) RegisterWebFetchTool() {
 	fetcher := web.NewFetcher(web.Config{Timeout: tr.NetworkTimeout})
 	tr.Register(&Tool{
-		Name: "web_fetch",
+		Name:     "web_fetch",
+		ReadOnly: true,
 		Description: "Fetch a web page over http(s) and return its main content as Markdown " +
 			"(readability-extracted, size-capped, short-TTL cached). Prefer this over running " +
 			"curl in the shell for reading docs, API references and error lookups: it returns " +

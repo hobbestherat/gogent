@@ -43,7 +43,15 @@ internal/clipboard/    System clipboard (OSC 52 + native pbcopy/xclip/wl-copy)
   parsing a JSON tool call out of assistant text. Emits a typed `SessionEvent`
   stream (`thinking`, `assistant_step`, `tool_call`, `tool_result`, `final`,
   `error`) so the UI renders incrementally. Only root-agent events surface in the
-  main chat; sub-agent detail is kept for the monologue popup.
+  main chat; sub-agent detail is kept for the monologue popup. When a turn
+  returns several independent tool calls, two fast-paths run them concurrently to
+  cut wall-clock latency: an all-`spawn_subagent` batch (bounded by the
+  `SubAgentLimiter`), and an all-read-only batch (`read`/`grep`/`glob`/`list`/
+  `calc`/`web_fetch`, bounded by a fixed tool semaphore, default 8). Read-only is
+  a per-tool property (`Tool.ReadOnly`); any write/shell, mixed, or unknown (e.g.
+  MCP) tool in the batch keeps the whole turn on the serial path so side effects
+  keep their requested order. Either way results are reassembled in call order
+  before being fed back (issue #50).
 - **Sub-agents** — two execution models: *one-shot* (blocking, must end in
   `SUCCESS:`/`FAILURE:`) and *interactive* (async, may return `CLARIFY`). Mode,
   recursion depth, and fan-out limits are configurable. Batched
