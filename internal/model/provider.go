@@ -126,6 +126,13 @@ type providerSpec struct {
 	// thinking request parameters so they are emitted only where understood.
 	supportsReasoningEffort bool
 	supportsThinking        bool
+
+	// supportsResponseFormat gates the response_format request parameter (OpenAI
+	// structured outputs) and the strict-tool parallel_tool_calls invariant
+	// (issue #49). It is set for the OpenAI-compatible family; Anthropic, which
+	// has no response_format field, leaves it unset and relies on strict tools +
+	// tool_choice forcing for structured output.
+	supportsResponseFormat bool
 }
 
 var providerSpecs = map[APIType]providerSpec{
@@ -142,6 +149,7 @@ var providerSpecs = map[APIType]providerSpec{
 		reasoningTokenParam:         "max_completion_tokens",
 		reasoningRejectsTemperature: true,
 		supportsReasoningEffort:     true,
+		supportsResponseFormat:      true,
 	},
 	APITypeZAI: {
 		defaultBaseURL: "https://api.z.ai/api/paas/v4",
@@ -154,6 +162,7 @@ var providerSpecs = map[APIType]providerSpec{
 		// both an explicit thinking toggle and reasoning_effort (GLM-5.2).
 		supportsReasoningEffort: true,
 		supportsThinking:        true,
+		supportsResponseFormat:  true,
 	},
 	APITypeAnthropic: {
 		defaultBaseURL: "https://api.anthropic.com",
@@ -179,6 +188,7 @@ var providerSpecs = map[APIType]providerSpec{
 			"HTTP-Referer": openRouterReferer,
 			"X-Title":      openRouterTitle,
 		},
+		supportsResponseFormat: true,
 	},
 }
 

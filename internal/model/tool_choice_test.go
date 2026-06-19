@@ -65,7 +65,7 @@ func TestBuildRequestToolChoiceAutoOnWire(t *testing.T) {
 		Type:     "function",
 		Function: FunctionDef{Name: "read", Parameters: map[string]interface{}{"type": "object"}},
 	}}
-	req := conn.buildRequest([]Message{{Role: RoleUser, Content: "hi"}}, false, tools)
+	req := conn.buildRequest([]Message{{Role: RoleUser, Content: "hi"}}, false, tools, nil)
 	if req.ToolChoice == nil || req.ToolChoice.Mode != ToolChoiceAuto {
 		t.Fatalf("ToolChoice = %+v, want auto", req.ToolChoice)
 	}
@@ -85,7 +85,7 @@ func TestBuildRequestToolChoiceAutoOnWire(t *testing.T) {
 // No tools => buildRequest leaves ToolChoice unset, and it is omitted on the wire.
 func TestBuildRequestNoToolChoiceWithoutTools(t *testing.T) {
 	conn := NewModelConnectionFromConfig(&config.ModelConfig{Model: "gpt-4o"})
-	req := conn.buildRequest([]Message{{Role: RoleUser, Content: "hi"}}, false, nil)
+	req := conn.buildRequest([]Message{{Role: RoleUser, Content: "hi"}}, false, nil, nil)
 	if req.ToolChoice != nil {
 		t.Errorf("ToolChoice = %+v, want nil without tools", req.ToolChoice)
 	}
