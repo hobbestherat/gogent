@@ -136,6 +136,10 @@ internal/clipboard/    System clipboard (OSC 52 + native pbcopy/xclip/wl-copy)
   `pbcopy`/`xclip`/`wl-copy` fallback); the **Session → Export Markdown/JSON**
   items render the full transcript — read from the same data the restored-session
   view uses — to a file under `~/.gogent`.
+  The **Session → Saved Sessions…** browser lists past sessions from index
+  metadata only (no transcript replay) and opens one read-only in an analysis
+  window or re-opens it live to continue; analysis windows are static, unbound to
+  any backend session, and excluded from the persisted layout (issue #58).
   next launch. A `notify.Notifier` watches the `SessionEvent` stream for terminal
   states (final, error, sub-agent clarify) and the permission-prompt path
   (approval) and emits a bell / OSC desktop notification / native notifier so a
@@ -164,15 +168,17 @@ internal/clipboard/    System clipboard (OSC 52 + native pbcopy/xclip/wl-copy)
   for auxiliary tasks, timeouts, sub-agent settings, notification settings,
   token-budget settings).
 - Sessions: sharded JSONL in the sessions directory. A live session occupies a
-  base prefix `<iso>_<id>_session` laid out as `<base>.index` (the session meta
-  and shard table — the source of truth) plus `<base>.0000.jsonl`,
-  `<base>.0001.jsonl`, … each capped at ~5 000 records / ~10 MiB so no single
-  file grows unboundedly. Closing a session renames the base to
-  `..._session_archived` across all its files. Listing reads only the tiny index
-  files (plus the current shard for restore), never replaying the whole history;
-  non-archived sessions are restored on startup (crash recovery). Durability
-  (`fsync`) is batched off the turn path; a graceful shutdown should flush via
-  `SessionStore.Sync`/`Close`.
+  base prefix `<iso>_<id>_session` laid out as `<base>.index` (the session meta,
+  shard table and a usage summary — turns/tokens/model — and the source of truth)
+  plus `<base>.0000.jsonl`, `<base>.0001.jsonl`, … each capped at ~5 000 records
+  / ~10 MiB so no single file grows unboundedly. Closing a session renames the
+  base to `..._session_archived` across all its files. Listing reads only the
+  tiny index files (plus the current shard for restore), never replaying the
+  whole history; `SessionStore.ListSessions` is index-only for the saved-session
+  browser (issue #58), while `ListActive` also loads the active shard for
+  restore. Non-archived sessions are restored on startup (crash recovery).
+  Durability (`fsync`) is batched off the turn path; a graceful shutdown should
+  flush via `SessionStore.Sync`/`Close`.
 - Workbench layout: `~/.gogent/workbench_layout.json` — the desktop arrangement
   (sidebar order, per-session titles, pin/favorite state, window bounds and
   minimized flag). Re-applied on startup after `RestoreSessions`, so renamed,

@@ -282,17 +282,49 @@ func main() {
 				loaded := g.RestoreSessions()
 				out := make([]tuipkg.RestoredSession, 0, len(loaded))
 				for _, ls := range loaded {
-					title := ls.Title
-					if title == "" {
-						title = ls.ID
-					}
-					out = append(out, tuipkg.RestoredSession{
-						ID:       ls.ID,
-						Title:    title,
-						Messages: toChatMessages(ls.Transcripts["root"]),
+					out = append(out, loadedToRestored(ls))
+				}
+				return out
+			},
+			// ListSavedSessions feeds the Sessions browser index-only metadata
+			// (issue #58): no transcript is replayed to populate the list.
+			ListSavedSessions: func() []tuipkg.SessionMeta {
+				metas := g.ListSessions()
+				out := make([]tuipkg.SessionMeta, 0, len(metas))
+				for _, m := range metas {
+					out = append(out, tuipkg.SessionMeta{
+						ID:        m.ID,
+						Title:     m.Title,
+						CreatedAt: m.CreatedAt,
+						Turns:     m.Turns,
+						Messages:  m.Messages,
+						TokensIn:  m.TokensIn,
+						TokensOut: m.TokensOut,
+						Model:     m.Model,
+						File:      m.File,
 					})
 				}
 				return out
+			},
+			// OpenSavedSession loads one persisted session for the browser: adopted
+			// live when continueSession is true (so sends append), read-only
+			// otherwise (issue #58).
+			OpenSavedSession: func(file string, continueSession bool) (tuipkg.RestoredSession, bool) {
+				var ls gogent.LoadedSession
+				if continueSession {
+					var ok bool
+					ls, ok = g.ContinueSession(file)
+					if !ok {
+						return tuipkg.RestoredSession{}, false
+					}
+				} else {
+					var err error
+					ls, err = g.LoadSavedSession(file)
+					if err != nil {
+						return tuipkg.RestoredSession{}, false
+					}
+				}
+				return loadedToRestored(ls), true
 			},
 			LoadLayout: func() gogent.Layout { return g.LoadLayout() },
 			SaveLayout: func(layout gogent.Layout) {
@@ -372,6 +404,21 @@ func toChatMessages(msgs []model.Message) []tuipkg.ChatMessage {
 		out = append(out, cm)
 	}
 	return out
+}
+
+// loadedToRestored maps a backend LoadedSession into the UI's RestoredSession
+// view, seeding an empty title with the session id. Shared by startup restore
+// and the on-demand Sessions browser open/continue paths (issue #58).
+func loadedToRestored(ls gogent.LoadedSession) tuipkg.RestoredSession {
+	title := ls.Title
+	if title == "" {
+		title = ls.ID
+	}
+	return tuipkg.RestoredSession{
+		ID:       ls.ID,
+		Title:    title,
+		Messages: toChatMessages(ls.Transcripts["root"]),
+	}
 }
 
 // HTTP server tunables. The read/header timeouts and body cap bound slow-client

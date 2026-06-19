@@ -1143,29 +1143,70 @@ func (g *Gogent) RestoreSessions() []LoadedSession {
 	}
 	var restored []LoadedSession
 	for _, ls := range loaded {
-		if ls.ID == "" || ls.ID == "default" {
-			continue
+		if r, ok := g.adoptLoaded(ls); ok {
+			restored = append(restored, r)
 		}
-		g.mu.RLock()
-		_, exists := g.userSessions[ls.ID]
-		g.mu.RUnlock()
-		if exists {
-			continue
-		}
-
-		conn := g.defaultConnection()
-		sess := model.NewModelSession("main", conn)
-		if msgs := ls.Transcripts["root"]; len(msgs) > 0 {
-			sess.ReplaceTranscript(msgs)
-		}
-		rootAgent := agent.NewAgent("root", sess)
-		rootAgent.SetState(agent.StateIdle)
-		g.CreateUserSession(ls.ID, rootAgent)
-		g.SetSessionTitle(ls.ID, ls.Title)
-		g.store.Adopt(ls.ID, ls.File, rootAgent.ListAllAgents()) // continue appending to the active shard
-		restored = append(restored, ls)
 	}
 	return restored
+}
+
+// adoptLoaded rebuilds one loaded session's in-memory UserSession from its
+// restored transcript (so the conversation can continue), seeds its title and
+// re-attaches the store so later saves append to its active shard. It is shared
+// by startup RestoreSessions and on-demand ContinueSession (issue #58). It is a
+// no-op (ok=false) for the "default" session or one that already exists.
+func (g *Gogent) adoptLoaded(ls LoadedSession) (LoadedSession, bool) {
+	if ls.ID == "" || ls.ID == "default" {
+		return LoadedSession{}, false
+	}
+	g.mu.RLock()
+	_, exists := g.userSessions[ls.ID]
+	g.mu.RUnlock()
+	if exists {
+		return LoadedSession{}, false
+	}
+
+	conn := g.defaultConnection()
+	sess := model.NewModelSession("main", conn)
+	if msgs := ls.Transcripts["root"]; len(msgs) > 0 {
+		sess.ReplaceTranscript(msgs)
+	}
+	rootAgent := agent.NewAgent("root", sess)
+	rootAgent.SetState(agent.StateIdle)
+	g.CreateUserSession(ls.ID, rootAgent)
+	g.SetSessionTitle(ls.ID, ls.Title)
+	if g.store != nil {
+		g.store.Adopt(ls.ID, ls.File, rootAgent.ListAllAgents()) // continue appending to the active shard
+	}
+	return ls, true
+}
+
+// ContinueSession re-opens a single saved session by its index file path so the
+// user can keep typing into it: it loads the transcript, adopts it into a live
+// backend session (the next send appends rather than starting over) and returns
+// the loaded session for a UI to re-open its window (issue #58). It returns
+// ok=false when the store is unavailable, the file is missing, or the session
+// is the "default"/already live.
+func (g *Gogent) ContinueSession(file string) (LoadedSession, bool) {
+	if g.store == nil {
+		return LoadedSession{}, false
+	}
+	ls, err := g.store.LoadSession(file)
+	if err != nil {
+		g.warnf("failed to load session %s: %v", file, err)
+		return LoadedSession{}, false
+	}
+	return g.adoptLoaded(ls)
+}
+
+// LoadSavedSession reads one saved session's transcript by its index file path
+// for read-only analysis (issue #58) — unlike ContinueSession it builds no live
+// backend session, so the returned transcript is a static snapshot.
+func (g *Gogent) LoadSavedSession(file string) (LoadedSession, error) {
+	if g.store == nil {
+		return LoadedSession{}, fmt.Errorf("session persistence unavailable")
+	}
+	return g.store.LoadSession(file)
 }
 
 // UndoLastTurn reverts the most recent turn's file mutations for a session,
@@ -1496,8 +1537,8 @@ When the user asks you to do something, determine which tool(s) to use and outpu
 `
 }
 
-// ListSessions returns all session IDs
-func (g *Gogent) ListSessions() []string {
+// SessionIDs returns the ids of every live in-memory session.
+func (g *Gogent) SessionIDs() []string {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
@@ -1506,6 +1547,23 @@ func (g *Gogent) ListSessions() []string {
 		sessions = append(sessions, id)
 	}
 	return sessions
+}
+
+// ListSessions returns the metadata of every persisted session straight from the
+// store's index files (issue #58): an O(sessions) listing for the Sessions
+// browser that never replays a transcript. It returns nil when persistence is
+// unavailable; a read error is warned and yields an empty slice rather than
+// failing the caller.
+func (g *Gogent) ListSessions() []SessionMeta {
+	if g.store == nil {
+		return nil
+	}
+	metas, err := g.store.ListSessions()
+	if err != nil {
+		g.warnf("failed to list saved sessions: %v", err)
+		return nil
+	}
+	return metas
 }
 
 // ListBackendModels asks a configured backend which models it serves, using the

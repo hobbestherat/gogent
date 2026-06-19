@@ -123,7 +123,7 @@ func TestGogentGetUserSession(t *testing.T) {
 	}
 }
 
-func TestGogentListSessions(t *testing.T) {
+func TestGogentSessionIDs(t *testing.T) {
 	g := NewGogent(t.TempDir())
 	m := model.NewModelConnection()
 
@@ -137,7 +137,7 @@ func TestGogentListSessions(t *testing.T) {
 	agent2 := agent.NewAgent("a2", s2)
 	g.CreateUserSession("session2", agent2)
 
-	sessions := g.ListSessions()
+	sessions := g.SessionIDs()
 	if len(sessions) != 2 {
 		t.Errorf("Expected 2 sessions, got %d", len(sessions))
 	}
