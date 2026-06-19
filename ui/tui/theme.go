@@ -38,6 +38,17 @@ var (
 	chromeAccent    = tui.ANSIColor(11) // indicators / badges
 )
 
+// Dialog body accent colours. Modal dialogs render on turbotui's light-grey
+// default chrome, where the bright transcript colours (yellow tool calls, cyan
+// user text) wash out badly — the very low-contrast "yellow on light-grey" of
+// issue #98. Coloured dialog lines therefore use darker, higher-contrast
+// variants. ApplyTheme overrides these for the neutral (NO_COLOR) and
+// high-contrast presets, whose dialogs are dark and want bright accents.
+var (
+	colorDialogHeader = tui.ANSIColor(5) // requester/header line (magenta on light grey)
+	colorDialogDetail = tui.ANSIColor(4) // shell command / details (blue on light grey)
+)
+
 // baseTVTheme captures turbotui's stock window/dialog palette at init so a
 // coloured theme can restore it after a NO_COLOR or high-contrast run has
 // replaced it (ApplyTheme mutates the shared tv.DefaultTheme).
@@ -416,11 +427,19 @@ func ApplyTheme(t Theme) {
 
 	switch {
 	case t.Level == ColorNone:
+		// Neutral chrome: dialog text is the terminal default, so coloured dialog
+		// lines must be too (no ANSI colour is emitted).
 		tv.DefaultTheme = neutralTVTheme()
+		colorDialogHeader, colorDialogDetail = tui.DefaultColor(), tui.DefaultColor()
 	case t.Name == themeHighContrast:
+		// High-contrast chrome is a black dialog, so the bright palette accents
+		// (which would wash out on light grey) read well here.
 		tv.DefaultTheme = highContrastTVTheme(t)
+		colorDialogHeader, colorDialogDetail = t.User, t.Tool
 	default:
+		// Stock light-grey dialog: use the dark, high-contrast accents.
 		tv.DefaultTheme = baseTVTheme
+		colorDialogHeader, colorDialogDetail = tui.ANSIColor(5), tui.ANSIColor(4)
 	}
 }
 

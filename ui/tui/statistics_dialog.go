@@ -40,7 +40,7 @@ func statisticsDialogSize(screenW, screenH int) (width, height int) {
 // stream, issue #51).
 func (w *Workbench) showStatisticsDialog() {
 	if w.handlers.GetStatistics == nil {
-		tv.ShowConfirmYesNo(w.desktop, "Statistics", "Statistics are unavailable.", nil)
+		w.showConfirm("Statistics", "Statistics are unavailable.", nil)
 		return
 	}
 	report := w.handlers.GetStatistics()
@@ -95,7 +95,7 @@ func (w *Workbench) showStatisticsDialog() {
 		if err != nil {
 			msg = "CSV export failed:\n" + err.Error()
 		}
-		tv.ShowConfirmYesNo(w.desktop, "Export", msg, nil)
+		w.showConfirm("Export", msg, nil)
 	}
 	exportJSON := func() {
 		path, err := writeStatisticsExport(report, "json")
@@ -103,7 +103,7 @@ func (w *Workbench) showStatisticsDialog() {
 		if err != nil {
 			msg = "JSON export failed:\n" + err.Error()
 		}
-		tv.ShowConfirmYesNo(w.desktop, "Export", msg, nil)
+		w.showConfirm("Export", msg, nil)
 	}
 
 	// Action buttons are sized from their rendered labels and right-aligned to

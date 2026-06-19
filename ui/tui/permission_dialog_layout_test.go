@@ -77,8 +77,8 @@ func TestPermissionDialogBody(t *testing.T) {
 		if got[1].text != "$ "+longCmd {
 			t.Errorf("command line = %q, want full command with $ prefix", got[1].text)
 		}
-		if got[1].color != colorTool {
-			t.Errorf("command color = %+v, want colorTool", got[1].color)
+		if got[1].color != colorDialogDetail {
+			t.Errorf("command color = %+v, want colorDialogDetail", got[1].color)
 		}
 		if !strings.Contains(got[1].text, "| sh") {
 			t.Errorf("dangerous tail hidden: %q", got[1].text)
