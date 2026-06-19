@@ -84,6 +84,15 @@ func (r *transcriptRecord) matches(query string) bool {
 	return false
 }
 
+// defaultTranscriptLimit bounds the number of records a session keeps live in its
+// TextView. The view otherwise grows without bound — every event, folded tool
+// result and compaction digest is appended forever — so capping it bounds both
+// memory and the per-frame render cost over a long session. Context compaction
+// shrinks the model context but not the widget tree, so the UI needs its own cap
+// (issue #22). The durable transcript lives in the session JSONL, so dropping old
+// records from the in-memory view loses nothing queryable.
+const defaultTranscriptLimit = 1000
+
 // transcriptModel is the indexed source of truth for one session's transcript.
 // Entries are appended as they arrive and rendered into the backing TextView;
 // the model layers find-in-transcript (query) and event-type filtering (hidden)
@@ -93,10 +102,14 @@ type transcriptModel struct {
 	records []*transcriptRecord
 	hidden  kindSet
 	query   string // lower-cased active search query, "" when not searching
+	// limit caps the number of records kept live in the TextView (0 = unbounded).
+	// The oldest records are dropped once it is exceeded; the newest — including
+	// any in-flight tool entry — are always kept.
+	limit int
 }
 
 func newTranscriptModel(view *tv.TextView) *transcriptModel {
-	return &transcriptModel{view: view}
+	return &transcriptModel{view: view, limit: defaultTranscriptLimit}
 }
 
 // filtering reports whether a search or any type filter is currently active.
@@ -116,14 +129,44 @@ func (m *transcriptModel) visible(r *transcriptRecord) bool {
 // add appends a record and reflects it in the view. While not filtering this is
 // a cheap append (matching the live streaming path); while a filter or search is
 // active the view is rebuilt so the new entry and the match count stay correct.
+// Once the record count exceeds the limit the oldest batch is dropped and the
+// view rebuilt, so the live TextView cannot grow without bound.
 func (m *transcriptModel) add(r *transcriptRecord) *transcriptRecord {
 	m.records = append(m.records, r)
+	if m.limit > 0 && len(m.records) > m.limit {
+		// Over the cap: drop the oldest batch and rebuild the view from what
+		// remains. The TextView exposes no per-entry removal, so a rebuild is the
+		// only way to reflect dropped records. The just-appended r is the newest
+		// record, so render() renders it too — skip the per-record path below.
+		m.trim()
+		return r
+	}
 	if m.filtering() {
 		m.render()
 	} else {
 		m.renderOne(r)
 	}
 	return r
+}
+
+// trim drops the oldest records to bring the transcript back under its limit,
+// then rebuilds the view. Roughly a tenth of the limit is dropped at once so the
+// full rebuild is amortised across many adds rather than firing on every add
+// while streaming past the limit. Only head (oldest) records are removed, so the
+// in-flight tool entry tracked by the session — always the newest record — is
+// never dropped mid-call. The retained records are copied into a fresh slice so
+// the dropped ones (and their folded children) are released to the GC.
+func (m *transcriptModel) trim() {
+	keep := m.limit - m.limit/10
+	if keep < 1 {
+		keep = 1
+	}
+	if len(m.records) > keep {
+		retained := make([]*transcriptRecord, keep)
+		copy(retained, m.records[len(m.records)-keep:])
+		m.records = retained
+	}
+	m.render()
 }
 
 // renderOne appends a single record's entry (and its children) to the view,
