@@ -60,8 +60,14 @@ internal/notify/       Desktop/terminal notifications (bell + OSC 9/777 + native
   `x-api-key` + `anthropic-version`, a top-level system prompt, content-block
   message arrays and `input_schema`/`tool_use`/`tool_result` tools) through its
   own adapter that translates to and from gogent's OpenAI-shaped internal types.
-  A bare base URL is normalized into the concrete endpoints. Connections are
-  rebuilt per send, so model/endpoint edits take effect on the next turn.
+  Tool schemas are kept portable so one definition serves every provider:
+  `tool.NormalizeSchema` (applied once at `Register`) guarantees an object root
+  with a `properties` map and strips keywords strict providers reject (`$ref`,
+  `default`, `allOf`, …); `tool_choice` is a typed `ToolChoice`
+  (auto/none/required/force-a-tool) each adapter serializes to its own encoding
+  (OpenAI string-or-object, Anthropic `{type:…}`). A bare base URL is normalized
+  into the concrete endpoints. Connections are rebuilt per send, so
+  model/endpoint edits take effect on the next turn.
 - **Tools** (`internal/tool`, `internal/fileops`, `internal/web`, `internal/vcs`) —
   `read`, `write`, `edit`, `shell`, `web_fetch`, `git`, `spawn_subagent`,
   agent-control tools, and `structured_output`. File ops resolve paths against the
