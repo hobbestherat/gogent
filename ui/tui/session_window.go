@@ -8,6 +8,7 @@ import (
 	"gogent/internal/agent"
 	"gogent/internal/config"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -124,6 +125,12 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect) *SessionW
 	submit := func() {
 		text := strings.TrimSpace(input.GetText())
 		if text == "" || sw.busy {
+			return
+		}
+		// A leading slash is a client-side command (/undo, /rewind) handled
+		// locally rather than sent to the model (issue #41).
+		if sw.handleSlashCommand(text) {
+			input.Clear()
 			return
 		}
 		input.Clear()
@@ -271,6 +278,73 @@ func (sw *SessionWindow) addUser(text string) {
 		kind: kindUser, header: "You:", color: colorUser,
 		lines: styledChildLines(text, colorUser),
 	})
+}
+
+// addNote appends a one-line system note to the transcript, used to echo
+// client-side command feedback.
+func (sw *SessionWindow) addNote(text string) {
+	sw.transcript.add(&transcriptRecord{
+		kind:   kindSystem,
+		header: "[System]",
+		color:  colorInfo,
+		lines:  styledChildLines(text, colorInfo),
+	})
+}
+
+// handleSlashCommand interprets a leading "/..." input as a client-side command.
+// It returns true when the command was recognized and handled (the caller clears
+// the input without sending anything to the model), and false when the input is
+// not a recognized command and should be sent as a normal message.
+func (sw *SessionWindow) handleSlashCommand(text string) bool {
+	if !strings.HasPrefix(text, "/") {
+		return false
+	}
+	fields := strings.Fields(text)
+	switch fields[0] {
+	case "/undo":
+		summary, err := sw.callUndo(false, 0)
+		sw.echoCommand("/undo", summary, err)
+		return true
+	case "/rewind":
+		turns := 0 // 0 => revert every recorded turn
+		if len(fields) >= 2 {
+			if n, err := strconv.Atoi(fields[1]); err == nil {
+				turns = n
+			} else {
+				sw.echoCommand("/rewind", "", fmt.Errorf("usage: /rewind [turns]"))
+				return true
+			}
+		}
+		summary, err := sw.callUndo(true, turns)
+		sw.echoCommand("/rewind", summary, err)
+		return true
+	}
+	return false
+}
+
+// callUndo invokes the backend undo/rewind handler. rewind selects /rewind (the
+// last turns turns, 0 = all) over /undo (the single last turn).
+func (sw *SessionWindow) callUndo(rewind bool, turns int) (string, error) {
+	if rewind {
+		if sw.wb.handlers.OnRewind != nil {
+			return sw.wb.handlers.OnRewind(sw.id, turns)
+		}
+	} else if sw.wb.handlers.OnUndo != nil {
+		return sw.wb.handlers.OnUndo(sw.id)
+	}
+	return "", fmt.Errorf("undo/rewind not available")
+}
+
+// echoCommand surfaces a command's outcome as a transcript note.
+func (sw *SessionWindow) echoCommand(cmd, summary string, err error) {
+	if err != nil {
+		sw.addNote(fmt.Sprintf("%s failed: %v", cmd, err))
+		return
+	}
+	if summary == "" {
+		summary = "done"
+	}
+	sw.addNote(fmt.Sprintf("%s — %s", cmd, summary))
 }
 
 // addAssistant appends the assistant's final answer (expanded, not folded).

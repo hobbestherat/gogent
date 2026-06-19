@@ -42,6 +42,15 @@ gogent gates every side-effecting tool through a single permission service
   all this session* / *Reject*; a rejected edit is not written. *Accept all*
   is remembered for that session only. With the gate off, edits apply
   immediately as before.
+- **Checkpoints / undo / rewind** — every `write`/`edit` first snapshots the
+  file's pre-turn state (an in-memory shadow copy), so a botched multi-file edit
+  can be rolled back without resorting to your own VCS. Type `/undo` to revert
+  the last turn, or `/rewind [n]` to revert the last `n` turns (`/rewind` with no
+  count reverts everything). Each file is snapshotted once per turn — the first
+  mutation wins — so an undo always restores the workspace to the turn's start.
+  Snapshots live in memory for the running process and are scoped per session;
+  restarting (which still recovers the transcript from disk) clears them. The
+  snapshots cover `write`/`edit`; shell-driven file changes are not captured.
 
 Interactive decisions appear as a modal in the TUI. Choosing *Always* persists
 the grant to `~/.gogent/permissions.json`. In headless/non-interactive runs

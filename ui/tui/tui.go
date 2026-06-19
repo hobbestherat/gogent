@@ -112,6 +112,13 @@ type Handlers struct {
 	// Best-effort: the handler should not block the UI on a write failure. May
 	// be nil, in which case layout changes are kept only for the current run.
 	SaveLayout func(gogent.Layout)
+	// OnUndo reverts the last turn's file mutations for a session (issue #41),
+	// returning a human-readable summary. May be nil (the /undo command then
+	// reports the feature as unavailable).
+	OnUndo func(sessionID string) (summary string, err error)
+	// OnRewind reverts the last n turns (n <= 0 reverts all) for a session (issue
+	// #41), returning a human-readable summary. May be nil.
+	OnRewind func(sessionID string, turns int) (summary string, err error)
 }
 
 // RestoredSession describes a session to be re-opened from persisted state.

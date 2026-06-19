@@ -129,6 +129,16 @@ internal/notify/       Desktop/terminal notifications (bell + OSC 9/777 + native
   file, so they can't corrupt the alternate screen); in headless mode they go to
   stderr. Skill-load and session-encode failures are surfaced here instead of
   being swallowed.
+- Checkpoints: in-memory, per-session shadow copies of files touched by
+  `write`/`edit` (`internal/fileops/checkpoint.go`). The active turn's
+  checkpoint accumulates one snapshot per file (first mutation wins), committed
+  at the end of `SendMessageToSessionWithModel`; `/undo` reverts the last turn,
+  `/rewind [n]` reverts several (oldest snapshot wins per file). They are a
+  safety net for the running process only — restarting clears them (the
+  transcript still recovers from the JSONL store), and shell-driven changes are
+  not captured.
+
+
 
 ## Entry points
 

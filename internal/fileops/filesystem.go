@@ -64,6 +64,16 @@ func (fsys *FileSystem) ensureWithin(resolved, original string) error {
 	return nil
 }
 
+// Abs returns the absolute path a Read/Write would act on for the given path,
+// honoring the workspace root exactly as the mutating operations do (absolute
+// paths are used as-is; relative paths are joined under the root). It only
+// resolves — it does not enforce the workspace boundary, which remains Read's and
+// Write's concern. It lets callers (e.g. the checkpointer) key files by the same
+// canonical path the file operations touch.
+func (fsys *FileSystem) Abs(path string) (string, error) {
+	return fsys.resolve(path)
+}
+
 // Read reads a file and returns its contents. The Authorization relaxes the
 // workspace boundary for paths that CheckFileAccess approved as external; pass a
 // zero Authorization (or one obtained for a workspace path) to keep file reads

@@ -35,6 +35,11 @@ type Gogent struct {
 	locationMutation *fileops.LocationMutation
 	permissions      *permission.Service
 	fileMutation     *fileops.FileMutation
+	// checkpoints snapshots touched files before each mutating write/edit, grouped
+	// by turn, so a botched edit can be rolled back with UndoLastTurn / Rewind
+	// without the user resorting to their own VCS (issue #41). Nil when the file
+	// system could not be built.
+	checkpoints      *fileops.Checkpointer
 	toolRegistry     *tool.ToolRegistry
 	config           *config.Config
 	workspaceRoot    string
@@ -163,6 +168,10 @@ func NewGogentWithWorkspace(homeDir, workspaceRoot string) *Gogent {
 	g.permissions.AddRule(permission.Rule{Action: string(permission.ActionRead), Resource: "*", Effect: string(permission.EffectAllow)})
 	g.permissions.AddRule(permission.Rule{Action: string(permission.ActionWrite), Resource: "*", Effect: string(permission.EffectAllow)})
 	g.fileMutation = fileops.NewFileMutation(g.fileSystem, g.locationMutation)
+	// Snapshot touched files before each mutating write/edit so a turn can be
+	// undone (issue #41). Reads through the same file system so snapshots and
+	// writes resolve paths identically.
+	g.checkpoints = fileops.NewCheckpointer(g.fileSystem)
 
 	// Load skills (user + built-in) and discover project AGENTS.md instructions
 	// before building the tool registry so the skill tool and system-context
@@ -291,6 +300,11 @@ func (g *Gogent) initializeToolRegistry() {
 				}
 			}
 
+			// Snapshot the file's pre-turn state so the turn can be undone
+			// (issue #41). Done after the review gate so a rejected write is not
+			// recorded, and before the mutation so the original content is captured.
+			g.snapshotBefore(ctx.SessionID, path, auth)
+
 			if err := g.fileMutation.WriteFile(path, content, auth); err != nil {
 				return nil, fmt.Errorf("failed to write file: %v", err)
 			}
@@ -347,6 +361,10 @@ func (g *Gogent) initializeToolRegistry() {
 					return nil, err
 				}
 			}
+
+			// Snapshot the file's pre-turn state so the turn can be undone
+			// (issue #41), after the review gate and before the mutation.
+			g.snapshotBefore(ctx.SessionID, path, auth)
 
 			err = g.fileMutation.EditFile(path, find, replace, replaceAll, auth)
 			if err != nil {
@@ -846,6 +864,44 @@ func (g *Gogent) RestoreSessions() []LoadedSession {
 	return restored
 }
 
+// UndoLastTurn reverts the most recent turn's file mutations for a session,
+// restoring every file it touched to its pre-turn state (issue #41). It returns a
+// human-readable summary and a non-nil error (with an empty summary) only when
+// there is no checkpoint to undo.
+func (g *Gogent) UndoLastTurn(sessionID string) (string, error) {
+	if g.checkpoints == nil {
+		return "", fmt.Errorf("checkpoints unavailable")
+	}
+	n, err := g.checkpoints.UndoLastTurn(sessionID)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("reverted last turn (%d file(s) restored)", n), nil
+}
+
+// Rewind reverts the last turns turns for a session — all of them when turns <= 0
+// — restoring each touched file to its state before the earliest reverted turn
+// (issue #41). It returns a human-readable summary.
+func (g *Gogent) Rewind(sessionID string, turns int) (string, error) {
+	if g.checkpoints == nil {
+		return "", fmt.Errorf("checkpoints unavailable")
+	}
+	files, reverted, err := g.checkpoints.Rewind(sessionID, turns)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("reverted %d turn(s) (%d file(s) restored)", reverted, files), nil
+}
+
+// CheckpointCount reports how many committed (undoable) turns a session has
+// recorded (issue #41).
+func (g *Gogent) CheckpointCount(sessionID string) int {
+	if g.checkpoints == nil {
+		return 0
+	}
+	return g.checkpoints.Count(sessionID)
+}
+
 // defaultConnection builds a model connection for the configured default model.
 func (g *Gogent) defaultConnection() *model.ModelConnection {
 	if g.config != nil {
@@ -889,6 +945,23 @@ func (g *Gogent) GetSkillRegistry() *skill.SkillRegistry {
 // GetFileMutation returns the file mutation service
 func (g *Gogent) GetFileMutation() *fileops.FileMutation {
 	return g.fileMutation
+}
+
+// GetCheckpointer returns the turn checkpoint store used for undo/rewind (issue
+// #41), or nil when checkpointing is disabled.
+func (g *Gogent) GetCheckpointer() *fileops.Checkpointer {
+	return g.checkpoints
+}
+
+// snapshotBefore records path's pre-mutation state into the session's active
+// checkpoint so the turn can be undone. It is a no-op when checkpointing is
+// disabled or no turn is in progress; the checkpointer swallows read errors so
+// this can never block or fail the write (issue #41).
+func (g *Gogent) snapshotBefore(sessionID, path string, auth fileops.Authorization) {
+	if g.checkpoints == nil {
+		return
+	}
+	g.checkpoints.Snapshot(sessionID, path, auth)
 }
 
 // GetToolRegistry returns the tool registry
@@ -1235,8 +1308,20 @@ func (g *Gogent) SendMessageToSessionWithModel(ctx context.Context, sessionID, a
 	}
 
 	// Execute the task loop with multi-turn tool calling support
-	// The last response may be a tool call or a final response
+	// The last response may be a tool call or a final response.
+	//
+	// Bracket the turn with the checkpointer (issue #41): a fresh active
+	// checkpoint accumulates every file mutated by this turn (root agent and any
+	// sub-agents share the session), and is committed at the end — even on error
+	// or cancellation — so a partially-applied turn remains undoable. An empty
+	// turn (no writes) is dropped by CommitTurn.
+	if g.checkpoints != nil {
+		g.checkpoints.BeginTurn(sessionID)
+	}
 	responses, err := userSession.ExecuteTaskLoopWithModel(ctx, agentID, message, selectedConfig)
+	if g.checkpoints != nil {
+		g.checkpoints.CommitTurn(sessionID)
+	}
 	if err != nil {
 		return nil, err
 	}
