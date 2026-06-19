@@ -100,3 +100,57 @@ func TestReadWriteExternalWithAuthorization(t *testing.T) {
 		t.Fatal("expected external path to be rejected without authorization")
 	}
 }
+
+// TestWorkspaceFiles covers the @-mention completer's listing (issue #46): every
+// regular file is returned relative to the root, the .git directory is skipped,
+// and nested files are included.
+func TestWorkspaceFiles(t *testing.T) {
+	root := t.TempDir()
+	fsys := NewFileSystem(root)
+
+	for _, rel := range []string{
+		"main.go",
+		"README.md",
+		filepath.Join("internal", "agent", "agent.go"),
+		filepath.Join(".git", "config"), // must be skipped
+	} {
+		if err := fsys.Write(rel, []byte("x"), Authorization{}); err != nil {
+			t.Fatalf("seed %s: %v", rel, err)
+		}
+	}
+
+	files, truncated := fsys.WorkspaceFiles(0)
+	if truncated {
+		t.Fatalf("did not expect truncation for %d files", len(files))
+	}
+	got := make(map[string]bool, len(files))
+	for _, f := range files {
+		got[filepath.ToSlash(f)] = true
+	}
+	for _, want := range []string{"main.go", "README.md", "internal/agent/agent.go"} {
+		if !got[want] {
+			t.Errorf("WorkspaceFiles missing %q; got %v", want, files)
+		}
+	}
+	if got[filepath.ToSlash(filepath.Join(".git", "config"))] {
+		t.Errorf("WorkspaceFiles must skip the .git directory; got %v", files)
+	}
+}
+
+// TestWorkspaceFilesLimit checks the cap truncates the listing and reports it.
+func TestWorkspaceFilesLimit(t *testing.T) {
+	root := t.TempDir()
+	fsys := NewFileSystem(root)
+	for _, name := range []string{"a.txt", "b.txt", "c.txt", "d.txt"} {
+		if err := fsys.Write(name, []byte("x"), Authorization{}); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+	files, truncated := fsys.WorkspaceFiles(2)
+	if !truncated {
+		t.Fatal("expected truncated=true when the cap is hit")
+	}
+	if len(files) != 2 {
+		t.Fatalf("expected exactly 2 files at the cap, got %d (%v)", len(files), files)
+	}
+}

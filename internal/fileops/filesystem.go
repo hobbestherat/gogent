@@ -188,6 +188,46 @@ func (fsys *FileSystem) Glob(pattern string) ([]string, error) {
 	return relativeMatches, nil
 }
 
+// maxWorkspaceFiles caps WorkspaceFiles when the caller passes no limit, so an
+// enormous tree cannot flood the @-mention completer that consumes the listing.
+const maxWorkspaceFiles = 5000
+
+// WorkspaceFiles returns every regular file in the workspace as a path relative
+// to the workspace root, in lexical (WalkDir) order, skipping the .git directory
+// (mirroring Grep). It backs the TUI's @-mention file completer (issue #46): a
+// read-only, workspace-confined listing the UI can offer so the user can attach
+// a file to a message without the model having to discover it. limit caps the
+// number of paths returned (a non-positive limit falls back to
+// maxWorkspaceFiles); the returned bool reports whether the cap truncated the
+// listing.
+func (fsys *FileSystem) WorkspaceFiles(limit int) (files []string, truncated bool) {
+	if limit <= 0 {
+		limit = maxWorkspaceFiles
+	}
+	_ = filepath.WalkDir(fsys.basePath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip entries we cannot stat
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, relErr := filepath.Rel(fsys.basePath, path)
+		if relErr != nil {
+			return nil
+		}
+		files = append(files, rel)
+		if len(files) >= limit {
+			truncated = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return files, truncated
+}
+
 // Output modes for Grep. They select the shape of a GrepResult.
 const (
 	GrepModeContent = "content"            // every matched line, with its file:line

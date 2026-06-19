@@ -60,6 +60,11 @@ type SessionWindow struct {
 	maximized         bool
 	preMaximizeBounds tv.Rect
 	maximizable       bool
+	// completer drives the @-file mention popup over the input (issue #46): typing
+	// "@" offers matching workspace files for precise context attachment, expanded
+	// into the sent message by expandMentions. Nil on read-only analysis windows,
+	// which have no input.
+	completer *mentionCompleter
 }
 
 // newSessionWindow builds the window, its widgets and their layout/handlers. A
@@ -166,11 +171,29 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 		// with the window on resize.
 		sw.refreshStatus()
 	}
+	// The @-file mention completer (issue #46) hangs off the input: it intercepts
+	// the navigation/accept keys while its popup is open and otherwise lets the
+	// input handle the key, then refreshes the popup from the new cursor position.
+	sw.completer = newMentionCompleter(sw)
+	baseType := input.Component.OnTypeFn
+	input.Component.OnTypeFn = func(c *tv.VisualComponent, event tui.TypeEvent) bool {
+		if sw.completer.handleKey(event) {
+			return true
+		}
+		handled := false
+		if baseType != nil {
+			handled = baseType(c, event)
+		}
+		sw.completer.update()
+		return handled
+	}
 	submit := func() {
 		text := strings.TrimSpace(input.GetText())
 		if text == "" || sw.busy {
 			return
 		}
+		// Dismiss the mention popup if a click on Send submitted while it was open.
+		sw.completer.hide()
 		// A leading slash is a client-side command (/undo, /rewind) handled
 		// locally rather than sent to the model (issue #41).
 		if sw.handleSlashCommand(text) {
@@ -181,8 +204,16 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 		sw.addUser(text)
 		sw.setBusy(true)
 		modelName := sw.selectedModelName()
+		// Expand any @-file mentions into attached file content so the model
+		// receives the referenced files directly (issue #46). The transcript keeps
+		// the message as typed; a note records what was attached.
+		message := text
+		if expanded, attached := expandMentions(text, wb.handlers.ReadWorkspaceFile); len(attached) > 0 {
+			message = expanded
+			sw.addNote("attached " + strings.Join(attached, ", "))
+		}
 		if wb.handlers.OnSend != nil {
-			go wb.handlers.OnSend(sw.id, text, modelName)
+			go wb.handlers.OnSend(sw.id, message, modelName)
 		}
 	}
 	sendButton.OnPress = submit
