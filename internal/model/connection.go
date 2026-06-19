@@ -61,16 +61,24 @@ type ToolDef struct {
 }
 
 type CompletionRequest struct {
-	Messages      []Message `json:"messages"`
-	Stream        bool      `json:"stream"`
-	N             int       `json:"n,omitempty"`
-	Temperature   float32   `json:"temperature,omitempty"`
-	TopP          float32   `json:"top_p,omitempty"`
-	MaxTokens     int       `json:"max_tokens,omitempty"`
-	ContextLength int       `json:"context_length,omitempty"`
-	Model         string    `json:"model,omitempty"`
-	Tools         []ToolDef `json:"tools,omitempty"`
-	ToolChoice    string    `json:"tool_choice,omitempty"`
+	Messages      []Message      `json:"messages"`
+	Stream        bool           `json:"stream"`
+	StreamOptions *StreamOptions `json:"stream_options,omitempty"`
+	N             int            `json:"n,omitempty"`
+	Temperature   float32        `json:"temperature,omitempty"`
+	TopP          float32        `json:"top_p,omitempty"`
+	MaxTokens     int            `json:"max_tokens,omitempty"`
+	ContextLength int            `json:"context_length,omitempty"`
+	Model         string         `json:"model,omitempty"`
+	Tools         []ToolDef      `json:"tools,omitempty"`
+	ToolChoice    string         `json:"tool_choice,omitempty"`
+}
+
+// StreamOptions mirrors OpenAI's stream_options. include_usage asks the backend
+// to emit a final SSE chunk carrying token usage (otherwise streamed responses
+// report no usage at all).
+type StreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type CompletionResponse struct {
@@ -130,13 +138,51 @@ func (u *TokenUsage) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// StreamResponse is one event delivered on the streaming channel. Content/Role
+// carry an incremental text delta as it arrives; the terminal event (Done) is
+// emitted once at end-of-stream and carries the finish reason, the fully
+// assembled tool calls and the final token usage.
 type StreamResponse struct {
-	Content      string      `json:"content"`
-	Role         Role        `json:"role"`
+	Content      string      `json:"content,omitempty"`
+	Role         Role        `json:"role,omitempty"`
+	ToolCalls    []ToolCall  `json:"tool_calls,omitempty"`
 	FinishReason *string     `json:"finish_reason,omitempty"`
 	Usage        *TokenUsage `json:"usage,omitempty"`
-	Done         bool        `json:"done"`
-	Choices      []Choice    `json:"choices,omitempty"`
+	Done         bool        `json:"done,omitempty"`
+}
+
+// streamChunk is the wire shape of a single OpenAI SSE "data:" payload. Streamed
+// completions deliver content and tool calls under choices[].delta (not the
+// blocking choices[].message), so this is parsed separately from
+// CompletionResponse.
+type streamChunk struct {
+	Choices []streamChoice `json:"choices"`
+	Usage   *TokenUsage    `json:"usage"`
+}
+
+type streamChoice struct {
+	Delta        streamDelta `json:"delta"`
+	FinishReason *string     `json:"finish_reason"`
+	Index        int         `json:"index"`
+}
+
+type streamDelta struct {
+	Role      Role             `json:"role"`
+	Content   string           `json:"content"`
+	ToolCalls []streamToolCall `json:"tool_calls"`
+}
+
+// streamToolCall is a tool-call fragment within a delta. The model streams a
+// tool call across many chunks: the first carries id/name, the rest append
+// argument text, all correlated by Index.
+type streamToolCall struct {
+	Index    int    `json:"index"`
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
 }
 
 type ModelStats struct {
@@ -301,7 +347,7 @@ func (c *ModelConnection) CompleteStream(messages []Message) (<-chan StreamRespo
 	go func() {
 		defer close(streamCh)
 		defer close(errCh)
-		_, err := c.completeStream(messages, streamCh)
+		_, err := c.completeStream(messages, nil, streamCh)
 		if err != nil {
 			errCh <- err
 		}
@@ -327,9 +373,12 @@ func (c *ModelConnection) CompleteWithStats(messages []Message) (*CompletionResp
 	return resp, usage, nil
 }
 
-func (c *ModelConnection) complete(messages []Message, stream bool, tools []ToolDef) (*CompletionResponse, error) {
+// buildRequest assembles a CompletionRequest with the connection's configured
+// model, token limit and temperature applied. It is shared by the blocking and
+// streaming paths so both send identical parameters; the only difference is that
+// streaming additionally requests a final usage chunk via stream_options.
+func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []ToolDef) CompletionRequest {
 	maxTokens := 4096
-	contextLength := 0 // 0 => omitted; let the server use the model's full window
 	var temperature float32
 	if c.Config != nil {
 		if c.Config.MaxTokens > 0 {
@@ -343,21 +392,26 @@ func (c *ModelConnection) complete(messages []Message, stream bool, tools []Tool
 		maxTokens = c.spec.maxTokensLimit
 	}
 	reqBody := CompletionRequest{
-		Messages:      messages,
-		Stream:        stream,
-		MaxTokens:     maxTokens,
-		ContextLength: contextLength,
-		Temperature:   temperature,
-		Tools:         tools,
+		Messages:    messages,
+		Stream:      stream,
+		MaxTokens:   maxTokens,
+		Temperature: temperature,
+		Tools:       tools,
 	}
 	if len(tools) > 0 {
 		reqBody.ToolChoice = "auto"
 	}
-
-	// Add model name if specified
+	if stream {
+		reqBody.StreamOptions = &StreamOptions{IncludeUsage: true}
+	}
 	if c.ModelName != "" {
 		reqBody.Model = c.ModelName
 	}
+	return reqBody
+}
+
+func (c *ModelConnection) complete(messages []Message, stream bool, tools []ToolDef) (*CompletionResponse, error) {
+	reqBody := c.buildRequest(messages, stream, tools)
 
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
@@ -456,16 +510,12 @@ func (c *ModelConnection) complete(messages []Message, stream bool, tools []Tool
 	return &fullResp, nil
 }
 
-func (c *ModelConnection) completeStream(messages []Message, streamCh chan<- StreamResponse) (string, error) {
-	reqBody := CompletionRequest{
-		Messages: messages,
-		Stream:   true,
-	}
-
-	// Add model name if specified
-	if c.ModelName != "" {
-		reqBody.Model = c.ModelName
-	}
+// completeStream issues a streaming completion and forwards incremental deltas
+// on streamCh, returning the fully assembled content. It reuses c.client so the
+// APIKeyRoundTripper (auth header) and configured timeout apply exactly as on
+// the blocking path, and asks for include_usage so token stats are populated.
+func (c *ModelConnection) completeStream(messages []Message, tools []ToolDef, streamCh chan<- StreamResponse) (string, error) {
+	reqBody := c.buildRequest(messages, true, tools)
 
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
@@ -482,11 +532,10 @@ func (c *ModelConnection) completeStream(messages []Message, streamCh chan<- Str
 			Message: fmt.Sprintf("failed to create request: %v", err),
 		}
 	}
-
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
 
-	client := &http.Client{Timeout: c.Timeout}
-	resp, err := client.Do(req)
+	resp, err := c.client.Do(req)
 	if err != nil {
 		return "", &ModelError{
 			Type:    ErrorConnection,
@@ -497,63 +546,23 @@ func (c *ModelConnection) completeStream(messages []Message, streamCh chan<- Str
 
 	c.Stats.Mutex.Lock()
 	c.Stats.RequestCount++
-	startTime := time.Now()
 	c.Stats.Mutex.Unlock()
+	startTime := time.Now()
 
-	scanner := bufio.NewScanner(resp.Body)
-	var fullResponse string
-	var usage *TokenUsage
-	var finishReason *string
-
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-
-		jsonData := strings.TrimPrefix(line, "data: ")
-		if jsonData == "[DONE]" {
-			break
-		}
-
-		var streamResp StreamResponse
-		if err := json.Unmarshal([]byte(jsonData), &streamResp); err != nil {
-			continue
-		}
-
-		if streamResp.Content != "" {
-			fullResponse += streamResp.Content
-			streamCh <- streamResp
-		}
-
-		if streamResp.Usage != nil {
-			usage = streamResp.Usage
-		}
-
-		if streamResp.FinishReason != nil {
-			reason := *streamResp.FinishReason
-			finishReason = &reason
-		}
-
-		if streamResp.Done || (finishReason != nil && *finishReason != "") {
-			break
-		}
+	// A non-200 response is a JSON error body, not an SSE stream.
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		c.Stats.Mutex.Lock()
+		c.Stats.TotalTimeMs += time.Since(startTime).Milliseconds()
+		c.Stats.Mutex.Unlock()
+		return "", c.analyzeError(resp.StatusCode, string(body))
 	}
 
-	if err := scanner.Err(); err != nil {
-		return "", &ModelError{
-			Type:    ErrorGeneric,
-			Message: fmt.Sprintf("error reading stream: %v", err),
-		}
-	}
+	full, usage, err := c.readSSEStream(resp.Body, streamCh)
 
 	c.Stats.Mutex.Lock()
 	c.Stats.TotalTimeMs += time.Since(startTime).Milliseconds()
-	if resp.StatusCode == http.StatusOK {
+	if err == nil {
 		c.Stats.SuccessCount++
 		if usage != nil {
 			c.Stats.TotalTokensIn += usage.PromptTokens
@@ -563,11 +572,113 @@ func (c *ModelConnection) completeStream(messages []Message, streamCh chan<- Str
 	}
 	c.Stats.Mutex.Unlock()
 
-	if resp.StatusCode != http.StatusOK {
-		return "", c.analyzeError(resp.StatusCode, fullResponse)
+	return full, err
+}
+
+// readSSEStream parses an OpenAI server-sent-event stream, forwarding each
+// content delta on streamCh and accumulating tool-call fragments (correlated by
+// index) and the trailing usage chunk. It drains to "[DONE]"/EOF so the final
+// usage event is not dropped, and emits one terminal StreamResponse carrying the
+// finish reason, assembled tool calls and usage. A bufio.Reader (not Scanner) is
+// used so arbitrarily long SSE lines never hit the 64 KB token cap.
+func (c *ModelConnection) readSSEStream(body io.Reader, streamCh chan<- StreamResponse) (string, *TokenUsage, error) {
+	reader := bufio.NewReaderSize(body, 64*1024)
+
+	// Tool calls stream as fragments across many chunks; accumulate by index.
+	type accTool struct {
+		id, typ, name string
+		args          strings.Builder
+	}
+	toolsByIndex := map[int]*accTool{}
+	var order []int
+
+	var content strings.Builder
+	var usage *TokenUsage
+	var finishReason *string
+
+	for {
+		line, readErr := reader.ReadString('\n')
+		if data, ok := strings.CutPrefix(strings.TrimSpace(line), "data:"); ok {
+			data = strings.TrimSpace(data)
+			if data == "[DONE]" {
+				break
+			}
+			var chunk streamChunk
+			if err := json.Unmarshal([]byte(data), &chunk); err == nil {
+				if chunk.Usage != nil {
+					usage = chunk.Usage
+				}
+				for _, ch := range chunk.Choices {
+					if ch.Delta.Content != "" {
+						content.WriteString(ch.Delta.Content)
+						streamCh <- StreamResponse{Content: ch.Delta.Content, Role: ch.Delta.Role}
+					}
+					for _, tc := range ch.Delta.ToolCalls {
+						acc := toolsByIndex[tc.Index]
+						if acc == nil {
+							acc = &accTool{}
+							toolsByIndex[tc.Index] = acc
+							order = append(order, tc.Index)
+						}
+						if tc.ID != "" {
+							acc.id = tc.ID
+						}
+						if tc.Type != "" {
+							acc.typ = tc.Type
+						}
+						if tc.Function.Name != "" {
+							acc.name = tc.Function.Name
+						}
+						acc.args.WriteString(tc.Function.Arguments)
+					}
+					if ch.FinishReason != nil && *ch.FinishReason != "" {
+						reason := *ch.FinishReason
+						finishReason = &reason
+					}
+				}
+			}
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			return content.String(), usage, &ModelError{
+				Type:    ErrorGeneric,
+				Message: fmt.Sprintf("error reading stream: %v", readErr),
+			}
+		}
 	}
 
-	return fullResponse, nil
+	// Assemble accumulated tool calls in first-seen order.
+	var toolCalls []ToolCall
+	for _, idx := range order {
+		acc := toolsByIndex[idx]
+		id := acc.id
+		if id == "" {
+			// vLLM omits tool_calls.id when streaming; synthesize a stable id so
+			// downstream tool-result correlation still works.
+			id = fmt.Sprintf("call_%d", idx)
+		}
+		typ := acc.typ
+		if typ == "" {
+			typ = "function"
+		}
+		toolCalls = append(toolCalls, ToolCall{
+			ID:       id,
+			Type:     typ,
+			Function: FunctionCall{Name: acc.name, Arguments: acc.args.String()},
+		})
+	}
+
+	// One authoritative end-of-stream event.
+	streamCh <- StreamResponse{
+		ToolCalls:    toolCalls,
+		FinishReason: finishReason,
+		Usage:        usage,
+		Done:         true,
+	}
+
+	return content.String(), usage, nil
 }
 
 func (c *ModelConnection) analyzeError(statusCode int, response string) *ModelError {
