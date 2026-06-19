@@ -51,6 +51,11 @@ type Gogent struct {
 	gitRepo bool
 	// sessionTitles records a human-friendly title per session for persistence.
 	sessionTitles map[string]string
+	// reviewer, when set, gates write/edit operations behind an interactive
+	// diff-review approval (issue #64). reviewApprovedAll records the sessions
+	// that chose "approve all this session", so their later edits skip the gate.
+	reviewer          EditReviewer
+	reviewApprovedAll map[string]bool
 }
 
 // HookEvent represents an event that triggers hooks
@@ -115,6 +120,8 @@ func NewGogentWithWorkspace(homeDir, workspaceRoot string) *Gogent {
 		workspaceRoot: workspaceRoot,
 		homeDir:       homeDir,
 		sessionTitles: make(map[string]string),
+
+		reviewApprovedAll: make(map[string]bool),
 	}
 
 	// Session transcript persistence (best-effort; a nil store disables it).
@@ -221,6 +228,18 @@ func (g *Gogent) initializeToolRegistry() {
 				return nil, err
 			}
 
+			// Diff-review gate (issue #64): when enabled, surface the change as a
+			// unified diff and defer the write until the user approves.
+			if g.reviewActive(ctx.SessionID) {
+				before, after, err := g.fileMutation.PreviewWrite(path, content, auth)
+				if err != nil {
+					return nil, fmt.Errorf("failed to preview write: %v", err)
+				}
+				if err := g.reviewEdit(ctx, "write", path, before, after); err != nil {
+					return nil, err
+				}
+			}
+
 			if err := g.fileMutation.WriteFile(path, content, auth); err != nil {
 				return nil, fmt.Errorf("failed to write file: %v", err)
 			}
@@ -258,6 +277,18 @@ func (g *Gogent) initializeToolRegistry() {
 				permission.RequestContext{SessionID: ctx.SessionID, Agent: ctx.AgentID})
 			if err != nil {
 				return nil, err
+			}
+
+			// Diff-review gate (issue #64): when enabled, surface the change as a
+			// unified diff and defer the edit until the user approves.
+			if g.reviewActive(ctx.SessionID) {
+				before, after, err := g.fileMutation.PreviewEdit(path, find, replace, auth)
+				if err != nil {
+					return nil, fmt.Errorf("failed to preview edit: %v", err)
+				}
+				if err := g.reviewEdit(ctx, "edit", path, before, after); err != nil {
+					return nil, err
+				}
 			}
 
 			err = g.fileMutation.EditFile(path, find, replace, auth)

@@ -295,6 +295,11 @@ type Config struct {
 	// resolves to the built-in defaults rather than a zero "everything off"
 	// value — see NotifyConfig.
 	Notify *NotifyConfig `json:"notify,omitempty"`
+	// ReviewEdits gates every write/edit behind an interactive diff-review
+	// approval before it is applied (issue #64). It is opt-in: the zero value
+	// (false) preserves the prior behavior of applying edits immediately, so an
+	// older config.json without the key is unaffected.
+	ReviewEdits bool `json:"review_edits,omitempty"`
 }
 
 // NotifyConfig returns the effective notification configuration, substituting

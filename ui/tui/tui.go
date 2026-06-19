@@ -70,6 +70,11 @@ type Handlers struct {
 	// refresh reflects it. May be nil.
 	GetBudget func() config.BudgetConfig
 	SetBudget func(config.BudgetConfig)
+	// GetReviewEdits / SetReviewEdits read and persist whether write/edit
+	// operations are gated behind the interactive diff-review approval (issue
+	// #64). May be nil.
+	GetReviewEdits func() bool
+	SetReviewEdits func(bool)
 	// GetModels returns editable copies of the configured models; UpdateModel
 	// persists changes to one model (matched by Name). May be nil.
 	GetModels   func() []config.ModelConfig

@@ -29,10 +29,19 @@ gogent gates every side-effecting tool through a single permission service
   workspace is a repo, a live `git status` is also injected into the prompt so the
   model always sees its working-tree state. Prefer it over `git` through the shell.
 
+- **Review edits** — an optional tier (Settings → *Review edits before applying*,
+  off by default) that defers every `write`/`edit` until you approve it. The TUI
+  shows a colour-coded unified diff of the change and offers *Accept* / *Accept
+  all this session* / *Reject*; a rejected edit is not written. *Accept all*
+  is remembered for that session only. With the gate off, edits apply
+  immediately as before.
+
 Interactive decisions appear as a modal in the TUI. Choosing *Always* persists
 the grant to `~/.gogent/permissions.json`. In headless/non-interactive runs
 (`--disable-tui`, HTTP server) there is no one to ask, so any "ask" decision is
-**denied** by default — keeping automated runs safe.
+**denied** by default — keeping automated runs safe. The edit-review gate is
+likewise interactive-only: without a UI to render the diff, writes proceed (the
+operation is already permission-authorized; review is only a confirmation step).
 
 > The shell guardrail is best-effort, not a sandbox: a shell is Turing-complete
 > and a determined command can still reach outside the workspace (variables,

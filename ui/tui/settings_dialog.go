@@ -76,7 +76,7 @@ func (w *Workbench) showSettingsDialog() {
 	}
 
 	const width = 56
-	const height = 19
+	const height = 20
 	x, y := centeredDialog(w, width, height)
 
 	dialog := tv.NewDialog("Sub-agent Settings", x, y, width, height)
@@ -92,6 +92,13 @@ func (w *Workbench) showSettingsDialog() {
 	oneShot := styleCheck(tv.NewCheckbox("&One-shot agents", tv.Rect{X: 4, Y: 2, W: width - 8, H: 1}, nil))
 	interactive := styleCheck(tv.NewCheckbox("&Interactive agents (experimental)", tv.Rect{X: 4, Y: 3, W: width - 8, H: 1}, nil))
 	recursive := styleCheck(tv.NewCheckbox("Allow &recursive agents", tv.Rect{X: 2, Y: 5, W: width - 4, H: 1}, nil))
+
+	// Diff-review approval gate (issue #64), an independent toggle below the
+	// timeout fields.
+	reviewEdits := styleCheck(tv.NewCheckbox("Re&view edits before applying (show diff)", tv.Rect{X: 2, Y: 14, W: width - 4, H: 1}, nil))
+	if w.handlers.GetReviewEdits != nil {
+		reviewEdits.SetChecked(w.handlers.GetReviewEdits())
+	}
 
 	oneShot.SetChecked(cur.IsOneShot())
 	interactive.SetChecked(!cur.IsOneShot())
@@ -120,6 +127,7 @@ func (w *Workbench) showSettingsDialog() {
 	dialog.Window.AddContent(oneShot)
 	dialog.Window.AddContent(interactive)
 	dialog.Window.AddContent(recursive)
+	dialog.Window.AddContent(reviewEdits)
 	dialog.Window.AddContent(timeoutsLabel)
 	for _, f := range []*numField{maxAgents, maxDepth, modelTO, toolTO, subTO} {
 		dialog.Window.AddContent(f.label)
@@ -138,6 +146,10 @@ func (w *Workbench) showSettingsDialog() {
 		cfg.MaxSubAgents = atoiOr(maxAgents.box.GetText(), cur.MaxSubAgentsOrDefault())
 		cfg.MaxDepth = atoiOr(maxDepth.box.GetText(), cur.MaxDepthOrDefault())
 		w.handlers.SetSettings(cfg)
+
+		if w.handlers.SetReviewEdits != nil {
+			w.handlers.SetReviewEdits(reviewEdits.IsChecked())
+		}
 
 		if w.handlers.SetTimeouts != nil {
 			t := timeouts

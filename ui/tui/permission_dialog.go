@@ -133,6 +133,18 @@ func (w *Workbench) notifyApproval(req permission.Request) {
 // with the chosen decision. It is a seam so the queue/shutdown logic can be
 // tested without a live event loop.
 func (w *Workbench) prompt(req permission.Request, present func(permission.Request, func(permission.Decision))) permission.Decision {
+	return serializePrompt(w, permission.DecisionDeny, func(resolve func(permission.Decision)) {
+		present(req, resolve)
+	})
+}
+
+// serializePrompt is the shared core behind every blocking modal (permission
+// prompts and the edit-review dialog): it presents one modal at a time
+// (promptMu), refuses to post to a dead event loop, and unblocks the calling
+// agent goroutine with onShutdown if the UI quits before the user answers.
+// present must call resolve exactly once on the UI thread; a stray second call
+// is dropped.
+func serializePrompt[T any](w *Workbench, onShutdown T, present func(resolve func(T))) T {
 	// One modal at a time: later requests queue here rather than stacking.
 	w.promptMu.Lock()
 	defer w.promptMu.Unlock()
@@ -140,12 +152,12 @@ func (w *Workbench) prompt(req permission.Request, present func(permission.Reque
 	// Don't post to a dead event loop if we're already shutting down.
 	select {
 	case <-w.shutdown.Done():
-		return permission.DecisionDeny
+		return onShutdown
 	default:
 	}
 
-	result := make(chan permission.Decision, 1)
-	present(req, func(d permission.Decision) {
+	result := make(chan T, 1)
+	present(func(d T) {
 		// Buffered + non-blocking so a stray second call can't block the UI.
 		select {
 		case result <- d:
@@ -157,8 +169,9 @@ func (w *Workbench) prompt(req permission.Request, present func(permission.Reque
 	case d := <-result:
 		return d
 	case <-w.shutdown.Done():
-		// The UI loop stopped before the user answered; deny rather than leak.
-		return permission.DecisionDeny
+		// The UI loop stopped before the user answered; fall back to the safe
+		// default rather than leak the goroutine.
+		return onShutdown
 	}
 }
 
