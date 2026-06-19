@@ -262,6 +262,7 @@ type ModelConnection struct {
 	Stats     *ModelStats
 	Timeout   time.Duration
 	spec      providerSpec
+	adapter   adapter
 	client    *http.Client
 
 	// Retry policy for transient completion failures. Defaults are set by the
@@ -293,6 +294,7 @@ func NewModelConnection() *ModelConnection {
 		URL:            DefaultModelURL,
 		APIType:        APITypeOpenAI,
 		spec:           specFor(APITypeOpenAI),
+		adapter:        adapterFor(APITypeOpenAI),
 		Stats:          &ModelStats{},
 		Timeout:        5 * time.Minute,
 		client:         &http.Client{Timeout: 5 * time.Minute},
@@ -319,16 +321,19 @@ func NewModelConnectionFromConfig(modelConfig *config.ModelConfig) *ModelConnect
 		Stats:          &ModelStats{},
 		Timeout:        5 * time.Minute,
 		spec:           spec,
+		adapter:        adapterFor(apiType),
 		client:         &http.Client{Timeout: 30 * time.Second},
 		maxAttempts:    defaultMaxAttempts,
 		retryBaseDelay: defaultRetryBaseDelay,
 		retryMaxDelay:  defaultRetryMaxDelay,
 	}
 
-	// Add API key header if present
+	// Add the provider's auth header(s) if a key is present. The exact headers
+	// are adapter-specific (OpenAI bearer vs. Anthropic x-api-key + version).
 	if modelConfig.APIKey != "" {
 		conn.client.Transport = &APIKeyRoundTripper{
 			apiKey:    modelConfig.APIKey,
+			headers:   conn.adapter.authHeaders(modelConfig.APIKey),
 			transport: conn.client.Transport,
 		}
 	}
@@ -336,9 +341,14 @@ func NewModelConnectionFromConfig(modelConfig *config.ModelConfig) *ModelConnect
 	return conn
 }
 
-// APIKeyRoundTripper adds API key header to requests
+// APIKeyRoundTripper injects a provider's auth/version headers into every
+// request. headers holds the adapter-resolved set (e.g. Authorization: Bearer …
+// for OpenAI, or x-api-key + anthropic-version for Anthropic); when it is nil it
+// falls back to the OpenAI bearer scheme using apiKey, so a bare
+// APIKeyRoundTripper{apiKey: …} keeps working.
 type APIKeyRoundTripper struct {
 	apiKey    string
+	headers   http.Header
 	transport http.RoundTripper
 }
 
@@ -346,8 +356,25 @@ func (rt *APIKeyRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 	if rt.transport == nil {
 		rt.transport = http.DefaultTransport
 	}
-	req.Header.Set("Authorization", "Bearer "+rt.apiKey)
+	if len(rt.headers) > 0 {
+		for k, vals := range rt.headers {
+			for _, v := range vals {
+				req.Header.Set(k, v)
+			}
+		}
+	} else if rt.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+rt.apiKey)
+	}
 	return rt.transport.RoundTrip(req)
+}
+
+// wireAdapter returns the connection's wire-format adapter, defaulting to the
+// OpenAI-compatible adapter so a zero-value or hand-built connection still works.
+func (c *ModelConnection) wireAdapter() adapter {
+	if c.adapter != nil {
+		return c.adapter
+	}
+	return openAIAdapter{}
 }
 
 func (c *ModelConnection) SetURL(url string) *ModelConnection {
@@ -491,7 +518,7 @@ func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []
 func (c *ModelConnection) complete(ctx context.Context, messages []Message, stream bool, tools []ToolDef) (*CompletionResponse, error) {
 	reqBody := c.buildRequest(messages, stream, tools)
 
-	jsonData, err := json.Marshal(reqBody)
+	jsonData, err := c.wireAdapter().buildBody(reqBody)
 	if err != nil {
 		return nil, &ModelError{
 			Type:    ErrorGeneric,
@@ -570,19 +597,12 @@ func (c *ModelConnection) complete(ctx context.Context, messages []Message, stre
 	c.Stats.TotalTimeMs += time.Since(startTime).Milliseconds()
 	c.Stats.Mutex.Unlock()
 
-	var fullResp CompletionResponse
-	if err := json.Unmarshal(bodyBytes, &fullResp); err != nil {
+	fullResp, err := c.wireAdapter().parseResponse(bodyBytes)
+	if err != nil {
 		return nil, &ModelError{
 			Type:    ErrorGeneric,
 			Message: fmt.Sprintf("failed to parse response: %v", err),
 		}
-	}
-
-	if len(fullResp.Choices) > 0 {
-		fullResp.Content = fullResp.Choices[0].Message.Content
-		fullResp.Role = fullResp.Choices[0].Message.Role
-		fullResp.FinishReason = fullResp.Choices[0].FinishReason
-		fullResp.ToolCalls = fullResp.Choices[0].Message.ToolCalls
 	}
 
 	c.Stats.Mutex.Lock()
@@ -594,7 +614,7 @@ func (c *ModelConnection) complete(ctx context.Context, messages []Message, stre
 	}
 	c.Stats.Mutex.Unlock()
 
-	return &fullResp, nil
+	return fullResp, nil
 }
 
 // completeStream issues a streaming completion and forwards incremental deltas
@@ -604,7 +624,7 @@ func (c *ModelConnection) complete(ctx context.Context, messages []Message, stre
 func (c *ModelConnection) completeStream(ctx context.Context, messages []Message, tools []ToolDef, streamCh chan<- StreamResponse) (string, error) {
 	reqBody := c.buildRequest(messages, true, tools)
 
-	jsonData, err := json.Marshal(reqBody)
+	jsonData, err := c.wireAdapter().buildBody(reqBody)
 	if err != nil {
 		return "", &ModelError{
 			Type:    ErrorGeneric,
@@ -645,7 +665,7 @@ func (c *ModelConnection) completeStream(ctx context.Context, messages []Message
 		return "", c.analyzeError(resp.StatusCode, string(body))
 	}
 
-	full, usage, err := c.readSSEStream(resp.Body, streamCh)
+	full, usage, err := c.wireAdapter().parseStream(resp.Body, streamCh)
 
 	c.Stats.Mutex.Lock()
 	c.Stats.TotalTimeMs += time.Since(startTime).Milliseconds()
@@ -662,13 +682,13 @@ func (c *ModelConnection) completeStream(ctx context.Context, messages []Message
 	return full, err
 }
 
-// readSSEStream parses an OpenAI server-sent-event stream, forwarding each
+// parseOpenAIStream parses an OpenAI server-sent-event stream, forwarding each
 // content delta on streamCh and accumulating tool-call fragments (correlated by
 // index) and the trailing usage chunk. It drains to "[DONE]"/EOF so the final
 // usage event is not dropped, and emits one terminal StreamResponse carrying the
 // finish reason, assembled tool calls and usage. A bufio.Reader (not Scanner) is
 // used so arbitrarily long SSE lines never hit the 64 KB token cap.
-func (c *ModelConnection) readSSEStream(body io.Reader, streamCh chan<- StreamResponse) (string, *TokenUsage, error) {
+func parseOpenAIStream(body io.Reader, streamCh chan<- StreamResponse) (string, *TokenUsage, error) {
 	reader := bufio.NewReaderSize(body, 64*1024)
 
 	// Tool calls stream as fragments across many chunks; accumulate by index.
