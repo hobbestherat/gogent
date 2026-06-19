@@ -537,68 +537,80 @@ type StructuredOutput struct {
 }
 
 func (tr *ToolRegistry) ParseToolCall(response string) (*ToolCall, error) {
-	var toolCall ToolCall
-	if err := json.Unmarshal([]byte(response), &toolCall); err == nil {
-		return &toolCall, nil
+	if calls := ParseToolCalls(response); len(calls) > 0 {
+		return &calls[0], nil
 	}
-
-	if extracted := extractJSON(response); extracted != "" {
-		if err := json.Unmarshal([]byte(extracted), &toolCall); err == nil {
-			return &toolCall, nil
-		}
-	}
-
 	return nil, fmt.Errorf("no valid tool call found in response")
 }
 
-func extractJSON(text string) string {
-	start := -1
-	end := -1
-
-	for i := 0; i < len(text)-2; i++ {
-		if text[i] == '`' && text[i+1] == '`' && text[i+2] == '`' {
-			if start == -1 {
-				start = i + 3
-			} else {
-				end = i
-				break
-			}
+// ParseToolCalls is the tolerant fallback for models without native
+// tool-calling: it returns every JSON tool call embedded in a model response,
+// in order of appearance. It scans for balanced {...} objects and keeps each one
+// that decodes to a call naming a tool, so it is robust to the formatting
+// variations small/local models produce — surrounding prose, Markdown code
+// fences, pretty-printing, key reordering, whitespace around colons, and several
+// calls in one reply. Returns nil when no tool call is present.
+func ParseToolCalls(response string) []ToolCall {
+	var calls []ToolCall
+	for _, obj := range ExtractJSONObjects(response) {
+		var tc ToolCall
+		if err := json.Unmarshal([]byte(obj), &tc); err == nil && tc.Tool != "" {
+			calls = append(calls, tc)
 		}
 	}
-
-	if start != -1 && end != -1 && end > start {
-		jsonStr := text[start:end]
-		if idx := strings.Index(jsonStr, "{"); idx != -1 {
-			return extractJSONFrom(jsonStr[idx:])
-		}
-	}
-
-	if idx := strings.Index(text, "{"); idx != -1 {
-		return extractJSONFrom(text[idx:])
-	}
-
-	return ""
+	return calls
 }
 
-func extractJSONFrom(text string) string {
-	braceCount := 0
+// ExtractJSONObjects scans text for balanced, top-level {...} JSON objects and
+// returns their source substrings in order of appearance. It is the single
+// tolerant extractor shared by every JSON-text tool-call fallback (issue #32),
+// replacing the brittle substring matching that only recognised one exact
+// `{"tool":` shape.
+//
+// Braces inside JSON string literals (including escaped quotes) are ignored, so
+// a value like {"content":"a } b"} is extracted whole. Non-JSON characters
+// between objects — prose, Markdown ```json fences, list markers — are skipped,
+// which is why fenced and prose-wrapped calls are handled without a separate
+// fence-stripping pass. Nested objects are returned as part of their enclosing
+// top-level object, not separately.
+func ExtractJSONObjects(text string) []string {
+	var objs []string
+	depth := 0
 	start := -1
-
-	for i, ch := range text {
-		if ch == '{' {
-			if braceCount == 0 {
+	inString := false
+	escaped := false
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+		case '{':
+			if depth == 0 {
 				start = i
 			}
-			braceCount++
-		} else if ch == '}' {
-			braceCount--
-			if braceCount == 0 && start != -1 {
-				return text[start : i+1]
+			depth++
+		case '}':
+			if depth > 0 {
+				depth--
+				if depth == 0 && start != -1 {
+					objs = append(objs, text[start:i+1])
+					start = -1
+				}
 			}
 		}
 	}
-
-	return ""
+	return objs
 }
 
 // UnmarshalJSON is a helper to unmarshal JSON

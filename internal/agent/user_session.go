@@ -789,28 +789,30 @@ func (s *UserSession) collectToolCalls(resp *model.CompletionResponse) []tool.To
 		return calls
 	}
 
-	// Fallback: JSON object in the text.
+	// Fallback: one or more JSON objects embedded in the assistant text. Small
+	// or local models without native tool-calling emit calls as JSON, often
+	// prose-wrapped, fenced in ```json, pretty-printed, key-reordered, or several
+	// at once — so we scan for every balanced object (issue #32) rather than
+	// substring-matching a single exact shape.
 	responseText := strings.TrimSpace(resp.Content)
-
-	// A {"response": ..., "final": true} object means we're done.
-	var structuredOutput struct {
-		Response string `json:"response"`
-		Final    bool   `json:"final"`
-	}
-	if jsonStr := extractToolCallJSON(responseText); jsonStr != "" {
-		if err := json.Unmarshal([]byte(jsonStr), &structuredOutput); err == nil && structuredOutput.Final {
+	var calls []tool.ToolCall
+	for _, obj := range tool.ExtractJSONObjects(responseText) {
+		// A {"response": ..., "final": true} object is the structured final
+		// answer: stop and surface its text instead of acting on any calls.
+		var structuredOutput struct {
+			Response string `json:"response"`
+			Final    bool   `json:"final"`
+		}
+		if err := json.Unmarshal([]byte(obj), &structuredOutput); err == nil && structuredOutput.Final {
 			resp.Content = structuredOutput.Response
 			return nil
 		}
-		var parsed struct {
-			Tool string                 `json:"tool"`
-			Args map[string]interface{} `json:"args"`
-		}
-		if err := json.Unmarshal([]byte(jsonStr), &parsed); err == nil && parsed.Tool != "" {
-			return []tool.ToolCall{{Tool: parsed.Tool, Args: parsed.Args}}
+		var parsed tool.ToolCall
+		if err := json.Unmarshal([]byte(obj), &parsed); err == nil && parsed.Tool != "" {
+			calls = append(calls, parsed)
 		}
 	}
-	return nil
+	return calls
 }
 
 // runToolCall executes a single tool call and returns a textual result. ctx is
@@ -1640,37 +1642,4 @@ type NotFoundError struct {
 
 func (e *NotFoundError) Error() string {
 	return "agent not found: " + e.ID
-}
-
-// extractToolCallJSON extracts a JSON tool call from a response that may contain other text
-func extractToolCallJSON(response string) string {
-	// Find the start of a JSON object with "tool" or structured_output
-	start := strings.Index(response, `{"tool"`)
-	if start == -1 {
-		// Try with spaces or other prefixes
-		start = strings.Index(response, `{"tool":`)
-		if start == -1 {
-			// Try for structured_output: {"response": "...", "final": true}
-			start = strings.Index(response, `{"response":`)
-			if start == -1 {
-				return ""
-			}
-		}
-	}
-
-	// Find the matching closing brace
-	depth := 0
-	for i := start; i < len(response); i++ {
-		switch response[i] {
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				return response[start : i+1]
-			}
-		}
-	}
-
-	return ""
 }

@@ -163,3 +163,112 @@ func TestListEnabledExcludesDisabled(t *testing.T) {
 		t.Error("dummy should be excluded from ListEnabled")
 	}
 }
+
+// TestExtractJSONObjects exercises the tolerant JSON-object scanner that backs
+// the JSON-text tool-call fallback (issue #32): it must find balanced objects
+// regardless of surrounding prose, Markdown fences, whitespace, or how many
+// objects appear, and must not be fooled by braces inside string literals.
+func TestExtractJSONObjects(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"empty", "", nil},
+		{"no json", "just some prose without braces", nil},
+		{"bare object", `{"tool":"read"}`, []string{`{"tool":"read"}`}},
+		{
+			"prose wrapped",
+			`Sure, I'll do that: {"tool":"read","args":{"path":"a"}} now.`,
+			[]string{`{"tool":"read","args":{"path":"a"}}`},
+		},
+		{
+			"fenced json block",
+			"Here you go:\n```json\n{\"tool\":\"read\"}\n```\n",
+			[]string{`{"tool":"read"}`},
+		},
+		{
+			"pretty printed",
+			"{\n  \"tool\": \"read\",\n  \"args\": {\n    \"path\": \"a\"\n  }\n}",
+			[]string{"{\n  \"tool\": \"read\",\n  \"args\": {\n    \"path\": \"a\"\n  }\n}"},
+		},
+		{
+			"braces inside string value",
+			`{"tool":"write","args":{"content":"a } b { c"}}`,
+			[]string{`{"tool":"write","args":{"content":"a } b { c"}}`},
+		},
+		{
+			"escaped quote inside string",
+			`{"tool":"write","args":{"content":"say \"hi\" }"}}`,
+			[]string{`{"tool":"write","args":{"content":"say \"hi\" }"}}`},
+		},
+		{
+			"multiple objects",
+			`{"tool":"a"} and then {"tool":"b"}`,
+			[]string{`{"tool":"a"}`, `{"tool":"b"}`},
+		},
+		{"unbalanced is skipped", `{"tool":"a"`, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ExtractJSONObjects(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %d objects %q, want %d %q", len(got), got, len(tc.want), tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("object %d = %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestParseToolCalls verifies the fallback decodes embedded JSON into tool calls
+// across the formatting variations small/local models produce, including the
+// pretty-printed, space-before-colon, key-reordered, and fenced shapes that the
+// old substring matcher silently dropped, plus multiple calls in one reply.
+func TestParseToolCalls(t *testing.T) {
+	tests := []struct {
+		name      string
+		in        string
+		wantTools []string
+	}{
+		{"none", "I'm thinking but not acting.", nil},
+		{"pretty printed", "{\n \"tool\": \"read\",\n \"args\": {\"path\":\"a\"}\n}", []string{"read"}},
+		{"space before colon", `{"tool" : "read", "args" : {"path":"a"}}`, []string{"read"}},
+		{"reordered keys", `{"args":{"path":"a"},"tool":"read"}`, []string{"read"}},
+		{"fenced", "```json\n{\"tool\":\"grep\",\"args\":{\"pattern\":\"x\"}}\n```", []string{"grep"}},
+		{"multiple calls", `{"tool":"read","args":{}} {"tool":"write","args":{}}`, []string{"read", "write"}},
+		{"non-tool object ignored", `{"foo":"bar"} {"tool":"read"}`, []string{"read"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := ParseToolCalls(tc.in)
+			if len(calls) != len(tc.wantTools) {
+				t.Fatalf("got %d calls, want %d: %+v", len(calls), len(tc.wantTools), calls)
+			}
+			for i, want := range tc.wantTools {
+				if calls[i].Tool != want {
+					t.Errorf("call %d tool = %q, want %q", i, calls[i].Tool, want)
+				}
+			}
+		})
+	}
+}
+
+// TestParseToolCallReturnsFirst confirms the single-call wrapper surfaces the
+// first call and errors only when nothing parseable is present.
+func TestParseToolCallReturnsFirst(t *testing.T) {
+	reg := NewToolRegistry()
+	tc, err := reg.ParseToolCall(`prefix {"tool":"read","args":{"path":"a"}} suffix`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tc.Tool != "read" {
+		t.Errorf("tool = %q, want read", tc.Tool)
+	}
+	if _, err := reg.ParseToolCall("no json here"); err == nil {
+		t.Error("expected error for response without a tool call")
+	}
+}
