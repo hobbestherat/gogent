@@ -29,6 +29,13 @@ type SessionWindow struct {
 	modelSelect *tv.Select
 	status      *tv.Label
 	systemInstr string
+	// readOnly marks a static analysis window opened from the Sessions browser
+	// (issue #58): it renders a saved transcript with the full search/filter/
+	// fold/yank toolkit but has no input, model selector or live backend session,
+	// so several can sit open side-by-side for comparison without cost. Its id is
+	// an "analysis-N" synthetic (never a backend session id), it is excluded from
+	// the persisted layout, and closing it tears down no backend session.
+	readOnly bool
 	// pendingTool tracks the record created for an in-flight tool call so its
 	// result can be appended to the same foldable entry when it returns.
 	pendingTool *transcriptRecord
@@ -43,15 +50,22 @@ type SessionWindow struct {
 	// when the session is idle. budgetAlerted latches the one-time "budget
 	// exceeded" transcript note so it fires once per breach (cumulative token
 	// usage is monotonic, so a breach never self-clears).
-	turnStart      time.Time
-	turnStartOut   int
-	budgetAlerted  bool
+	turnStart     time.Time
+	turnStartOut  int
+	budgetAlerted bool
 }
 
-// newSessionWindow builds the window, its widgets and their layout/handlers.
-func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect) *SessionWindow {
-	sw := &SessionWindow{wb: wb, id: id, title: title}
-	window := tv.NewWindow(title, bounds, tui.LineSingle)
+// newSessionWindow builds the window, its widgets and their layout/handlers. A
+// readOnly window (opened from the Sessions browser, issue #58) omits the input,
+// model selector and status line and gives the transcript the full height; a
+// live window wires the full send/model/status chrome.
+func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly bool) *SessionWindow {
+	sw := &SessionWindow{wb: wb, id: id, title: title, readOnly: readOnly}
+	displayTitle := title
+	if readOnly {
+		displayTitle = title + " (analysis)"
+	}
+	window := tv.NewWindow(displayTitle, bounds, tui.LineSingle)
 
 	// Enable scalable windows using turbotv options
 	window.Resizable = wb.windowConfig.Resizable
@@ -62,13 +76,6 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect) *SessionW
 	window.OnClose = func(_ *tv.Window) { wb.CloseSession(id) }
 	history := tv.NewTextView("", tv.Rect{})
 	history.Wrap = true
-	input := tv.NewMultiLineInput("", tv.Rect{})
-	sendButton := tv.NewButton("Send", tv.Rect{}, nil)
-	modelLabel := tv.NewLabel("Model", tv.Rect{})
-	modelSelect := tv.NewSelect(wb.desktop, wb.modelNames, tv.Rect{})
-	modelLabel.SetTarget(modelSelect)
-	status := tv.NewLabel("idle", tv.Rect{})
-	status.FG = colorNote
 	sw.window = window
 	sw.history = history
 	sw.transcript = newTranscriptModel(history)
@@ -89,6 +96,29 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect) *SessionW
 		}
 		return false
 	}
+
+	if readOnly {
+		// Analysis window: transcript only, no input/model/status chrome.
+		window.AddContent(history)
+		window.Content.LayoutFn = func(c *tv.VisualComponent) {
+			wd := c.Bounds.W
+			ht := c.Bounds.H
+			if wd < 4 || ht < 4 {
+				return
+			}
+			history.Component.SetBounds(tv.Rect{X: 0, Y: 0, W: wd, H: ht})
+		}
+		sw.layer = tv.NewWindowLayer("layer-"+id, window)
+		return sw
+	}
+
+	input := tv.NewMultiLineInput("", tv.Rect{})
+	sendButton := tv.NewButton("Send", tv.Rect{}, nil)
+	modelLabel := tv.NewLabel("Model", tv.Rect{})
+	modelSelect := tv.NewSelect(wb.desktop, wb.modelNames, tv.Rect{})
+	modelLabel.SetTarget(modelSelect)
+	status := tv.NewLabel("idle", tv.Rect{})
+	status.FG = colorNote
 	sw.input = input
 	sw.sendButton = sendButton
 	sw.modelLabel = modelLabel
@@ -610,9 +640,9 @@ type liveStats struct {
 type budgetLevel int
 
 const (
-	budgetOK budgetLevel = iota
-	budgetApproaching // >= the warn fraction of the budget
-	budgetExceeded    // >= the full budget
+	budgetOK          budgetLevel = iota
+	budgetApproaching             // >= the warn fraction of the budget
+	budgetExceeded                // >= the full budget
 )
 
 // formatStatusLine composes the bottom status line for a session window:

@@ -210,6 +210,26 @@ the next launch, so your workbench comes back exactly as you left it. (Window
 moves and resizes are captured when you quit; renames, pins, reorders and
 open/close are saved immediately.)
 
+### Browsing saved sessions
+
+Every chat is persisted as it runs, so *Session → Saved Sessions…* opens a
+browser over your past sessions. The list is built from the per-session index
+only (it never replays a transcript), so it stays instant no matter how long a
+session grew. Each row shows the title, date, turns and message count, with a
+detail pane for the full metadata (tokens, model). Search filters by title, id
+or model.
+
+From a selected session you can:
+
+- **Open (analysis)** — open the transcript read-only in its own window. Several
+  can sit open side-by-side for comparison; each carries the full search/filter/
+  fold/yank toolkit but no input and no cost, since it is a static snapshot.
+- **Continue** — re-open the session live so you can keep typing into it; later
+  turns append to the existing transcript.
+
+The browser stays open after an open/continue, so you can pull up several
+sessions in one go.
+
 Beneath the session tree, the sidebar carries an **Overall** panel: a live,
 cluster-wide readout (open sessions, sub-agents, tokens in/out, requests,
 errors and prompt-cache hit %) that updates as work streams in. It refreshes on

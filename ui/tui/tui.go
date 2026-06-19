@@ -97,6 +97,16 @@ type Handlers struct {
 	// Restore returns sessions to re-open at startup (crash/continuation
 	// recovery). May be nil.
 	Restore func() []RestoredSession
+	// ListSavedSessions returns index-only metadata for every persisted session
+	// for the Sessions browser (issue #58). It must not replay transcripts. May
+	// be nil, in which case the browser is hidden.
+	ListSavedSessions func() []SessionMeta
+	// OpenSavedSession loads one persisted session by its index file path
+	// (SessionMeta.File) for the Sessions browser (issue #58). When continue_
+	// is true the backend adopts it so subsequent sends append; otherwise it is
+	// loaded read-only for analysis. It returns the session and ok=false when it
+	// could not be loaded. May be nil.
+	OpenSavedSession func(file string, continueSession bool) (RestoredSession, bool)
 	// LoadLayout returns the persisted workbench layout (sidebar order, titles,
 	// pin states and window bounds) to re-apply after sessions are restored. May
 	// be nil, in which case the desktop starts with its default arrangement.
@@ -119,6 +129,22 @@ type RestoredSession struct {
 	ID       string
 	Title    string
 	Messages []ChatMessage
+}
+
+// SessionMeta is the UI-facing, index-only view of one persisted session for the
+// Sessions browser (issue #58): enough to list, search and pick a session
+// without loading its transcript. File is the index path the browser hands back
+// to OpenSavedSession to open or continue the session.
+type SessionMeta struct {
+	ID        string
+	Title     string
+	CreatedAt string
+	Turns     int
+	Messages  int
+	TokensIn  int
+	TokensOut int
+	Model     string
+	File      string
 }
 
 // SkillInfo is a UI-facing view of a loaded skill and its usage stats.
@@ -156,11 +182,15 @@ type Workbench struct {
 	order      []string
 	// pinned records favorite sessions (shown with a ★ marker and floated to the
 	// top of the sidebar on pin). Kept as a set so the flag survives reorders.
-	pinned   map[string]bool
-	nextNum  int
-	handlers Handlers
-	sidebar  *sidebar
-	monolog  *tv.Layer
+	pinned  map[string]bool
+	nextNum int
+	// nextAnalysis assigns unique ids to read-only analysis windows opened from
+	// the Sessions browser (issue #58), kept separate from nextNum so synthetic
+	// "analysis-N" ids never collide with backend "session-N" ids.
+	nextAnalysis int
+	handlers     Handlers
+	sidebar      *sidebar
+	monolog      *tv.Layer
 	// shutdown is cancelled (via quit) when the UI loop stops. Background
 	// goroutines blocked on a permission prompt select on it so they unblock
 	// instead of leaking when the user quits. See AskPermission.
@@ -326,6 +356,9 @@ func (w *Workbench) rebuildMenu() {
 		pinned[id] = p
 	}
 	active := w.activeIDLocked()
+	// A read-only analysis window (issue #58) has no backend session, so the
+	// per-active operations (rename/pin/reorder/export) do not apply to it.
+	activeRO := active != "" && w.sessions[active] != nil && w.sessions[active].readOnly
 	w.mu.Unlock()
 	sessionItems := []*tv.MenuItem{
 		tv.NewMenuItem("&New Session", func() { w.NewSession() }).
@@ -338,9 +371,17 @@ func (w *Workbench) rebuildMenu() {
 		tv.NewMenuItem("Close &Others", func() { w.CloseOthers(w.ActiveID()) }),
 		tv.NewMenuItem("Close Al&l", func() { w.CloseAll() }),
 	}
+	// The Sessions browser (issue #58) is surfaced only when the backend wires
+	// the listing handler; otherwise the item would lead nowhere.
+	if w.handlers.ListSavedSessions != nil {
+		sessionItems = append(sessionItems,
+			tv.NewMenuItem("----------", nil),
+			tv.NewMenuItem("Saved &Sessions…", func() { w.showSessionsDialog() }),
+		)
+	}
 	// Per-active-session operations (rename / pin / reorder) only make sense when
-	// a window is open. They reflect the active session's current pin state.
-	if active != "" {
+	// a live window is open. They reflect the active session's current pin state.
+	if active != "" && !activeRO {
 		pinLabel := "&Pin Active"
 		if pinned[active] {
 			pinLabel = "Un&pin Active"
@@ -582,9 +623,37 @@ func (w *Workbench) AdoptSession(rs RestoredSession) *SessionWindow {
 	return sw
 }
 
-// openWindow builds, registers and shows a session window with the given id and
-// title. It is shared by NewSession and AdoptSession.
+// OpenAnalysisSession opens a saved transcript in a read-only analysis window
+// (issue #58): it renders the conversation with the full search/filter/fold/yank
+// toolkit but has no input or live backend session, so several can sit open
+// side-by-side for comparison. It is fed by the Sessions browser's read-only
+// load and uses a synthetic "analysis-N" id that never collides with a backend
+// session.
+func (w *Workbench) OpenAnalysisSession(rs RestoredSession) *SessionWindow {
+	w.mu.Lock()
+	w.nextAnalysis++
+	id := fmt.Sprintf("analysis-%d", w.nextAnalysis)
+	w.mu.Unlock()
+	title := rs.Title
+	if title == "" {
+		title = rs.ID
+	}
+	sw := w.openWindowAny(id, title, true)
+	sw.restore(rs.Messages)
+	w.rebuildMenu()
+	return sw
+}
+
+// openWindow builds, registers and shows a live session window with the given id
+// and title. It is the entry point shared by NewSession and AdoptSession.
 func (w *Workbench) openWindow(id, title string) *SessionWindow {
+	return w.openWindowAny(id, title, false)
+}
+
+// openWindowAny is the core window builder shared by live sessions (readOnly
+// false) and the read-only analysis windows (readOnly true, issue #58) opened
+// from the Sessions browser.
+func (w *Workbench) openWindowAny(id, title string, readOnly bool) *SessionWindow {
 	w.mu.Lock()
 	// Cascade windows so they don't perfectly overlap.
 	offset := len(w.order) % 6
@@ -602,7 +671,7 @@ func (w *Workbench) openWindow(id, title string) *SessionWindow {
 	}
 	x := 2 + offset*3
 	y := 2 + offset*1
-	sw := newSessionWindow(w, id, title, tv.Rect{X: x, Y: y, W: width, H: height})
+	sw := newSessionWindow(w, id, title, tv.Rect{X: x, Y: y, W: width, H: height}, readOnly)
 	w.sessions[id] = sw
 	w.order = append(w.order, id)
 	pinned := w.pinned[id]
@@ -726,11 +795,15 @@ func (w *Workbench) CloseSession(id string) {
 	// The Overall panel's session/sub-agent counts changed; refresh before the
 	// repaint below so the closed session's figures drop immediately.
 	w.refreshOverall()
-	if w.handlers.OnClose != nil {
-		w.handlers.OnClose(id)
+	// A read-only analysis window (issue #58) has no live backend session, so
+	// closing it tears down nothing on the backend and persists no layout.
+	if !sw.readOnly {
+		if w.handlers.OnClose != nil {
+			w.handlers.OnClose(id)
+		}
+		w.persistLayout()
 	}
 	w.rebuildMenu()
-	w.persistLayout()
 	w.mu.Lock()
 	last := ""
 	if len(w.order) > 0 {
@@ -920,6 +993,11 @@ func (w *Workbench) captureLayout() gogent.Layout {
 	for _, id := range w.order {
 		sw := w.sessions[id]
 		if sw == nil {
+			continue
+		}
+		// Read-only analysis windows (issue #58) are ephemeral views with no
+		// backend session, so they are not part of the persisted layout.
+		if sw.readOnly {
 			continue
 		}
 		bounds := sw.window.Component.Bounds

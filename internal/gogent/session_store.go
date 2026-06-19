@@ -44,15 +44,15 @@ import (
 // index written last: as long as an index is present and points at shards that
 // exist, the on-disk state is consistent.
 const (
-	activeBaseSuffix   = "_session"              // base prefix for a live session
-	archivedTag        = "_archived"             // appended to the base to archive it
-	indexFileExt       = ".index"                // the per-session index file
-	shardFileExt       = ".jsonl"                // one shard of the transcript
-	shardNumberWidth   = 4                       // zero-padded shard index in filenames
-	shardMaxEvents     = 5000                    // roll a shard at this many message records
-	shardMaxBytes      = 10 * 1024 * 1024        // roll a shard at ~10 MiB
-	shardCacheCapacity = 16                      // parsed frozen shards kept hot in memory
-	flushInterval      = 250 * time.Millisecond  // cadence of the batched durability flush
+	activeBaseSuffix   = "_session"             // base prefix for a live session
+	archivedTag        = "_archived"            // appended to the base to archive it
+	indexFileExt       = ".index"               // the per-session index file
+	shardFileExt       = ".jsonl"               // one shard of the transcript
+	shardNumberWidth   = 4                      // zero-padded shard index in filenames
+	shardMaxEvents     = 5000                   // roll a shard at this many message records
+	shardMaxBytes      = 10 * 1024 * 1024       // roll a shard at ~10 MiB
+	shardCacheCapacity = 16                     // parsed frozen shards kept hot in memory
+	flushInterval      = 250 * time.Millisecond // cadence of the batched durability flush
 )
 
 // jsonlRecord is one line of a shard file. Shards hold only "message" records;
@@ -70,11 +70,31 @@ type jsonlRecord struct {
 // the ordered shard table. It is the source of truth for listing and for the
 // shard layout, and is rewritten (temp file + rename) whenever the layout or
 // meta changes.
+//
+// The summary fields (Turns/TokensIn/TokensOut/Model) let the Sessions browser
+// list per-session usage straight from the index without replaying any
+// transcript (issue #58) — they are refreshed on every Save from the live
+// session snapshot. Older index files predating them decode with zero values,
+// which list cleanly; the next save backfills them.
 type sessionIndex struct {
 	SessionID string      `json:"session_id"`
 	Title     string      `json:"title,omitempty"`
 	CreatedAt string      `json:"created_at,omitempty"`
+	Turns     int         `json:"turns,omitempty"`
+	TokensIn  int         `json:"tokens_in,omitempty"`
+	TokensOut int         `json:"tokens_out,omitempty"`
+	Model     string      `json:"model,omitempty"`
 	Shards    []shardMeta `json:"shards"`
+}
+
+// sessionSummary is the lightweight per-session usage summary persisted in the
+// index so ListSessions can show turns/tokens/model without replaying
+// transcripts (issue #58). It is captured once per Save from the live session.
+type sessionSummary struct {
+	turns     int
+	tokensIn  int
+	tokensOut int
+	model     string
 }
 
 // shardMeta is one entry in the index's shard table.
@@ -89,10 +109,10 @@ type SessionStore struct {
 	dir string
 
 	mu     sync.Mutex
-	base   map[string]string         // sessionID -> base prefix
-	state  map[string]*persistState  // sessionID -> per-agent persisted frontier
-	shards map[string][]shardMeta    // sessionID -> shard table (last = active shard)
-	cache  *shardCache               // parsed-shard LRU (hot turns)
+	base   map[string]string        // sessionID -> base prefix
+	state  map[string]*persistState // sessionID -> per-agent persisted frontier
+	shards map[string][]shardMeta   // sessionID -> shard table (last = active shard)
+	cache  *shardCache              // parsed-shard LRU (hot turns)
 
 	// flusher: the data writes themselves stay synchronous (an append is cheap
 	// and keeps the file readable immediately + crash-recoverable), but the
@@ -232,6 +252,10 @@ func (s *SessionStore) Save(us *agent.UserSession, title string) error {
 		return nil
 	}
 
+	// Snapshot the usage summary before taking the store lock (it takes the
+	// session's own lock, not this one) so the index write carries fresh stats.
+	snap := us.Snapshot()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -239,10 +263,18 @@ func (s *SessionStore) Save(us *agent.UserSession, title string) error {
 	st := s.state[us.ID]
 	agents := us.RootAgent.ListAllAgents()
 	created := time.Unix(us.CreatedAt, 0).UTC().Format(time.RFC3339)
+	// Capture the usage summary once so every index write (first save,
+	// compaction rewrite, delta) carries the same fresh figures (issue #58).
+	sum := sessionSummary{
+		turns:     snap.Turns,
+		tokensIn:  snap.TokensIn,
+		tokensOut: snap.TokensOut,
+		model:     us.PrimaryModel(),
+	}
 
 	// First save: build the whole shard set.
 	if st == nil {
-		sms, err := s.writeFullTranscript(base, us.ID, title, created, agents)
+		sms, err := s.writeFullTranscript(base, us.ID, title, created, sum, agents)
 		if err != nil {
 			return err
 		}
@@ -258,7 +290,7 @@ func (s *SessionStore) Save(us *agent.UserSession, title string) error {
 			continue
 		}
 		if prev, ok := st.epoch[a.ID]; ok && prev != a.ThoughtTrain.TranscriptEpoch() {
-			sms, err := s.writeFullTranscript(base, us.ID, title, created, agents)
+			sms, err := s.writeFullTranscript(base, us.ID, title, created, sum, agents)
 			if err != nil {
 				return err
 			}
@@ -302,7 +334,7 @@ func (s *SessionStore) Save(us *agent.UserSession, title string) error {
 		s.shards[us.ID] = sms
 		s.cache.evictPrefix(base) // the active shard(s) changed
 	}
-	if err := writeIndexFile(base, sessionIndex{SessionID: us.ID, Title: title, CreatedAt: created, Shards: sms}); err != nil {
+	if err := writeIndexFile(base, indexFrom(us.ID, title, created, sum, sms)); err != nil {
 		delete(s.state, us.ID)
 		delete(s.shards, us.ID)
 		return err
@@ -318,7 +350,7 @@ func (s *SessionStore) Save(us *agent.UserSession, title string) error {
 // temp file + rename so a crash can't leave a half-written shard behind), drops
 // any leftover shards from a previously larger layout, then rewrites the index
 // last so the on-disk state stays consistent.
-func (s *SessionStore) writeFullTranscript(base, id, title, created string, agents []*agent.Agent) ([]shardMeta, error) {
+func (s *SessionStore) writeFullTranscript(base, id, title, created string, sum sessionSummary, agents []*agent.Agent) ([]shardMeta, error) {
 	var buf bytes.Buffer
 	if _, err := encodeMessages(json.NewEncoder(&buf), agents, func(string) int { return 0 }); err != nil {
 		return nil, err
@@ -335,10 +367,25 @@ func (s *SessionStore) writeFullTranscript(base, id, title, created string, agen
 		_ = os.Remove(shardFilePath(base, i))
 	}
 	s.cache.evictPrefix(base)
-	if err := writeIndexFile(base, sessionIndex{SessionID: id, Title: title, CreatedAt: created, Shards: sms}); err != nil {
+	if err := writeIndexFile(base, indexFrom(id, title, created, sum, sms)); err != nil {
 		return nil, err
 	}
 	return sms, nil
+}
+
+// indexFrom assembles the index document from its parts. Centralising it keeps
+// the summary fields (issue #58) populated consistently across every write site.
+func indexFrom(id, title, created string, sum sessionSummary, sms []shardMeta) sessionIndex {
+	return sessionIndex{
+		SessionID: id,
+		Title:     title,
+		CreatedAt: created,
+		Turns:     sum.turns,
+		TokensIn:  sum.tokensIn,
+		TokensOut: sum.tokensOut,
+		Model:     sum.model,
+		Shards:    sms,
+	}
 }
 
 // writeLinesToShards appends a batch of pre-encoded JSONL lines to the active
@@ -505,24 +552,10 @@ func (s *SessionStore) Archive(sessionID string) error {
 // reads just the small index plus the active shard per session, never replaying
 // the whole history, so it stays O(active shards) rather than O(total events).
 func (s *SessionStore) ListActive() ([]LoadedSession, error) {
-	entries, err := os.ReadDir(s.dir)
+	bases, err := s.activeBases()
 	if err != nil {
 		return nil, err
 	}
-	var bases []string
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, indexFileExt) {
-			continue
-		}
-		baseName := strings.TrimSuffix(name, indexFileExt)
-		if !strings.HasSuffix(baseName, activeBaseSuffix) { // skip "_session_archived"
-			continue
-		}
-		bases = append(bases, filepath.Join(s.dir, baseName))
-	}
-	sort.Strings(bases) // ISO-prefixed bases sort chronologically
-
 	var sessions []LoadedSession
 	for _, base := range bases {
 		idx, err := loadIndexFile(base)
@@ -540,6 +573,106 @@ func (s *SessionStore) ListActive() ([]LoadedSession, error) {
 		})
 	}
 	return sessions, nil
+}
+
+// activeBases lists the base prefixes of every live (non-archived) session,
+// oldest first. The ISO timestamp prefixing each base makes the lexical sort
+// chronological. Shared by ListActive (which also loads transcripts) and
+// ListSessions (which does not).
+func (s *SessionStore) activeBases() ([]string, error) {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, err
+	}
+	var bases []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, indexFileExt) {
+			continue
+		}
+		baseName := strings.TrimSuffix(name, indexFileExt)
+		if !strings.HasSuffix(baseName, activeBaseSuffix) { // skip "_session_archived"
+			continue
+		}
+		bases = append(bases, filepath.Join(s.dir, baseName))
+	}
+	sort.Strings(bases)
+	return bases, nil
+}
+
+// SessionMeta is the lightweight, index-only view of one persisted session used
+// by the Sessions browser (issue #58): enough metadata to list, search and pick
+// a session without replaying its transcript. Messages is the total message
+// record count (the sum of every shard's events); File is the index path that
+// LoadSession re-opens.
+type SessionMeta struct {
+	ID        string
+	Title     string
+	CreatedAt string
+	Turns     int
+	Messages  int
+	TokensIn  int
+	TokensOut int
+	Model     string
+	File      string
+}
+
+// ListSessions returns the metadata of every live session straight from the
+// index files (oldest first) — the O(sessions) listing the Sessions browser
+// needs (issue #58). It never reads a shard, so listing stays cheap regardless
+// of transcript size; total message counts come from the index's shard table.
+func (s *SessionStore) ListSessions() ([]SessionMeta, error) {
+	bases, err := s.activeBases()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SessionMeta, 0, len(bases))
+	for _, base := range bases {
+		idx, err := loadIndexFile(base)
+		if err != nil || idx.SessionID == "" {
+			continue
+		}
+		messages := 0
+		for _, sm := range idx.Shards {
+			messages += sm.Events
+		}
+		out = append(out, SessionMeta{
+			ID:        idx.SessionID,
+			Title:     idx.Title,
+			CreatedAt: idx.CreatedAt,
+			Turns:     idx.Turns,
+			Messages:  messages,
+			TokensIn:  idx.TokensIn,
+			TokensOut: idx.TokensOut,
+			Model:     idx.Model,
+			File:      indexFilePath(base),
+		})
+	}
+	return out, nil
+}
+
+// LoadSession reads one session's transcript (current shard only) on demand,
+// addressed by its index file path (SessionMeta.File) or the bare base prefix.
+// It is the on-demand counterpart of ListActive's per-session load, used to open
+// a single saved session into a window for analysis or continuation (issue #58).
+func (s *SessionStore) LoadSession(file string) (LoadedSession, error) {
+	base := file
+	if strings.HasSuffix(file, indexFileExt) {
+		base = strings.TrimSuffix(file, indexFileExt)
+	}
+	idx, err := loadIndexFile(base)
+	if err != nil {
+		return LoadedSession{}, err
+	}
+	transcripts, order := s.loadTranscripts(base, idx.Shards)
+	return LoadedSession{
+		ID:          idx.SessionID,
+		Title:       idx.Title,
+		CreatedAt:   idx.CreatedAt,
+		File:        indexFilePath(base),
+		Transcripts: transcripts,
+		AgentOrder:  order,
+	}, nil
 }
 
 // loadTranscripts reads the current (latest) shard and returns its per-agent
