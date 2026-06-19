@@ -2,6 +2,7 @@ package model
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -29,7 +30,14 @@ import (
 // get their own. The adapter is selected from the APIType (see adapterFor),
 // which is the seam to extend for a new provider family.
 type adapter interface {
-	buildBody(req CompletionRequest) ([]byte, error)
+	// buildBody marshals an internal CompletionRequest into the provider's
+	// request JSON, writing into buf. The caller owns buf (and may pool it,
+	// see acquireReqBodyBuf); buildBody resets buf first so a pooled buffer is
+	// safe to hand in directly. Returning the bytes via the caller-owned buffer
+	// — rather than allocating a fresh one per call — lets a large, growing
+	// transcript be marshaled into a single reused buffer across turns instead
+	// of being re-allocated and GC'd on every send (issue #20).
+	buildBody(req CompletionRequest, buf *bytes.Buffer) error
 	parseResponse(body []byte) (*CompletionResponse, error)
 	parseStream(body io.Reader, streamCh chan<- StreamResponse) (string, *TokenUsage, error)
 }
@@ -45,14 +53,31 @@ func adapterFor(t APIType) adapter {
 	}
 }
 
+// encodeJSON serializes v into buf as compact JSON, reusing buf's existing
+// capacity. It is byte-identical to json.Marshal(v) for gogent's request types
+// (the encoder uses the same HTML escaping) while letting the caller own — and
+// pool — the destination buffer. json.Encoder.Encode appends a trailing newline;
+// it is trimmed so the wire body stays exactly what json.Marshal would have
+// produced.
+func encodeJSON(buf *bytes.Buffer, v any) error {
+	buf.Reset()
+	if err := json.NewEncoder(buf).Encode(v); err != nil {
+		return err
+	}
+	if b := buf.Bytes(); len(b) > 0 && b[len(b)-1] == '\n' {
+		buf.Truncate(buf.Len() - 1)
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // OpenAI-compatible adapter (OpenAI, Z.AI, Gemini compat layer, local servers)
 // ---------------------------------------------------------------------------
 
 type openAIAdapter struct{}
 
-func (openAIAdapter) buildBody(req CompletionRequest) ([]byte, error) {
-	return json.Marshal(req)
+func (openAIAdapter) buildBody(req CompletionRequest, buf *bytes.Buffer) error {
+	return encodeJSON(buf, req)
 }
 
 func (openAIAdapter) parseResponse(body []byte) (*CompletionResponse, error) {
@@ -139,7 +164,7 @@ type anthropicTool struct {
 	InputSchema interface{} `json:"input_schema"`
 }
 
-func (anthropicAdapter) buildBody(req CompletionRequest) ([]byte, error) {
+func (anthropicAdapter) buildBody(req CompletionRequest, buf *bytes.Buffer) error {
 	out := anthropicRequest{
 		Model:       req.Model,
 		Stream:      req.Stream,
@@ -203,7 +228,7 @@ func (anthropicAdapter) buildBody(req CompletionRequest) ([]byte, error) {
 		out.ToolChoice = anthropicToolChoice(*req.ToolChoice)
 	}
 
-	return json.Marshal(out)
+	return encodeJSON(buf, out)
 }
 
 // anthropicToolChoice maps the provider-independent ToolChoice onto Anthropic's

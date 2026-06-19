@@ -1,9 +1,12 @@
 package model
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -207,6 +210,44 @@ func TestCompleteRetryByStatus(t *testing.T) {
 			t.Errorf("expected 2 attempts, got %d", got)
 		}
 	})
+}
+
+// TestCompleteRequestBodyConsistentAcrossRetries verifies the two halves of the
+// issue #20 fix in the blocking path: the request body is marshaled ONCE before
+// the retry loop (so it is identical on every attempt), and it lives in a pooled
+// buffer that must stay valid for the whole loop — not be released or overwritten
+// mid-retry. The server fails twice then succeeds; every attempt must carry the
+// exact same body bytes.
+func TestCompleteRequestBodyConsistentAcrossRetries(t *testing.T) {
+	var mu sync.Mutex
+	var bodies [][]byte
+	var attempts int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, append([]byte(nil), body...))
+		mu.Unlock()
+		if atomic.AddInt32(&attempts, 1) < 3 {
+			http.Error(w, "try again", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(CompletionResponse{Content: "ok", Role: RoleAssistant})
+	}))
+	defer server.Close()
+
+	c := newTestConn(server.URL)
+	if _, err := c.Complete([]Message{{Role: RoleUser, Content: "hi"}}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(bodies) != 3 {
+		t.Fatalf("got %d attempts, want 3", len(bodies))
+	}
+	for i := 1; i < len(bodies); i++ {
+		if !bytes.Equal(bodies[i], bodies[0]) {
+			t.Errorf("request body differs on retry %d: pooled marshal buffer must stay live for the whole retry loop", i)
+		}
+	}
 }
 
 func TestIsRetryableStatus(t *testing.T) {
