@@ -106,6 +106,12 @@ type SubAgentConfig struct {
 	// backend (issue #23). <=0 means use the built-in default (see
 	// MaxConcurrentOrDefault).
 	MaxConcurrent int `json:"max_concurrent"`
+	// TokenBudget caps the cumulative tokens (prompt + completion) a single
+	// sub-agent may spend before it stops gracefully with a BUDGET_EXCEEDED
+	// result. It bounds the cost of a sub-agent that would otherwise loop to the
+	// step limit with no token ceiling (issue #28). Zero (the default) leaves
+	// sub-agents unbounded, preserving prior behavior — it is opt-in.
+	TokenBudget int `json:"token_budget,omitempty"`
 }
 
 // defaultMaxSubAgents, defaultMaxDepth and defaultMaxConcurrent are the
@@ -286,6 +292,20 @@ type BudgetConfig struct {
 	WarnFraction float64 `json:"warn_fraction,omitempty"`
 }
 
+// RateLimitConfig governs how fast gogent issues model requests to the provider,
+// process-wide. It is the throttle that keeps a wide sub-agent fan-out — or
+// several cluster nodes firing at once — from stampeding a provider into 429s
+// (issue #28). A zero value (RequestsPerMinute <= 0) disables throttling, which
+// is the default so an older config.json without the key is unaffected.
+type RateLimitConfig struct {
+	// RequestsPerMinute is the sustained ceiling on model requests per minute
+	// across all sessions. <=0 disables throttling.
+	RequestsPerMinute int `json:"requests_per_minute,omitempty"`
+	// Burst is how many requests may fire back-to-back before the per-minute rate
+	// applies. <=0 falls back to RequestsPerMinute (a one-minute burst).
+	Burst int `json:"burst,omitempty"`
+}
+
 // defaultBudgetWarnFraction is the fraction of the token budget at which the
 // status gauge turns amber (the red "exceeded" alert fires at the full budget).
 const defaultBudgetWarnFraction = 0.8
@@ -354,6 +374,10 @@ type Config struct {
 	// status-bar budget alert (issue #63). A zero value disables alerting, so an
 	// older config.json without a "budget" key simply leaves the feature off.
 	Budget BudgetConfig `json:"budget"`
+	// RateLimit governs the process-wide model request rate (issue #28). A zero
+	// value disables throttling, so an older config.json without the key keeps the
+	// prior unthrottled behavior.
+	RateLimit RateLimitConfig `json:"rate_limit,omitempty"`
 	// Notify holds the desktop/terminal notification settings. It is a pointer
 	// so a config.json that predates the setting (missing the "notify" key)
 	// resolves to the built-in defaults rather than a zero "everything off"

@@ -39,13 +39,13 @@ type Gogent struct {
 	// by turn, so a botched edit can be rolled back with UndoLastTurn / Rewind
 	// without the user resorting to their own VCS (issue #41). Nil when the file
 	// system could not be built.
-	checkpoints      *fileops.Checkpointer
-	toolRegistry     *tool.ToolRegistry
-	config           *config.Config
-	workspaceRoot    string
-	homeDir          string
-	store            *SessionStore
-	skills           *skill.SkillRegistry
+	checkpoints   *fileops.Checkpointer
+	toolRegistry  *tool.ToolRegistry
+	config        *config.Config
+	workspaceRoot string
+	homeDir       string
+	store         *SessionStore
+	skills        *skill.SkillRegistry
 	// log routes diagnostics (warnings, errors) to a sink that never corrupts
 	// the TUI's alternate screen: a file in TUI mode, stderr when headless
 	// (issue #17). Defaults to stderr; the TUI entry point redirects it via
@@ -82,6 +82,12 @@ type Gogent struct {
 	// is shared by all sessions, created once at startup from the configured
 	// SubAgents.MaxConcurrent.
 	subAgentLimiter *agent.SubAgentLimiter
+	// rateLimiter paces model requests against the provider's request-rate ceiling
+	// across every session, so a wide fan-out (or several cluster nodes) cannot
+	// stampede the provider into 429s (issue #28). It is shared by all sessions,
+	// created once at startup from the configured RateLimit. Nil/unbounded when
+	// throttling is disabled.
+	rateLimiter *agent.RateLimiter
 }
 
 // HookEvent represents an event that triggers hooks
@@ -155,6 +161,7 @@ func NewGogentWithWorkspace(homeDir, workspaceRoot string) *Gogent {
 		reviewApprovedAll: make(map[string]bool),
 		log:               log,
 		subAgentLimiter:   agent.NewSubAgentLimiter(cfg.SubAgents.MaxConcurrentOrDefault()),
+		rateLimiter:       agent.NewRateLimiter(cfg.RateLimit.RequestsPerMinute, cfg.RateLimit.Burst),
 	}
 
 	// Session transcript persistence (best-effort; a nil store disables it).
@@ -841,6 +848,9 @@ func (g *Gogent) CreateUserSession(id string, rootAgent *agent.Agent) *agent.Use
 	// Share the process-wide concurrency limiter so sub-agent fan-out across all
 	// sessions is globally bounded (issue #23).
 	userSession.SetSubAgentLimiter(g.subAgentLimiter)
+	// Share the process-wide request-rate limiter so the model request rate is
+	// governed across all sessions, not per-session (issue #28).
+	userSession.SetRateLimiter(g.rateLimiter)
 	userSession.SetSystemContextProvider(g.buildSystemContext)
 	// Route context compression to the configured fast model when its role
 	// resolves to a model other than the session's primary one; otherwise leave

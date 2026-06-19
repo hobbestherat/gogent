@@ -49,6 +49,13 @@ internal/notify/       Desktop/terminal notifications (bell + OSC 9/777 + native
   (`max_concurrent`, default 8) caps how many sub-agent loops run at once so the
   multiplicative fan-out (`max_subagents ^ max_depth`) cannot spawn an unbounded
   goroutine herd against the backend; overflow tasks run inline as backpressure.
+  Cost is governed two further ways (issue #28): each sub-agent gets a per-agent
+  token budget (`sub_agents.token_budget`, opt-in) and stops gracefully with a
+  `BUDGET_EXCEEDED` result once it is reached, instead of looping to the step cap
+  with no token ceiling; and a process-wide token-bucket `RateLimiter`
+  (`rate_limit.requests_per_minute`/`burst`, opt-in) paces every model round-trip
+  so a wide fan-out — or several cluster nodes — cannot stampede a provider into
+  429s. Both default off, preserving prior behavior.
 - **Model layer** (`internal/model`) — split into small capability interfaces
   (`Completer`, streaming, tools, stats) so it can later be extracted into its
   own library. A provider abstraction (`provider.go`, `APIType`) maps each

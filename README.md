@@ -352,6 +352,22 @@ budget) and records a one-line transcript note; a zero/omitted budget disables
 alerting (the default). Cost budgets are not yet supported — that needs
 per-model pricing (tracked as a follow-up).
 
+Two further governance knobs bound fan-out cost (issue #28), both opt-in:
+
+```json
+"sub_agents": { "token_budget": 100000 },
+"rate_limit": { "requests_per_minute": 120, "burst": 20 }
+```
+
+`sub_agents.token_budget` caps the cumulative (prompt + completion) tokens a
+single sub-agent may spend; on reaching it the sub-agent stops gracefully with a
+`BUDGET_EXCEEDED` result instead of looping to the step cap with no token
+ceiling. `rate_limit` is a process-wide token-bucket throttle on model requests
+(`requests_per_minute` sustained, `burst` back-to-back) so a wide sub-agent
+fan-out — or several cluster nodes — cannot stampede a provider into 429s;
+requests back off and wait for a permit rather than erroring. A zero/omitted
+value leaves each feature off (the default).
+
 ## Skills & project instructions
 
 gogent assembles a system-context block for every task:

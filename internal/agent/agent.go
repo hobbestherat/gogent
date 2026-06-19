@@ -60,7 +60,18 @@ type Agent struct {
 	Result       string
 	TimeoutMs    int64
 	ToolRegistry *tool.ToolRegistry
-	mu           sync.Mutex
+	// TokenBudget caps the cumulative tokens (prompt + completion) this agent's
+	// task loop may spend before it stops gracefully with a BUDGET_EXCEEDED
+	// result. Zero means unbounded — the agent runs until it finishes or hits the
+	// step limit, preserving prior behavior. Sub-agents inherit a budget from the
+	// session's SubAgentConfig so a deep fan-out cannot loop to the step cap with
+	// no token ceiling (issue #28).
+	TokenBudget int
+	// TokensUsed is the running total of tokens this agent has spent across its
+	// loop's model round-trips. It is compared against TokenBudget to decide when
+	// to stop. Guarded by mu.
+	TokensUsed int
+	mu         sync.Mutex
 	// cancel aborts the agent's currently running task loop. It is set while a
 	// loop is in flight (see UserSession.runLoop) and invoked by Cancel — which
 	// is how StopAgent and session close actually interrupt in-flight model work
@@ -260,6 +271,38 @@ func (a *Agent) GetResult() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.Result
+}
+
+// SetTokenBudget sets the cumulative token budget for the agent's task loop. A
+// non-positive budget leaves the agent unbounded.
+func (a *Agent) SetTokenBudget(budget int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.TokenBudget = budget
+}
+
+// AddTokensUsed adds a round-trip's prompt and completion tokens to the agent's
+// running total and returns the new total.
+func (a *Agent) AddTokensUsed(promptTokens, completionTokens int) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.TokensUsed += promptTokens + completionTokens
+	return a.TokensUsed
+}
+
+// GetTokensUsed returns the agent's cumulative token usage.
+func (a *Agent) GetTokensUsed() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.TokensUsed
+}
+
+// BudgetExceeded reports whether the agent has spent at least its token budget.
+// An agent with no budget (TokenBudget <= 0) is never over budget.
+func (a *Agent) BudgetExceeded() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.TokenBudget > 0 && a.TokensUsed >= a.TokenBudget
 }
 
 // DisplayName returns the friendly name for the agent, falling back to its ID.
