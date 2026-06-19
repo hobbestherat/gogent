@@ -7,26 +7,26 @@ import (
 	tv "github.com/hobbestherat/turbotui/turbotv"
 )
 
-// TestMaximizedWindowRect covers the maximize target geometry: it fills the
-// desktop below the menu bar, reserves the sidebar, and degrades sensibly on a
-// desktop too narrow/short to spare it (issue #105).
+// TestMaximizedWindowRect covers the maximize target geometry: it fills the given
+// available width (the workbench's window area — already reduced by a pinned
+// sidebar) below the menu bar, and floors the dimensions at 1 so the rect is never
+// empty (issues #105 / #106).
 func TestMaximizedWindowRect(t *testing.T) {
 	for _, tc := range []struct {
-		name             string
-		screenW, screenH int
-		want             tv.Rect
+		name            string
+		availW, screenH int
+		want            tv.Rect
 	}{
-		{"standard 80x25 leaves sidebar + menu bar", 80, 25, tv.Rect{X: 0, Y: 1, W: 48, H: 24}},
-		{"narrow desktop still reserves sidebar", 40, 25, tv.Rect{X: 0, Y: 1, W: 8, H: 24}},
-		{"desktop exactly sidebar-wide uses full width", 32, 25, tv.Rect{X: 0, Y: 1, W: 32, H: 24}},
-		{"desktop narrower than sidebar falls back to full width", 10, 25, tv.Rect{X: 0, Y: 1, W: 10, H: 24}},
-		{"one-row desktop keeps a 1-row window", 80, 1, tv.Rect{X: 0, Y: 1, W: 48, H: 1}},
-		{"zero-height desktop floors height at 1", 80, 0, tv.Rect{X: 0, Y: 1, W: 48, H: 1}},
+		{"fills available width below menu bar", 48, 25, tv.Rect{X: 0, Y: 1, W: 48, H: 24}},
+		{"narrow available width", 8, 25, tv.Rect{X: 0, Y: 1, W: 8, H: 24}},
+		{"full desktop width when sidebar unpinned", 80, 25, tv.Rect{X: 0, Y: 1, W: 80, H: 24}},
+		{"one-row desktop keeps a 1-row window", 48, 1, tv.Rect{X: 0, Y: 1, W: 48, H: 1}},
+		{"zero-height desktop floors height at 1", 48, 0, tv.Rect{X: 0, Y: 1, W: 48, H: 1}},
 		{"zero-width desktop floors width at 1", 0, 25, tv.Rect{X: 0, Y: 1, W: 1, H: 24}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := maximizedWindowRect(tc.screenW, tc.screenH); got != tc.want {
-				t.Errorf("maximizedWindowRect(%d, %d) = %+v, want %+v", tc.screenW, tc.screenH, got, tc.want)
+			if got := maximizedWindowRect(tc.availW, tc.screenH); got != tc.want {
+				t.Errorf("maximizedWindowRect(%d, %d) = %+v, want %+v", tc.availW, tc.screenH, got, tc.want)
 			}
 		})
 	}
@@ -86,7 +86,7 @@ func TestSessionWindowMaximizeToggle(t *testing.T) {
 	if !sw.IsMaximized() {
 		t.Fatal("expected window maximized after Maximize()")
 	}
-	want := maximizedWindowRect(w.app.Width(), w.app.Height())
+	want := maximizedWindowRect(w.windowArea().W, w.windowArea().H)
 	if got := sw.window.Component.Bounds; got != want {
 		t.Errorf("maximized bounds = %+v, want %+v", got, want)
 	}

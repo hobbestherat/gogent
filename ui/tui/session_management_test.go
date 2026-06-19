@@ -256,7 +256,10 @@ func TestLayoutCaptureApplyRoundTrip(t *testing.T) {
 	if !w2.pinned["b"] {
 		t.Error("pin state not restored")
 	}
-	wantRect := clampWindowRect(rect, w2.app.Width(), w2.app.Height(), a.window.MinWidth, a.window.MinHeight)
+	// Restored bounds are clamped to the pinned window area (left of the
+	// sidebar), not the full desktop (issue #106).
+	area := w2.windowArea()
+	wantRect := clampWindowRect(rect, area.W, area.H, a.window.MinWidth, a.window.MinHeight)
 	if got := a.window.Component.Bounds; got != wantRect {
 		t.Errorf("bounds = %+v, want %+v", got, wantRect)
 	}

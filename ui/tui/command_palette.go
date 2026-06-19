@@ -99,7 +99,8 @@ func (w *Workbench) commands() []command {
 			enabled: avail(h.GetTheme != nil && h.SetTheme != nil)},
 
 		// Application-wide actions. The palette itself is reference-only (you are
-		// already in it); the help overlay and quit are runnable.
+		// already in it); the sidebar pin and help/quit are runnable.
+		{category: "App", name: "Pin / unpin sidebar", run: w.ToggleSidebarPin},
 		{category: "App", name: "Command palette", keys: "Ctrl+K, :"},
 		{category: "App", name: "Keybinding help", keys: "?", run: w.showHelpOverlay},
 		{category: "App", name: "Quit", keys: "Ctrl+Q", run: w.confirmQuit},
