@@ -378,6 +378,115 @@ func (g *Gogent) initializeToolRegistry() {
 		},
 	})
 
+	// Codebase search tools (issue #37): grep/glob/list are read-only and
+	// workspace-confined, so — unlike the same searches routed through the
+	// shell — they run without a permission prompt and return structured
+	// file:line results the model can pass straight back to read. They build on
+	// the existing FileSystem primitives (Glob/List) plus the Grep primitive.
+	g.toolRegistry.Register(&tool.Tool{
+		Name: "grep",
+		Description: "Search file contents across the workspace for a regular expression (Go regex syntax). " +
+			"Read-only and workspace-confined, so it runs without a permission prompt — prefer it over " +
+			"shelling out to grep/rg. It returns file:line references the read tool can open. " +
+			"output_mode selects the shape: content (default, every match with its line), " +
+			"files_with_matches (just the matching paths), or count (match total per file).",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"pattern":          map[string]interface{}{"type": "string", "description": "Go regular expression to search for."},
+				"path":             map[string]interface{}{"type": "string", "description": "File or directory to search, relative to the workspace root (default: whole workspace)."},
+				"output_mode":      map[string]interface{}{"type": "string", "enum": []string{"content", "files_with_matches", "count"}, "description": "Result shape (default content)."},
+				"include":          map[string]interface{}{"type": "string", "description": "Only search files whose name matches this glob, e.g. \"*.go\"."},
+				"case_insensitive": map[string]interface{}{"type": "boolean", "description": "Match regardless of letter case."},
+				"max_results":      map[string]interface{}{"type": "integer", "description": "Cap on returned matches/files (default 200)."},
+			},
+			"required": []string{"pattern"},
+		},
+		Execute: func(args map[string]interface{}, ctx tool.ToolContext) (interface{}, error) {
+			pattern, ok := args["pattern"].(string)
+			if !ok || strings.TrimSpace(pattern) == "" {
+				return nil, fmt.Errorf("pattern argument is required")
+			}
+			opts := fileops.GrepOptions{
+				Path:            stringArg(args, "path"),
+				OutputMode:      stringArg(args, "output_mode"),
+				Include:         stringArg(args, "include"),
+				CaseInsensitive: boolArg(args, "case_insensitive"),
+			}
+			if v, ok := args["max_results"].(float64); ok {
+				opts.MaxResults = int(v)
+			}
+			res, err := g.fileSystem.Grep(pattern, opts)
+			if err != nil {
+				return nil, fmt.Errorf("failed to grep: %v", err)
+			}
+			return grepToolResult(res), nil
+		},
+	})
+
+	g.toolRegistry.Register(&tool.Tool{
+		Name:        "glob",
+		Description: "List files in the workspace whose path matches a glob pattern (shell-style *, ?, [abc]; it does not cross directory boundaries, so prefer grep for recursive content search). Read-only and workspace-confined, so it runs without a permission prompt. Use it to discover files by name before reading them.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"pattern": map[string]interface{}{"type": "string", "description": "Glob pattern relative to the workspace root, e.g. \"*.txt\" or \"src/*.go\"."},
+			},
+			"required": []string{"pattern"},
+		},
+		Execute: func(args map[string]interface{}, ctx tool.ToolContext) (interface{}, error) {
+			pattern, ok := args["pattern"].(string)
+			if !ok || strings.TrimSpace(pattern) == "" {
+				return nil, fmt.Errorf("pattern argument is required")
+			}
+			matches, err := g.fileSystem.Glob(pattern)
+			if err != nil {
+				return nil, fmt.Errorf("failed to glob: %v", err)
+			}
+			sort.Strings(matches) // deterministic order for stable display
+			return map[string]interface{}{
+				"pattern": pattern,
+				"matches": matches,
+				"count":   len(matches),
+			}, nil
+		},
+	})
+
+	g.toolRegistry.Register(&tool.Tool{
+		Name:        "list",
+		Description: "List the files and subdirectories immediately inside a workspace directory. Read-only and workspace-confined, so it runs without a permission prompt. Use it to explore a directory's layout before reading specific files.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{"type": "string", "description": "Directory to list, relative to the workspace root (default: the workspace root)."},
+			},
+		},
+		Execute: func(args map[string]interface{}, ctx tool.ToolContext) (interface{}, error) {
+			path := stringArg(args, "path")
+			if path == "" {
+				path = "."
+			}
+			entries, err := g.fileSystem.List(path)
+			if err != nil {
+				return nil, fmt.Errorf("failed to list: %v", err)
+			}
+			out := make([]map[string]interface{}, 0, len(entries))
+			for _, e := range entries {
+				out = append(out, map[string]interface{}{
+					"name":   e.Name,
+					"path":   e.Path,
+					"is_dir": e.IsDir,
+					"size":   e.Size,
+				})
+			}
+			return map[string]interface{}{
+				"path":    path,
+				"entries": out,
+				"count":   len(out),
+			}, nil
+		},
+	})
+
 	g.toolRegistry.RegisterCalcTool()
 	if g.config != nil {
 		g.toolRegistry.ShellTimeout = time.Duration(g.config.Timeouts.ToolSecondsOrDefault()) * time.Second
@@ -660,6 +769,59 @@ func (g *Gogent) initializeToolRegistry() {
 			},
 		})
 	}
+}
+
+// grepToolResult renders a fileops.GrepResult as the grep tool's model-facing
+// output: the mode, pattern and truncation flag, plus the mode-specific payload
+// (matches / files / counts). It is a plain map so the value renders readably
+// when the agent loop stringifies tool results for the model.
+func grepToolResult(r *fileops.GrepResult) map[string]interface{} {
+	out := map[string]interface{}{
+		"mode":      r.Mode,
+		"pattern":   r.Pattern,
+		"truncated": r.Truncated,
+	}
+	switch r.Mode {
+	case fileops.GrepModeContent:
+		matches := make([]map[string]interface{}, 0, len(r.Matches))
+		for _, m := range r.Matches {
+			matches = append(matches, map[string]interface{}{
+				"path":    m.Path,
+				"line":    m.Line,
+				"content": m.Content,
+			})
+		}
+		out["matches"] = matches
+		out["count"] = len(matches)
+	case fileops.GrepModeFiles:
+		out["files"] = r.Files
+		out["count"] = len(r.Files)
+	case fileops.GrepModeCount:
+		counts := make([]map[string]interface{}, 0, len(r.Counts))
+		total := 0
+		for _, c := range r.Counts {
+			counts = append(counts, map[string]interface{}{"path": c.Path, "count": c.Count})
+			total += c.Count
+		}
+		out["counts"] = counts
+		out["files"] = len(counts)
+		out["total"] = total
+	}
+	return out
+}
+
+// stringArg returns args[key] as a string, or "" when it is absent or not a
+// string. It mirrors the loose, inline coercion the other tools use for optional
+// string parameters.
+func stringArg(args map[string]interface{}, key string) string {
+	s, _ := args[key].(string)
+	return s
+}
+
+// boolArg returns args[key] as a bool, or false when it is absent or not a bool.
+func boolArg(args map[string]interface{}, key string) bool {
+	b, _ := args[key].(bool)
+	return b
 }
 
 // CreateUserSession creates a new user session
@@ -1003,6 +1165,21 @@ Write content to a file. Use this when the user asks you to create or overwrite 
 Edit a file by replacing exact text. Use this for precise edits. The find string must match exactly once — include surrounding context to make it unique, or pass "replace_all": true to replace every occurrence.
 - Input: {"path": "string", "find": "string", "replace": "string", "replace_all": "boolean (optional, default false)"}
 - Example: {"tool": "edit", "args": {"path": "hello.txt", "find": "World", "replace": "Universe"}}
+
+### grep
+Search file contents across the workspace for a regular expression (Go regex syntax). Read-only and workspace-confined, so it runs without a permission prompt — prefer it over shelling out to grep/rg. It returns file:line references you can pass straight to read.
+- Input: {"pattern": "string", "path": "string (optional)", "output_mode": "content|files_with_matches|count (optional)", "include": "string (optional glob)", "case_insensitive": "boolean (optional)", "max_results": "integer (optional)"}
+- Example: {"tool": "grep", "args": {"pattern": "func.*List", "include": "*.go"}}
+
+### glob
+List workspace files whose path matches a shell-style glob (*, ?, [abc]; does not cross directory boundaries). Read-only and runs without a prompt. Use it to discover files by name.
+- Input: {"pattern": "string"}
+- Example: {"tool": "glob", "args": {"pattern": "*.go"}}
+
+### list
+List the files and subdirectories immediately inside a workspace directory. Read-only and runs without a prompt. Use it to explore layout before reading files.
+- Input: {"path": "string (optional, default workspace root)"}
+- Example: {"tool": "list", "args": {"path": "internal"}}
 
 ### calc
  	Calculate mathematical expressions. Use this when the user asks you to calculate, compute, or solve a math problem.

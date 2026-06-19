@@ -63,9 +63,13 @@ internal/notify/       Desktop/terminal notifications (bell + OSC 9/777 + native
   A bare base URL is normalized into the concrete endpoints. Connections are
   rebuilt per send, so model/endpoint edits take effect on the next turn.
 - **Tools** (`internal/tool`, `internal/fileops`, `internal/web`, `internal/vcs`) —
-  `read`, `write`, `edit`, `shell`, `web_fetch`, `git`, `spawn_subagent`,
-  agent-control tools, and `structured_output`. File ops resolve paths against the
-  workspace root (the launch cwd) and run through a keyed-mutex file mutator.
+  `read`, `write`, `edit`, `grep`, `glob`, `list`, `shell`, `web_fetch`, `git`,
+  `spawn_subagent`, agent-control tools, and `structured_output`. File ops resolve
+  paths against the workspace root (the launch cwd) and run through a keyed-mutex
+  file mutator. `grep`/`glob`/`list` are read-only, workspace-confined search tools
+  built on the `FileSystem` primitives: they run without a permission prompt
+  (unlike the same searches routed through the shell) and `grep` returns `file:line`
+  references the model can feed back into `read`.
   `web_fetch` downloads an http(s) URL and returns readability-style Markdown
   (size-capped, short-TTL cached, gated per domain via `ActionNetwork`); the
   HTML→Markdown reduction is a dependency-free, stdlib-only extractor
