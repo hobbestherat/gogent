@@ -97,6 +97,28 @@ func TestDiagnosticsGrantDoesNotBlessShell(t *testing.T) {
 	}
 }
 
+// TestVerifyGrantDoesNotBlessShellOrDiagnostics confirms a dedicated ActionVerify
+// gate is independent of ActionShell and ActionDiagnostics: an "always" grant
+// for verify must not also bless the shell or diagnostics tools. This is why
+// verify gets its own action rather than reusing one of the others (issue #44).
+func TestVerifyGrantDoesNotBlessShellOrDiagnostics(t *testing.T) {
+	s := New("")
+	p := &stubPrompter{decision: DecisionAlways}
+	s.SetPrompter(p)
+
+	if err := s.Check(ActionVerify, ""); err != nil {
+		t.Fatalf("expected verify allow, got %v", err)
+	}
+	before := p.calls
+	_ = s.Check(ActionShell, "")
+	_ = s.Check(ActionDiagnostics, "")
+	// Both shell and diagnostics must still prompt rather than be covered by the
+	// verify grant.
+	if want := before + 2; p.calls != want {
+		t.Errorf("shell+diagnostics should still prompt after a verify grant: prompts before=%d after=%d want=%d", before, p.calls, want)
+	}
+}
+
 func TestAlwaysExternalRootCoversChildren(t *testing.T) {
 	s := New("")
 	p := &stubPrompter{decision: DecisionAlways}

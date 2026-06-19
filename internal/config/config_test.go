@@ -359,6 +359,37 @@ func TestDiagnosticsConfigRoundTrip(t *testing.T) {
 	}
 }
 
+// TestVerifyConfigRoundTrip confirms a configured verify command survives a JSON
+// marshal/unmarshal cycle, and that a legacy config blob with no "verify" key
+// loads as the zero value (the tool then applies its Go default).
+func TestVerifyConfigRoundTrip(t *testing.T) {
+	in := &Config{Verify: VerifyConfig{
+		Command: []string{"go", "test", "-count=1", "./..."},
+	}}
+	data, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var out Config
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(out.Verify.Command) != 4 || out.Verify.Command[2] != "-count=1" {
+		t.Errorf("round-trip lost command, got %+v", out.Verify.Command)
+	}
+
+	// A legacy config blob with no "verify" key loads as the zero value, so the
+	// tool falls back to its built-in default (issue #44 backward compat).
+	const legacy = `{"default_model": "x"}`
+	var legacyCfg Config
+	if err := json.Unmarshal([]byte(legacy), &legacyCfg); err != nil {
+		t.Fatalf("legacy unmarshal: %v", err)
+	}
+	if len(legacyCfg.Verify.Command) != 0 {
+		t.Errorf("legacy config should leave verify empty, got %+v", legacyCfg.Verify)
+	}
+}
+
 func TestIsReasoningModel(t *testing.T) {
 	on := true
 	off := false

@@ -621,6 +621,16 @@ func (g *Gogent) initializeToolRegistry() {
 	}
 	g.toolRegistry.RegisterDiagnosticsTool(diagCmd, diagWarn)
 
+	// Verify tool (issue #44): runs the project's test command and returns
+	// structured pass/fail results plus parsed failures — the tight
+	// edit→test→read-failures loop. The command is configurable; the zero-value
+	// config keeps the Go default (`go test ./...`), so it works out of the box.
+	var verifyCmd []string
+	if g.config != nil {
+		verifyCmd = g.config.Verify.Command
+	}
+	g.toolRegistry.RegisterVerifyTool(verifyCmd)
+
 	g.toolRegistry.Register(&tool.Tool{
 		Name:        "spawn_subagent",
 		Description: "Delegate work to one or more sub-agents. In one-shot mode they must end with SUCCESS:/FAILURE:. In interactive mode they may return CLARIFY: questions.",
@@ -2090,6 +2100,7 @@ func (g *Gogent) SetTimeouts(t config.TimeoutConfig) {
 	g.toolRegistry.Permission = g.permissions
 	diagCmd := g.config.Diagnostics.Command
 	diagWarn := g.config.Diagnostics.WarningPattern
+	verifyCmd := g.config.Verify.Command
 	sessions := make([]*agent.UserSession, 0, len(g.userSessions))
 	for _, s := range g.userSessions {
 		sessions = append(sessions, s)
@@ -2102,6 +2113,7 @@ func (g *Gogent) SetTimeouts(t config.TimeoutConfig) {
 	g.toolRegistry.RegisterWebFetchTool()
 	g.toolRegistry.RegisterGitTool()
 	g.toolRegistry.RegisterDiagnosticsTool(diagCmd, diagWarn)
+	g.toolRegistry.RegisterVerifyTool(verifyCmd)
 	subAgentTO := time.Duration(t.SubAgentSecondsOrDefault()) * time.Second
 	for _, s := range sessions {
 		s.SetSubAgentTimeout(subAgentTO)
