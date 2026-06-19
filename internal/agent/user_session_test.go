@@ -346,3 +346,69 @@ func TestNextAgentEventDrainsBufferBeforeOverflow(t *testing.T) {
 		t.Errorf("expected %d buffered and 1 spilled, got %d and %d", n, buffered, spilled)
 	}
 }
+
+// TestCollectToolCallsFallback covers the JSON-text tool-call fallback for
+// models without native tool_calls (issue #32): formatting variations that the
+// old substring matcher dropped must now resolve to calls, a structured
+// final-answer object must end the turn, and several calls in one reply must all
+// be collected.
+func TestCollectToolCallsFallback(t *testing.T) {
+	s := &UserSession{}
+
+	tests := []struct {
+		name        string
+		content     string
+		wantTools   []string
+		wantContent string // when set, expect zero calls and resp.Content rewritten
+	}{
+		{
+			name:      "pretty printed single call",
+			content:   "{\n  \"tool\": \"read\",\n  \"args\": {\"path\": \"a\"}\n}",
+			wantTools: []string{"read"},
+		},
+		{
+			name:      "reordered keys with prose",
+			content:   `Let me look: {"args":{"path":"a"},"tool":"read"}`,
+			wantTools: []string{"read"},
+		},
+		{
+			name:      "fenced multiple calls",
+			content:   "```json\n{\"tool\":\"read\",\"args\":{}}\n{\"tool\":\"write\",\"args\":{}}\n```",
+			wantTools: []string{"read", "write"},
+		},
+		{
+			name:        "structured final answer",
+			content:     `Done. {"response":"all set","final":true}`,
+			wantContent: "all set",
+		},
+		{
+			name:      "thinking without action yields no calls",
+			content:   "I should probably read the file, but here is no JSON.",
+			wantTools: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := &model.CompletionResponse{Content: tc.content}
+			calls := s.collectToolCalls(resp)
+			if tc.wantContent != "" {
+				if len(calls) != 0 {
+					t.Fatalf("expected no calls for final answer, got %+v", calls)
+				}
+				if resp.Content != tc.wantContent {
+					t.Errorf("resp.Content = %q, want %q", resp.Content, tc.wantContent)
+				}
+				return
+			}
+			if len(calls) != len(tc.wantTools) {
+				t.Fatalf("got %d calls, want %d: %+v", len(calls), len(tc.wantTools), calls)
+			}
+			for i, want := range tc.wantTools {
+				if calls[i].Tool != want {
+					t.Errorf("call %d tool = %q, want %q", i, calls[i].Tool, want)
+				}
+			}
+		})
+	}
+}

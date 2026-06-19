@@ -2,7 +2,6 @@ package gogent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -1674,75 +1673,15 @@ func (e *SessionNotFoundError) Error() string {
 	return "session not found: " + e.ID
 }
 
-// ParseToolCall parses a tool call from a model response
+// ParseToolCall parses a tool call from a model response, returning the first
+// JSON tool call found. It delegates to the shared tolerant extractor
+// (tool.ParseToolCalls) so prose-wrapped, fenced, pretty-printed or reordered
+// calls are all recognised (issue #32).
 func (g *Gogent) ParseToolCall(response string) (*tool.ToolCall, error) {
-	// Try to parse as JSON first (structured output)
-	var toolCall tool.ToolCall
-	if err := json.Unmarshal([]byte(response), &toolCall); err == nil {
-		return &toolCall, nil
+	if calls := tool.ParseToolCalls(response); len(calls) > 0 {
+		return &calls[0], nil
 	}
-
-	// Fallback: try to extract JSON from response
-	if extracted := extractJSON(response); extracted != "" {
-		if err := json.Unmarshal([]byte(extracted), &toolCall); err == nil {
-			return &toolCall, nil
-		}
-	}
-
 	return nil, fmt.Errorf("no valid tool call found in response")
-}
-
-func extractJSON(text string) string {
-	// Look for JSON in triple backticks
-	start := -1
-	end := -1
-
-	for i := 0; i < len(text)-2; i++ {
-		if text[i] == '`' && text[i+1] == '`' && text[i+2] == '`' {
-			if start == -1 {
-				start = i + 3
-			} else {
-				end = i
-				break
-			}
-		}
-	}
-
-	if start != -1 && end != -1 && end > start {
-		jsonStr := text[start:end]
-		if idx := strings.Index(jsonStr, "{"); idx != -1 {
-			return extractJSONFrom(jsonStr[idx:])
-		}
-	}
-
-	// Try to find JSON without backticks
-	if idx := strings.Index(text, "{"); idx != -1 {
-		return extractJSONFrom(text[idx:])
-	}
-
-	return ""
-}
-
-func extractJSONFrom(text string) string {
-	// Find balanced braces
-	braceCount := 0
-	start := -1
-
-	for i, ch := range text {
-		if ch == '{' {
-			if braceCount == 0 {
-				start = i
-			}
-			braceCount++
-		} else if ch == '}' {
-			braceCount--
-			if braceCount == 0 && start != -1 {
-				return text[start : i+1]
-			}
-		}
-	}
-
-	return ""
 }
 
 // ExecuteToolCall executes a tool call and returns the result
