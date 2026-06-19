@@ -459,6 +459,49 @@ var reqBodyPool = sync.Pool{
 func acquireReqBodyBuf() *bytes.Buffer  { return reqBodyPool.Get().(*bytes.Buffer) }
 func releaseReqBodyBuf(b *bytes.Buffer) { reqBodyPool.Put(b) }
 
+// sharedHTTPTransport is the single, tuned *http.Transport that backs every
+// ModelConnection's *http.Client. An *http.Client is cheap — just a per-config
+// wrapper (URL, model, key, timeout) — and safe to rebuild each turn, but the
+// keep-alive connection pool it rides on is expensive to rebuild: a fresh
+// transport discards every pooled TCP/TLS conn, forcing a full handshake next
+// turn. Sharing one transport lets that pool persist across turns and across
+// sub-agent fan-out, which all hit one host through one transport.
+//
+// It is cloned from http.DefaultTransport — preserving proxy-from-environment,
+// dialer and TLS-handshake defaults — with only the idle-conn knobs raised:
+// http.DefaultTransport leaves MaxIdleConnsPerHost at its default of 2, which
+// throttles parallel requests to a single host and forces an open-then-close on
+// every fan-out round beyond two in flight (issue #19). A *http.Transport is
+// safe for concurrent use by many goroutines, so it is designed to be shared.
+var sharedHTTPTransport = newSharedTransport()
+
+func newSharedTransport() *http.Transport {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok || base == nil {
+		base = new(http.Transport)
+	} else {
+		base = base.Clone()
+	}
+	base.MaxIdleConns = 100
+	base.MaxIdleConnsPerHost = 32
+	base.IdleConnTimeout = 90 * time.Second
+	base.ForceAttemptHTTP2 = true
+	return base
+}
+
+// newClient builds an *http.Client that runs all model traffic over the shared,
+// pooled transport. timeout is the per-request deadline; the connection pool
+// itself is shared across every client so keep-alive conns persist. rt, when
+// non-nil (e.g. an APIKeyRoundTripper), wraps the shared transport and becomes
+// the client's Transport; otherwise the client uses the shared transport
+// directly (issue #19).
+func newClient(timeout time.Duration, rt http.RoundTripper) *http.Client {
+	if rt == nil {
+		rt = sharedHTTPTransport
+	}
+	return &http.Client{Transport: rt, Timeout: timeout}
+}
+
 // DefaultModelURL is the connector's neutral fallback endpoint: a local
 // OpenAI-compatible server on the conventional port. This is intentionally
 // generic so the connector stays reusable as a standalone library. Applications
@@ -475,7 +518,7 @@ func NewModelConnection() *ModelConnection {
 		adapter:        adapterFor(APITypeOpenAI),
 		Stats:          &ModelStats{},
 		Timeout:        5 * time.Minute,
-		client:         &http.Client{Timeout: 5 * time.Minute},
+		client:         newClient(5 * time.Minute, nil),
 		maxAttempts:    defaultMaxAttempts,
 		retryBaseDelay: defaultRetryBaseDelay,
 		retryMaxDelay:  defaultRetryMaxDelay,
@@ -500,7 +543,6 @@ func NewModelConnectionFromConfig(modelConfig *config.ModelConfig) *ModelConnect
 		Timeout:        5 * time.Minute,
 		spec:           spec,
 		adapter:        adapterFor(apiType),
-		client:         &http.Client{Timeout: 30 * time.Second},
 		maxAttempts:    defaultMaxAttempts,
 		retryBaseDelay: defaultRetryBaseDelay,
 		retryMaxDelay:  defaultRetryMaxDelay,
@@ -509,14 +551,19 @@ func NewModelConnectionFromConfig(modelConfig *config.ModelConfig) *ModelConnect
 	// Attach the provider's auth when a key is present. The exact scheme is
 	// spec-driven (OpenAI/OpenRouter bearer, Anthropic x-api-key + version, Azure
 	// api-key, or a Gemini-style query parameter); see providerSpec.authHeaders.
+	// The round-tripper wraps the shared pooled transport so keep-alive conns
+	// persist regardless of auth; without a key the client uses that shared
+	// transport directly (issue #19).
+	var rt http.RoundTripper
 	if modelConfig.APIKey != "" {
-		conn.client.Transport = &APIKeyRoundTripper{
+		rt = &APIKeyRoundTripper{
 			apiKey:     modelConfig.APIKey,
 			headers:    spec.authHeaders(modelConfig.APIKey),
 			queryParam: spec.authQuery(),
-			transport:  conn.client.Transport,
+			transport:  sharedHTTPTransport,
 		}
 	}
+	conn.client = newClient(30*time.Second, rt)
 
 	return conn
 }
