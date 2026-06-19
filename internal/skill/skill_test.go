@@ -253,3 +253,164 @@ func TestLoadSkillsMissingDirIsNotAnError(t *testing.T) {
 		t.Errorf("loading a missing optional skills dir should be a no-op, got: %v", err)
 	}
 }
+
+// TestLoadSkillsLoadsNestedSkill confirms the containment/symlink guards do not
+// break legitimate, in-tree skills organized into nested directories.
+func TestLoadSkillsLoadsNestedSkill(t *testing.T) {
+	dir := t.TempDir()
+	writeSkillFixture(t, filepath.Join(dir, "category", "tool"),
+		"---\nname: tool\ndescription: nested tool\n---\n# tool\n")
+
+	reg := NewSkillRegistry()
+	if err := reg.LoadSkills(dir); err != nil {
+		t.Fatalf("expected the nested skill to load cleanly, got: %v", err)
+	}
+	if reg.GetSkill("tool") == nil {
+		t.Error("expected the nested skill to load")
+	}
+}
+
+// TestLoadSkillsRefusesSymlinkedSkillFile guards issue #15 / CWE-59: a SKILL.md
+// that is a symlink (here to a secret file outside the skills root) must be
+// refused rather than followed and injected into the model context.
+func TestLoadSkillsRefusesSymlinkedSkillFile(t *testing.T) {
+	dir := t.TempDir()
+
+	// A "secret" file outside the skills root.
+	secret := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(secret, []byte("TOPSECRET"), 0o600); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+
+	skillDir := filepath.Join(dir, "evil")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", skillDir, err)
+	}
+	// SKILL.md is a symlink to the out-of-tree secret file.
+	if err := os.Symlink(secret, filepath.Join(skillDir, "SKILL.md")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	reg := NewSkillRegistry()
+	err := reg.LoadSkills(dir)
+	if err == nil {
+		t.Fatal("expected an error refusing the symlinked skill file, got nil")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Errorf("expected the error to mention the symlink, got: %v", err)
+	}
+	if reg.GetSkill("evil") != nil {
+		t.Error("a symlinked skill file must not be loaded")
+	}
+	for _, s := range reg.ListSkills() {
+		if strings.Contains(s.Content, "TOPSECRET") {
+			t.Errorf("out-of-tree content must not leak into skill %q", s.Name)
+		}
+	}
+}
+
+// TestLoadSkillsDoesNotTraverseSymlinkedDir guards issue #15: a symlinked
+// directory inside the skills root is skipped, so skills reachable only through
+// it are never loaded.
+func TestLoadSkillsDoesNotTraverseSymlinkedDir(t *testing.T) {
+	dir := t.TempDir()
+
+	// A real skill tree that lives outside the skills root.
+	outside := t.TempDir()
+	writeSkillFixture(t, filepath.Join(outside, "leaked"),
+		"---\nname: leaked\ndescription: should not load\n---\n# leaked\n")
+
+	// A symlink inside the root pointing at the outside tree.
+	if err := os.Symlink(outside, filepath.Join(dir, "link")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	reg := NewSkillRegistry()
+	if err := reg.LoadSkills(dir); err != nil {
+		t.Errorf("a symlinked entry should be skipped silently, got: %v", err)
+	}
+	if reg.GetSkill("leaked") != nil {
+		t.Error("a skill behind a symlinked directory must not be loaded")
+	}
+	if got := len(reg.ListSkills()); got != 0 {
+		t.Errorf("expected zero skills loaded, got %d", got)
+	}
+}
+
+// TestLoadSkillsRefusesOversizedSkillFile guards the file-size bound from
+// issue #15: an oversized SKILL.md is refused instead of being read in full.
+func TestLoadSkillsRefusesOversizedSkillFile(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "big")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", skillDir, err)
+	}
+	// Valid frontmatter but a body well over the size limit.
+	content := "---\nname: big\ndescription: too large\n---\n" +
+		strings.Repeat("x", maxSkillFileSize+1)
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+
+	reg := NewSkillRegistry()
+	err := reg.LoadSkills(dir)
+	if err == nil {
+		t.Fatal("expected an error for the oversized skill file, got nil")
+	}
+	if !strings.Contains(err.Error(), "limit") {
+		t.Errorf("expected the error to mention the size limit, got: %v", err)
+	}
+	if reg.GetSkill("big") != nil {
+		t.Error("an oversized skill file must not be loaded")
+	}
+}
+
+// TestLoadSkillsBoundsTreeDepth guards the recursion-depth bound from issue #15:
+// a skills tree nested beyond the limit is refused instead of recursing forever.
+func TestLoadSkillsBoundsTreeDepth(t *testing.T) {
+	dir := t.TempDir()
+	// Nest one level beyond the limit and drop a skill at the bottom.
+	deep := dir
+	for i := 0; i <= maxSkillTreeDepth+1; i++ {
+		deep = filepath.Join(deep, "d")
+	}
+	writeSkillFixture(t, deep,
+		"---\nname: deep\ndescription: too deep\n---\n# deep\n")
+
+	reg := NewSkillRegistry()
+	err := reg.LoadSkills(dir)
+	if err == nil {
+		t.Fatal("expected an error for exceeding max skill tree depth, got nil")
+	}
+	if !strings.Contains(err.Error(), "depth") {
+		t.Errorf("expected the error to mention depth, got: %v", err)
+	}
+	if reg.GetSkill("deep") != nil {
+		t.Error("a skill beyond the depth limit must not be loaded")
+	}
+}
+
+// TestPathIsInside exercises the containment helper, including the prefix
+// lookalike that a naive strings.HasPrefix check would get wrong.
+func TestPathIsInside(t *testing.T) {
+	const root = "/skills"
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{"direct child", "/skills/foo/SKILL.md", true},
+		{"nested child", "/skills/a/b/c/SKILL.md", true},
+		{"root itself", "/skills", false},
+		{"sibling escapes", "/other/foo", false},
+		{"parent escape via ..", "/skills/../etc/passwd", false},
+		{"prefix lookalike", "/skills-secret/SKILL.md", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := pathIsInside(tt.path, root); got != tt.want {
+				t.Errorf("pathIsInside(%q, %q) = %v, want %v", tt.path, root, got, tt.want)
+			}
+		})
+	}
+}
