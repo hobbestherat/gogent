@@ -68,6 +68,12 @@ type Handlers struct {
 	// #64). May be nil.
 	GetReviewEdits func() bool
 	SetReviewEdits func(bool)
+	// GetTheme / SetTheme read and persist the TUI colour palette (issue #103).
+	// SetTheme also re-applies the resolved palette to the live UI so the change
+	// takes effect without a restart. May be nil, in which case the Theme editor
+	// is hidden.
+	GetTheme func() config.ThemeConfig
+	SetTheme func(config.ThemeConfig)
 	// GetModels returns editable copies of the configured models; UpdateModel
 	// persists changes to one model (matched by Name). May be nil.
 	GetModels   func() []config.ModelConfig
@@ -489,7 +495,23 @@ func (w *Workbench) settingsItems() []*tv.MenuItem {
 			tv.NewMenuItem("Notifications: "+state, func() { w.showNotificationsDialog() }),
 		)
 	}
+	// Theme editor (issue #103). Surfaced only when the backend wired the
+	// accessors so the palette can be edited and persisted live.
+	if w.handlers.GetTheme != nil && w.handlers.SetTheme != nil {
+		items = append(items,
+			tv.NewMenuItem("----------", nil),
+			tv.NewMenuItem("T&heme…", func() { w.showThemeEditor() }),
+		)
+	}
 	return items
+}
+
+// RefreshTheme re-applies the active palette to the long-lived UI chrome after a
+// theme change: the desktop background, sidebar and menu bar all read the
+// package-level colour variables at draw time, so rebuilding the menu and
+// repainting is enough to recolour them without a restart (issue #103).
+func (w *Workbench) RefreshTheme() {
+	w.rebuildMenu() // also repaints the desktop
 }
 
 // viewItems builds the View submenu: find-in-transcript, the event-type filter
