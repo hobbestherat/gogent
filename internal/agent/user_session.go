@@ -110,6 +110,12 @@ type UserSession struct {
 	// SetSubAgentLimiter), so a deep fan-out cannot spawn an unbounded number of
 	// goroutines (issue #23). Nil means unbounded.
 	subAgentLimiter *SubAgentLimiter
+	// rateLimiter paces this session's model round-trips against the provider's
+	// request-rate ceiling. Like subAgentLimiter it is typically a process-wide
+	// limiter shared across every session, so the global request rate is governed
+	// regardless of how many sessions or cluster nodes fan out at once (issue #28).
+	// Nil means unthrottled.
+	rateLimiter *RateLimiter
 
 	// systemContextFn, when set, returns extra system-prompt context (project
 	// AGENTS.md instructions and the available-skills index) appended to every
@@ -242,6 +248,15 @@ func (s *UserSession) SetSubAgentLimiter(l *SubAgentLimiter) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.subAgentLimiter = l
+}
+
+// SetRateLimiter installs the (typically process-wide) limiter that paces this
+// session's model round-trips against the provider's request-rate ceiling.
+// Passing nil restores unthrottled behavior.
+func (s *UserSession) SetRateLimiter(l *RateLimiter) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rateLimiter = l
 }
 
 // SetSubAgentTimeout sets the timeout applied to newly spawned sub-agents. A
@@ -455,6 +470,55 @@ func (s *UserSession) ExecuteTaskLoop(ctx context.Context, agentID string, initi
 	return s.runLoop(ctx, agent, agentID, initialMessage, buildAgentSystemPrompt(len(tools) > 0, s.SubAgentConfig()))
 }
 
+// budgetExceededMarker prefixes an agent's final result when it stopped because
+// its token budget was reached. It doubles as the signal subAgentOutcome uses to
+// classify the run as failed (the task did not finish) (issue #28).
+const budgetExceededMarker = "BUDGET_EXCEEDED"
+
+// waitRateLimit blocks until the session's rate limiter grants a permit (or ctx
+// is cancelled). It is a no-op when no limiter is installed.
+func (s *UserSession) waitRateLimit(ctx context.Context) error {
+	s.mu.RLock()
+	rl := s.rateLimiter
+	s.mu.RUnlock()
+	return rl.Wait(ctx)
+}
+
+// modelRoundTrip performs one paced, accounted model request: it waits on the
+// rate limiter, sends, and folds the reported usage into the agent's per-agent
+// token total so the loop can enforce its budget. It centralizes the three call
+// sites in runLoop so rate limiting and token accounting cannot drift apart.
+func (s *UserSession) modelRoundTrip(ctx context.Context, sess *model.ModelSession, agent *Agent, messages []model.Message, tools []model.ToolDef) (*model.CompletionResponse, error) {
+	if err := s.waitRateLimit(ctx); err != nil {
+		return nil, err
+	}
+	resp, err := sess.SendWithToolsCtx(ctx, messages, tools)
+	if err != nil {
+		return nil, err
+	}
+	if resp != nil && resp.Usage != nil {
+		agent.AddTokensUsed(resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+	}
+	return resp, nil
+}
+
+// stopForBudget folds a graceful BUDGET_EXCEEDED notice into the agent's last
+// response so the loop can break with a final answer that records the stop (and,
+// for sub-agents, is classified as a failed/incomplete run). Any partial progress
+// the model had produced is preserved beneath the notice.
+func stopForBudget(agent *Agent, resp *model.CompletionResponse) *model.CompletionResponse {
+	if resp == nil {
+		resp = &model.CompletionResponse{}
+	}
+	note := fmt.Sprintf("%s: token budget reached (%d/%d tokens); stopping early.",
+		budgetExceededMarker, agent.GetTokensUsed(), agent.TokenBudget)
+	if partial := strings.TrimSpace(resp.Content); partial != "" {
+		note += "\n\nPartial progress before stopping:\n" + partial
+	}
+	resp.Content = note
+	return resp
+}
+
 // runLoop is the shared multi-turn tool-calling loop used by both the top-level
 // task loop and sub-agents (sub-agents pass a different system prompt).
 func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initialMessage, systemPrompt string) (responses []*model.CompletionResponse, err error) {
@@ -510,7 +574,7 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 
 	// First request carries the user message.
 	s.compactIfNeeded(sess, emit)
-	resp, err := sess.SendWithToolsCtx(ctx,
+	resp, err := s.modelRoundTrip(ctx, sess, agent,
 		[]model.Message{{Role: model.RoleUser, Content: initialMessage}},
 		tools,
 	)
@@ -528,6 +592,15 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 		if err := ctx.Err(); err != nil {
 			emit(SessionEvent{Type: SessionEventError, Err: err})
 			return responses, err
+		}
+
+		// Stop gracefully before spending another round-trip once the agent has
+		// reached its token budget. The most recent response is finalized with a
+		// BUDGET_EXCEEDED notice so cost is bounded without crashing the loop or
+		// dropping the work done so far (issue #28).
+		if agent.BudgetExceeded() {
+			resp = stopForBudget(agent, resp)
+			break
 		}
 
 		calls := s.collectToolCalls(resp)
@@ -579,7 +652,7 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 			sess.AppendToolResults(toolMsgs)
 			emit(SessionEvent{Type: SessionEventThinking, Step: step + 1})
 			s.compactIfNeeded(sess, emit)
-			resp, err = sess.SendWithToolsCtx(ctx, nil, tools)
+			resp, err = s.modelRoundTrip(ctx, sess, agent, nil, tools)
 			if err != nil {
 				emit(SessionEvent{Type: SessionEventError, Err: err})
 				return responses, err
@@ -616,7 +689,7 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 		sess.AppendToolResults(toolMsgs)
 		emit(SessionEvent{Type: SessionEventThinking, Step: step + 1})
 		s.compactIfNeeded(sess, emit)
-		resp, err = sess.SendWithToolsCtx(ctx, nil, tools)
+		resp, err = s.modelRoundTrip(ctx, sess, agent, nil, tools)
 		if err != nil {
 			emit(SessionEvent{Type: SessionEventError, Err: err})
 			return responses, err
@@ -961,6 +1034,10 @@ func (s *UserSession) newSubAgent(parentAgentID, name, task string, kind SubAgen
 	if timeoutMs > 0 {
 		child.TimeoutMs = timeoutMs
 	}
+	// Give the child a per-agent token budget so a sub-agent (or a recursive
+	// fan-out of them) cannot loop to the step cap with no token ceiling. Zero
+	// leaves it unbounded, preserving prior behavior (issue #28).
+	child.TokenBudget = cfg.TokenBudget
 
 	// Recursion control: when recursive sub-agents are disabled, hand the child a
 	// registry that omits the spawn/coordinate tools so it cannot delegate.
@@ -991,9 +1068,12 @@ func (s *UserSession) emitSubAgent(child *Agent, text string, err error) {
 }
 
 // subAgentOutcome maps a sub-agent's final text to a terminal status. A reply
-// starting with FAILURE: is a failure; anything else is treated as completed.
+// starting with FAILURE: is a failure, as is one stopped at its token budget
+// (BUDGET_EXCEEDED), since the task did not run to completion; anything else is
+// treated as completed.
 func subAgentOutcome(final string) AgentStatus {
-	if strings.HasPrefix(strings.TrimSpace(strings.ToUpper(final)), "FAILURE") {
+	up := strings.TrimSpace(strings.ToUpper(final))
+	if strings.HasPrefix(up, "FAILURE") || strings.HasPrefix(up, budgetExceededMarker) {
 		return StatusFailed
 	}
 	return StatusCompleted
