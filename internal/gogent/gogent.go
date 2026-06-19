@@ -297,11 +297,16 @@ func (g *Gogent) initializeToolRegistry() {
 
 	g.toolRegistry.Register(&tool.Tool{
 		Name:        "edit",
-		Description: "Edit a file by replacing exact text. Use this for precise edits.",
+		Description: "Edit a file by replacing exact text. Use this for precise edits. The find text must match exactly once; include surrounding context to make it unique, or set replace_all to true to replace every occurrence.",
 		InputSchema: map[string]interface{}{
-			"type":       "object",
-			"properties": map[string]interface{}{"path": map[string]interface{}{"type": "string"}, "find": map[string]interface{}{"type": "string"}, "replace": map[string]interface{}{"type": "string"}},
-			"required":   []string{"path", "find", "replace"},
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path":        map[string]interface{}{"type": "string"},
+				"find":        map[string]interface{}{"type": "string"},
+				"replace":     map[string]interface{}{"type": "string"},
+				"replace_all": map[string]interface{}{"type": "boolean", "description": "Replace every occurrence of find instead of requiring a single unique match. Defaults to false."},
+			},
+			"required": []string{"path", "find", "replace"},
 		},
 		Execute: func(args map[string]interface{}, ctx tool.ToolContext) (interface{}, error) {
 			path, ok := args["path"].(string)
@@ -316,6 +321,7 @@ func (g *Gogent) initializeToolRegistry() {
 			if !ok {
 				return nil, fmt.Errorf("replace argument is required")
 			}
+			replaceAll, _ := args["replace_all"].(bool)
 
 			auth, err := fileops.CheckFileAccess(g.permissions, g.locationMutation, true, path,
 				permission.RequestContext{SessionID: ctx.SessionID, Agent: ctx.AgentID})
@@ -326,7 +332,7 @@ func (g *Gogent) initializeToolRegistry() {
 			// Diff-review gate (issue #64): when enabled, surface the change as a
 			// unified diff and defer the edit until the user approves.
 			if g.reviewActive(ctx.SessionID) {
-				before, after, err := g.fileMutation.PreviewEdit(path, find, replace, auth)
+				before, after, err := g.fileMutation.PreviewEdit(path, find, replace, replaceAll, auth)
 				if err != nil {
 					return nil, fmt.Errorf("failed to preview edit: %v", err)
 				}
@@ -335,7 +341,7 @@ func (g *Gogent) initializeToolRegistry() {
 				}
 			}
 
-			err = g.fileMutation.EditFile(path, find, replace, auth)
+			err = g.fileMutation.EditFile(path, find, replace, replaceAll, auth)
 			if err != nil {
 				return nil, fmt.Errorf("failed to edit file: %v", err)
 			}
@@ -910,8 +916,8 @@ Write content to a file. Use this when the user asks you to create or overwrite 
 - Example: {"tool": "write", "args": {"path": "hello.txt", "content": "Hello World!"}}
 
 ### edit
-Edit a file by replacing exact text. Use this for precise edits. The find string must match exactly.
-- Input: {"path": "string", "find": "string", "replace": "string"}
+Edit a file by replacing exact text. Use this for precise edits. The find string must match exactly once — include surrounding context to make it unique, or pass "replace_all": true to replace every occurrence.
+- Input: {"path": "string", "find": "string", "replace": "string", "replace_all": "boolean (optional, default false)"}
 - Example: {"tool": "edit", "args": {"path": "hello.txt", "find": "World", "replace": "Universe"}}
 
 ### calc
