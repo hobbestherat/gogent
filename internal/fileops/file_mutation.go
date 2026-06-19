@@ -114,6 +114,47 @@ func (fm *FileMutation) WriteFile(path string, content string, auth Authorizatio
 	return err
 }
 
+// PreviewWrite returns the file's current content and the content a Write would
+// produce, without writing anything. The "before" is empty when the file does
+// not yet exist. It backs the diff preview shown before an approved write
+// (issue #64).
+func (fm *FileMutation) PreviewWrite(path, content string, auth Authorization) (before, after string, err error) {
+	before, err = fm.currentContent(path, auth)
+	if err != nil {
+		return "", "", err
+	}
+	return before, content, nil
+}
+
+// PreviewEdit returns the file's current content and the content an EditFile
+// would produce by replacing find→replace, without writing anything.
+func (fm *FileMutation) PreviewEdit(path, find, replace string, auth Authorization) (before, after string, err error) {
+	before, err = fm.currentContent(path, auth)
+	if err != nil {
+		return "", "", err
+	}
+	return before, strings.ReplaceAll(before, find, replace), nil
+}
+
+// currentContent reads a file's content for diff preview, returning "" (and no
+// error) when the file does not exist yet. A leading UTF-8 BOM is stripped so the
+// preview is not polluted by the BOM that WriteTextPreservingBOM transparently
+// re-adds on write.
+func (fm *FileMutation) currentContent(path string, auth Authorization) (string, error) {
+	existed, err := fm.fileSys.Exists(path)
+	if err != nil {
+		return "", err
+	}
+	if !existed {
+		return "", nil
+	}
+	data, err := fm.fileSys.Read(path, auth)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimPrefix(string(data), "\uFEFF"), nil
+}
+
 // EditFile edits a file by replacing text. The Authorization is forwarded to the
 // underlying reads/writes.
 func (fm *FileMutation) EditFile(path, find, replace string, auth Authorization) error {
