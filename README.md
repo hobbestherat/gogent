@@ -155,6 +155,42 @@ These features are controlled by the `window` section of `config.json`:
 }
 ```
 
+### Theming & accessibility
+
+Colours are configurable and accessible. The TUI honours the
+[`NO_COLOR`](https://no-color.org/) convention and a `--no-color` flag — either
+one disables colour entirely and falls back to the terminal defaults. Truecolor
+is detected from `COLORTERM` (`truecolor`/`24bit`); on lesser terminals the
+palette degrades gracefully to 256- or 16-colour ANSI.
+
+The `theme` section of `config.json` selects a built-in palette and recolours
+individual roles:
+
+```json
+{
+  "theme": {
+    "name": "high-contrast",
+    "no_color": false,
+    "overrides": {
+      "agent": "#009E73",
+      "error": "1"
+    }
+  }
+}
+```
+
+- **`name`** — `default` (the original colours) or `high-contrast`, a
+  high-contrast, colourblind-safe preset built on the
+  [Okabe–Ito palette](https://jfly.uni-koeln.de/color/) (aliases: `colorblind`,
+  `high_contrast`).
+- **`no_color`** — the config-file equivalent of `NO_COLOR` / `--no-color`.
+- **`overrides`** — per-role colours layered on top of the palette. Roles are
+  `user`, `agent`, `note`, `tool`, `result`, `info`, `error` and the chrome
+  roles `desktop_fg`/`desktop_bg`/`panel_fg`/`panel_bg`/`title`/`divider`/`accent`.
+  Each value is a `#RRGGBB` hex colour, a decimal ANSI index (`0`–`255`), or
+  `default` for the terminal default. Unknown roles or unparsable values are
+  ignored.
+
 ### Session management
 
 When you run many sessions at once, the **Session** menu (and the right-hand

@@ -74,12 +74,12 @@ func newSidebar(wb *Workbench) *sidebar {
 	panel.AddChild(tree.Root())
 	panel.DrawFn = func(c *tv.VisualComponent, surface tv.Surface) {
 		abs := c.AbsoluteBounds()
-		surface.Fill(abs, tui.Cell{Ch: ' ', FG: tui.ANSIColor(7), BG: tui.ANSIColor(0)})
+		surface.Fill(abs, tui.Cell{Ch: ' ', FG: chromePanelFG, BG: chromePanelBG})
 		// Left divider + title.
 		for y := 0; y < abs.H; y++ {
-			surface.SetCell(abs.X, abs.Y+y, tui.Cell{Ch: '│', FG: tui.ANSIColor(8), BG: tui.ANSIColor(0)})
+			surface.SetCell(abs.X, abs.Y+y, tui.Cell{Ch: '│', FG: chromeDivider, BG: chromePanelBG})
 		}
-		surface.WriteString(abs.X+2, abs.Y, "Sessions & Agents", tui.Cell{FG: tui.ANSIColor(15), BG: tui.ANSIColor(0)})
+		surface.WriteString(abs.X+2, abs.Y, "Sessions & Agents", tui.Cell{FG: chromeTitle, BG: chromePanelBG})
 		// Global "needs approval" indicator: a bright badge + count, drawn at the
 		// far right of the title row so a wide glyph cannot shift the title.
 		if s.globalApprovals > 0 {
@@ -88,7 +88,7 @@ func newSidebar(wb *Workbench) *sidebar {
 			if x < abs.X+20 {
 				x = abs.X + 20
 			}
-			surface.WriteString(x, abs.Y, ind, tui.Cell{FG: tui.ANSIColor(11), BG: tui.ANSIColor(0)})
+			surface.WriteString(x, abs.Y, ind, tui.Cell{FG: chromeAccent, BG: chromePanelBG})
 		}
 		// Bottom "Overall" aggregate-stats panel (issue #53).
 		s.drawOverall(surface, abs)
@@ -229,18 +229,18 @@ func (s *sidebar) drawOverall(surface tv.Surface, abs tv.Rect) {
 	top := abs.Y + abs.H - bandH
 	// Separator under the session tree.
 	for x := 1; x < abs.W-1; x++ {
-		surface.SetCell(abs.X+x, top, tui.Cell{Ch: '─', FG: tui.ANSIColor(8), BG: tui.ANSIColor(0)})
+		surface.SetCell(abs.X+x, top, tui.Cell{Ch: '─', FG: chromeDivider, BG: chromePanelBG})
 	}
 	// Title.
-	surface.WriteString(abs.X+2, top+1, "Overall", tui.Cell{FG: tui.ANSIColor(15), BG: tui.ANSIColor(0)})
+	surface.WriteString(abs.X+2, top+1, "Overall", tui.Cell{FG: chromeTitle, BG: chromePanelBG})
 	// Metric rows. A non-zero error count is highlighted red so it stands out.
 	for i, line := range formatOverallStats(s.overall) {
-		fg := tui.ANSIColor(7)
+		fg := chromePanelFG
 		if s.overall.Errors > 0 && i == overallErrLineIdx {
-			fg = tui.ANSIColor(9)
+			fg = colorError
 		}
 		surface.WriteString(abs.X+2, top+2+i, truncateRunes(line, contentW),
-			tui.Cell{FG: fg, BG: tui.ANSIColor(0)})
+			tui.Cell{FG: fg, BG: chromePanelBG})
 	}
 }
 
