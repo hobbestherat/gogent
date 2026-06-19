@@ -205,11 +205,19 @@ func (s *Service) CheckWithContext(rc RequestContext, a Action, resource, detail
 	}
 }
 
+// persist records a sticky decision and flushes the snapshot to disk. The map
+// mutation and its marshalling happen under a single lock so a concurrent
+// persist cannot interleave between them; only the file I/O runs outside the
+// lock, on the stable snapshot.
 func (s *Service) persist(a Action, resource string, d Decision) {
 	s.mu.Lock()
 	s.saved[key(a, resource)] = d
+	data, err := json.MarshalIndent(savedFile{Saved: s.saved}, "", "  ")
 	s.mu.Unlock()
-	s.save()
+	if err != nil {
+		return
+	}
+	s.write(data)
 }
 
 func (s *Service) configPath() string {
@@ -241,21 +249,18 @@ func (s *Service) load() {
 	}
 }
 
-func (s *Service) save() error {
+// write replaces the persisted snapshot on disk. The grant file records what
+// the agent is permitted to do, so it is created owner-only: the directory with
+// 0700 and the file with 0600, never readable by other local users (CWE-732).
+func (s *Service) write(data []byte) error {
 	path := s.configPath()
 	if path == "" {
 		return nil
 	}
-	if err := os.MkdirAll(s.configDir, 0755); err != nil {
+	if err := os.MkdirAll(s.configDir, 0700); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	data, err := json.MarshalIndent(savedFile{Saved: s.saved}, "", "  ")
-	s.mu.Unlock()
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, data, 0600)
 }
 
 func splitKey(k string) (Action, string) {

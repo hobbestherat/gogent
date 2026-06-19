@@ -1,7 +1,10 @@
 package permission
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -148,5 +151,84 @@ func TestContextNotConsultedWhenResolved(t *testing.T) {
 	}
 	if p.calls != 0 {
 		t.Fatalf("prompter consulted despite allow rule: %d calls", p.calls)
+	}
+}
+
+// decisionPrompter returns a fixed Decision without touching shared state, so it
+// is safe to share across the goroutines used by the concurrency test.
+type decisionPrompter struct {
+	decision Decision
+}
+
+func (p *decisionPrompter) AskPermission(Request) Decision { return p.decision }
+
+// TestPermissionsOwnerOnly verifies the grant file (0600) and its config
+// directory (0700) are created owner-only, so other local users cannot read what
+// the agent is allowed to do (issue #16, CWE-732). The previous 0644/0755 modes
+// left both world-readable.
+func TestPermissionsOwnerOnly(t *testing.T) {
+	// A nested, non-existent config dir so MkdirAll actually creates it and the
+	// observed mode is what our code applies, not the harness-created temp dir.
+	configDir := filepath.Join(t.TempDir(), "gogent")
+	s := New(configDir)
+	s.SetPrompter(&decisionPrompter{decision: DecisionAlways})
+	if err := s.Check(ActionExternal, "/var/data"); err != nil {
+		t.Fatalf("expected allow, got %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{"config dir", configDir},
+		{"grant file", filepath.Join(configDir, "permissions.json")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info, err := os.Stat(tc.path)
+			if err != nil {
+				t.Fatalf("stat %s: %v", tc.path, err)
+			}
+			// No access for group or other, regardless of umask.
+			if perm := info.Mode().Perm(); perm&0077 != 0 {
+				t.Fatalf("%s is accessible by group/other: %#o", tc.path, perm)
+			}
+		})
+	}
+}
+
+// TestPersistConcurrentMutations confirms persist is safe under concurrent use:
+// every persisted decision lands in the in-memory state. Issue #16's fix keeps
+// the map mutation and its marshalling in a single critical section, so the
+// marshalled snapshot always reflects the state at the moment of mutation.
+// (File-write ordering is not asserted here: concurrent writes to the same path
+// are last-writer-wins by design.)
+func TestPersistConcurrentMutations(t *testing.T) {
+	s := New(t.TempDir())
+	s.SetPrompter(&decisionPrompter{decision: DecisionAlways})
+
+	const n = 64
+	resources := make([]string, n)
+	for i := range resources {
+		resources[i] = fmt.Sprintf("/var/data/%d", i)
+	}
+
+	var wg sync.WaitGroup
+	for _, r := range resources {
+		wg.Add(1)
+		go func(r string) {
+			defer wg.Done()
+			if err := s.Check(ActionExternal, r); err != nil {
+				t.Errorf("persist %s: %v", r, err)
+			}
+		}(r)
+	}
+	wg.Wait()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range resources {
+		if got := s.saved[key(ActionExternal, r)]; got != DecisionAlways {
+			t.Fatalf("missing in-memory decision for %s: got %q", r, got)
+		}
 	}
 }
