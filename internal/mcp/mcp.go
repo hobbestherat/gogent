@@ -146,9 +146,10 @@ func newTransport(cfg ServerConfig) (transport, error) {
 // Name returns the configured server name.
 func (c *Client) Name() string { return c.name }
 
-// initialize performs the MCP handshake: an initialize request followed by the
+// initialize performs the MCP handshake: an initialize request, the
 // notifications/initialized acknowledgement the spec requires before any other
-// request.
+// request, and a ping that confirms the server has processed that notification
+// before the client lists or calls tools.
 func (c *Client) initialize() error {
 	params := map[string]interface{}{
 		"protocolVersion": protocolVersion,
@@ -161,7 +162,18 @@ func (c *Client) initialize() error {
 	if _, err := c.t.call("initialize", params); err != nil {
 		return err
 	}
-	return c.t.notify("notifications/initialized", nil)
+	if err := c.t.notify("notifications/initialized", nil); err != nil {
+		return err
+	}
+	// notifications/initialized is a one-way notification, so the transport has no
+	// reply to wait on and the client cannot otherwise tell the server received it.
+	// Follow it with a ping: messages are processed in order, so the ping's reply
+	// can only come back after the server has consumed the initialized notification
+	// ahead of it. That round-trip makes the handshake observably complete before we
+	// list or invoke tools. The spec requires servers to answer ping; a quirky
+	// server that errors instead has still proved delivery, so the result is ignored.
+	_, _ = c.t.call("ping", nil)
+	return nil
 }
 
 // ListTools returns every tool the server advertises, following the tools/list
