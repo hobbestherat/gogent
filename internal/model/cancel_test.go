@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -67,6 +68,13 @@ func TestCompleteCancelledDoesNotRetry(t *testing.T) {
 	var hits int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&hits, 1)
+		// Consume the request body, as any real server does. Go's HTTP server
+		// only begins watching the connection for a client disconnect (and thus
+		// only cancels r.Context()) once the handler has read the request body to
+		// EOF; a handler that blocks without reading the body never observes the
+		// client's cancellation (see net/http/server.go: requestBodyRemains /
+		// backgroundRead). Draining here lets the cancelled client abort us.
+		_, _ = io.Copy(io.Discard, r.Body)
 		<-r.Context().Done() // never responds; cancellation is the only exit
 	}))
 	defer server.Close()
