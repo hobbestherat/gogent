@@ -390,6 +390,102 @@ func (g *Gogent) initializeToolRegistry() {
 		},
 	})
 
+	// multi_edit applies several find→replace edits to a single file in one call
+	// (issue #45). The batch is all-or-nothing — if any edit is ambiguous or its
+	// find text is absent, nothing is written — so the model can land several
+	// related changes without a round-trip per edit or risk a half-applied file.
+	g.toolRegistry.Register(&tool.Tool{
+		Name:        "multi_edit",
+		Description: "Apply several exact text replacements to one file in a single call. Edits run in order, each against the result of the previous one, and each find must match exactly once (set replace_all on an edit to replace every occurrence). The batch is all-or-nothing: if any edit fails, the file is left untouched.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{"type": "string"},
+				"edits": map[string]interface{}{
+					"type":        "array",
+					"description": "Edits applied in order. Each is {find, replace, replace_all?}.",
+					"items": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"find":        map[string]interface{}{"type": "string"},
+							"replace":     map[string]interface{}{"type": "string"},
+							"replace_all": map[string]interface{}{"type": "boolean", "description": "Replace every occurrence of this edit's find instead of requiring a single unique match. Defaults to false."},
+						},
+						"required": []string{"find", "replace"},
+					},
+				},
+			},
+			"required": []string{"path", "edits"},
+		},
+		Execute: func(args map[string]interface{}, ctx tool.ToolContext) (interface{}, error) {
+			path, ok := args["path"].(string)
+			if !ok {
+				return nil, fmt.Errorf("path argument is required")
+			}
+			edits, err := parseEditOps(args["edits"])
+			if err != nil {
+				return nil, err
+			}
+
+			auth, err := fileops.CheckFileAccess(g.permissions, g.locationMutation, true, path,
+				permission.RequestContext{SessionID: ctx.SessionID, Agent: ctx.AgentID})
+			if err != nil {
+				return nil, err
+			}
+
+			// Diff-review gate (issue #64): preview the whole batch as one diff and
+			// defer the write until the user approves.
+			if g.reviewActive(ctx.SessionID) {
+				before, after, err := g.fileMutation.PreviewMultiEdit(path, edits, auth)
+				if err != nil {
+					return nil, fmt.Errorf("failed to preview multi_edit: %v", err)
+				}
+				if err := g.reviewEdit(ctx, "edit", path, before, after); err != nil {
+					return nil, err
+				}
+			}
+
+			// Snapshot the pre-turn state for undo (issue #41), after the review
+			// gate and before the mutation.
+			g.snapshotBefore(ctx.SessionID, path, auth)
+
+			if err := g.fileMutation.MultiEditFile(path, edits, auth); err != nil {
+				return nil, fmt.Errorf("failed to apply multi_edit: %v", err)
+			}
+
+			return map[string]interface{}{
+				"success": true,
+				"path":    path,
+				"edits":   len(edits),
+			}, nil
+		},
+	})
+
+	// apply_patch applies a single "*** Begin Patch" envelope that can add, update
+	// and delete several files at once (issue #45). The unified-diff hunk format is
+	// less error-prone for multi-location edits than repeated find→replace calls.
+	// All changes are previewed (and reviewed) before any file is written, so a
+	// patch that fails to parse or whose context does not match leaves the
+	// workspace untouched.
+	g.toolRegistry.Register(&tool.Tool{
+		Name:        "apply_patch",
+		Description: "Apply a unified-diff patch in the \"*** Begin Patch\" / \"*** End Patch\" envelope to add, update and delete files in one call. Sections are \"*** Add File: <path>\" (followed by '+' content lines), \"*** Delete File: <path>\", and \"*** Update File: <path>\" (followed by '@@' hunks whose lines are prefixed ' ' for context, '-' to remove, '+' to add). Update hunks are located by their context, so include a few surrounding lines. The whole patch is all-or-nothing per file and leaves the workspace untouched if it does not apply.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"patch": map[string]interface{}{"type": "string", "description": "The full patch text, from \"*** Begin Patch\" to \"*** End Patch\"."},
+			},
+			"required": []string{"patch"},
+		},
+		Execute: func(args map[string]interface{}, ctx tool.ToolContext) (interface{}, error) {
+			patch, ok := args["patch"].(string)
+			if !ok {
+				return nil, fmt.Errorf("patch argument is required")
+			}
+			return g.applyPatch(patch, ctx)
+		},
+	})
+
 	// Codebase search tools (issue #37): grep/glob/list are read-only and
 	// workspace-confined, so — unlike the same searches routed through the
 	// shell — they run without a permission prompt and return structured
@@ -1168,6 +1264,131 @@ func (g *Gogent) snapshotBefore(sessionID, path string, auth fileops.Authorizati
 	g.checkpoints.Snapshot(sessionID, path, auth)
 }
 
+// parseEditOps converts the multi_edit "edits" argument (a JSON array of
+// {find, replace, replace_all?} objects) into fileops.EditOp values, validating
+// that the array is present, non-empty, and well-shaped (issue #45).
+func parseEditOps(raw interface{}) ([]fileops.EditOp, error) {
+	arr, ok := raw.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("edits argument must be an array")
+	}
+	if len(arr) == 0 {
+		return nil, fmt.Errorf("edits argument must not be empty")
+	}
+	edits := make([]fileops.EditOp, 0, len(arr))
+	for i, item := range arr {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("edit %d must be an object", i+1)
+		}
+		find, ok := m["find"].(string)
+		if !ok {
+			return nil, fmt.Errorf("edit %d: find is required", i+1)
+		}
+		replace, ok := m["replace"].(string)
+		if !ok {
+			return nil, fmt.Errorf("edit %d: replace is required", i+1)
+		}
+		replaceAll, _ := m["replace_all"].(bool)
+		edits = append(edits, fileops.EditOp{Find: find, Replace: replace, ReplaceAll: replaceAll})
+	}
+	return edits, nil
+}
+
+// applyPatch parses and applies a "*** Begin Patch" envelope (issue #45) in two
+// phases so the whole patch is validated before anything is written. Phase one
+// parses, resolves each op's before/after against current disk content,
+// authorizes the path and runs the diff-review gate; phase two snapshots and
+// writes. Any failure in phase one (bad envelope, missing/existing file, a hunk
+// whose context does not match, or a rejected review) leaves the workspace
+// untouched. Each file may be touched at most once per patch.
+func (g *Gogent) applyPatch(patch string, ctx tool.ToolContext) (interface{}, error) {
+	ops, err := fileops.ParsePatch(patch)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse patch: %v", err)
+	}
+
+	type plannedOp struct {
+		op    fileops.PatchOp
+		auth  fileops.Authorization
+		after string
+	}
+	planned := make([]plannedOp, 0, len(ops))
+	seen := make(map[string]bool, len(ops))
+
+	for _, op := range ops {
+		if seen[op.Path] {
+			return nil, fmt.Errorf("patch touches %q more than once", op.Path)
+		}
+		seen[op.Path] = true
+
+		auth, err := fileops.CheckFileAccess(g.permissions, g.locationMutation, true, op.Path,
+			permission.RequestContext{SessionID: ctx.SessionID, Agent: ctx.AgentID})
+		if err != nil {
+			return nil, err
+		}
+
+		exists, err := g.fileSystem.Exists(op.Path)
+		if err != nil {
+			return nil, err
+		}
+		switch op.Type {
+		case fileops.PatchAdd:
+			if exists {
+				return nil, fmt.Errorf("add file %q: file already exists", op.Path)
+			}
+		case fileops.PatchUpdate, fileops.PatchDelete:
+			if !exists {
+				return nil, fmt.Errorf("%s file %q: file does not exist", op.Type, op.Path)
+			}
+		}
+
+		before := ""
+		if exists {
+			data, err := g.fileSystem.Read(op.Path, auth)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read %q: %v", op.Path, err)
+			}
+			before = strings.TrimPrefix(string(data), "\uFEFF")
+		}
+
+		after, err := op.ApplyTo(before)
+		if err != nil {
+			return nil, fmt.Errorf("%s file %q: %v", op.Type, op.Path, err)
+		}
+
+		// Diff-review gate (issue #64): surface this file's change and defer the
+		// write until the user approves. Gating in phase one means a rejection
+		// partway through never leaves a partially-written set on disk.
+		if g.reviewActive(ctx.SessionID) {
+			if err := g.reviewEdit(ctx, op.Type.String(), op.Path, before, after); err != nil {
+				return nil, err
+			}
+		}
+
+		planned = append(planned, plannedOp{op: op, auth: auth, after: after})
+	}
+
+	for _, p := range planned {
+		// Snapshot the pre-turn state for undo (issue #41) before mutating.
+		g.snapshotBefore(ctx.SessionID, p.op.Path, p.auth)
+		if p.op.Type == fileops.PatchDelete {
+			if err := g.fileMutation.Remove(p.op.Path); err != nil {
+				return nil, fmt.Errorf("failed to delete %q: %v", p.op.Path, err)
+			}
+			continue
+		}
+		if err := g.fileMutation.WriteFile(p.op.Path, p.after, p.auth); err != nil {
+			return nil, fmt.Errorf("failed to write %q: %v", p.op.Path, err)
+		}
+	}
+
+	return map[string]interface{}{
+		"success": true,
+		"files":   len(planned),
+	}, nil
+}
+
 // GetToolRegistry returns the tool registry
 func (g *Gogent) GetToolRegistry() *tool.ToolRegistry {
 	return g.toolRegistry
@@ -1207,6 +1428,16 @@ Write content to a file. Use this when the user asks you to create or overwrite 
 Edit a file by replacing exact text. Use this for precise edits. The find string must match exactly once — include surrounding context to make it unique, or pass "replace_all": true to replace every occurrence.
 - Input: {"path": "string", "find": "string", "replace": "string", "replace_all": "boolean (optional, default false)"}
 - Example: {"tool": "edit", "args": {"path": "hello.txt", "find": "World", "replace": "Universe"}}
+
+### multi_edit
+Apply several exact text replacements to one file in a single call. Edits run in order (each against the result of the previous one) and each find must match exactly once unless that edit sets replace_all. The batch is all-or-nothing: if any edit fails, the file is left untouched. Prefer this over many edit calls when changing several spots in one file.
+- Input: {"path": "string", "edits": [{"find": "string", "replace": "string", "replace_all": "boolean (optional)"}]}
+- Example: {"tool": "multi_edit", "args": {"path": "main.go", "edits": [{"find": "foo", "replace": "bar"}, {"find": "old", "replace": "new"}]}}
+
+### apply_patch
+Apply a unified-diff patch in the "*** Begin Patch" / "*** End Patch" envelope to add, update and delete files in one call. Sections are "*** Add File: <path>" (followed by '+' content lines), "*** Delete File: <path>", and "*** Update File: <path>" (followed by '@@' hunks whose lines are prefixed ' ' for context, '-' to remove, '+' to add). Update hunks are located by their context, so include a few surrounding lines. The patch leaves the workspace untouched if it does not apply cleanly.
+- Input: {"patch": "string"}
+- Example: {"tool": "apply_patch", "args": {"patch": "*** Begin Patch\n*** Update File: main.go\n@@\n-old line\n+new line\n*** End Patch"}}
 
 ### grep
 Search file contents across the workspace for a regular expression (Go regex syntax). Read-only and workspace-confined, so it runs without a permission prompt — prefer it over shelling out to grep/rg. It returns file:line references you can pass straight to read.

@@ -412,6 +412,14 @@ edit:
   description: Edit a file by replacing exact text. Use this for precise edits. The find text must match exactly once; set replace_all to true to replace every occurrence.
   input: {"type": "object", "properties": {"path": {"type": "string"}, "find": {"type": "string"}, "replace": {"type": "string"}, "replace_all": {"type": "boolean"}}}
 
+multi_edit:
+  description: Apply several exact text replacements to one file in one call. Edits run in order; each find must match exactly once unless its replace_all is set. All-or-nothing: if any edit fails, the file is left untouched.
+  input: {"type": "object", "properties": {"path": {"type": "string"}, "edits": {"type": "array", "items": {"type": "object", "properties": {"find": {"type": "string"}, "replace": {"type": "string"}, "replace_all": {"type": "boolean"}}}}}}
+
+apply_patch:
+  description: Apply a unified-diff patch in the "*** Begin Patch" / "*** End Patch" envelope to add, update and delete files in one call. Update hunks are located by their context lines.
+  input: {"type": "object", "properties": {"patch": {"type": "string"}}}
+
 calc:
   	description: Calculate mathematical expressions like 5+5 or 10*20/5
   	input: {"type": "object", "properties": {"expression": {"type": "string"}}}
