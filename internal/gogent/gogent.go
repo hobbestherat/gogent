@@ -981,6 +981,26 @@ func (g *Gogent) CreateUserSession(id string, rootAgent *agent.Agent) *agent.Use
 		})
 	}
 
+	// Wire the lifecycle hooks that were defined but never fired (issue #47).
+	// Root-agent state transitions surface as HookStateChange, and any callback
+	// the model session already emits — today, context compaction — is bridged to
+	// its matching HookEvent (HookCompression). HookResponseComplete/HookError are
+	// fired by SendMessageToSessionWithModel at the turn boundary.
+	rootAgentID := rootAgent.ID
+	rootAgent.SetStateChangeCallback(func(old, new agent.AgentState) {
+		g.NotifyHooks(HookEvent{
+			Type:      HookStateChange,
+			SessionID: id,
+			AgentID:   rootAgentID,
+			State:     new,
+		})
+	})
+	if rootAgent.ThoughtTrain != nil {
+		rootAgent.ThoughtTrain.AddCallback(func(ev model.CallbackEvent) {
+			g.bridgeModelEvent(id, rootAgentID, ev)
+		})
+	}
+
 	// Set tool callback to increment tool call count
 	userSession.SetToolCallback(func(toolName string, args map[string]interface{}) error {
 		userSession.IncrementToolCall()
@@ -1833,6 +1853,11 @@ func (g *Gogent) SendMessageToSessionWithModel(ctx context.Context, sessionID, a
 	// sub-agents share the session), and is committed at the end — even on error
 	// or cancellation — so a partially-applied turn remains undoable. An empty
 	// turn (no writes) is dropped by CommitTurn.
+	//
+	// Mark the agent thinking for the duration of the turn and idle once it ends
+	// (issue #47): both transitions fire HookStateChange, and the turn's terminal
+	// outcome fires HookError or HookResponseComplete below.
+	ag.SetState(agent.StateThinking)
 	if g.checkpoints != nil {
 		g.checkpoints.BeginTurn(sessionID)
 	}
@@ -1840,7 +1865,14 @@ func (g *Gogent) SendMessageToSessionWithModel(ctx context.Context, sessionID, a
 	if g.checkpoints != nil {
 		g.checkpoints.CommitTurn(sessionID)
 	}
+	ag.SetState(agent.StateIdle)
 	if err != nil {
+		g.NotifyHooks(HookEvent{
+			Type:      HookError,
+			SessionID: sessionID,
+			AgentID:   agentID,
+			Error:     &model.ModelError{Message: err.Error()},
+		})
 		return nil, err
 	}
 
@@ -1848,8 +1880,17 @@ func (g *Gogent) SendMessageToSessionWithModel(ctx context.Context, sessionID, a
 	g.persistSession(sessionID)
 
 	// Return the last response (this will be the final response from the model)
+	// and announce the completed turn to hooks with its text and token usage.
 	if len(responses) > 0 {
-		return responses[len(responses)-1], nil
+		final := responses[len(responses)-1]
+		g.NotifyHooks(HookEvent{
+			Type:      HookResponseComplete,
+			SessionID: sessionID,
+			AgentID:   agentID,
+			Response:  final.Content,
+			Usage:     final.Usage,
+		})
+		return final, nil
 	}
 
 	return nil, fmt.Errorf("no responses generated")
@@ -1880,6 +1921,37 @@ func (g *Gogent) RemoveHook(hookID string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	delete(g.hooks, hookID)
+}
+
+// bridgeModelEvent translates a model-session CallbackEvent into the matching
+// lifecycle HookEvent, so the callbacks the model layer already emits reach the
+// hooks registered on Gogent (issue #47). Today only context compaction
+// (EventCompression) is emitted by the model session; the response/error/token
+// types are mapped too so they flow automatically if the model layer starts
+// emitting them. An unknown event type is dropped.
+func (g *Gogent) bridgeModelEvent(sessionID, agentID string, ev model.CallbackEvent) {
+	out := HookEvent{
+		SessionID:   sessionID,
+		AgentID:     agentID,
+		Token:       ev.Token,
+		Response:    ev.Response,
+		Usage:       ev.Usage,
+		Error:       ev.Error,
+		Compression: ev.Compression,
+	}
+	switch ev.Type {
+	case model.EventTokenReceived:
+		out.Type = HookTokenReceived
+	case model.EventResponseComplete:
+		out.Type = HookResponseComplete
+	case model.EventError:
+		out.Type = HookError
+	case model.EventCompression:
+		out.Type = HookCompression
+	default:
+		return
+	}
+	g.NotifyHooks(out)
 }
 
 // NotifyHooks notifies all hooks

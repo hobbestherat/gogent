@@ -77,6 +77,11 @@ type Agent struct {
 	// is how StopAgent and session close actually interrupt in-flight model work
 	// instead of merely flipping a state field (issue #24).
 	cancel context.CancelFunc
+	// stateChange, when set, is invoked after State transitions to a different
+	// value, outside the agent mutex, so a higher layer can observe lifecycle
+	// transitions — gogent wires it to fire HookStateChange (issue #47). Set via
+	// SetStateChangeCallback.
+	stateChange func(old, new AgentState)
 }
 
 // NewAgent creates a new agent
@@ -195,11 +200,26 @@ func (a *Agent) GetAgentByID(id string) *Agent {
 	return nil
 }
 
-// SetState sets the agent state
+// SetState sets the agent state, notifying any registered state-change callback
+// when the value actually changes (issue #47).
 func (a *Agent) SetState(state AgentState) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
+	old := a.State
 	a.State = state
+	cb := a.stateChange
+	a.mu.Unlock()
+	if cb != nil && old != state {
+		cb(old, state)
+	}
+}
+
+// SetStateChangeCallback registers a function invoked whenever this agent's State
+// transitions to a different value (issue #47). It is called outside the agent
+// mutex, so the callback may safely read agent state. Passing nil disables it.
+func (a *Agent) SetStateChangeCallback(cb func(old, new AgentState)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.stateChange = cb
 }
 
 // GetState returns the agent state
@@ -229,12 +249,17 @@ func (a *Agent) Cancel() {
 	}
 }
 
-// UpdateState updates state and returns old state
+// UpdateState updates state and returns old state, notifying any registered
+// state-change callback when the value actually changes (issue #47).
 func (a *Agent) UpdateState(newState AgentState) AgentState {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	oldState := a.State
 	a.State = newState
+	cb := a.stateChange
+	a.mu.Unlock()
+	if cb != nil && oldState != newState {
+		cb(oldState, newState)
+	}
 	return oldState
 }
 
