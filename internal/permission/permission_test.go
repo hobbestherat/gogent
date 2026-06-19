@@ -277,3 +277,65 @@ func TestPersistConcurrentMutations(t *testing.T) {
 		}
 	}
 }
+
+// auditRecord captures one resolved decision delivered to the audit sink.
+type auditRecord struct {
+	rc       RequestContext
+	action   Action
+	resource string
+	allowed  bool
+}
+
+func TestAuditSinkRecordsDecisions(t *testing.T) {
+	s := New("")
+	s.AddRule(Rule{Action: "read", Resource: "*", Effect: "allow"})
+	s.AddRule(Rule{Action: "write", Resource: "secret*", Effect: "deny"})
+
+	var got []auditRecord
+	s.SetAuditSink(func(rc RequestContext, a Action, resource string, allowed bool) {
+		got = append(got, auditRecord{rc, a, resource, allowed})
+	})
+
+	// Allowed by rule.
+	if err := s.CheckWithContext(RequestContext{SessionID: "s1"}, ActionRead, "notes.txt", ""); err != nil {
+		t.Fatalf("expected allow, got %v", err)
+	}
+	// Denied by rule.
+	if err := s.CheckWithContext(RequestContext{SessionID: "s2", Agent: "sub"}, ActionWrite, "secret.txt", ""); err == nil {
+		t.Fatalf("expected deny")
+	}
+	// Ask with no prompter resolves to deny — still audited.
+	if err := s.CheckWithContext(RequestContext{SessionID: "s3"}, ActionShell, "ls", ""); err == nil {
+		t.Fatalf("expected deny (no prompter)")
+	}
+
+	want := []auditRecord{
+		{RequestContext{SessionID: "s1"}, ActionRead, "notes.txt", true},
+		{RequestContext{SessionID: "s2", Agent: "sub"}, ActionWrite, "secret.txt", false},
+		{RequestContext{SessionID: "s3"}, ActionShell, "ls", false},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d audit records, want %d: %+v", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("record %d = %+v, want %+v", i, got[i], w)
+		}
+	}
+}
+
+func TestAuditSinkRecordsPromptedDecision(t *testing.T) {
+	s := New("")
+	s.SetPrompter(&stubPrompter{decision: DecisionAllow})
+
+	var allowed *bool
+	s.SetAuditSink(func(rc RequestContext, a Action, resource string, ok bool) {
+		allowed = &ok
+	})
+	if err := s.CheckWithContext(RequestContext{}, ActionShell, "echo hi", ""); err != nil {
+		t.Fatalf("expected allow, got %v", err)
+	}
+	if allowed == nil || !*allowed {
+		t.Fatalf("expected an audited allow, got %v", allowed)
+	}
+}

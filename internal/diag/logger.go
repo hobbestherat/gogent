@@ -1,53 +1,43 @@
 // Package diag routes diagnostic messages (warnings, errors) to a configurable
 // sink so they never corrupt the TUI's alternate screen (issue #17). In TUI mode
-// the sink is a log file; in headless mode it is standard error. It is the thin
-// seed the structured-logging/audit stream (issue #51) will grow from, so the
-// surface here is deliberately small: a few leveled methods over a single writer.
+// the sink is a log file; in headless mode it is standard error.
+//
+// Diagnostics are structured: the package is a thin wrapper over the standard
+// library's log/slog (issue #51), so every record carries a timestamp, a level
+// and typed key/value attributes. Logger.With binds context (session/agent ids)
+// that then rides along on every line, and the separate Audit stream records
+// security-relevant events (permission decisions, tool calls) as an append-only
+// post-incident artifact. Use Secret to keep API keys and tokens out of the logs.
 package diag
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
-	"sync"
-	"time"
 )
 
-// Level classifies a diagnostic message.
-type Level int
-
-const (
-	LevelInfo Level = iota
-	LevelWarn
-	LevelError
-)
-
-func (l Level) tag() string {
-	switch l {
-	case LevelWarn:
-		return "WARN"
-	case LevelError:
-		return "ERROR"
-	default:
-		return "INFO"
-	}
-}
-
-// Logger writes timestamped, leveled diagnostic lines to a single sink.
+// Logger writes structured, leveled diagnostic records to a single sink. The
+// printf-style methods (Infof/Warnf/Errorf) bridge the many call sites that
+// pre-date structured logging; Info/Warn/Error take typed slog attributes and
+// With binds attributes (e.g. session/agent ids) onto every later record.
+//
+// A nil *Logger is a safe no-op, so embedders that never configure one — and
+// callers that hold an unset field — are unaffected.
 type Logger struct {
-	mu sync.Mutex
-	w  io.Writer
+	sl *slog.Logger
 }
 
-// New returns a logger that writes to w. A nil sink is silently discarded (via
-// io.Discard) so callers can disable diagnostics without nil checks at every
-// call site.
+// New returns a logger that writes text-format records to w. A nil sink is
+// silently discarded (via io.Discard) so callers can disable diagnostics without
+// nil checks at every call site.
 func New(w io.Writer) *Logger {
 	if w == nil {
 		w = io.Discard
 	}
-	return &Logger{w: w}
+	return &Logger{sl: slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo}))}
 }
 
 // Stderr returns the default headless logger, writing to standard error. The TUI
@@ -60,6 +50,54 @@ func Stderr() *Logger { return New(os.Stderr) }
 // TUI-mode sink: a file is used instead of stderr so diagnostics land somewhere
 // visible without disturbing the rendered screen.
 func NewFile(path string) (*Logger, error) {
+	f, err := openAppend(path)
+	if err != nil {
+		return nil, err
+	}
+	return New(f), nil
+}
+
+// With returns a child logger that adds args (alternating key/value pairs, or
+// slog.Attr values) to every record it writes. Use it to thread session and
+// agent ids so a model event can be correlated to the tool outcome it caused.
+func (l *Logger) With(args ...any) *Logger {
+	if l == nil || l.sl == nil {
+		return l
+	}
+	return &Logger{sl: l.sl.With(args...)}
+}
+
+func (l *Logger) log(level slog.Level, msg string, args ...any) {
+	if l == nil || l.sl == nil {
+		return
+	}
+	l.sl.Log(context.Background(), level, msg, args...)
+}
+
+// Info logs an informational message with typed attributes.
+func (l *Logger) Info(msg string, args ...any) { l.log(slog.LevelInfo, msg, args...) }
+
+// Warn logs a warning with typed attributes.
+func (l *Logger) Warn(msg string, args ...any) { l.log(slog.LevelWarn, msg, args...) }
+
+// Error logs an error with typed attributes.
+func (l *Logger) Error(msg string, args ...any) { l.log(slog.LevelError, msg, args...) }
+
+// Infof logs a preformatted informational message. Prefer Info with attributes
+// for new code; this exists for call sites that pre-date structured logging.
+func (l *Logger) Infof(format string, args ...any) { l.log(slog.LevelInfo, fmt.Sprintf(format, args...)) }
+
+// Warnf logs a preformatted warning.
+func (l *Logger) Warnf(format string, args ...any) { l.log(slog.LevelWarn, fmt.Sprintf(format, args...)) }
+
+// Errorf logs a preformatted error.
+func (l *Logger) Errorf(format string, args ...any) {
+	l.log(slog.LevelError, fmt.Sprintf(format, args...))
+}
+
+// openAppend opens path for appending, creating the parent directory and the
+// file as needed. It backs both the diagnostic and audit file sinks.
+func openAppend(path string) (*os.File, error) {
 	if dir := filepath.Dir(path); dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, fmt.Errorf("create log dir: %w", err)
@@ -69,26 +107,5 @@ func NewFile(path string) (*Logger, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open log file: %w", err)
 	}
-	return New(f), nil
+	return f, nil
 }
-
-// logf formats and writes a single diagnostic line. A nil logger is a no-op so
-// embedders that never configure one are unaffected.
-func (l *Logger) logf(level Level, format string, args ...any) {
-	if l == nil {
-		return
-	}
-	line := time.Now().UTC().Format(time.RFC3339) + " " + level.tag() + " " + fmt.Sprintf(format, args...) + "\n"
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	_, _ = io.WriteString(l.w, line)
-}
-
-// Infof logs an informational message.
-func (l *Logger) Infof(format string, args ...any) { l.logf(LevelInfo, format, args...) }
-
-// Warnf logs a warning.
-func (l *Logger) Warnf(format string, args ...any) { l.logf(LevelWarn, format, args...) }
-
-// Errorf logs an error.
-func (l *Logger) Errorf(format string, args ...any) { l.logf(LevelError, format, args...) }

@@ -204,10 +204,19 @@ internal/clipboard/    System clipboard (OSC 52 + native pbcopy/xclip/wl-copy)
   them. The title here is a UI concern decoupled from the session id; the
   transcript itself lives in the session JSONL above.
 - Diagnostics: warnings and errors go through `internal/diag`, never raw
-  `fmt.Printf` to stdout. In TUI mode they append to `~/.gogent/gogent.log` (a
-  file, so they can't corrupt the alternate screen); in headless mode they go to
-  stderr. Skill-load and session-encode failures are surfaced here instead of
-  being swallowed.
+  `fmt.Printf` to stdout. `diag.Logger` wraps the standard library's `log/slog`,
+  so records are structured (timestamp, level, typed key/value attributes);
+  `Logger.With` binds context such as session/agent ids onto every later line.
+  In TUI mode diagnostics append to `~/.gogent/gogent.log` (a file, so they can't
+  corrupt the alternate screen); in headless mode they go to stderr. Skill-load
+  and session-encode failures are surfaced here instead of being swallowed.
+- Audit trail: `internal/diag` also exposes a separate, append-only `Audit`
+  stream for security-relevant events — every resolved permission decision and
+  every tool call — written to `~/.gogent/audit.log` in both TUI and headless
+  mode so it survives as a post-incident artifact. The permission `Service`
+  emits decisions via an `AuditSink`; the per-session tool callback emits tool
+  calls (arguments are omitted — they may carry secrets). `diag.Secret` wraps API
+  keys/tokens so they redact to `[REDACTED]` whenever logged.
 - Checkpoints: in-memory, per-session shadow copies of files touched by
   `write`/`edit` (`internal/fileops/checkpoint.go`). The active turn's
   checkpoint accumulates one snapshot per file (first mutation wins), committed

@@ -50,6 +50,11 @@ type Gogent struct {
 	// (issue #17). Defaults to stderr; the TUI entry point redirects it via
 	// SetLogger.
 	log *diag.Logger
+	// audit is the append-only security trail (issue #51): permission decisions
+	// and tool calls, kept apart from diagnostics so it survives as a
+	// post-incident artifact. Defaults to a discard sink; the entry point
+	// redirects it to a file via SetAudit.
+	audit *diag.Audit
 	// agentsContext is the project AGENTS.md instruction text discovered at
 	// startup, injected into every session's system prompt.
 	agentsContext string
@@ -139,6 +144,9 @@ func NewGogentWithWorkspace(homeDir, workspaceRoot string) *Gogent {
 	// Diagnostics default to stderr (headless); the TUI entry point redirects
 	// them to a log file via SetLogger so they never hit the alternate screen.
 	log := diag.Stderr()
+	// The audit trail defaults to a discard sink; the entry point redirects it to
+	// an append-only file via SetAudit (issue #51).
+	audit := diag.NewAudit(nil)
 
 	// Load config
 	cfg, err := config.LoadConfig(homeDir)
@@ -159,6 +167,7 @@ func NewGogentWithWorkspace(homeDir, workspaceRoot string) *Gogent {
 
 		reviewApprovedAll: make(map[string]bool),
 		log:               log,
+		audit:             audit,
 		subAgentLimiter:   agent.NewSubAgentLimiter(cfg.SubAgents.MaxConcurrentOrDefault()),
 		rateLimiter:       agent.NewRateLimiter(cfg.RateLimit.RequestsPerMinute, cfg.RateLimit.Burst),
 	}
@@ -174,6 +183,12 @@ func NewGogentWithWorkspace(homeDir, workspaceRoot string) *Gogent {
 	g.fileSystem = fileops.NewFileSystem(workspaceRoot)
 	g.locationMutation = fileops.NewLocationMutation(workspaceRoot)
 	g.permissions = permission.New(filepath.Join(homeDir, ".gogent"))
+	// Record every resolved permission decision on the append-only audit trail
+	// (issue #51). The sink reads the current audit logger each call, so it picks
+	// up the file sink installed later via SetAudit.
+	g.permissions.SetAuditSink(func(rc permission.RequestContext, a permission.Action, resource string, allowed bool) {
+		g.auditLog().Permission(rc.SessionID, rc.Agent, string(a), resource, allowed)
+	})
 	// Default posture: file reads/writes inside the workspace are allowed
 	// without prompting. Paths outside the workspace, shell, and sub-agents fall
 	// through to "ask" (resolved interactively, or denied when headless).
@@ -219,15 +234,39 @@ func (g *Gogent) SetLogger(lg *diag.Logger) {
 	g.mu.Unlock()
 }
 
+// SetAudit redirects gogent's security audit trail to a (typically file-backed)
+// sink. Like SetLogger it is meant to be called once at startup. A nil argument
+// is ignored.
+func (g *Gogent) SetAudit(a *diag.Audit) {
+	if a == nil {
+		return
+	}
+	g.mu.Lock()
+	g.audit = a
+	g.mu.Unlock()
+}
+
+// logger returns the current diagnostic logger, snapshotted under the registry
+// lock since it can be swapped via SetLogger while goroutines log. The returned
+// *Logger is nil-safe, so callers need no nil check.
+func (g *Gogent) logger() *diag.Logger {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.log
+}
+
+// auditLog returns the current audit sink, snapshotted under the registry lock.
+// The returned *Audit is nil-safe.
+func (g *Gogent) auditLog() *diag.Audit {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.audit
+}
+
 // warnf emits a warning through the configured logger, snapshotting it under the
 // registry lock since warnings fire from multiple goroutines.
 func (g *Gogent) warnf(format string, args ...any) {
-	g.mu.RLock()
-	lg := g.log
-	g.mu.RUnlock()
-	if lg != nil {
-		lg.Warnf(format, args...)
-	}
+	g.logger().Warnf(format, args...)
 }
 
 // GetConfig returns the current configuration
@@ -1011,9 +1050,13 @@ func (g *Gogent) CreateUserSession(id string, rootAgent *agent.Agent) *agent.Use
 		})
 	}
 
-	// Set tool callback to increment tool call count
+	// Set tool callback to increment tool call count and record the invocation on
+	// the audit trail (issue #51). Arguments are deliberately not logged — they
+	// can carry file contents or secrets; the permission audit events capture the
+	// resource a side-effecting tool touched.
 	userSession.SetToolCallback(func(toolName string, args map[string]interface{}) error {
 		userSession.IncrementToolCall()
+		g.auditLog().ToolCall(id, "", toolName)
 		return nil
 	})
 
