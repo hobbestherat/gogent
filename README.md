@@ -191,6 +191,13 @@ individual roles:
   `default` for the terminal default. Unknown roles or unparsable values are
   ignored.
 
+You do not have to edit JSON by hand: **Settings → Theme…** opens an in-UI
+editor that lists every role with a spec field and a live swatch. Pick a preset
+(*Default* or *High-contrast*), tweak individual colours, toggle *Disable
+colours*, and **Save** to persist the palette as your preferred theme — it is
+re-applied to the running UI immediately and restored on the next launch.
+*Reset* returns to the default palette.
+
 ### Session management
 
 When you run many sessions at once, the **Session** menu (and the right-hand

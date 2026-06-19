@@ -205,6 +205,16 @@ func main() {
 			SetReviewEdits: func(enabled bool) {
 				g.SetReviewEdits(enabled)
 			},
+			GetTheme: func() config.ThemeConfig {
+				return g.Theme()
+			},
+			SetTheme: func(t config.ThemeConfig) {
+				// Persist, then re-resolve and install the palette so the live
+				// UI recolours without a restart (issue #103).
+				g.SetTheme(t)
+				tuipkg.ApplyTheme(tuipkg.ResolveTheme(t, os.Getenv, *noColor))
+				wb.RefreshTheme()
+			},
 			GetModels: func() []config.ModelConfig {
 				return g.Models()
 			},

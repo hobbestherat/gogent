@@ -2204,6 +2204,27 @@ func (g *Gogent) SetNotifications(n config.NotifyConfig) {
 	}
 }
 
+// Theme returns the TUI colour-palette configuration (issue #66/#103). The zero
+// value is the built-in "default" palette, so a config.json predating the
+// setting yields the original colours.
+func (g *Gogent) Theme() config.ThemeConfig {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.config.Theme
+}
+
+// SetTheme updates the colour-palette configuration and persists it to disk so
+// the preferred theme is restored on the next launch (issue #103). The UI
+// re-applies the palette to its live widgets separately.
+func (g *Gogent) SetTheme(t config.ThemeConfig) {
+	g.mu.Lock()
+	g.config.Theme = t
+	g.mu.Unlock()
+	if err := g.SaveConfig(); err != nil {
+		g.warnf("Failed to persist config: %v", err)
+	}
+}
+
 // Budget returns the per-session token-budget configuration that drives the
 // status-bar budget alert (issue #63, the UI side of #28). A zero TokenBudget
 // means alerting is off.
