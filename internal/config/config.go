@@ -370,6 +370,26 @@ type MCPServerConfig struct {
 	Disabled bool `json:"disabled,omitempty"`
 }
 
+// ThemeConfig selects and customises the TUI colour palette (issue #66). The
+// zero value is the built-in "default" palette with colour enabled, so an older
+// config.json without a "theme" key is unaffected. Colour is still disabled at
+// runtime by the NO_COLOR env var or the --no-color flag regardless of this.
+type ThemeConfig struct {
+	// Name selects a built-in palette: "default" (the original colours) or
+	// "high-contrast" (a colourblind-safe, high-contrast preset; aliases:
+	// "colorblind", "high_contrast"). Empty means "default".
+	Name string `json:"name,omitempty"`
+	// NoColor disables all colour (terminal defaults only), the config-file
+	// equivalent of the NO_COLOR env var / --no-color flag.
+	NoColor bool `json:"no_color,omitempty"`
+	// Overrides recolours individual roles on top of the selected palette. Keys
+	// are role names — user, agent, note, tool, result, info, error, and the
+	// chrome roles desktop_fg/desktop_bg/panel_fg/panel_bg/title/divider/accent.
+	// Values are "#RRGGBB" hex, a decimal ANSI index ("0".."255"), or
+	// "default"/"none" for the terminal default. Unknown keys/values are ignored.
+	Overrides map[string]string `json:"overrides,omitempty"`
+}
+
 // Config represents the full configuration
 type Config struct {
 	DefaultModel string `json:"default_model"`
@@ -411,6 +431,10 @@ type Config struct {
 	// Diagnostics configures the `diagnostics` tool (issue #42). The zero value
 	// keeps the Go default, so an older config.json without the key is unaffected.
 	Diagnostics DiagnosticsConfig `json:"diagnostics,omitempty"`
+	// Theme selects and customises the TUI colour palette (issue #66). The zero
+	// value is the coloured "default" palette, so an older config.json without the
+	// key is unaffected.
+	Theme ThemeConfig `json:"theme,omitempty"`
 }
 
 // NotifyConfig returns the effective notification configuration, substituting

@@ -381,3 +381,39 @@ func TestIsReasoningModel(t *testing.T) {
 		})
 	}
 }
+
+// TestThemeConfigUnmarshal checks the optional theme section round-trips,
+// including the overrides map (issue #66), and that an absent section leaves the
+// zero value (the coloured "default" palette).
+func TestThemeConfigUnmarshal(t *testing.T) {
+	const data = `{
+		"default_model": "x",
+		"models": [],
+		"theme": {
+			"name": "high-contrast",
+			"no_color": true,
+			"overrides": {"user": "#E69F00", "error": "9"}
+		}
+	}`
+	var cfg Config
+	if err := json.Unmarshal([]byte(data), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if cfg.Theme.Name != "high-contrast" {
+		t.Errorf("Name = %q, want high-contrast", cfg.Theme.Name)
+	}
+	if !cfg.Theme.NoColor {
+		t.Error("NoColor = false, want true")
+	}
+	if got := cfg.Theme.Overrides["user"]; got != "#E69F00" {
+		t.Errorf("overrides[user] = %q, want #E69F00", got)
+	}
+
+	var bare Config
+	if err := json.Unmarshal([]byte(`{"default_model":"x","models":[]}`), &bare); err != nil {
+		t.Fatalf("unmarshal bare: %v", err)
+	}
+	if bare.Theme.Name != "" || bare.Theme.NoColor || bare.Theme.Overrides != nil {
+		t.Errorf("absent theme = %+v, want zero value", bare.Theme)
+	}
+}

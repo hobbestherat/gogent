@@ -235,7 +235,7 @@ func showPermissionDialog(desktop *tv.Desktop, req permission.Request, requester
 	questionY := 1
 	if label := requesterLine(requester, req.Context.Agent); label != "" {
 		r := tv.NewLabel(truncate(label, width-4), tv.Rect{X: 2, Y: 1, W: width - 4, H: 1})
-		r.FG = tui.ANSIColor(14)
+		r.FG = colorUser
 		r.BG = tv.DefaultTheme.DialogBG
 		dialog.Window.AddContent(r)
 		questionY = 2
@@ -248,7 +248,7 @@ func showPermissionDialog(desktop *tv.Desktop, req permission.Request, requester
 
 	if req.Detail != "" {
 		detail := tv.NewLabel("$ "+truncate(req.Detail, width-6), tv.Rect{X: 2, Y: 5, W: width - 4, H: 1})
-		detail.FG = tui.ANSIColor(11)
+		detail.FG = colorTool
 		detail.BG = tv.DefaultTheme.DialogBG
 		dialog.Window.AddContent(detail)
 	}

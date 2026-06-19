@@ -34,6 +34,7 @@ var (
 	httpHost   = flag.String("http-host", "127.0.0.1", "HTTP server host")
 	httpPort   = flag.Int("http-port", 8080, "HTTP server port")
 	disableTUI = flag.Bool("no-tui", false, "Disable TUI (for API testing)")
+	noColor    = flag.Bool("no-color", false, "Disable coloured output (also honours the NO_COLOR env var)")
 )
 
 var (
@@ -118,6 +119,10 @@ func main() {
 	// Create and start the multi-session TUI if enabled
 	var wb *tuipkg.Workbench
 	if !*disableTUI {
+		// Resolve and install the colour theme before the workbench (and its
+		// desktop chrome) are built, honouring config, NO_COLOR and --no-color, and
+		// degrading to the terminal's colour fidelity (issue #66).
+		tuipkg.ApplyTheme(tuipkg.ResolveTheme(g.GetConfig().Theme, os.Getenv, *noColor))
 		wb = tuipkg.NewWorkbench(g.GetConfig().ModelConfigs)
 		fmt.Println("TUI enabled. Press Ctrl+C to exit.")
 

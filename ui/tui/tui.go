@@ -28,16 +28,8 @@ import (
 	tv "github.com/hobbestherat/turbotui/turbotv"
 )
 
-// Colours used across the UI.
-var (
-	colorUser   = tui.ANSIColor(14) // bright cyan
-	colorAgent  = tui.ANSIColor(10) // bright green
-	colorNote   = tui.ANSIColor(8)  // dim grey (thoughts)
-	colorTool   = tui.ANSIColor(11) // bright yellow (tool calls)
-	colorResult = tui.ANSIColor(13) // magenta (tool results)
-	colorInfo   = tui.ANSIColor(12) // bright blue
-	colorError  = tui.ANSIColor(9)  // bright red
-)
+// The UI's colour palette lives in theme.go (the colorXxx and chromeXxx
+// variables), loaded from config and installed via ApplyTheme.
 
 // Handlers wires the Workbench to the agent backend. All handlers may be nil.
 type Handlers struct {
@@ -240,10 +232,10 @@ func NewWorkbench(models []*config.ModelConfig) *Workbench {
 	bg := tv.NewComponent(tv.Rect{X: 0, Y: 0, W: app.Width(), H: app.Height()})
 	bg.DrawFn = func(c *tv.VisualComponent, surface tv.Surface) {
 		abs := c.AbsoluteBounds()
-		surface.Fill(abs, tui.Cell{Ch: ' ', FG: tui.ANSIColor(7), BG: tui.ANSIColor(4)})
+		surface.Fill(abs, tui.Cell{Ch: ' ', FG: chromeDesktopFG, BG: chromeDesktopBG})
 		hint := "Gogent - Session > New (Ctrl+N) to start.  Use the >/v markers in a transcript to fold thoughts & tool details."
 		if abs.H > 2 {
-			surface.WriteString(abs.X+2, abs.Y+abs.H-2, hint, tui.Cell{FG: tui.ANSIColor(15), BG: tui.ANSIColor(4)})
+			surface.WriteString(abs.X+2, abs.Y+abs.H-2, hint, tui.Cell{FG: chromeTitle, BG: chromeDesktopBG})
 		}
 	}
 	w.desktop.AddLayer(tv.NewFullscreenLayer("background", bg))
