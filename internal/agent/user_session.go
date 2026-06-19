@@ -438,7 +438,7 @@ func (s *UserSession) ExecuteTaskLoop(ctx context.Context, agentID string, initi
 
 // runLoop is the shared multi-turn tool-calling loop used by both the top-level
 // task loop and sub-agents (sub-agents pass a different system prompt).
-func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initialMessage, systemPrompt string) ([]*model.CompletionResponse, error) {
+func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initialMessage, systemPrompt string) (responses []*model.CompletionResponse, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -471,7 +471,21 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 		emit = func(SessionEvent) {}
 	}
 
-	responses := make([]*model.CompletionResponse, 0)
+	// Contain a panic anywhere in the model/tool loop (tool-call parsing, a
+	// slice index, a type assertion) so it fails this one agent instead of
+	// crashing the whole multi-session process. Every loop-driven goroutine —
+	// the root task loop, parallel sub-agent spawns, and interactive workers —
+	// funnels through here, so this is the single guard for all of them (issue
+	// #8). The defer is registered after emit is set so the panic can be
+	// reported to the (root) session window like any other loop error.
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("agent loop panicked: %v", r)
+			emit(SessionEvent{Type: SessionEventError, Err: err})
+		}
+	}()
+
+	responses = make([]*model.CompletionResponse, 0)
 
 	emit(SessionEvent{Type: SessionEventThinking, Step: 0})
 
@@ -525,6 +539,17 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
+					// Keep a panic in this worker (or anything it calls) from
+					// taking down the process: turn it into a tool-result error
+					// for this slot so wg.Wait still yields a valid message set
+					// (issue #8).
+					defer func() {
+						if r := recover(); r != nil {
+							resultStr := fmt.Sprintf("error: tool %q panicked: %v", call.Tool, r)
+							emit(SessionEvent{Type: SessionEventToolResult, Step: step, Tool: call.Tool, Args: call.Args, Result: resultStr})
+							toolMsgs[i] = makeToolResultMessage(call, resultStr)
+						}
+					}()
 					resultStr := s.runToolCall(ctx, agent, agentID, call)
 					emit(SessionEvent{Type: SessionEventToolResult, Step: step, Tool: call.Tool, Args: call.Args, Result: resultStr})
 					toolMsgs[i] = makeToolResultMessage(call, resultStr)
@@ -1064,6 +1089,13 @@ func (s *UserSession) LaunchInteractiveAgent(parentAgentID, name, task string) (
 // runInteractive drives an interactive sub-agent across one or more rounds,
 // pausing for coordinator input whenever the model replies CLARIFY:.
 func (s *UserSession) runInteractive(ia *InteractiveAgent, task string) {
+	// This runs on its own background goroutine, so a panic here would crash the
+	// whole process. Contain it and finish the agent as failed instead (issue #8).
+	defer func() {
+		if r := recover(); r != nil {
+			s.finishInteractive(ia, StatusFailed, fmt.Sprintf("panic: %v", r), AgentEventFailed)
+		}
+	}()
 	// Interactive sub-agents are asynchronous and outlive any single turn, so
 	// their loop is scoped to the session (background) rather than a turn context.
 	// Terminating the agent cancels its in-flight model work too (issue #24).

@@ -138,6 +138,17 @@ func main() {
 			// OnSend runs the task loop in the background; progress (thoughts,
 			// tool calls, final answer) flows back through the observer above.
 			OnSend: func(sessionID, message, modelName string) {
+				// This is a fire-and-forget background goroutine: contain any
+				// panic so a single session's crash surfaces as an error in its
+				// window instead of taking down the whole TUI process (issue #8).
+				defer func() {
+					if r := recover(); r != nil {
+						wb.EmitSessionEvent(sessionID, agent.SessionEvent{
+							Type: agent.SessionEventError,
+							Err:  fmt.Errorf("session panicked: %v", r),
+						})
+					}
+				}()
 				// The TUI loop runs in the background; cancellation comes from the
 				// session's own controls (Stop / window close), which cancel the
 				// agent loop directly, so a plain background context is correct here.

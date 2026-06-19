@@ -288,7 +288,7 @@ type ToolCallResponse struct {
 	Error   string      `json:"error,omitempty"`
 }
 
-func (tr *ToolRegistry) ExecuteToolCall(toolCall *ToolCall, ctx ToolContext) (*ToolCallResponse, error) {
+func (tr *ToolRegistry) ExecuteToolCall(toolCall *ToolCall, ctx ToolContext) (resp *ToolCallResponse, err error) {
 	tool := tr.tools[toolCall.Tool]
 	if tool == nil {
 		return &ToolCallResponse{
@@ -325,6 +325,16 @@ func (tr *ToolRegistry) ExecuteToolCall(toolCall *ToolCall, ctx ToolContext) (*T
 	}
 
 	start := time.Now()
+	// Contain a panicking tool (unchecked type assertion, parser slice index,
+	// nil deref, ...) so one bad tool call surfaces as an ordinary tool error
+	// instead of crashing the process and every concurrent session (issue #8).
+	defer func() {
+		if r := recover(); r != nil {
+			tr.recordOutcome(toolCall.Tool, false, time.Since(start).Milliseconds())
+			err = fmt.Errorf("tool %q panicked: %v", toolCall.Tool, r)
+			resp = &ToolCallResponse{Success: false, Error: err.Error()}
+		}
+	}()
 	result, err := tool.Execute(toolCall.Args, ctx)
 	tr.recordOutcome(toolCall.Tool, err == nil, time.Since(start).Milliseconds())
 	if err != nil {
