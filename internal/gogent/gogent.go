@@ -404,6 +404,14 @@ func (g *Gogent) initializeToolRegistry() {
 					wg.Add(1)
 					go func() {
 						defer wg.Done()
+						// A panic in a spawn worker must fail only its own
+						// subtask, not crash the process and every other session
+						// (issue #8).
+						defer func() {
+							if r := recover(); r != nil {
+								results[i].Error = fmt.Sprintf("subagent panicked: %v", r)
+							}
+						}()
 						text, err := session.SpawnSubAgent(loopCtx, ctx.AgentID, name, task, g.SubAgentOneShot())
 						if err != nil {
 							results[i].Error = err.Error()
