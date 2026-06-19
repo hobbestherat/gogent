@@ -22,6 +22,7 @@ internal/agent/        UserSession + Agent tree, ReAct task loop, sub-agents
 internal/model/        Connector interfaces + HTTP model connection + session
 internal/tool/         Tool registry, shell/git/web tools, structured-output tool
 internal/vcs/          Thin, safe git wrapper (backs the git tool + git-status context)
+internal/diagnostics/  Runs the project compiler/linter; parses file:line:col errors
 internal/fileops/      Path resolution, file I/O, file mutation
 internal/command/      Shell exec + internal commands (calc/echo/help)
 internal/skill/        SKILL.md loader + registry (wired via syscontext + skill tool)
@@ -68,9 +69,11 @@ internal/notify/       Desktop/terminal notifications (bell + OSC 9/777 + native
   (OpenAI string-or-object, Anthropic `{type:…}`). A bare base URL is normalized
   into the concrete endpoints. Connections are rebuilt per send, so
   model/endpoint edits take effect on the next turn.
-- **Tools** (`internal/tool`, `internal/fileops`, `internal/web`, `internal/vcs`) —
+- **Tools** (`internal/tool`, `internal/fileops`, `internal/web`, `internal/vcs`,
+  `internal/diagnostics`) —
   `read`, `write`, `edit`, `grep`, `glob`, `list`, `shell`, `web_fetch`, `git`,
-  `spawn_subagent`, agent-control tools, and `structured_output`. File ops resolve
+  `diagnostics`, `spawn_subagent`, agent-control tools, and `structured_output`.
+  File ops resolve
   paths against the workspace root (the launch cwd) and run through a keyed-mutex
   file mutator. `grep`/`glob`/`list` are read-only, workspace-confined search tools
   built on the `FileSystem` primitives: they run without a permission prompt
@@ -83,7 +86,12 @@ internal/notify/       Desktop/terminal notifications (bell + OSC 9/777 + native
   (`status`/`diff`/`log`/`commit`/`create_branch`/`restore`) backed by
   `internal/vcs`, which runs git with explicit argument vectors (no shell, no
   injection surface) and disabled interactive prompts; mutating operations are
-  gated via `ActionShell`, read-only ones run freely.
+  gated via `ActionShell`, read-only ones run freely. `diagnostics` runs the
+  project's compiler/linter and parses its output into structured
+  file:line:column findings (default `go vet ./...`, configurable); it runs a
+  fixed command pinned to the workspace but executes build-time code, so it is
+  gated through a dedicated `ActionDiagnostics` (an *always* grant scopes to
+  diagnostics alone, never the shell) and backed by `internal/diagnostics`.
 - **MCP client** (`internal/mcp`) — a stdlib-only Model Context Protocol client
   speaking JSON-RPC 2.0 over two transports: a launched stdio subprocess and
   streamable-HTTP (plain JSON or SSE replies). Servers are declared in the

@@ -34,6 +34,16 @@ gogent gates every side-effecting tool through a single permission service
   mutating ones (commit/create_branch/restore) are gated like shell. When the
   workspace is a repo, a live `git status` is also injected into the prompt so the
   model always sees its working-tree state. Prefer it over `git` through the shell.
+- **Diagnostics** — the `diagnostics` tool runs the project's compiler/linter and
+  returns structured errors (`file:line:column`, severity, message), giving the
+  agent push-button "did it compile / typecheck?" feedback. The default is
+  `go vet ./...` (typechecks Go and reports vet findings); the command is
+  configurable under `diagnostics` in `config.json`. It runs a **fixed** command
+  pinned to the workspace (the model cannot inject arguments), but executing it
+  does run build-time code, so each call is gated through a dedicated
+  `ActionDiagnostics` — an *Always* grant is scoped to diagnostics alone and
+  never blesses the shell tool. Prefer it over running the compiler through the
+  shell after edits.
 - **MCP servers** — each [Model Context Protocol](https://modelcontextprotocol.info/)
   server declared under `mcp_servers` is dialed at startup, its tools discovered via
   `tools/list`, and each registered under an `mcp__<server>__<tool>` name so the
@@ -102,6 +112,27 @@ Each server's tools appear as `mcp__<name>__<tool>`. Add `"disabled": true` to k
 an entry without connecting it. Launching is gated through the permission service
 (see **MCP servers** above), so in headless runs add an `mcp` allow rule to
 `~/.gogent/permissions.json` or the servers will be denied.
+
+### Diagnostics
+
+The `diagnostics` tool runs the project's compiler/linter and returns structured
+errors so the agent can check whether its edits compile/typecheck without shelling
+out. It defaults to `go vet ./...` (no config needed); override the command, or
+mark some messages as warnings, under the `diagnostics` key:
+
+```json
+{
+  "diagnostics": {
+    "command": ["go", "build", "./..."],
+    "warning_pattern": "^printf:"
+  }
+}
+```
+
+Any command that emits `path:line:column: message` lines (Go `vet`/`build`, and
+most linters) is parsed into actionable diagnostics. Each run is gated through
+`ActionDiagnostics` (see **Diagnostics** above); in headless runs add a
+`diagnostics` allow rule to `~/.gogent/permissions.json` or it will be denied.
 
 ### Window scaling
 

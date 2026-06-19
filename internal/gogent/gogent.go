@@ -504,6 +504,17 @@ func (g *Gogent) initializeToolRegistry() {
 	g.toolRegistry.RegisterWebFetchTool()
 	g.toolRegistry.RegisterGitTool()
 
+	// Diagnostics tool (issue #42): runs the project's compiler/linter and returns
+	// structured errors. The command is configurable; the zero-value config keeps
+	// the Go default (`go vet ./...`), so it works out of the box.
+	var diagCmd []string
+	var diagWarn string
+	if g.config != nil {
+		diagCmd = g.config.Diagnostics.Command
+		diagWarn = g.config.Diagnostics.WarningPattern
+	}
+	g.toolRegistry.RegisterDiagnosticsTool(diagCmd, diagWarn)
+
 	g.toolRegistry.Register(&tool.Tool{
 		Name:        "spawn_subagent",
 		Description: "Delegate work to one or more sub-agents. In one-shot mode they must end with SUCCESS:/FAILURE:. In interactive mode they may return CLARIFY: questions.",
@@ -1217,6 +1228,12 @@ List the files and subdirectories immediately inside a workspace directory. Read
  	- Returns: {"command": "...", "stdout": "...", "stderr": "...", "exit_code": 0, "timeout": false, "error": null}
  	- Timeout: 5 minutes, max output: 1MB
 
+### diagnostics
+Run the project's compiler/linter and return structured errors (file:line:column, severity, message). The default is "go vet ./..."; the command is fixed (configurable, not model-controlled). Prefer it over running the compiler through the shell: no shell quoting, output parsed into actionable diagnostics, and ok=true means the project builds. Call it after edits to catch compile/typecheck/lint breakage early.
+- Input: {} (no arguments)
+- Example: {"tool": "diagnostics", "args": {}}
+- Returns: {"command": ["go","vet","./..."], "ok": false, "exit_code": 1, "count": 1, "diagnostics": [{"path": "foo.go", "line": 6, "column": 14, "severity": "error", "message": "undefined: undef"}]}
+
 ## How to Use Tools
 
 When the user asks you to do something, determine which tool(s) to use and output a JSON object:
@@ -1829,6 +1846,8 @@ func (g *Gogent) SetTimeouts(t config.TimeoutConfig) {
 	g.toolRegistry.NetworkTimeout = g.toolRegistry.ShellTimeout
 	g.toolRegistry.WorkspaceRoot = g.workspaceRoot
 	g.toolRegistry.Permission = g.permissions
+	diagCmd := g.config.Diagnostics.Command
+	diagWarn := g.config.Diagnostics.WarningPattern
 	sessions := make([]*agent.UserSession, 0, len(g.userSessions))
 	for _, s := range g.userSessions {
 		sessions = append(sessions, s)
@@ -1840,6 +1859,7 @@ func (g *Gogent) SetTimeouts(t config.TimeoutConfig) {
 	g.toolRegistry.RegisterShellTool()
 	g.toolRegistry.RegisterWebFetchTool()
 	g.toolRegistry.RegisterGitTool()
+	g.toolRegistry.RegisterDiagnosticsTool(diagCmd, diagWarn)
 	subAgentTO := time.Duration(t.SubAgentSecondsOrDefault()) * time.Second
 	for _, s := range sessions {
 		s.SetSubAgentTimeout(subAgentTO)

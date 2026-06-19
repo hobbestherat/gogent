@@ -19,13 +19,14 @@ import (
 type Action string
 
 const (
-	ActionRead     Action = "read"     // read a file inside the workspace
-	ActionWrite    Action = "write"    // write/edit a file inside the workspace
-	ActionShell    Action = "shell"    // run a shell command (session-wide gate)
-	ActionExternal Action = "external" // touch a path outside the workspace
-	ActionNetwork  Action = "network"  // network access
-	ActionSubagent Action = "subagent" // spawn a sub-agent
-	ActionMCP      Action = "mcp"      // launch/connect to an MCP server
+	ActionRead        Action = "read"        // read a file inside the workspace
+	ActionWrite       Action = "write"       // write/edit a file inside the workspace
+	ActionShell       Action = "shell"       // run a shell command (session-wide gate)
+	ActionExternal    Action = "external"    // touch a path outside the workspace
+	ActionNetwork     Action = "network"     // network access
+	ActionSubagent    Action = "subagent"    // spawn a sub-agent
+	ActionMCP         Action = "mcp"         // launch/connect to an MCP server
+	ActionDiagnostics Action = "diagnostics" // run the configured compiler/linter
 )
 
 // Effect is the resolved policy for a request.
