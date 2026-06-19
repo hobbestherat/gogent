@@ -1,5 +1,10 @@
 package tool
 
+import (
+	"fmt"
+	"time"
+)
+
 // Task tracks the state of a multi-turn task with tool calling
 type Task struct {
 	ID          string
@@ -88,14 +93,13 @@ func generateTaskID() string {
 	return "task_" + GetTimestampStr()
 }
 
-// GetTimestamp returns current timestamp as int64
+// GetTimestamp returns the current time as a Unix timestamp in seconds.
 func GetTimestamp() int64 {
-	// TODO: implement proper timestamp
-	return 0
+	return time.Now().Unix()
 }
 
-// GetTimestampStr returns current timestamp as string
+// GetTimestampStr returns the current time as a compact, monotonic string used
+// to derive unique task ids.
 func GetTimestampStr() string {
-	// TODO: implement proper timestamp
-	return "0"
+	return fmt.Sprintf("%d", time.Now().UnixNano())
 }

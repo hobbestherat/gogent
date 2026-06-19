@@ -41,6 +41,12 @@ const (
 	// model round-trip so UIs can render live per-session token/turn/context usage
 	// (e.g. a status bar) without polling the session.
 	SessionEventUsage SessionEventType = "usage"
+	// SessionEventTodo carries an updated task checklist (issue #43). The list is
+	// the session's current todo state, rendered in the sidebar.
+	SessionEventTodo SessionEventType = "todo"
+	// SessionEventPlan carries a proposed plan produced in plan mode, awaiting the
+	// user's approval before the agent executes it (issue #43).
+	SessionEventPlan SessionEventType = "plan"
 )
 
 // SessionStats is a point-in-time, mutex-free snapshot of a session's per-session
@@ -84,6 +90,11 @@ type SessionEvent struct {
 
 	// Stats carries a fresh SessionStats snapshot on SessionEventUsage.
 	Stats SessionStats
+
+	// Todos carries the session's current task checklist on SessionEventTodo.
+	Todos []TodoItem
+	// Plan carries the proposed plan on SessionEventPlan (plan mode).
+	Plan string
 }
 
 // SessionObserver receives SessionEvents as a task loop progresses. It is always
@@ -134,6 +145,17 @@ type UserSession struct {
 
 	// Task tracking for multi-turn tool calling
 	currentTask *tool.Task
+
+	// todos is the session's current task checklist, maintained by the todo tool
+	// and rendered in the sidebar (issue #43). Guarded by mu.
+	todos []TodoItem
+	// planMode, when true, runs the next root-agent turn against a write-free tool
+	// set with a planning prompt, so the agent investigates and proposes a plan
+	// instead of making changes (issue #43). pendingPlan holds the plan awaiting
+	// the user's approval; approving it re-runs the turn with the full tool set.
+	// Both are guarded by mu.
+	planMode    bool
+	pendingPlan string
 
 	// compressionCompleter, when set, runs context compression on a separate
 	// (typically smaller/faster) model backend instead of the session's primary
@@ -474,8 +496,67 @@ func (s *UserSession) ExecuteTaskLoop(ctx context.Context, agentID string, initi
 	s.turnCount++
 	s.mu.Unlock()
 
+	// Plan mode (issue #43): run the root agent against a write-free tool set with
+	// a planning prompt for this turn, then surface its answer as an approval-
+	// gated plan. The swap is scoped to this turn and restored on exit so later
+	// turns (and sub-agents, which bypass ExecuteTaskLoop) keep the full tool set.
+	planMode := s.PlanMode() && agent.Kind == KindRoot
+	if planMode {
+		full := agent.ToolRegistry
+		agent.SetToolRegistry(full.CloneForPlanMode(planKeptTools...))
+		defer agent.SetToolRegistry(full)
+	}
+
 	tools := toolDefsFromRegistry(agent.ToolRegistry)
-	return s.runLoop(ctx, agent, agentID, initialMessage, buildAgentSystemPrompt(len(tools) > 0, s.SubAgentConfig()))
+	systemPrompt := buildAgentSystemPrompt(len(tools) > 0, s.SubAgentConfig())
+	if planMode {
+		systemPrompt = planModeSystemPrompt(systemPrompt)
+	}
+
+	responses, err := s.runLoop(ctx, agent, agentID, initialMessage, systemPrompt)
+	if err != nil {
+		return responses, err
+	}
+	if planMode {
+		s.recordPlan(responses)
+	}
+	return responses, nil
+}
+
+// planKeptTools are the non-read-only tools retained in plan mode alongside the
+// read-only investigation tools: todo (to lay out the plan's steps) and
+// structured_output (to finalize the plan). Everything side-effecting is
+// stripped by CloneForPlanMode (issue #43).
+var planKeptTools = []string{"todo", "structured_output"}
+
+// recordPlan captures the final answer of a plan-mode turn as the plan awaiting
+// approval and emits SessionEventPlan so the UI can offer to approve it. An
+// empty plan is ignored rather than surfaced as an approval gate (issue #43).
+func (s *UserSession) recordPlan(responses []*model.CompletionResponse) {
+	plan := ""
+	if len(responses) > 0 {
+		plan = responses[len(responses)-1].Content
+	}
+	if !s.setPendingPlan(plan) {
+		return
+	}
+	s.emit(SessionEvent{Type: SessionEventPlan, Plan: strings.TrimSpace(plan)})
+}
+
+// planModeSystemPrompt layers planning instructions on top of the base agent
+// prompt. It tells the model the workspace is read-only this turn and that its
+// answer is a plan for the user to approve, not something to carry out (issue
+// #43).
+func planModeSystemPrompt(base string) string {
+	return base + `
+
+## PLAN MODE (read-only)
+You are in PLAN MODE. The tools that modify the workspace (write, edit,
+multi_edit, apply_patch, shell) and the sub-agent tools are unavailable this
+turn. Use only the read-only tools to investigate, then reply with a concrete,
+step-by-step plan the user will approve before you execute it. Lay the plan's
+steps out with the todo tool. Do NOT attempt to carry the plan out — present it
+as your final answer.`
 }
 
 // budgetExceededMarker prefixes an agent's final result when it stopped because

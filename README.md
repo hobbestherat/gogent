@@ -78,6 +78,14 @@ gogent gates every side-effecting tool through a single permission service
   Snapshots live in memory for the running process and are scoped per session;
   restarting (which still recovers the transcript from disk) clears them. The
   snapshots cover `write`/`edit`; shell-driven file changes are not captured.
+- **Plan mode & task checklist** — type `/plan` to toggle plan mode for a
+  session. In plan mode the agent runs against a write-free tool set (read,
+  search, `diagnostics`/`verify`, plus `todo` and `structured_output`) so it
+  researches and proposes a plan instead of making changes; the status line shows
+  `PLAN`. Approve the proposed plan with `/act` (or *Session → Approve Plan*) to
+  re-run it with the full tool set. The `todo` tool records a step-by-step
+  checklist the model maintains as it works; the list renders live under the
+  session in the *Sessions & Agents* sidebar (☐ pending · ▶ in progress · ✓ done).
 
 Interactive decisions appear as a modal in the TUI. Choosing *Always* persists
 the grant to `~/.gogent/permissions.json`. In headless/non-interactive runs

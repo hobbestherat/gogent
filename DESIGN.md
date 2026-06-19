@@ -43,8 +43,14 @@ internal/clipboard/    System clipboard (OSC 52 + native pbcopy/xclip/wl-copy)
   task loop uses native OpenAI tool-calling when available and falls back to
   parsing a JSON tool call out of assistant text. Emits a typed `SessionEvent`
   stream (`thinking`, `assistant_step`, `tool_call`, `tool_result`, `final`,
-  `error`) so the UI renders incrementally. Only root-agent events surface in the
-  main chat; sub-agent detail is kept for the monologue popup. When a turn
+  `error`, `todo`, `plan`) so the UI renders incrementally. Only root-agent events surface in the
+  main chat; sub-agent detail is kept for the monologue popup. **Plan mode**
+  (issue #43) runs a root turn against `ToolRegistry.CloneForPlanMode` — read-only
+  tools plus `todo`/`structured_output`, with every side-effecting tool stripped —
+  under a planning system prompt; the model's answer is recorded as an approval-
+  gated plan (`SessionEventPlan`) that `ExecuteApprovedPlan` re-runs with the full
+  tool set once the user approves. The `todo` tool maintains a per-session
+  checklist (`SessionEventTodo`) rendered in the sidebar. When a turn
   returns several independent tool calls, two fast-paths run them concurrently to
   cut wall-clock latency: an all-`spawn_subagent` batch (bounded by the
   `SubAgentLimiter`), and an all-read-only batch (`read`/`grep`/`glob`/`list`/

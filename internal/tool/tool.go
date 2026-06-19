@@ -289,6 +289,33 @@ func (tr *ToolRegistry) CloneWithout(names ...string) *ToolRegistry {
 	return clone
 }
 
+// CloneForPlanMode returns a clone exposing only read-only tools plus the named
+// extras, stripping every side-effecting tool so a planning agent cannot mutate
+// the workspace (issue #43). It backs the plan-mode turn: write/edit/shell and
+// the sub-agent coordination tools are removed, leaving the read-only
+// investigation tools (and the named extras such as "todo" and
+// "structured_output"). The per-tool counters are shared with the source (see
+// CloneWithout) so plan-mode calls still aggregate into the Statistics view.
+func (tr *ToolRegistry) CloneForPlanMode(keep ...string) *ToolRegistry {
+	keepSet := make(map[string]bool, len(keep))
+	for _, n := range keep {
+		keepSet[n] = true
+	}
+	var strip []string
+	for name, t := range tr.tools {
+		if t.ReadOnly || keepSet[name] {
+			continue
+		}
+		strip = append(strip, name)
+	}
+	if len(strip) == 0 {
+		// Every tool is read-only or kept; CloneWithout with no exclusions still
+		// produces an independent clone sharing the counters.
+		return tr.CloneWithout()
+	}
+	return tr.CloneWithout(strip...)
+}
+
 type ToolCall struct {
 	Tool   string                 `json:"tool"`
 	Args   map[string]interface{} `json:"args"`

@@ -911,6 +911,46 @@ func (g *Gogent) initializeToolRegistry() {
 		},
 	})
 
+	// todo tracks the session's task checklist (issue #43). Each call replaces the
+	// whole list; the new list is rendered in the sidebar so the user can follow
+	// multi-step progress. It is intentionally not read-only (it mutates session
+	// state) so concurrent calls stay serial, but it is retained in plan mode as a
+	// way to lay out a plan's steps.
+	g.toolRegistry.Register(&tool.Tool{
+		Name:        "todo",
+		Description: "Record or update the session's task checklist. Pass the full list each call (it replaces the previous one). Each item is {content, status} where status is pending, in_progress or completed (defaults to pending). The list is shown live in the sidebar; use it to lay out and track multi-step work.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"todos": map[string]interface{}{
+					"type":        "array",
+					"description": "The complete checklist. Each entry is {content: string, status?: pending|in_progress|completed}.",
+					"items": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"content": map[string]interface{}{"type": "string"},
+							"status":  map[string]interface{}{"type": "string", "enum": []string{"pending", "in_progress", "completed"}},
+						},
+						"required": []string{"content"},
+					},
+				},
+			},
+			"required": []string{"todos"},
+		},
+		Execute: func(args map[string]interface{}, ctx tool.ToolContext) (interface{}, error) {
+			session := g.GetUserSession(ctx.SessionID)
+			if session == nil {
+				return nil, fmt.Errorf("session not found: %s", ctx.SessionID)
+			}
+			items, err := parseTodoItems(args["todos"])
+			if err != nil {
+				return nil, err
+			}
+			session.SetTodos(items)
+			return map[string]interface{}{"success": true, "count": len(items)}, nil
+		},
+	})
+
 	// Register the skill tool only when skills are loaded, so models without
 	// skills aren't offered a useless tool.
 	if g.skills != nil && len(g.skills.ListSkills()) > 0 {
@@ -1411,6 +1451,31 @@ func parseEditOps(raw interface{}) ([]fileops.EditOp, error) {
 		edits = append(edits, fileops.EditOp{Find: find, Replace: replace, ReplaceAll: replaceAll})
 	}
 	return edits, nil
+}
+
+// parseTodoItems converts the todo tool's "todos" argument (a JSON array of
+// {content, status?} objects) into agent.TodoItem values, validating that the
+// array is present and well-shaped (issue #43). A missing/unknown status
+// defaults to pending via agent.NormalizeTodoStatus.
+func parseTodoItems(raw interface{}) ([]agent.TodoItem, error) {
+	arr, ok := raw.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("todos argument must be an array")
+	}
+	items := make([]agent.TodoItem, 0, len(arr))
+	for i, item := range arr {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("todo %d must be an object", i+1)
+		}
+		content, _ := m["content"].(string)
+		if strings.TrimSpace(content) == "" {
+			return nil, fmt.Errorf("todo %d: content is required", i+1)
+		}
+		status, _ := m["status"].(string)
+		items = append(items, agent.TodoItem{Content: content, Status: agent.NormalizeTodoStatus(status)})
+	}
+	return items, nil
 }
 
 // applyPatch parses and applies a "*** Begin Patch" envelope (issue #45) in two
@@ -1947,6 +2012,63 @@ func (g *Gogent) SendMessageToSessionWithModel(ctx context.Context, sessionID, a
 	}
 
 	return nil, fmt.Errorf("no responses generated")
+}
+
+// SetPlanMode toggles plan mode for a session (issue #43): in plan mode the
+// agent investigates with read-only tools and proposes a plan instead of making
+// changes. It is a no-op for an unknown session.
+func (g *Gogent) SetPlanMode(sessionID string, on bool) {
+	if us := g.GetUserSession(sessionID); us != nil {
+		us.SetPlanMode(on)
+	}
+}
+
+// PlanMode reports whether a session is in plan mode (issue #43).
+func (g *Gogent) PlanMode(sessionID string) bool {
+	if us := g.GetUserSession(sessionID); us != nil {
+		return us.PlanMode()
+	}
+	return false
+}
+
+// HasPendingPlan reports whether a session has a plan awaiting the user's
+// approval (issue #43). It is the gate the UI's "approve plan" action checks.
+func (g *Gogent) HasPendingPlan(sessionID string) bool {
+	if us := g.GetUserSession(sessionID); us != nil {
+		return strings.TrimSpace(us.PendingPlan()) != ""
+	}
+	return false
+}
+
+// approvedPlanPrefix introduces the message sent to the agent once the user
+// approves a plan, so the model knows it may now make changes (issue #43).
+const approvedPlanPrefix = "The user approved the plan below. Implement it now using the available tools.\n\n"
+
+// ExecuteApprovedPlan runs the session's pending plan with the full tool set
+// (issue #43): it leaves plan mode, then sends an "approved — execute" turn that
+// carries the plan. It is synchronous (like SendMessageToSessionWithModel); the
+// caller runs it on a background goroutine. It reuses the model the planning
+// turn used (the session's primary model), or the default when none is known.
+func (g *Gogent) ExecuteApprovedPlan(ctx context.Context, sessionID, agentID string) (*model.CompletionResponse, error) {
+	us := g.GetUserSession(sessionID)
+	if us == nil {
+		return nil, &SessionNotFoundError{ID: sessionID}
+	}
+	plan := us.PendingPlan()
+	if strings.TrimSpace(plan) == "" {
+		return nil, fmt.Errorf("no plan awaiting approval in session %s", sessionID)
+	}
+	modelName := us.PrimaryModel()
+	us.SetPlanMode(false) // exit plan mode (also clears the pending plan)
+	return g.SendMessageToSessionWithModel(ctx, sessionID, agentID, approvedPlanPrefix+plan, modelName)
+}
+
+// RejectPlan discards a session's pending plan without executing it, leaving
+// plan mode so the user can revise and re-plan (issue #43).
+func (g *Gogent) RejectPlan(sessionID string) {
+	if us := g.GetUserSession(sessionID); us != nil {
+		us.ClearPendingPlan()
+	}
 }
 
 // CountMessages counts messages in a session

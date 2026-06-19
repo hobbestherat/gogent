@@ -65,6 +65,11 @@ type SessionWindow struct {
 	// into the sent message by expandMentions. Nil on read-only analysis windows,
 	// which have no input.
 	completer *mentionCompleter
+	// planMode mirrors the backend plan-mode flag for the status indicator, and
+	// planPending marks a plan awaiting approval (set on SessionEventPlan),
+	// enabling the /act (approve) command (issue #43).
+	planMode    bool
+	planPending bool
 }
 
 // newSessionWindow builds the window, its widgets and their layout/handlers. A
@@ -207,6 +212,7 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 		input.Clear()
 		sw.addUser(text)
 		sw.setBusy(true)
+		sw.planPending = false // sending supersedes any plan awaiting approval
 		modelName := sw.selectedModelName()
 		// Expand any @-file mentions into attached file content so the model
 		// receives the referenced files directly (issue #46). The transcript keeps
@@ -482,7 +488,13 @@ func (sw *SessionWindow) refreshStatus() {
 	budget := sw.wb.budgetConfig()
 	live := sw.liveStats()
 	sw.status.FG = statusColor(!sw.busy, sw.statusStats, budget)
-	sw.status.SetText(formatStatusLine(sw.statusState, sw.statusStats, live, budget, sw.status.Component.Bounds.W))
+	state := sw.statusState
+	if sw.planMode {
+		// Surface plan mode at the left of the status line so the read-only turn
+		// is unmistakable (issue #43).
+		state = "PLAN · " + state
+	}
+	sw.status.SetText(formatStatusLine(state, sw.statusStats, live, budget, sw.status.Component.Bounds.W))
 	sw.alertBudgetIfNewlyExceeded(budget)
 }
 
@@ -542,6 +554,17 @@ func (sw *SessionWindow) apply(ev agent.SessionEvent) {
 	case agent.SessionEventFinal:
 		sw.addAssistant(ev.Text)
 		sw.setBusy(false)
+	case agent.SessionEventPlan:
+		// The plan itself arrives as the assistant's final answer; this just marks
+		// that a plan is awaiting approval so /act (and the menu) can execute it
+		// (issue #43). A non-plan turn clears a stale pending flag.
+		sw.planPending = strings.TrimSpace(ev.Plan) != ""
+		if sw.planPending {
+			sw.addNote("Plan ready for review — approve with /act (or Session → Approve Plan) to execute it.")
+		}
+	case agent.SessionEventTodo:
+		// The checklist is rendered in the sidebar; nothing to add to the
+		// transcript (issue #43).
 	case agent.SessionEventCompaction:
 		sw.addCompaction(ev.Step, ev.Text)
 	case agent.SessionEventError:
@@ -608,8 +631,59 @@ func (sw *SessionWindow) handleSlashCommand(text string) bool {
 		summary, err := sw.callUndo(true, turns)
 		sw.echoCommand("/rewind", summary, err)
 		return true
+	case "/plan":
+		sw.togglePlanMode()
+		return true
+	case "/act":
+		sw.approvePlan()
+		return true
 	}
 	return false
+}
+
+// togglePlanMode flips the session's plan mode (issue #43). In plan mode the
+// agent researches with read-only tools and proposes a plan instead of making
+// changes; the change is mirrored to the backend and reflected in the status
+// line. The note explains the new state so the mode is discoverable.
+func (sw *SessionWindow) togglePlanMode() {
+	sw.planMode = !sw.planMode
+	sw.planPending = false // either direction supersedes any stale pending plan
+	if sw.wb.handlers.OnSetPlanMode != nil {
+		sw.wb.handlers.OnSetPlanMode(sw.id, sw.planMode)
+	}
+	if sw.planMode {
+		sw.addNote("Plan mode on — the agent will research and propose a plan without making changes. " +
+			"Send your request, then approve the plan (/act) to execute it.")
+	} else {
+		sw.addNote("Plan mode off — the agent may make changes directly.")
+	}
+	sw.refreshStatus()
+}
+
+// approvePlan executes the session's pending plan (issue #43). It refuses (with a
+// note) when no plan is awaiting approval; otherwise it hands the turn to the
+// backend approver, which re-runs the plan with the full tool set.
+func (sw *SessionWindow) approvePlan() {
+	if !sw.planPending {
+		sw.addNote("no plan to approve — use /plan to plan a task first")
+		return
+	}
+	sw.startApprovedTurn()
+}
+
+// startApprovedTurn marks the window busy for an approved plan's executing turn
+// and dispatches it to the backend approver (issue #43). The plan-pending flag
+// clears and the turn's terminal events (final/error) clear the busy state.
+func (sw *SessionWindow) startApprovedTurn() {
+	sw.planPending = false
+	sw.planMode = false
+	sw.setBusy(true)
+	if sw.wb.handlers.OnApprovePlan != nil {
+		go sw.wb.handlers.OnApprovePlan(sw.id)
+	} else {
+		sw.addNote("plan approval unavailable")
+		sw.setBusy(false)
+	}
 }
 
 // callUndo invokes the backend undo/rewind handler. rewind selects /rewind (the
