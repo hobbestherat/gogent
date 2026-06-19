@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"sync"
 
 	"gogent/internal/model"
@@ -60,6 +61,11 @@ type Agent struct {
 	TimeoutMs    int64
 	ToolRegistry *tool.ToolRegistry
 	mu           sync.Mutex
+	// cancel aborts the agent's currently running task loop. It is set while a
+	// loop is in flight (see UserSession.runLoop) and invoked by Cancel — which
+	// is how StopAgent and session close actually interrupt in-flight model work
+	// instead of merely flipping a state field (issue #24).
+	cancel context.CancelFunc
 }
 
 // NewAgent creates a new agent
@@ -190,6 +196,26 @@ func (a *Agent) GetState() AgentState {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.State
+}
+
+// setCancel records the cancel func of the agent's in-flight task loop. Passing
+// nil clears it (the loop has finished). It is unexported because only the task
+// loop should arm/disarm it.
+func (a *Agent) setCancel(cancel context.CancelFunc) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.cancel = cancel
+}
+
+// Cancel aborts the agent's currently running task loop, if any. It is safe to
+// call when no loop is running (a no-op) and from any goroutine.
+func (a *Agent) Cancel() {
+	a.mu.Lock()
+	cancel := a.cancel
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // UpdateState updates state and returns old state

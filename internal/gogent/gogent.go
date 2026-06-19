@@ -330,6 +330,7 @@ func (g *Gogent) initializeToolRegistry() {
 			if session == nil {
 				return nil, fmt.Errorf("session not found: %s", ctx.SessionID)
 			}
+			loopCtx := toolLoopContext(ctx)
 
 			rawBatch, hasBatch := args["subtasks"]
 			if hasBatch {
@@ -363,7 +364,7 @@ func (g *Gogent) initializeToolRegistry() {
 					wg.Add(1)
 					go func() {
 						defer wg.Done()
-						text, err := session.SpawnSubAgent(ctx.AgentID, name, task, g.SubAgentOneShot())
+						text, err := session.SpawnSubAgent(loopCtx, ctx.AgentID, name, task, g.SubAgentOneShot())
 						if err != nil {
 							results[i].Error = err.Error()
 							return
@@ -380,7 +381,7 @@ func (g *Gogent) initializeToolRegistry() {
 			if strings.TrimSpace(task) == "" {
 				return nil, fmt.Errorf("task is required")
 			}
-			result, err := session.SpawnSubAgent(ctx.AgentID, name, task, g.SubAgentOneShot())
+			result, err := session.SpawnSubAgent(loopCtx, ctx.AgentID, name, task, g.SubAgentOneShot())
 			if err != nil {
 				return nil, err
 			}
@@ -659,12 +660,29 @@ func (g *Gogent) NewSession(id string) *agent.UserSession {
 	return g.CreateUserSession(id, rootAgent)
 }
 
+// toolLoopContext returns the cancellation scope of the loop that invoked a
+// tool, falling back to context.Background() for callers that pre-date context
+// plumbing (issue #24).
+func toolLoopContext(ctx tool.ToolContext) context.Context {
+	if ctx.Context != nil {
+		return ctx.Context
+	}
+	return context.Background()
+}
+
 // RemoveSession deletes a user session by id.
 func (g *Gogent) RemoveSession(id string) {
 	g.mu.Lock()
+	us := g.userSessions[id]
 	delete(g.userSessions, id)
 	delete(g.sessionTitles, id)
 	g.mu.Unlock()
+
+	// Cancel any in-flight task loops so they stop mutating a session that is no
+	// longer reachable (issue #24).
+	if us != nil {
+		us.Stop()
+	}
 
 	// Archive the on-disk transcript so it is not auto-restored next start.
 	if g.store != nil && id != "default" {
@@ -1070,13 +1088,15 @@ func (g *Gogent) Statistics() stats.Report {
 
 // SendMessageToSession sends a message to a session and executes any tool calls
 // This uses the ExecuteTaskLoop for proper multi-turn tool calling support
-func (g *Gogent) SendMessageToSession(sessionID, agentID, message string) (*model.CompletionResponse, error) {
-	return g.SendMessageToSessionWithModel(sessionID, agentID, message, "")
+func (g *Gogent) SendMessageToSession(ctx context.Context, sessionID, agentID, message string) (*model.CompletionResponse, error) {
+	return g.SendMessageToSessionWithModel(ctx, sessionID, agentID, message, "")
 }
 
 // SendMessageToSessionWithModel sends a message to a session with a specific model
-// This uses the ExecuteTaskLoop for proper multi-turn tool calling support
-func (g *Gogent) SendMessageToSessionWithModel(sessionID, agentID, message, modelName string) (*model.CompletionResponse, error) {
+// This uses the ExecuteTaskLoop for proper multi-turn tool calling support. ctx
+// bounds the (potentially long) task loop: cancelling it — e.g. when an HTTP
+// client disconnects — aborts the in-flight model work (issue #24).
+func (g *Gogent) SendMessageToSessionWithModel(ctx context.Context, sessionID, agentID, message, modelName string) (*model.CompletionResponse, error) {
 	g.mu.RLock()
 	userSession, exists := g.userSessions[sessionID]
 	cfg := g.config
@@ -1147,7 +1167,7 @@ func (g *Gogent) SendMessageToSessionWithModel(sessionID, agentID, message, mode
 
 	// Execute the task loop with multi-turn tool calling support
 	// The last response may be a tool call or a final response
-	responses, err := userSession.ExecuteTaskLoopWithModel(agentID, message, selectedConfig)
+	responses, err := userSession.ExecuteTaskLoopWithModel(ctx, agentID, message, selectedConfig)
 	if err != nil {
 		return nil, err
 	}

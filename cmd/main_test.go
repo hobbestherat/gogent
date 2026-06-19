@@ -24,12 +24,18 @@ type fakeBackend struct {
 	mu      sync.Mutex
 }
 
-func (f *fakeBackend) SendMessage(message, modelName string) (*model.CompletionResponse, error) {
+func (f *fakeBackend) SendMessage(ctx context.Context, message, modelName string) (*model.CompletionResponse, error) {
 	f.mu.Lock()
 	f.called++
 	f.mu.Unlock()
 	if f.block != nil {
-		<-f.block
+		// Honor the request context so a client disconnect aborts the loop
+		// instead of blocking forever (issue #24).
+		select {
+		case <-f.block:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	if f.err != nil {
 		return nil, f.err

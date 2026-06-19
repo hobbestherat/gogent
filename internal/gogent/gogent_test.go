@@ -1,6 +1,7 @@
 package gogent
 
 import (
+	"context"
 	"testing"
 
 	"gogent/internal/agent"
@@ -115,7 +116,7 @@ func TestGogentSendMessage(t *testing.T) {
 	agent := agent.NewAgent("agent3", s)
 	g.CreateUserSession("session3", agent)
 
-	resp, err := g.SendMessageToSession("session3", "agent3", "hi")
+	resp, err := g.SendMessageToSession(context.Background(), "session3", "agent3", "hi")
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
@@ -127,7 +128,7 @@ func TestGogentSendMessage(t *testing.T) {
 func TestGogentSendMessageNotFound(t *testing.T) {
 	g := NewGogent(t.TempDir())
 
-	_, err := g.SendMessageToSession("nonexistent", "agent", "hi")
+	_, err := g.SendMessageToSession(context.Background(), "nonexistent", "agent", "hi")
 	if err == nil {
 		t.Error("Expected error for non-existent session")
 	}

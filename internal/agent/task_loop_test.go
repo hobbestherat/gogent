@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -98,7 +99,7 @@ func TestExecuteTaskLoopNativeToolCall(t *testing.T) {
 
 	us, ag := newLoopSession(t, server.URL)
 
-	responses, err := us.ExecuteTaskLoop("root", "what is 2+2?")
+	responses, err := us.ExecuteTaskLoop(context.Background(), "root", "what is 2+2?")
 	if err != nil {
 		t.Fatalf("loop returned error: %v", err)
 	}
@@ -154,7 +155,7 @@ func TestExecuteTaskLoopJSONFallback(t *testing.T) {
 
 	us, _ := newLoopSession(t, server.URL)
 
-	responses, err := us.ExecuteTaskLoop("root", "compute 3*7")
+	responses, err := us.ExecuteTaskLoop(context.Background(), "root", "compute 3*7")
 	if err != nil {
 		t.Fatalf("loop returned error: %v", err)
 	}

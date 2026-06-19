@@ -1,5 +1,7 @@
 package model
 
+import "context"
+
 // This file defines the clean, reusable interface surface for "something that
 // can talk to a model". It is intentionally split into small capability
 // interfaces so the connector can later be extracted into its own standalone
@@ -17,6 +19,10 @@ type Completer interface {
 // the model can emit structured tool calls.
 type ToolCompleter interface {
 	CompleteWithTools(messages []Message, tools []ToolDef) (*CompletionResponse, error)
+	// CompleteWithToolsCtx is CompleteWithTools bound to a context so an in-flight
+	// completion can be cancelled — the agent loop uses it to make "Stop"/session
+	// close abort the request instead of running to the timeout (issue #24).
+	CompleteWithToolsCtx(ctx context.Context, messages []Message, tools []ToolDef) (*CompletionResponse, error)
 }
 
 // Streamer supports incremental/streaming completions. gogent uses this to

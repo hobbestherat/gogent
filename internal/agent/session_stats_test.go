@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -78,7 +79,7 @@ func TestUsageEventEmittedThroughLoop(t *testing.T) {
 		events = append(events, ev)
 	})
 
-	if _, err := us.ExecuteTaskLoop("root", "what is 2+2?"); err != nil {
+	if _, err := us.ExecuteTaskLoop(context.Background(), "root", "what is 2+2?"); err != nil {
 		t.Fatalf("loop returned error: %v", err)
 	}
 
