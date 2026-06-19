@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"strings"
 
 	"gogent/internal/notify"
 	"gogent/internal/permission"
@@ -214,44 +215,47 @@ func showPermissionDialog(desktop *tv.Desktop, req permission.Request, requester
 	}
 
 	title, question, alwaysLabel := permissionPrompt(req)
+	bodyLines := permissionDialogBody(req, question)
 
-	const width = 64
-	const height = 13
-	x := (desktop.App().Width() - width) / 2
-	y := (desktop.App().Height() - height) / 2
+	app := desktop.App()
+	requesterHdr := requesterLine(requester, req.Context.Agent)
+	width, height, bodyY, bodyH, btnY := permissionDialogLayout(app.Width(), app.Height(), requesterHdr != "", bodyLines)
+
+	x := (app.Width() - width) / 2
+	y := (app.Height() - height) / 2
 	if x < 0 {
 		x = 0
 	}
 	if y < 0 {
 		y = 0
 	}
-
 	dialog := tv.NewDialog(title, x, y, width, height)
 	dialog.Window.ShowClose = false
 
 	// Name the requesting session/agent so a prompt raised by an unfocused
-	// background session is unambiguous (issue #55). It takes the top content row;
-	// the question moves down one row to make space.
-	questionY := 1
-	if label := requesterLine(requester, req.Context.Agent); label != "" {
-		r := tv.NewLabel(truncate(label, width-4), tv.Rect{X: 2, Y: 1, W: width - 4, H: 1})
+	// background session is unambiguous (issue #55). It stays pinned above the
+	// (possibly scrolling) body.
+	if requesterHdr != "" {
+		r := tv.NewLabel(truncate(requesterHdr, width-4), tv.Rect{X: 2, Y: 1, W: width - 4, H: 1})
 		r.FG = colorUser
 		r.BG = tv.DefaultTheme.DialogBG
 		dialog.Window.AddContent(r)
-		questionY = 2
 	}
 
-	q := tv.NewLabel(question, tv.Rect{X: 2, Y: questionY, W: width - 4, H: 3})
-	q.FG = tv.DefaultTheme.DialogFG
-	q.BG = tv.DefaultTheme.DialogBG
-	dialog.Window.AddContent(q)
-
-	if req.Detail != "" {
-		detail := tv.NewLabel("$ "+truncate(req.Detail, width-6), tv.Rect{X: 2, Y: 5, W: width - 4, H: 1})
-		detail.FG = colorTool
-		detail.BG = tv.DefaultTheme.DialogBG
-		dialog.Window.AddContent(detail)
+	// The decision-relevant text — the question (which carries the resource/path
+	// for external and network actions) and the shell command — goes in a wrapping,
+	// scrollable view so nothing is hidden behind "…". The dialog is sized to show
+	// it in full when it fits the terminal and scrolls when it does not (issue
+	// #122). Scroll with the mouse wheel or Tab to the view and use the arrows.
+	body := tv.NewTextView("", tv.Rect{X: 2, Y: bodyY, W: width - 4, H: bodyH})
+	body.Wrap = true
+	body.FG = tv.DefaultTheme.DialogFG
+	body.BG = tv.DefaultTheme.DialogBG
+	body.FocusFG = tv.DefaultTheme.MnemonicFG
+	for _, line := range bodyLines {
+		body.AddColored(line.text, line.color)
 	}
+	dialog.Window.AddContent(body)
 
 	var layer *tv.Layer
 	done := false
@@ -264,13 +268,17 @@ func showPermissionDialog(desktop *tv.Desktop, req permission.Request, requester
 		onResult(d)
 	}
 
-	allowOnce := tv.NewButton("Allow once", tv.Rect{X: 2, Y: 8, W: 14, H: 1}, func() {
+	// "Allow once" is left-anchored, "Deny" right-anchored, and "Always …" fills
+	// the space between (elided when the resource is long), so the row stays clean
+	// and in-bounds at any dialog width.
+	allowRect, alwaysRect, denyRect, alwaysText := permissionButtonRow(width, btnY, alwaysLabel)
+	allowOnce := tv.NewButton("Allow once", allowRect, func() {
 		finish(permission.DecisionAllow)
 	})
-	always := tv.NewButton(truncate(alwaysLabel, 24), tv.Rect{X: 18, Y: 8, W: 28, H: 1}, func() {
+	always := tv.NewButton(alwaysText, alwaysRect, func() {
 		finish(permission.DecisionAlways)
 	})
-	deny := tv.NewButton("Deny", tv.Rect{X: 48, Y: 8, W: 10, H: 1}, func() {
+	deny := tv.NewButton("Deny", denyRect, func() {
 		finish(permission.DecisionDeny)
 	})
 	dialog.Window.AddContent(allowOnce)
@@ -289,6 +297,201 @@ func showPermissionDialog(desktop *tv.Desktop, req permission.Request, requester
 	layer = tv.NewModalLayer("permission-dialog", dialog)
 	desktop.AddLayer(layer)
 	desktop.SetFocus(deny)
+}
+
+// Sizing knobs for the permission dialog. Width grows with the terminal (clamped
+// to [permissionMinWidth, permissionMaxWidth]) so long commands and paths get
+// room; height grows with the wrapped content up to permissionMaxBodyRows, beyond
+// which (and on short terminals) the body scrolls instead of overflowing.
+const (
+	permissionMinWidth    = 52
+	permissionMaxWidth    = 92
+	permissionMinHeight   = 8
+	permissionMaxBodyRows = 16
+)
+
+// permissionBodyLine is one coloured line of the dialog's scrollable body. The
+// question and the command may exceed the dialog width, so they are wrapped
+// rather than truncated (issue #122).
+type permissionBodyLine struct {
+	text  string
+	color tui.Color
+}
+
+// permissionDialogBody composes the wrapping body: the prompt question (which for
+// external and network actions embeds the resource/path) followed by the shell
+// command from req.Detail, prefixed with "$ " like a prompt. Each logical line is
+// a separate entry so turbotui wraps it rather than collapsing embedded newlines,
+// and nothing is elided — the full resource and command are always present.
+func permissionDialogBody(req permission.Request, question string) []permissionBodyLine {
+	lines := make([]permissionBodyLine, 0, 2)
+	for _, line := range strings.Split(question, "\n") {
+		lines = append(lines, permissionBodyLine{text: line, color: tv.DefaultTheme.DialogFG})
+	}
+	if req.Detail != "" {
+		for i, line := range strings.Split(req.Detail, "\n") {
+			if i == 0 {
+				line = "$ " + line
+			}
+			lines = append(lines, permissionBodyLine{text: line, color: colorTool})
+		}
+	}
+	return lines
+}
+
+// permissionDialogLayout sizes the dialog for the terminal and its content and
+// returns the body's content-relative origin/height plus the button row Y. It is
+// pure so the sizing (grow-with-content, clamp-to-terminal, scroll-on-overflow)
+// can be tested without a live event loop (issue #122).
+func permissionDialogLayout(termW, termH int, hasRequester bool, bodyLines []permissionBodyLine) (width, height, bodyY, bodyH, btnY int) {
+	width = termW - 2
+	if width > permissionMaxWidth {
+		width = permissionMaxWidth
+	}
+	if width < permissionMinWidth {
+		width = permissionMinWidth
+	}
+	if width > termW {
+		width = termW
+	}
+	if width < 1 {
+		width = 1
+	}
+
+	// Effective text columns inside the body: it spans width-4 columns (X:2 …
+	// width-3) and turbotui reserves its last column for the scrollbar.
+	wrapW := width - 5
+	if wrapW < 1 {
+		wrapW = 1
+	}
+	contentRows := 0
+	for _, line := range bodyLines {
+		contentRows += wrapRowCount(line.text, wrapW)
+	}
+	if contentRows < 1 {
+		contentRows = 1
+	}
+
+	bodyY = 1 // leave content row 0 as top padding
+	if hasRequester {
+		bodyY = 2
+	}
+
+	desiredBody := contentRows
+	if desiredBody > permissionMaxBodyRows {
+		desiredBody = permissionMaxBodyRows
+	}
+
+	// height = 2 borders + topPad + requester? + body + 1 gap + 1 button row + 1 bottom pad.
+	height = bodyY + desiredBody + 5
+	if max := termH - 2; height > max {
+		height = max
+	}
+	if height < permissionMinHeight {
+		height = permissionMinHeight
+	}
+	if height > termH {
+		height = termH
+	}
+
+	// Derive the body height from the final (possibly clamped) dialog height.
+	bodyH = height - bodyY - 5
+	if bodyH < 1 {
+		bodyH = 1
+	}
+	btnY = bodyY + bodyH + 1
+	return width, height, bodyY, bodyH, btnY
+}
+
+// permissionButtonRow lays out the three action buttons on content row btnY across
+// a dialog of the given width. "Allow once" is left-anchored at the content left
+// margin, "Deny" is right-anchored to the content right edge, and "Always …" takes
+// the space between them — its label elided with "..." when the resource is long —
+// so the row never overlaps or escapes the dialog. The returned alwaysLabel is the
+// (possibly elided) text to render.
+func permissionButtonRow(width, btnY int, alwaysLabel string) (allowOnce, always, deny tv.Rect, alwaysText string) {
+	const gap = 2
+	leftX := 2
+	rightX := width - 3
+	allowOnce = tv.Rect{X: leftX, Y: btnY, W: buttonLabelWidth("Allow once"), H: 1}
+
+	denyW := buttonLabelWidth("Deny")
+	deny = tv.Rect{X: rightX - denyW + 1, Y: btnY, W: denyW, H: 1}
+
+	slotStart := allowOnce.X + allowOnce.W + gap
+	slotEnd := deny.X - gap - 1
+	avail := slotEnd - slotStart + 1
+	if avail < 1 {
+		avail = 1
+	}
+	alwaysText = fitButtonLabel(alwaysLabel, avail)
+	alwaysW := buttonLabelWidth(alwaysText)
+	if alwaysW < 1 {
+		alwaysW = 1
+	}
+	if alwaysW > avail {
+		alwaysW = avail
+	}
+	always = tv.Rect{X: slotStart, Y: btnY, W: alwaysW, H: 1}
+	return allowOnce, always, deny, alwaysText
+}
+
+// fitButtonLabel elides label (appending "...") so its rendered button width — the
+// clean rune count plus the "[ " / " ]" chrome — fits in maxCols. The full
+// resource stays visible in the scrollable body, so this only shortens the button
+// caption. Mirrors truncate()'s "..." convention but is chrome-aware.
+func fitButtonLabel(label string, maxCols int) string {
+	maxClean := maxCols - buttonChrome
+	if maxClean <= 0 || cleanMnemonicRunes(label) <= maxClean {
+		return label
+	}
+	runes := []rune(label)
+	if maxClean <= 3 {
+		return string(runes[:maxClean])
+	}
+	return string(runes[:maxClean-3]) + "..."
+}
+
+// wrapRowCount reports how many display rows text occupies when word-wrapped at
+// width columns, matching turbotui's TextView Wrap layout (greedy word fill that
+// hard-splits words longer than the width). It mirrors turbotv.wrapText so the
+// dialog's computed height matches what the widget actually renders; empty text
+// occupies a single row.
+func wrapRowCount(text string, width int) int {
+	if width < 1 {
+		width = 1
+	}
+	if text == "" {
+		return 1
+	}
+	rows := 0
+	cur := 0 // rune length of the in-progress row; 0 means the row is empty
+	for _, word := range strings.Fields(text) {
+		wlen := len([]rune(word))
+		if cur != 0 && cur+1+wlen <= width {
+			cur += 1 + wlen
+			continue
+		}
+		if wlen <= width {
+			rows++
+			cur = wlen
+			continue
+		}
+		// Over-long word: full width rows plus a final partial (or full) row.
+		full := wlen / width
+		rem := wlen % width
+		if rem == 0 {
+			rows += full
+			cur = width
+		} else {
+			rows += full + 1
+			cur = rem
+		}
+	}
+	if rows == 0 {
+		return 1
+	}
+	return rows
 }
 
 // requesterLine renders the "Requested by …" header for the permission dialog.
