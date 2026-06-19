@@ -99,13 +99,22 @@ type SubAgentConfig struct {
 	// MaxDepth bounds how deeply sub-agents may recursively spawn further
 	// sub-agents. <=0 means use the built-in default (see MaxDepthOrDefault).
 	MaxDepth int `json:"max_depth"`
+	// MaxConcurrent caps how many sub-agent loops may run concurrently across the
+	// whole process, independent of the structural per-parent/per-depth limits
+	// which otherwise compose multiplicatively (MaxSubAgents ^ MaxDepth). It is
+	// the backpressure that stops a deep fan-out from thundering against the
+	// backend (issue #23). <=0 means use the built-in default (see
+	// MaxConcurrentOrDefault).
+	MaxConcurrent int `json:"max_concurrent"`
 }
 
-// defaultMaxSubAgents and defaultMaxDepth are the conservative built-in limits
-// applied when the config leaves the corresponding field unset (<=0).
+// defaultMaxSubAgents, defaultMaxDepth and defaultMaxConcurrent are the
+// conservative built-in limits applied when the config leaves the corresponding
+// field unset (<=0).
 const (
-	defaultMaxSubAgents = 4
-	defaultMaxDepth     = 3
+	defaultMaxSubAgents  = 4
+	defaultMaxDepth      = 3
+	defaultMaxConcurrent = 8
 )
 
 // MaxSubAgentsOrDefault returns the configured sub-agent fan-out limit, or the
@@ -126,6 +135,15 @@ func (c SubAgentConfig) MaxDepthOrDefault() int {
 	return c.MaxDepth
 }
 
+// MaxConcurrentOrDefault returns the configured global cap on concurrently
+// running sub-agents, or the built-in default when unset.
+func (c SubAgentConfig) MaxConcurrentOrDefault() int {
+	if c.MaxConcurrent <= 0 {
+		return defaultMaxConcurrent
+	}
+	return c.MaxConcurrent
+}
+
 // IsOneShot reports whether the configured execution model is one-shot. An empty
 // (unset) value defaults to one-shot, the stable mode.
 func (c SubAgentConfig) IsOneShot() bool {
@@ -140,6 +158,7 @@ func DefaultSubAgentConfig() SubAgentConfig {
 		AllowRecursive: false,
 		MaxSubAgents:   defaultMaxSubAgents,
 		MaxDepth:       defaultMaxDepth,
+		MaxConcurrent:  defaultMaxConcurrent,
 	}
 }
 

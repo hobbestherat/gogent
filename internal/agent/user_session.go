@@ -105,6 +105,11 @@ type UserSession struct {
 	// subAgentTimeoutMs bounds how long a spawned sub-agent may run. Zero leaves
 	// the agent's built-in default in place.
 	subAgentTimeoutMs int64
+	// subAgentLimiter bounds how many sub-agent loops run concurrently. It is
+	// typically a process-wide limiter shared across every session (see
+	// SetSubAgentLimiter), so a deep fan-out cannot spawn an unbounded number of
+	// goroutines (issue #23). Nil means unbounded.
+	subAgentLimiter *SubAgentLimiter
 
 	// systemContextFn, when set, returns extra system-prompt context (project
 	// AGENTS.md instructions and the available-skills index) appended to every
@@ -223,6 +228,15 @@ func (s *UserSession) systemContext() string {
 		return ""
 	}
 	return fn()
+}
+
+// SetSubAgentLimiter installs the (typically process-wide) limiter that bounds
+// how many sub-agent loops this session may run concurrently. Passing nil
+// restores unbounded behavior.
+func (s *UserSession) SetSubAgentLimiter(l *SubAgentLimiter) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.subAgentLimiter = l
 }
 
 // SetSubAgentTimeout sets the timeout applied to newly spawned sub-agents. A
@@ -532,16 +546,17 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 		// lock via GetSubAgents, the parent link via GetParent), so this is
 		// safe and is what lets "delegate A, B and C at once" run in parallel.
 		if allSpawnSubAgent(calls) {
-			var wg sync.WaitGroup
+			// Bound the goroutine fan-out: spawns run concurrently only while a
+			// global sub-agent slot is free, otherwise inline as backpressure so a
+			// deep fan-out can't thunder against the backend (issue #23).
+			tasks := make([]func(), len(calls))
 			for i, call := range calls {
 				i, call := i, call
 				emit(SessionEvent{Type: SessionEventToolCall, Step: step, Tool: call.Tool, Args: call.Args})
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+				tasks[i] = func() {
 					// Keep a panic in this worker (or anything it calls) from
 					// taking down the process: turn it into a tool-result error
-					// for this slot so wg.Wait still yields a valid message set
+					// for this slot so the batch still yields a valid message set
 					// (issue #8).
 					defer func() {
 						if r := recover(); r != nil {
@@ -553,9 +568,9 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 					resultStr := s.runToolCall(ctx, agent, agentID, call)
 					emit(SessionEvent{Type: SessionEventToolResult, Step: step, Tool: call.Tool, Args: call.Args, Result: resultStr})
 					toolMsgs[i] = makeToolResultMessage(call, resultStr)
-				}()
+				}
 			}
-			wg.Wait()
+			s.RunSubAgentsBounded(tasks)
 			sess.AppendToolResults(toolMsgs)
 			emit(SessionEvent{Type: SessionEventThinking, Step: step + 1})
 			s.compactIfNeeded(sess, emit)
