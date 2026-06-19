@@ -424,8 +424,9 @@ func (sw *SessionWindow) addError(text string) {
 
 // handleTranscriptKey implements the less/vim-style transcript controls while the
 // history view is focused: '/' to search, single letters to toggle event-type
-// filters, 'f'/'u' to fold/unfold all, and Esc to clear an active filter/search.
-// It returns false (letting the TextView scroll) when nothing applies.
+// filters, 'f'/'u' to fold/unfold all, 'y' to yank the last answer, and Esc to
+// clear an active filter/search. It returns false (letting the TextView scroll)
+// when nothing applies.
 func (sw *SessionWindow) handleTranscriptKey(event tui.TypeEvent) bool {
 	if event.Ctrl || event.Alt {
 		return false
@@ -453,6 +454,8 @@ func (sw *SessionWindow) handleTranscriptKey(event tui.TypeEvent) bool {
 			sw.transcript.setFold(true)
 		case 'u':
 			sw.transcript.setFold(false)
+		case 'y':
+			sw.copyLastAnswer()
 		default:
 			return false
 		}
@@ -471,6 +474,33 @@ func (sw *SessionWindow) promptFind() {
 		sw.transcript.setQuery(value)
 		sw.wb.desktop.Redraw()
 	})
+}
+
+// copyLastAnswer yanks the most recent assistant answer to the system clipboard
+// (issue #62). It is also bound to the 'y' key while the transcript is focused
+// (vim-style yank). A transcript note confirms the copy, or reports when there is
+// nothing yet to copy.
+func (sw *SessionWindow) copyLastAnswer() {
+	text := sw.transcript.lastAssistantRecord().body()
+	if strings.TrimSpace(text) == "" {
+		sw.addNote("no answer to copy yet")
+		return
+	}
+	sw.wb.copyToClipboard(text)
+	sw.addNote(fmt.Sprintf("copied last answer (%d chars) to clipboard", utf8.RuneCountInString(text)))
+}
+
+// copyLastCode yanks the fenced code blocks from the most recent assistant answer
+// to the system clipboard (issue #62). When the answer has no fenced code it
+// reports that rather than copying the prose.
+func (sw *SessionWindow) copyLastCode() {
+	code := extractFencedCode(sw.transcript.lastAssistantRecord().body())
+	if strings.TrimSpace(code) == "" {
+		sw.addNote("no code block in last answer")
+		return
+	}
+	sw.wb.copyToClipboard(code)
+	sw.addNote(fmt.Sprintf("copied code (%d chars) to clipboard", utf8.RuneCountInString(code)))
 }
 
 // restore replays a saved transcript into the model so a re-opened session is

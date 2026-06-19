@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"gogent/internal/agent"
+	"gogent/internal/clipboard"
 	"gogent/internal/config"
 	"gogent/internal/gogent"
 	"gogent/internal/notify"
@@ -194,6 +195,10 @@ type Workbench struct {
 	// output (os.Stdout); SetNotifyConfig keeps its config in sync with the
 	// persisted setting.
 	notify *notify.Notifier
+	// clipboard copies yanked text to the system clipboard (OSC 52 plus a native
+	// fallback), writing the OSC sequence to os.Stdout like the notifier (issue
+	// #62).
+	clipboard *clipboard.Board
 	// statsRefresh coalesces Overall-panel recomputations: a burst of session
 	// events arms it once and rapid follow-ups Reset it, so the panel refreshes
 	// at most ~250ms after the burst settles instead of once per event (issues
@@ -224,6 +229,9 @@ func NewWorkbench(models []*config.ModelConfig) *Workbench {
 		// terminal the TUI renders to. Defaults are used until the backend pushes
 		// the persisted config in via SetNotifyConfig.
 		notify: notify.New(config.DefaultNotifyConfig(), os.Stdout),
+		// Clipboard writes OSC 52 to the same terminal (SSH-safe) and pipes to a
+		// native utility when one is available.
+		clipboard: clipboard.New(os.Stdout),
 	}
 	// Cancelled when the UI loop stops; see the shutdown field and Run.
 	w.shutdown, w.quit = context.WithCancel(context.Background())
@@ -351,6 +359,9 @@ func (w *Workbench) rebuildMenu() {
 			tv.NewMenuItem(pinLabel, func() { w.TogglePin(w.ActiveID()) }),
 			tv.NewMenuItem("Move Active &Up", func() { w.MoveSession(w.ActiveID(), -1) }),
 			tv.NewMenuItem("Move Active &Down", func() { w.MoveSession(w.ActiveID(), 1) }),
+			tv.NewMenuItem("----------", nil),
+			tv.NewMenuItem("Export &Markdown…", func() { w.exportActive("md") }),
+			tv.NewMenuItem("Export &JSON…", func() { w.exportActive("json") }),
 		)
 	}
 	if len(order) > 0 {
@@ -434,9 +445,10 @@ func (w *Workbench) settingsItems() []*tv.MenuItem {
 }
 
 // viewItems builds the View submenu: find-in-transcript, the event-type filter
-// toggles and fold/unfold — all acting on the active session's transcript. The
-// same operations are available from the keyboard while the transcript is
-// focused ('/', a/t/r/e, f/u, Esc); the menu makes them discoverable.
+// toggles, fold/unfold and yank-to-clipboard — all acting on the active
+// session's transcript. The same operations are available from the keyboard
+// while the transcript is focused ('/', a/t/r/e, f/u, y, Esc); the menu makes
+// them discoverable.
 func (w *Workbench) viewItems() []*tv.MenuItem {
 	return []*tv.MenuItem{
 		tv.NewMenuItem("&Find…", func() { w.withActiveTranscript((*SessionWindow).promptFind) }).
@@ -450,6 +462,13 @@ func (w *Workbench) viewItems() []*tv.MenuItem {
 		tv.NewMenuItem("----------", nil),
 		tv.NewMenuItem("F&old All", func() { w.transcriptDo(func(m *transcriptModel) { m.setFold(true) }) }),
 		tv.NewMenuItem("&Unfold All", func() { w.transcriptDo(func(m *transcriptModel) { m.setFold(false) }) }),
+		tv.NewMenuItem("----------", nil),
+		tv.NewMenuItem("Cop&y Last Answer", func() {
+			w.withActiveTranscript((*SessionWindow).copyLastAnswer)
+		}),
+		tv.NewMenuItem("Copy Last &Code Block", func() {
+			w.withActiveTranscript((*SessionWindow).copyLastCode)
+		}),
 	}
 }
 
@@ -475,6 +494,51 @@ func (w *Workbench) transcriptDo(fn func(*transcriptModel)) {
 		fn(sw.transcript)
 		w.desktop.Redraw()
 	})
+}
+
+// copyToClipboard writes text to the system clipboard via the workbench's board
+// (OSC 52 plus a native utility fallback). No-op when no board is configured.
+func (w *Workbench) copyToClipboard(text string) {
+	if w.clipboard != nil {
+		w.clipboard.Copy(text)
+	}
+}
+
+// sessionTitle returns a session's window title, or "" when it is unknown.
+func (w *Workbench) sessionTitle(id string) string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if sw := w.sessions[id]; sw != nil {
+		return sw.title
+	}
+	return ""
+}
+
+// exportActive renders the active session's transcript in the given format
+// ("md" or "json") and writes it to ~/.gogent, then confirms with the path (or an
+// error). It reads the same backend transcript data the restored-session and
+// monologue views use, so the export reflects the full conversation rather than
+// the capped live view (issue #62).
+func (w *Workbench) exportActive(format string) {
+	if w.handlers.GetTranscript == nil {
+		tv.ShowConfirmYesNo(w.desktop, "Export Session", "Export is unavailable.", nil)
+		return
+	}
+	id := w.ActiveID()
+	if id == "" {
+		return
+	}
+	msgs := w.handlers.GetTranscript(id, "root")
+	path, err := writeTranscriptExport(msgs, w.sessionTitle(id), format)
+	label := "Markdown"
+	if format == "json" {
+		label = "JSON"
+	}
+	msg := "Wrote " + label + " to:\n" + path
+	if err != nil {
+		msg = label + " export failed:\n" + err.Error()
+	}
+	tv.ShowConfirmYesNo(w.desktop, "Export Session", msg, nil)
 }
 
 func (w *Workbench) confirmQuit() {

@@ -84,6 +84,33 @@ func (r *transcriptRecord) matches(query string) bool {
 	return false
 }
 
+// body joins a record's child lines back into the text they were rendered from.
+// For a user or assistant record — whose lines carry the verbatim message split
+// on newlines — this reconstructs the original message text, which the yank
+// actions copy to the clipboard (issue #62).
+func (r *transcriptRecord) body() string {
+	if r == nil {
+		return ""
+	}
+	parts := make([]string, len(r.lines))
+	for i, ln := range r.lines {
+		parts[i] = ln.text
+	}
+	return strings.Join(parts, "\n")
+}
+
+// lastAssistantRecord returns the most recent assistant record, or nil when the
+// transcript has no assistant message yet. It anchors the yank-last-answer and
+// yank-last-code actions (issue #62).
+func (m *transcriptModel) lastAssistantRecord() *transcriptRecord {
+	for i := len(m.records) - 1; i >= 0; i-- {
+		if m.records[i].kind == kindAssistant {
+			return m.records[i]
+		}
+	}
+	return nil
+}
+
 // defaultTranscriptLimit bounds the number of records a session keeps live in its
 // TextView. The view otherwise grows without bound — every event, folded tool
 // result and compaction digest is appended forever — so capping it bounds both
