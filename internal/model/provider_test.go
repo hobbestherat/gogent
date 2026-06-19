@@ -81,7 +81,11 @@ func TestZAIMaxTokensClamp(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req CompletionRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		gotMaxTokens = req.MaxTokens
+		if req.MaxTokens != nil {
+			gotMaxTokens = *req.MaxTokens
+		} else {
+			gotMaxTokens = 0
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(CompletionResponse{Content: "ok", Role: RoleAssistant, FinishReason: "stop"})
 	}))

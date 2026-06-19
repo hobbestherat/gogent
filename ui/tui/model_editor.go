@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"gogent/internal/model"
 
@@ -89,6 +90,15 @@ func (w *Workbench) showModelEditor() {
 	apiKey := field("API key:", 7)
 	temp := field("Temperature:", 8)
 	maxTokens := field("Max tokens:", 9)
+	reasoningEffort := field("Reasoning:", 10)
+
+	// Thinking is tri-state: "default" leaves the toggle unset (provider
+	// default), "on"/"off" force it. Only providers that understand it actually
+	// send it (see buildRequest), so it is safe to show for every model.
+	dialog.Window.AddContent(dialogLabel("Thinking:", tv.Rect{X: 2, Y: 11, W: labelW, H: 1}))
+	thinkingOpts := []string{"default", "on", "off"}
+	thinking := tv.NewSelect(w.desktop, thinkingOpts, tv.Rect{X: boxX, Y: 11, W: boxW, H: 1})
+	dialog.Window.AddContent(thinking)
 
 	// currentModelID reads the model id from whichever model widget is active.
 	currentModelID := func() string {
@@ -111,6 +121,8 @@ func (w *Workbench) showModelEditor() {
 		apiKey.SetText(m.APIKey)
 		temp.SetText(strconv.FormatFloat(float64(m.Temperature), 'g', -1, 32))
 		maxTokens.SetText(strconv.Itoa(m.MaxTokens))
+		reasoningEffort.SetText(m.ReasoningEffort)
+		thinking.SetSelected(thinkingIndex(m.Thinking))
 	}
 	store := func(i int) {
 		models[i].DisplayName = display.GetText()
@@ -122,6 +134,8 @@ func (w *Workbench) showModelEditor() {
 			models[i].Temperature = float32(v)
 		}
 		models[i].MaxTokens = atoiOr(maxTokens.GetText(), models[i].MaxTokens)
+		models[i].ReasoningEffort = strings.TrimSpace(reasoningEffort.GetText())
+		models[i].Thinking = thinkingValue(thinking.Value())
 	}
 	scanModels = func() {
 		if w.handlers.ScanModels == nil {
@@ -192,6 +206,34 @@ func (w *Workbench) showModelEditor() {
 	layer = tv.NewModalLayer("model-editor", dialog)
 	w.desktop.AddLayer(layer)
 	w.desktop.SetFocus(sel)
+}
+
+// thinkingIndex maps a ModelConfig.Thinking pointer to its index in the
+// "default"/"on"/"off" select (nil => default).
+func thinkingIndex(t *bool) int {
+	switch {
+	case t == nil:
+		return 0
+	case *t:
+		return 1
+	default:
+		return 2
+	}
+}
+
+// thinkingValue maps the "default"/"on"/"off" select value back to a
+// ModelConfig.Thinking pointer (default => nil, leaving the param unset).
+func thinkingValue(v string) *bool {
+	switch v {
+	case "on":
+		on := true
+		return &on
+	case "off":
+		off := false
+		return &off
+	default:
+		return nil
+	}
 }
 
 // indexOrZero returns the index of value in opts, or 0 (the default option) when

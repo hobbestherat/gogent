@@ -49,6 +49,23 @@ type providerSpec struct {
 	// max_tokens (output) parameter; requests above it are clamped. 0 means no
 	// known limit (don't clamp), which suits local servers.
 	maxTokensLimit int
+
+	// --- reasoning-model request capabilities (issue #31) ---
+
+	// reasoningTokenParam, when non-empty, is the JSON field used to cap output
+	// tokens for reasoning models instead of the default max_tokens. OpenAI's
+	// o-series and GPT-5 reject max_tokens and require max_completion_tokens;
+	// Z.AI keeps max_tokens, so it leaves this empty.
+	reasoningTokenParam string
+	// reasoningRejectsTemperature drops temperature/top_p from reasoning
+	// requests entirely. OpenAI reasoning models accept only the default
+	// temperature (o-series require exactly 1, GPT-5 rejects the field
+	// outright), so the safe encoding is to omit it.
+	reasoningRejectsTemperature bool
+	// supportsReasoningEffort / supportsThinking gate the reasoning_effort and
+	// thinking request parameters so they are emitted only where understood.
+	supportsReasoningEffort bool
+	supportsThinking        bool
 }
 
 var providerSpecs = map[APIType]providerSpec{
@@ -58,6 +75,12 @@ var providerSpecs = map[APIType]providerSpec{
 		defaultBaseURL: "http://localhost:8080/v1",
 		chatPath:       "/chat/completions",
 		modelsPath:     "/models",
+		// OpenAI reasoning models (o-series, GPT-5) require max_completion_tokens
+		// and reject a custom temperature; they accept reasoning_effort but have
+		// no `thinking` toggle.
+		reasoningTokenParam:         "max_completion_tokens",
+		reasoningRejectsTemperature: true,
+		supportsReasoningEffort:     true,
 	},
 	APITypeZAI: {
 		defaultBaseURL: "https://api.z.ai/api/paas/v4",
@@ -65,6 +88,10 @@ var providerSpecs = map[APIType]providerSpec{
 		modelsPath:     "/models",
 		// Z.AI rejects max_tokens outside [1, 131072] with a 400.
 		maxTokensLimit: 131072,
+		// GLM reasoning keeps max_tokens and accepts a temperature; it exposes
+		// both an explicit thinking toggle and reasoning_effort (GLM-5.2).
+		supportsReasoningEffort: true,
+		supportsThinking:        true,
 	},
 }
 
