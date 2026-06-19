@@ -50,3 +50,103 @@ func TestModelSessionResumeWithNoUsage(t *testing.T) {
 		t.Errorf("after resuming on a new model with no recorded usage: count = %d, want 0", got)
 	}
 }
+
+// TestModelSessionResumeCarriesConnectorStats covers issue #146: the overall
+// stats panel reads cumulative connector counters, but gogent rebuilds the
+// connection (with zeroed stats) on every send and swaps it in via Resume. The
+// outgoing connector's accumulated counters must be carried into the incoming
+// one so the totals stay cumulative across switches instead of resetting.
+func TestModelSessionResumeCarriesConnectorStats(t *testing.T) {
+	first := NewModelConnection()
+	first.Stats.RequestCount = 3
+	first.Stats.SuccessCount = 3
+	first.Stats.ErrorCount = 1
+	first.Stats.TotalTokensIn = 1000
+	first.Stats.TotalCachedTokensIn = 200
+	first.Stats.TotalTokensOut = 400
+	first.Stats.TotalTimeMs = 500
+
+	s := NewModelSession("t", first)
+
+	t.Run("switching backend carries accumulated counters", func(t *testing.T) {
+		second := NewModelConnection()
+		s.Resume(second)
+
+		got := second.StatsSnapshot()
+		want := StatsSnapshot{
+			RequestCount:        3,
+			SuccessCount:        3,
+			ErrorCount:          1,
+			TotalTokensIn:       1000,
+			TotalCachedTokensIn: 200,
+			TotalTokensOut:      400,
+			TotalTimeMs:         500,
+		}
+		if got != want {
+			t.Errorf("carried stats = %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("further usage accumulates on top of carried totals", func(t *testing.T) {
+		// The current backend already holds the carried totals; record more usage
+		// on it, then switch again and confirm the running total keeps growing.
+		cur := s.Model.(*ModelConnection)
+		cur.Stats.TotalTokensIn += 50
+		cur.Stats.RequestCount++
+
+		third := NewModelConnection()
+		s.Resume(third)
+
+		if got := third.StatsSnapshot().TotalTokensIn; got != 1050 {
+			t.Errorf("tokens-in after second switch = %d, want 1050", got)
+		}
+		if got := third.StatsSnapshot().RequestCount; got != 4 {
+			t.Errorf("requests after second switch = %d, want 4", got)
+		}
+	})
+
+	t.Run("resuming the same backend does not double-count", func(t *testing.T) {
+		before := s.Model.(*ModelConnection).StatsSnapshot()
+		s.Resume(s.Model)
+		if after := s.Model.(*ModelConnection).StatsSnapshot(); after != before {
+			t.Errorf("same-backend resume changed stats: %+v -> %+v", before, after)
+		}
+	})
+}
+
+// TestModelStatsCarry pins the element-wise fold used to preserve connector
+// stats across a model switch (issue #146).
+func TestModelStatsCarry(t *testing.T) {
+	dst := &ModelStats{RequestCount: 2, TotalTokensIn: 100, ErrorCount: 1}
+	dst.Carry(StatsSnapshot{
+		RequestCount:               5,
+		SuccessCount:               4,
+		ErrorCount:                 2,
+		TotalTokensIn:              900,
+		TotalCachedTokensIn:        50,
+		TotalTokensOut:             300,
+		TotalTimeMs:                700,
+		TimeoutCount:               1,
+		ContextWindowOverflowCount: 1,
+		RefusalCount:               1,
+		GenericErrorCount:          1,
+	})
+
+	got := dst.Snapshot()
+	want := StatsSnapshot{
+		RequestCount:               7,
+		SuccessCount:               4,
+		ErrorCount:                 3,
+		TotalTokensIn:              1000,
+		TotalCachedTokensIn:        50,
+		TotalTokensOut:             300,
+		TotalTimeMs:                700,
+		TimeoutCount:               1,
+		ContextWindowOverflowCount: 1,
+		RefusalCount:               1,
+		GenericErrorCount:          1,
+	}
+	if got != want {
+		t.Errorf("after Carry: %+v, want %+v", got, want)
+	}
+}

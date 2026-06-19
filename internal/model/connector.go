@@ -161,3 +161,24 @@ func (s *ModelStats) Snapshot() StatsSnapshot {
 		GenericErrorCount:          s.GenericErrorCount,
 	}
 }
+
+// Carry folds a previously-accumulated snapshot into these counters. It is used
+// when a session's model backend is swapped (ModelSession.Resume): the incoming
+// connector starts with zeroed stats, so the outgoing connector's totals are
+// carried over to keep per-session usage cumulative across model switches
+// instead of appearing to reset to zero (issue #146).
+func (s *ModelStats) Carry(prev StatsSnapshot) {
+	s.Mutex.Lock()
+	defer s.Mutex.Unlock()
+	s.RequestCount += prev.RequestCount
+	s.SuccessCount += prev.SuccessCount
+	s.ErrorCount += prev.ErrorCount
+	s.TotalTokensIn += prev.TotalTokensIn
+	s.TotalCachedTokensIn += prev.TotalCachedTokensIn
+	s.TotalTokensOut += prev.TotalTokensOut
+	s.TotalTimeMs += prev.TotalTimeMs
+	s.TimeoutCount += prev.TimeoutCount
+	s.ContextWindowOverflowCount += prev.ContextWindowOverflowCount
+	s.RefusalCount += prev.RefusalCount
+	s.GenericErrorCount += prev.GenericErrorCount
+}
