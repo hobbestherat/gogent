@@ -23,23 +23,89 @@ import (
 //
 // A notification is emitted first (issue #59): an approval prompt blocks the
 // agent, so it is exactly the "needs attention" event a user stepping away
-// wants to be pinged for. The permission prompter has no session context, so the
-// focus-suppression toggle is bypassed (focused=false) — approvals always fire.
+// wants to be pinged for. An approval always fires regardless of which session
+// is focused (focused=false) — a blocking prompt warrants attention even on the
+// foreground session. The request now carries the requesting session (issue
+// #55), used to badge that session's sidebar node and name it in the dialog.
 func (w *Workbench) AskPermission(req permission.Request) permission.Decision {
 	w.notifyApproval(req)
+	// Badge the requesting session (and the global indicator) for the whole life
+	// of the prompt — including the time it spends queued behind another modal —
+	// so a background session's pending approval is never silently missed.
+	w.markApproval(req.Context.SessionID, +1)
+	defer w.markApproval(req.Context.SessionID, -1)
 	return w.prompt(req, func(req permission.Request, resolve func(permission.Decision)) {
+		requester := w.requesterLabel(req.Context.SessionID)
 		w.desktop.Post(func() {
-			showPermissionDialog(w.desktop, req, resolve)
+			showPermissionDialog(w.desktop, req, requester, resolve)
 		})
 	})
+}
+
+// markApproval adjusts the in-flight permission-prompt count for a session and
+// refreshes the requesting session's sidebar badge plus the global header
+// indicator (issue #55). delta is +1 when a prompt is raised and -1 when it
+// resolves. It is called from the agent goroutine, so the sidebar mutation is
+// marshalled onto the UI thread. A session id of "" (headless/unknown requester)
+// still moves the global counter but badges no node.
+func (w *Workbench) markApproval(sessionID string, delta int) {
+	w.mu.Lock()
+	if w.approvals == nil {
+		w.approvals = make(map[string]int)
+	}
+	n := w.approvals[sessionID] + delta
+	if n <= 0 {
+		delete(w.approvals, sessionID)
+		n = 0
+	} else {
+		w.approvals[sessionID] = n
+	}
+	total := 0
+	for _, c := range w.approvals {
+		total += c
+	}
+	title := ""
+	pinned := w.pinned[sessionID]
+	if sw := w.sessions[sessionID]; sw != nil {
+		title = sw.title
+	}
+	w.mu.Unlock()
+
+	if w.sidebar == nil || w.desktop == nil {
+		return
+	}
+	pending := n > 0
+	w.desktop.Post(func() {
+		if sessionID != "" {
+			w.sidebar.setApproval(sessionID, title, pinned, pending)
+		}
+		w.sidebar.setGlobalApprovals(total)
+		w.desktop.Redraw()
+	})
+}
+
+// requesterLabel resolves a human label for the session that raised a prompt, so
+// the dialog can name it ("Session 2") rather than leave the user guessing which
+// background session is asking. Empty when the requester is unknown.
+func (w *Workbench) requesterLabel(sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if sw := w.sessions[sessionID]; sw != nil {
+		return sw.title
+	}
+	return sessionID
 }
 
 // notifyApproval fires an "approval needed" notification when the config allows
 // it. It is called from the agent goroutine, so the emit is marshalled onto the
 // UI thread: that keeps the bell/OSC write serialized with frame rendering
 // (avoids interleaving with the TUI's own stdout writes) and matches how session
-// events are notified. The permission prompter has no session context, so the
-// focus-suppression toggle is bypassed (focused=false) — approvals always fire.
+// events are notified. An approval always fires regardless of focus
+// (focused=false) — a blocking prompt warrants attention even on the foreground
+// session.
 func (w *Workbench) notifyApproval(req permission.Request) {
 	if w.notify == nil {
 		return
@@ -48,6 +114,11 @@ func (w *Workbench) notifyApproval(req permission.Request) {
 	body := req.Detail
 	if body == "" {
 		_, body, _ = permissionPrompt(req)
+	}
+	// Name the requesting session so an alert for an unfocused background session
+	// is actionable (issue #55).
+	if label := w.requesterLabel(req.Context.SessionID); label != "" {
+		body = label + ": " + body
 	}
 	w.desktop.Post(func() {
 		if w.notify.ShouldNotify(notify.ReasonApproval, false) {
@@ -119,7 +190,7 @@ func permissionPrompt(req permission.Request) (title, question, alwaysLabel stri
 	}
 }
 
-func showPermissionDialog(desktop *tv.Desktop, req permission.Request, onResult func(permission.Decision)) {
+func showPermissionDialog(desktop *tv.Desktop, req permission.Request, requester string, onResult func(permission.Decision)) {
 	if desktop == nil {
 		onResult(permission.DecisionDeny)
 		return
@@ -141,7 +212,19 @@ func showPermissionDialog(desktop *tv.Desktop, req permission.Request, onResult 
 	dialog := tv.NewDialog(title, x, y, width, height)
 	dialog.Window.ShowClose = false
 
-	q := tv.NewLabel(question, tv.Rect{X: 2, Y: 1, W: width - 4, H: 3})
+	// Name the requesting session/agent so a prompt raised by an unfocused
+	// background session is unambiguous (issue #55). It takes the top content row;
+	// the question moves down one row to make space.
+	questionY := 1
+	if label := requesterLine(requester, req.Context.Agent); label != "" {
+		r := tv.NewLabel(truncate(label, width-4), tv.Rect{X: 2, Y: 1, W: width - 4, H: 1})
+		r.FG = tui.ANSIColor(14)
+		r.BG = tv.DefaultTheme.DialogBG
+		dialog.Window.AddContent(r)
+		questionY = 2
+	}
+
+	q := tv.NewLabel(question, tv.Rect{X: 2, Y: questionY, W: width - 4, H: 3})
 	q.FG = tv.DefaultTheme.DialogFG
 	q.BG = tv.DefaultTheme.DialogBG
 	dialog.Window.AddContent(q)
@@ -189,6 +272,20 @@ func showPermissionDialog(desktop *tv.Desktop, req permission.Request, onResult 
 	layer = tv.NewModalLayer("permission-dialog", dialog)
 	desktop.AddLayer(layer)
 	desktop.SetFocus(deny)
+}
+
+// requesterLine renders the "Requested by …" header for the permission dialog.
+// It names the session and, when the request came from a sub-agent, that agent
+// too. The session's primary agent ("root") is implied by the session itself, so
+// its id is not repeated. Empty session yields an empty line (header omitted).
+func requesterLine(session, agentID string) string {
+	if session == "" {
+		return ""
+	}
+	if agentID != "" && agentID != "root" {
+		return fmt.Sprintf("Requested by %s · agent %s", session, agentID)
+	}
+	return "Requested by " + session
 }
 
 func truncate(s string, max int) string {

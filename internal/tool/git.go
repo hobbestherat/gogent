@@ -79,7 +79,8 @@ func (tr *ToolRegistry) RegisterGitTool() {
 				}
 				if perm != nil {
 					detail := "git " + strings.Join(plan.args, " ")
-					if err := perm.CheckWithDetail(permission.ActionShell, "", detail); err != nil {
+					rc := permission.RequestContext{SessionID: ctx.SessionID, Agent: ctx.AgentID}
+					if err := perm.CheckWithContext(rc, permission.ActionShell, "", detail); err != nil {
 						return nil, err
 					}
 				}

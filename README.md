@@ -111,7 +111,12 @@ gogent can ping you when a long task finishes or a session needs your attention,
 so you don't have to watch the screen:
 
 - **Task complete** and **error** — fired when the agent's turn ends.
-- **Approval needed** — a permission prompt is waiting for an answer.
+- **Approval needed** — a permission prompt is waiting for an answer. The
+  requesting session is also badged with a ⏳ marker in the sidebar (and a global
+  ⏳N count in its header) until you answer, even when that session isn't focused,
+  so a background prompt is never silently missed. The prompt dialog names the
+  session that is asking, and clicking the badged sidebar node jumps straight to
+  it.
 - **Clarification** — an interactive sub-agent asked a `CLARIFY` question.
 
 Each event can be delivered through three independent channels:

@@ -46,7 +46,7 @@ func TestCheckFileAccess_ExternalApproved(t *testing.T) {
 	})
 
 	target := filepath.Join(externalDir, "notes.txt")
-	auth, err := CheckFileAccess(perm, loc, true, target)
+	auth, err := CheckFileAccess(perm, loc, true, target, permission.RequestContext{})
 	if err != nil {
 		t.Fatalf("external write denied despite grant: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestCheckFileAccess_ExternalInteractiveAllow(t *testing.T) {
 	perm.SetPrompter(&fakePrompter{decision: permission.DecisionAllow})
 
 	target := filepath.Join(externalDir, "data.bin")
-	auth, err := CheckFileAccess(perm, loc, false, target)
+	auth, err := CheckFileAccess(perm, loc, false, target, permission.RequestContext{})
 	if err != nil {
 		t.Fatalf("unexpected deny after interactive allow: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestCheckFileAccess_ExternalDenied(t *testing.T) {
 	fsys, loc, perm, externalDir := newAuthScaffold(t)
 
 	target := filepath.Join(externalDir, "secret")
-	auth, err := CheckFileAccess(perm, loc, true, target)
+	auth, err := CheckFileAccess(perm, loc, true, target, permission.RequestContext{})
 	if err == nil {
 		t.Fatal("expected external path without grant to be denied")
 	}
@@ -115,7 +115,7 @@ func TestCheckFileAccess_ExternalDenied(t *testing.T) {
 func TestCheckFileAccess_WorkspacePathNoExternalAuth(t *testing.T) {
 	_, loc, perm, _ := newAuthScaffold(t)
 
-	auth, err := CheckFileAccess(perm, loc, true, "inside.txt")
+	auth, err := CheckFileAccess(perm, loc, true, "inside.txt", permission.RequestContext{})
 	if err != nil {
 		t.Fatalf("workspace write denied: %v", err)
 	}

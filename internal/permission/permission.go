@@ -54,11 +54,22 @@ type Rule struct {
 	Effect   string `json:"effect"`
 }
 
+// RequestContext identifies the session (and optionally the sub-agent) on whose
+// behalf a decision is requested, so the UI can badge the requesting session's
+// sidebar node, alert when it is unfocused and let the user jump straight to it.
+// The zero value is valid: headless or CLI callers leave it empty and the prompt
+// stays session-agnostic.
+type RequestContext struct {
+	SessionID string // requesting session id ("" if unknown)
+	Agent     string // requesting sub-agent id ("" for the session's main agent)
+}
+
 // Request is handed to a Prompter when a decision is needed.
 type Request struct {
 	Action   Action
 	Resource string
-	Detail   string // human context, e.g. the shell command being run
+	Detail   string         // human context, e.g. the shell command being run
+	Context  RequestContext // who is asking (for alerting/routing); optional
 }
 
 // Prompter asks the user for a decision. It blocks until the user answers and
@@ -155,6 +166,14 @@ func (s *Service) Check(a Action, resource string) error {
 
 // CheckWithDetail is Check with extra human context for the prompt.
 func (s *Service) CheckWithDetail(a Action, resource, detail string) error {
+	return s.CheckWithContext(RequestContext{}, a, resource, detail)
+}
+
+// CheckWithContext is CheckWithDetail that additionally records which session
+// (and sub-agent) is asking, so the prompter can alert and route the user to the
+// requesting session. The context is carried only when the request reaches the
+// prompter; persisted and rule-based decisions are session-agnostic.
+func (s *Service) CheckWithContext(rc RequestContext, a Action, resource, detail string) error {
 	s.mu.Lock()
 	eff := s.effect(a, resource)
 	prompter := s.prompter
@@ -171,7 +190,7 @@ func (s *Service) CheckWithDetail(a Action, resource, detail string) error {
 		return &DeniedError{Action: a, Resource: resource}
 	}
 
-	switch prompter.AskPermission(Request{Action: a, Resource: resource, Detail: detail}) {
+	switch prompter.AskPermission(Request{Action: a, Resource: resource, Detail: detail, Context: rc}) {
 	case DecisionAllow:
 		return nil
 	case DecisionAlways:

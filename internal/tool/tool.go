@@ -383,11 +383,12 @@ func (tr *ToolRegistry) RegisterShellTool() {
 			// may choose "always"); then any path that escapes the workspace is
 			// gated per external root folder.
 			if tr.Permission != nil {
-				if err := tr.Permission.CheckWithDetail(permission.ActionShell, "", command); err != nil {
+				rc := permission.RequestContext{SessionID: ctx.SessionID, Agent: ctx.AgentID}
+				if err := tr.Permission.CheckWithContext(rc, permission.ActionShell, "", command); err != nil {
 					return nil, err
 				}
 				for _, root := range shell.ExternalRoots(command, tr.WorkspaceRoot) {
-					if err := tr.Permission.CheckWithDetail(permission.ActionExternal, root, command); err != nil {
+					if err := tr.Permission.CheckWithContext(rc, permission.ActionExternal, root, command); err != nil {
 						return nil, err
 					}
 				}
@@ -462,7 +463,8 @@ func (tr *ToolRegistry) RegisterWebFetchTool() {
 				perm = tr.Permission
 			}
 			if perm != nil {
-				if err := perm.CheckWithDetail(permission.ActionNetwork, u.Host, rawURL); err != nil {
+				rc := permission.RequestContext{SessionID: ctx.SessionID, Agent: ctx.AgentID}
+				if err := perm.CheckWithContext(rc, permission.ActionNetwork, u.Host, rawURL); err != nil {
 					return nil, err
 				}
 			}
