@@ -141,6 +141,10 @@ same actions:
   calls/results, `r` thinking, `e` errors.
 - **Fold / unfold all** — `f` folds every entry, `u` unfolds them.
 - **Clear** — `Esc` removes any active search and filters.
+
+The live view keeps only the most recent ~1000 entries so memory and render
+cost stay bounded over a long session; older entries age out of the window (the
+durable transcript still lives in the session JSONL).
 ### Notifications (step away from the terminal)
 
 gogent can ping you when a long task finishes or a session needs your attention,

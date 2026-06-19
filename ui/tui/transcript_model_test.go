@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -192,5 +193,88 @@ func TestRestoreIndexesTranscript(t *testing.T) {
 	m.setQuery("grep")
 	if m.matchCount() != 2 {
 		t.Errorf("search over restored transcript: matchCount = %d, want 2", m.matchCount())
+	}
+}
+
+// addRecords appends n user messages whose text uniquely identifies each (e.g.
+// "msg-0007"), returning the texts in insertion order so callers can assert
+// which survived a cap-driven trim.
+func addRecords(sw *SessionWindow, n int) []string {
+	texts := make([]string, n)
+	for i := 0; i < n; i++ {
+		texts[i] = fmt.Sprintf("msg-%04d", i)
+		sw.addUser(texts[i])
+	}
+	return texts
+}
+
+// TestTranscriptCapBoundsRecords verifies the live record slice and rendered view
+// never exceed the configured limit: the newest entry is always retained and the
+// oldest is dropped once the limit is crossed. With no trimming the transcript is
+// untouched.
+func TestTranscriptCapBoundsRecords(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		limit int
+		adds  int
+	}{
+		{"small cap many adds", 10, 25},
+		{"cap exceeded once", 8, 9},
+		{"large add stream", 50, 500},
+		{"no trim under cap", 100, 50},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sw := newTestSession()
+			sw.transcript.limit = tc.limit
+			texts := addRecords(sw, tc.adds)
+			m := sw.transcript
+
+			if len(m.records) > tc.limit {
+				t.Errorf("len(records) = %d, want <= limit %d", len(m.records), tc.limit)
+			}
+
+			all := m.view.AllText()
+			newest := texts[tc.adds-1]
+			if !strings.Contains(all, newest) {
+				t.Errorf("newest record %q dropped from view\n%s", newest, all)
+			}
+
+			oldest := texts[0]
+			trimmed := tc.adds > tc.limit
+			switch {
+			case trimmed && strings.Contains(all, oldest):
+				t.Errorf("oldest record %q should have been trimmed\n%s", oldest, all)
+			case !trimmed && !strings.Contains(all, oldest):
+				t.Errorf("oldest record %q should still be present\n%s", oldest, all)
+			}
+		})
+	}
+}
+
+// TestTranscriptCapZeroUnbounded confirms a zero limit disables trimming entirely
+// (used only by tests that opt out of the cap).
+func TestTranscriptCapZeroUnbounded(t *testing.T) {
+	sw := newTestSession()
+	sw.transcript.limit = 0
+	addRecords(sw, 50)
+	if got := len(sw.transcript.records); got != 50 {
+		t.Errorf("with limit 0, len(records) = %d, want 50 (no trimming)", got)
+	}
+}
+
+// TestTranscriptCapKeepsInFlightTool confirms that even after heavy trimming the
+// newest record — an in-flight tool call — is never dropped, so its result still
+// folds into the same entry when it arrives.
+func TestTranscriptCapKeepsInFlightTool(t *testing.T) {
+	sw := newTestSession()
+	sw.transcript.limit = 5
+	addRecords(sw, 20) // fill well past the cap
+	sw.beginToolCall("Read", map[string]interface{}{"path": "x.go"})
+	sw.finishToolCall("Read", "the result body")
+	got := sw.transcript.view.AllText()
+	for _, want := range []string{"tool: Read (done)", "result:", "the result body"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("in-flight tool entry missing %q after cap trims\n%s", want, got)
+		}
 	}
 }
