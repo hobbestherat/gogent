@@ -128,6 +128,12 @@ the next launch, so your workbench comes back exactly as you left it. (Window
 moves and resizes are captured when you quit; renames, pins, reorders and
 open/close are saved immediately.)
 
+Beneath the session tree, the sidebar carries an **Overall** panel: a live,
+cluster-wide readout (open sessions, sub-agents, tokens in/out, requests,
+errors and prompt-cache hit %) that updates as work streams in. It refreshes on
+the session event stream, coalesced to ~250 ms so a fast stream can't thrash
+the redraw (and once per second while any session is busy).
+
 ### Navigating a transcript
 
 Long sessions are searchable and filterable. Focus a transcript (click it or

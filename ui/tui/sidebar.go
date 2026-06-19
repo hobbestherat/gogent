@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"gogent/internal/agent"
+	"gogent/internal/stats"
 
 	tui "github.com/hobbestherat/turbotui"
 	tv "github.com/hobbestherat/turbotui/turbotv"
@@ -12,6 +13,11 @@ import (
 // sidebarWidth is the number of columns reserved on the right of the desktop for
 // the always-visible session / sub-agent tree.
 const sidebarWidth = 32
+
+// minSidebarTreeHeight is the smallest tree region worth showing. When the
+// Overall stats band would leave the tree shorter than this, the band is dropped
+// so a very short terminal keeps the session list usable.
+const minSidebarTreeHeight = 4
 
 // approvalBadge marks a session that has a permission prompt waiting for the
 // user (issue #55). It is appended to the requesting session's node label and,
@@ -36,6 +42,13 @@ type sidebar struct {
 	// rendered as a header indicator. Both are read/written on the UI thread.
 	approvals       map[string]bool
 	globalApprovals int
+
+	// overall is the bottom "Overall" aggregate-stats panel's current data (issue
+	// #53), refreshed from the Statistics report (coalesced) on the UI thread.
+	// overallBandH is the band height resolved by LayoutFn (0 when the sidebar is
+	// too short to show the panel); DrawFn reads it to place the band.
+	overall      overallStats
+	overallBandH int
 }
 
 // nodeRef identifies what a tree node points at: a session (agentID empty) or a
@@ -49,10 +62,11 @@ type nodeRef struct {
 // newSidebar builds the pinned sidebar panel and its tree.
 func newSidebar(wb *Workbench) *sidebar {
 	s := &sidebar{
-		wb:        wb,
-		sessions:  make(map[string]*tv.TreeNode),
-		agents:    make(map[string]*tv.TreeNode),
-		approvals: make(map[string]bool),
+		wb:           wb,
+		sessions:     make(map[string]*tv.TreeNode),
+		agents:       make(map[string]*tv.TreeNode),
+		approvals:    make(map[string]bool),
+		overallBandH: overallBandHeight,
 	}
 
 	panel := tv.NewComponent(tv.Rect{})
@@ -76,6 +90,8 @@ func newSidebar(wb *Workbench) *sidebar {
 			}
 			surface.WriteString(x, abs.Y, ind, tui.Cell{FG: tui.ANSIColor(11), BG: tui.ANSIColor(0)})
 		}
+		// Bottom "Overall" aggregate-stats panel (issue #53).
+		s.drawOverall(surface, abs)
 	}
 	panel.LayoutFn = func(c *tv.VisualComponent) {
 		w := c.Bounds.W
@@ -83,8 +99,16 @@ func newSidebar(wb *Workbench) *sidebar {
 		if w < 3 || h < 2 {
 			return
 		}
+		// Reserve the bottom band for the Overall stats panel when there is room
+		// for both it and a usable tree; otherwise drop the band so a very short
+		// sidebar keeps the session list.
+		bandH := overallBandHeight
+		if h-1-bandH < minSidebarTreeHeight {
+			bandH = 0
+		}
+		s.overallBandH = bandH
 		// Leave the first column for the divider and the first row for the title.
-		tree.Root().SetBounds(tv.Rect{X: 2, Y: 1, W: w - 3, H: h - 1})
+		tree.Root().SetBounds(tv.Rect{X: 2, Y: 1, W: w - 3, H: h - 1 - bandH})
 	}
 
 	// Selecting (navigating to) a node raises the owning session. Activating a
@@ -178,6 +202,46 @@ func (s *sidebar) setGlobalApprovals(n int) {
 		n = 0
 	}
 	s.globalApprovals = n
+}
+
+// refreshOverallStats rebuilds the Overall panel's data from a Statistics report
+// joined with the sidebar's own session / sub-agent node counts. It only updates
+// the stored struct; the caller owns the redraw (mirrors SessionWindow's
+// refreshStatus contract). Runs on the UI thread.
+func (s *sidebar) refreshOverallStats(report stats.Report) {
+	s.overall = buildOverallStats(report, len(s.sessions), len(s.agents))
+}
+
+// drawOverall renders the bottom aggregate-stats band: a separator under the
+// session tree, the "Overall" title and the formatted metric rows. It is a no-op
+// when LayoutFn resolved the band height to 0 (sidebar too short). Each metric
+// row is clipped to the content width so a wide value can never run into the
+// divider or the panel edge. Runs on the UI thread.
+func (s *sidebar) drawOverall(surface tv.Surface, abs tv.Rect) {
+	bandH := s.overallBandH
+	if bandH <= 0 || bandH >= abs.H {
+		return
+	}
+	contentW := abs.W - 3 // leave the divider (col 0) and a right margin
+	if contentW < 1 {
+		return
+	}
+	top := abs.Y + abs.H - bandH
+	// Separator under the session tree.
+	for x := 1; x < abs.W-1; x++ {
+		surface.SetCell(abs.X+x, top, tui.Cell{Ch: '─', FG: tui.ANSIColor(8), BG: tui.ANSIColor(0)})
+	}
+	// Title.
+	surface.WriteString(abs.X+2, top+1, "Overall", tui.Cell{FG: tui.ANSIColor(15), BG: tui.ANSIColor(0)})
+	// Metric rows. A non-zero error count is highlighted red so it stands out.
+	for i, line := range formatOverallStats(s.overall) {
+		fg := tui.ANSIColor(7)
+		if s.overall.Errors > 0 && i == overallErrLineIdx {
+			fg = tui.ANSIColor(9)
+		}
+		surface.WriteString(abs.X+2, top+2+i, truncateRunes(line, contentW),
+			tui.Cell{FG: fg, BG: tui.ANSIColor(0)})
+	}
 }
 
 // applySubAgent inserts or updates a sub-agent node from a lifecycle event.

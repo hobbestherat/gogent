@@ -84,7 +84,8 @@ internal/notify/       Desktop/terminal notifications (bell + OSC 9/777 + native
   server is skipped with a warning rather than blocking startup.
 - **TUI** (`ui/tui`) — `Workbench` desktop hosting draggable `SessionWindow`s,
   each with a foldable transcript (turbotv `TextView`), per-session model select,
-  status line, a right-hand sidebar (session/sub-agent tree), and Config / model
+  status line, a right-hand sidebar (session/sub-agent tree plus an Overall
+  aggregate-stats panel), and Config / model
   / settings dialogs. The **Session** menu manages many windows: rename, pin
   (favorite, floats to the top with a ★), move up/down to reorder, and
   close-others / close-all. The desktop layout (order, titles, pin state, window
@@ -107,7 +108,13 @@ internal/notify/       Desktop/terminal notifications (bell + OSC 9/777 + native
   tokens/turns, and a context-window gauge that turns amber near the compaction
   threshold and red at it; a `budget` block raises a token-budget alert. The
   gauge/elapsed refresh on every `SessionEventUsage` and once per second (a UI
-  ticker that only redraws while some session is busy) via `refreshStatus`.
+  ticker that only redraws while some session is busy) via `refreshStatus`. The
+  sidebar's bottom **Overall** panel (issue #53) shows cluster-wide totals
+  (sessions, sub-agents, tokens in/out, requests, errors, prompt-cache hit %)
+  drawn from the `Statistics` report's grand totals joined with the sidebar's own
+  node counts; it refreshes on the `SessionEvent` stream, coalesced to ~250 ms
+  (the redraw note in #22), with the per-second status ticker as a floor while
+  any session is busy.
 
 ## Persistence
 
