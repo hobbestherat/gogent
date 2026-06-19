@@ -49,9 +49,15 @@ internal/notify/       Desktop/terminal notifications (bell + OSC 9/777 + native
 - **Model layer** (`internal/model`) — split into small capability interfaces
   (`Completer`, streaming, tools, stats) so it can later be extracted into its
   own library. A provider abstraction (`provider.go`, `APIType`) maps each
-  configured backend to its endpoint layout, so the same OpenAI-compatible
-  transport serves generic servers (`openai`) and the Z.AI platform (`zai`); a
-  bare base URL is normalized into the concrete endpoints. Connections are
+  configured backend to its endpoint layout *and* a wire-format adapter
+  (`adapter.go`): the request/response/stream translation. OpenAI-compatible
+  providers (generic servers `openai`, the Z.AI platform `zai`) share one
+  adapter and differ only in endpoint layout; Anthropic (`anthropic`/`claude`)
+  speaks the genuinely different Messages protocol (`POST /v1/messages`,
+  `x-api-key` + `anthropic-version`, a top-level system prompt, content-block
+  message arrays and `input_schema`/`tool_use`/`tool_result` tools) through its
+  own adapter that translates to and from gogent's OpenAI-shaped internal types.
+  A bare base URL is normalized into the concrete endpoints. Connections are
   rebuilt per send, so model/endpoint edits take effect on the next turn.
 - **Tools** (`internal/tool`, `internal/fileops`, `internal/web`, `internal/vcs`) —
   `read`, `write`, `edit`, `shell`, `web_fetch`, `git`, `spawn_subagent`,

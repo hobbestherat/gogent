@@ -2,12 +2,13 @@ package model
 
 import "strings"
 
-// APIType identifies which provider/wire conventions a backend speaks. Every
-// provider supported today is OpenAI-compatible over HTTP + SSE and differs only
-// in its base-URL layout and default endpoint, which providerSpec captures. This
-// is the seam to extend when a genuinely different protocol has to be added:
-// introduce a new APIType, give it a providerSpec, and (if the request/response
-// shape differs) branch on the type where the wire format is built.
+// APIType identifies which provider/wire conventions a backend speaks. It
+// selects two things: a providerSpec (base-URL layout, default endpoint and
+// request capabilities) and a wire-format adapter (request/response/stream
+// translation; see adapterFor). OpenAI-compatible providers share one adapter
+// and differ only in their providerSpec; a genuinely different protocol
+// (Anthropic Messages) gets its own APIType, providerSpec and adapter. That is
+// the seam to extend when adding a new provider family.
 type APIType string
 
 const (
@@ -18,12 +19,19 @@ const (
 	// compatible; only the default base URL differs, so the user can leave the
 	// endpoint empty and just provide an API key.
 	APITypeZAI APIType = "zai"
+	// APITypeAnthropic is the Anthropic Messages API (POST /v1/messages). It is
+	// not OpenAI-compatible — it uses x-api-key + anthropic-version auth, a
+	// top-level system prompt, content-block message arrays, input_schema tools
+	// and tool_use/tool_result blocks — so it is served by a dedicated adapter.
+	APITypeAnthropic APIType = "anthropic"
 )
 
 var stringToAPITypeMap = map[string]APIType{
-	"openai": APITypeOpenAI,
-	"zai":    APITypeZAI,
-	"z.ai":   APITypeZAI,
+	"openai":    APITypeOpenAI,
+	"zai":       APITypeZAI,
+	"z.ai":      APITypeZAI,
+	"anthropic": APITypeAnthropic,
+	"claude":    APITypeAnthropic,
 }
 
 // StringToAPIType resolves a config string to an APIType, defaulting to the
@@ -93,6 +101,17 @@ var providerSpecs = map[APIType]providerSpec{
 		supportsReasoningEffort: true,
 		supportsThinking:        true,
 	},
+	APITypeAnthropic: {
+		defaultBaseURL: "https://api.anthropic.com",
+		chatPath:       "/v1/messages",
+		modelsPath:     "/v1/models",
+		// max_tokens is required by the Messages API and capped at the model's
+		// output limit; 0 here leaves the (always-set) request value untouched.
+		// Extended thinking and reasoning_effort are not wired through the
+		// Anthropic adapter yet, so leave their capability flags unset (the
+		// internal thinking/effort params would otherwise be emitted in the
+		// OpenAI shape, which Anthropic rejects). See follow-up below.
+	},
 }
 
 // specFor returns the providerSpec for an APIType, falling back to OpenAI.
@@ -106,7 +125,7 @@ func specFor(t APIType) providerSpec {
 // APITypeIDs lists the selectable api_type values in display order (first is the
 // default). Config UIs use this to populate an API-type dropdown.
 func APITypeIDs() []string {
-	return []string{string(APITypeOpenAI), string(APITypeZAI)}
+	return []string{string(APITypeOpenAI), string(APITypeZAI), string(APITypeAnthropic)}
 }
 
 // normalizeBaseURL reduces whatever the user put in the config endpoint to a

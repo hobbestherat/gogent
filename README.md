@@ -228,6 +228,17 @@ Each model entry has an `api_type` selecting the provider conventions:
   remaining paths are appended automatically.
 - `zai` — the [Z.AI platform](https://docs.z.ai). Leave `endpoint` empty to use
   the built-in base URL (`https://api.z.ai/api/paas/v4`) and just set `api_key`.
+- `anthropic` (alias `claude`) — the [Anthropic Messages API](https://platform.claude.com/docs/en/docs/build-with-claude/tool-use).
+  Leave `endpoint` empty to use the built-in base URL
+  (`https://api.anthropic.com`) and just set `api_key`. gogent talks the native
+  `POST /v1/messages` protocol (`x-api-key` auth, top-level system prompt,
+  content-block messages, `input_schema` tools), translating to and from its
+  internal OpenAI-shaped types, so tools and prompt-cache accounting work
+  unchanged. Extended thinking is not yet exposed for this provider.
+
+Other OpenAI-compatible gateways (Google's Gemini OpenAI-compat layer,
+OpenRouter, Azure OpenAI) work under `openai` by pointing `endpoint` at their
+base URL and setting `api_key`.
 
 In the model editor, the **Scan** button next to the model id queries the
 backend's listing endpoint and replaces the model-id field with a dropdown of
