@@ -152,10 +152,16 @@ internal/clipboard/    System clipboard (OSC 52 + native pbcopy/xclip/wl-copy)
 - Config: `~/.gogent/config.json` (models, optional `fast_model` + `model_roles`
   for auxiliary tasks, timeouts, sub-agent settings, notification settings,
   token-budget settings).
-- Sessions: JSONL in the sessions directory — live as
-  `<iso>_<id>_session.jsonl`, renamed to `..._session_archived.jsonl` on close.
-  Non-archived files are restored on startup (crash recovery); re-loading an
-  archived session is a rename back.
+- Sessions: sharded JSONL in the sessions directory. A live session occupies a
+  base prefix `<iso>_<id>_session` laid out as `<base>.index` (the session meta
+  and shard table — the source of truth) plus `<base>.0000.jsonl`,
+  `<base>.0001.jsonl`, … each capped at ~5 000 records / ~10 MiB so no single
+  file grows unboundedly. Closing a session renames the base to
+  `..._session_archived` across all its files. Listing reads only the tiny index
+  files (plus the current shard for restore), never replaying the whole history;
+  non-archived sessions are restored on startup (crash recovery). Durability
+  (`fsync`) is batched off the turn path; a graceful shutdown should flush via
+  `SessionStore.Sync`/`Close`.
 - Workbench layout: `~/.gogent/workbench_layout.json` — the desktop arrangement
   (sidebar order, per-session titles, pin/favorite state, window bounds and
   minimized flag). Re-applied on startup after `RestoreSessions`, so renamed,

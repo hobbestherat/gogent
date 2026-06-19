@@ -1063,7 +1063,7 @@ func (g *Gogent) RestoreSessions() []LoadedSession {
 		rootAgent.SetState(agent.StateIdle)
 		g.CreateUserSession(ls.ID, rootAgent)
 		g.SetSessionTitle(ls.ID, ls.Title)
-		g.store.Adopt(ls.ID, ls.File) // continue appending to the same file
+		g.store.Adopt(ls.ID, ls.File, rootAgent.ListAllAgents()) // continue appending to the active shard
 		restored = append(restored, ls)
 	}
 	return restored
