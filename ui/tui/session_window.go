@@ -123,6 +123,9 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 	sw.sendButton = sendButton
 	sw.modelLabel = modelLabel
 	sw.modelSelect = modelSelect
+	// A model change in the focused session moves the Overall panel's "model"/"api"
+	// rows (issue #107); coalesce the refresh rather than paying for one per pick.
+	modelSelect.OnChange = func(int) { wb.scheduleOverallRefresh() }
 	sw.status = status
 	sw.statusState = "idle"
 	window.AddContent(history)

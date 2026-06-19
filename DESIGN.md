@@ -162,12 +162,15 @@ internal/clipboard/    System clipboard (OSC 52 + native pbcopy/xclip/wl-copy)
   threshold and red at it; a `budget` block raises a token-budget alert. The
   gauge/elapsed refresh on every `SessionEventUsage` and once per second (a UI
   ticker that only redraws while some session is busy) via `refreshStatus`. The
-  sidebar's bottom **Overall** panel (issue #53) shows cluster-wide totals
-  (sessions, sub-agents, tokens in/out, requests, errors, prompt-cache hit %)
-  drawn from the `Statistics` report's grand totals joined with the sidebar's own
-  node counts; it refreshes on the `SessionEvent` stream, coalesced to ~250 ms
-  (the redraw note in #22), with the per-second status ticker as a floor while
-  any session is busy.
+  sidebar's bottom **Overall** panel (issues #53 / #107) shows cluster-wide
+  totals (sessions, sub-agents, tokens in/out, requests, errors, prompt-cache
+  hit %) plus the focused session's active **model** and **API endpoint**
+  (display name, and the endpoint host or provider label) drawn from the
+  `Statistics` report's grand totals joined with the sidebar's own node counts
+  and the focused session's `ModelConfig`; it refreshes on the `SessionEvent`
+  stream, coalesced to ~250 ms (the redraw note in #22), with the per-second
+  status ticker as a floor while any session is busy, and immediately on focus
+  change / model selection so the model rows track the active session.
 
 ## Persistence
 

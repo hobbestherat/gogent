@@ -232,9 +232,12 @@ sessions in one go.
 
 Beneath the session tree, the sidebar carries an **Overall** panel: a live,
 cluster-wide readout (open sessions, sub-agents, tokens in/out, requests,
-errors and prompt-cache hit %) that updates as work streams in. It refreshes on
-the session event stream, coalesced to ~250 ms so a fast stream can't thrash
-the redraw (and once per second while any session is busy).
+errors, prompt-cache hit %) plus the focused session's active **model** and
+**API endpoint** (host, or provider like `zai`/`openrouter`), so the global
+state is visible at a glance. It updates as work streams in — on the session
+event stream, coalesced to ~250 ms so a fast stream can't thrash the redraw
+(and once per second while any session is busy), and immediately when you focus
+a session or pick a different model.
 
 ### Navigating a transcript
 

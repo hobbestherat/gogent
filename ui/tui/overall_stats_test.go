@@ -6,6 +6,7 @@ import (
 
 	tv "github.com/hobbestherat/turbotui/turbotv"
 	"gogent/internal/agent"
+	"gogent/internal/config"
 	"gogent/internal/stats"
 )
 
@@ -21,30 +22,70 @@ func TestBuildOverallStats(t *testing.T) {
 		// totals, to avoid double counting.
 		Fast: stats.ConnectorStat{Requests: 9, TokensIn: 9999, TokensOut: 9999},
 	}}
-	got := buildOverallStats(report, 3, 5)
+	got := buildOverallStats(report, 3, 5,
+		&config.ModelConfig{Name: "groq-free", DisplayName: "Groq", Endpoint: "https://api.groq.com/openai/v1/chat/completions"})
 	want := overallStats{Sessions: 3, SubAgents: 5, TokensIn: 1000, TokensOut: 500,
-		Requests: 42, Errors: 3, CacheHitPct: 25}
+		Requests: 42, Errors: 3, CacheHitPct: 25, Model: "Groq", APIEndpoint: "api.groq.com"}
 	if got != want {
 		t.Fatalf("buildOverallStats = %+v, want %+v", got, want)
 	}
 }
 
-// TestBuildOverallStatsEmpty verifies a zero report yields a safe zero view (the
-// panel's first frame before any traffic, and the "no statistics handler" path).
+// TestBuildOverallStatsEmpty verifies a zero report with no active model yields a
+// safe zero view (the panel's first frame before any traffic / session, and the
+// "no statistics handler" path).
 func TestBuildOverallStatsEmpty(t *testing.T) {
-	got := buildOverallStats(stats.Report{}, 0, 0)
+	got := buildOverallStats(stats.Report{}, 0, 0, nil)
 	if got != (overallStats{}) {
 		t.Fatalf("empty report should yield zero view, got %+v", got)
 	}
 }
 
+// TestBuildOverallStatsModel covers the model / endpoint derivation (issue #107):
+// the display name falls back to the config Name, and the endpoint is reduced to
+// its host (or provider label) by formatEndpoint.
+func TestBuildOverallStatsModel(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		model *config.ModelConfig
+		// zero report so only the model-derived fields are under test
+		wantModel string
+		wantAPI   string
+	}{
+		{
+			name:      "display name preferred",
+			model:     &config.ModelConfig{Name: "local-lan", DisplayName: "Local LAN", Endpoint: "http://127.0.0.1:8080/v1/chat/completions"},
+			wantModel: "Local LAN",
+			wantAPI:   "127.0.0.1:8080",
+		},
+		{
+			name:      "falls back to config name",
+			model:     &config.ModelConfig{Name: "zai-glm", APIType: "zai"},
+			wantModel: "zai-glm",
+			wantAPI:   "zai",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildOverallStats(stats.Report{}, 0, 0, tc.model)
+			if got.Model != tc.wantModel {
+				t.Errorf("Model = %q, want %q", got.Model, tc.wantModel)
+			}
+			if got.APIEndpoint != tc.wantAPI {
+				t.Errorf("APIEndpoint = %q, want %q", got.APIEndpoint, tc.wantAPI)
+			}
+		})
+	}
+}
+
 // TestFormatOverallStats pins the rendered metric rows: label column alignment,
-// compact token formatting and the cache-hit percentage. Exact lines document the
-// alignment contract the band relies on.
+// compact token formatting, the cache-hit percentage and the model / endpoint
+// rows (issue #107). Exact lines document the alignment contract the band relies
+// on.
 func TestFormatOverallStats(t *testing.T) {
 	got := formatOverallStats(overallStats{
 		Sessions: 3, SubAgents: 5, TokensIn: 1234, TokensOut: 567,
 		Requests: 42, Errors: 0, CacheHitPct: 25,
+		Model: "Groq", APIEndpoint: "api.groq.com",
 	})
 	want := []string{
 		"sessions   3",
@@ -54,6 +95,8 @@ func TestFormatOverallStats(t *testing.T) {
 		"requests   42",
 		"errors     0",
 		"cache hit  25%",
+		"model      Groq",
+		"api        api.groq.com",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("formatOverallStats produced %d lines, want %d (%q)", len(got), len(want), got)
@@ -62,6 +105,19 @@ func TestFormatOverallStats(t *testing.T) {
 		if got[i] != w {
 			t.Errorf("line %d = %q, want %q", i, got[i], w)
 		}
+	}
+}
+
+// TestFormatOverallStatsPlaceholders verifies the model / api rows render a "-"
+// placeholder before any active model is known (no session open yet), so the row
+// count is stable while nothing misleading is shown.
+func TestFormatOverallStatsPlaceholders(t *testing.T) {
+	got := formatOverallStats(overallStats{})
+	if got[len(got)-2] != "model      -" {
+		t.Errorf("model row = %q, want %q", got[len(got)-2], "model      -")
+	}
+	if got[len(got)-1] != "api        -" {
+		t.Errorf("api row = %q, want %q", got[len(got)-1], "api        -")
 	}
 }
 
@@ -127,7 +183,7 @@ func TestSidebarRefreshOverallStats(t *testing.T) {
 	report := stats.Report{Totals: stats.Totals{Primary: stats.ConnectorStat{
 		Requests: 10, Errors: 1, TokensIn: 500, TokensOut: 50, CachedTokensIn: 100,
 	}}}
-	s.refreshOverallStats(report)
+	s.refreshOverallStats(report, &config.ModelConfig{Name: "groq-free", DisplayName: "Groq", Endpoint: "https://api.groq.com/openai/v1/chat/completions"})
 
 	if s.overall.Sessions != 2 {
 		t.Errorf("Sessions = %d, want 2", s.overall.Sessions)
@@ -141,6 +197,10 @@ func TestSidebarRefreshOverallStats(t *testing.T) {
 	if s.overall.CacheHitPct != 20 {
 		t.Errorf("CacheHitPct = %d, want 20", s.overall.CacheHitPct)
 	}
+	// The active model config is threaded through to the model / api rows.
+	if s.overall.Model != "Groq" || s.overall.APIEndpoint != "api.groq.com" {
+		t.Errorf("Model/API = %q/%q, want Groq/api.groq.com", s.overall.Model, s.overall.APIEndpoint)
+	}
 }
 
 // TestSidebarOverallBandReservation covers the LayoutFn split: the bottom band is
@@ -153,9 +213,9 @@ func TestSidebarOverallBandReservation(t *testing.T) {
 		wantBand  int
 		wantTreeH int
 	}{
-		{"tall reserves band", 40, overallBandHeight, 40 - 1 - overallBandHeight},
-		{"just enough for band + min tree", 14, overallBandHeight, 4},
-		{"one short drops band", 13, 0, 12},
+		{"tall reserves band", overallBandHeight + 20, overallBandHeight, overallBandHeight + 20 - 1 - overallBandHeight},
+		{"just enough for band + min tree", overallBandHeight + 5, overallBandHeight, minSidebarTreeHeight},
+		{"one short drops band", overallBandHeight + 4, 0, overallBandHeight + 4 - 1},
 		{"very short drops band", 12, 0, 11},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -184,5 +244,31 @@ func TestScheduleOverallRefreshSkipsWithoutHandler(t *testing.T) {
 	w.scheduleOverallRefresh()
 	if w.statsRefresh != nil {
 		t.Fatal("scheduled a refresh timer without a statistics handler")
+	}
+}
+
+// TestFormatEndpoint covers the "api" row's endpoint -> host/provider rendering
+// (issue #107): an explicit URL collapses to its host[:port], an empty endpoint
+// falls back to the provider (api_type), defaulting to the OpenAI-compatible
+// convention so the row is never blank.
+func TestFormatEndpoint(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		endpoint string
+		apiType  string
+		want     string
+	}{
+		{"https host drops scheme and path", "https://api.groq.com/openai/v1/chat/completions", "", "api.groq.com"},
+		{"http host keeps port", "http://127.0.0.1:8080/v1/chat/completions", "", "127.0.0.1:8080"},
+		{"empty endpoint uses provider", "", "zai", "zai"},
+		{"empty endpoint + openrouter", "", "openrouter", "openrouter"},
+		{"empty everything defaults to openai", "", "", "openai"},
+		{"unparseable endpoint falls back to raw", "not a url at all", "", "not a url at all"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatEndpoint(tc.endpoint, tc.apiType); got != tc.want {
+				t.Errorf("formatEndpoint(%q, %q) = %q, want %q", tc.endpoint, tc.apiType, got, tc.want)
+			}
+		})
 	}
 }
