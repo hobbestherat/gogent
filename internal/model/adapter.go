@@ -9,9 +9,10 @@ import (
 )
 
 // adapter encapsulates a provider's wire format. gogent's internal request and
-// response types are OpenAI-shaped (a scalar Message.Content plus OpenAI-style
-// tool calls), which serves as the lingua franca; an adapter translates that
-// internal shape to and from one provider's concrete protocol:
+// response types are OpenAI-shaped (a scalar Message.Content for text, optional
+// Message.Images for multimodal input, plus OpenAI-style tool calls), which
+// serves as the lingua franca; an adapter translates that internal shape to and
+// from one provider's concrete protocol:
 //
 //   - buildBody marshals an internal CompletionRequest into the provider's
 //     request JSON,
@@ -118,6 +119,18 @@ type anthropicContent struct {
 	// tool_result
 	ToolUseID string `json:"tool_use_id,omitempty"`
 	Content   string `json:"content,omitempty"`
+	// image
+	Source *anthropicImageSource `json:"source,omitempty"`
+}
+
+// anthropicImageSource is the source of an Anthropic image block: an inline
+// base64 payload ("type":"base64" with media_type + data) or a remote
+// ("type":"url") reference.
+type anthropicImageSource struct {
+	Type      string `json:"type"`
+	MediaType string `json:"media_type,omitempty"`
+	Data      string `json:"data,omitempty"`
+	URL       string `json:"url,omitempty"`
 }
 
 type anthropicTool struct {
@@ -240,11 +253,54 @@ func anthropicBlocks(m Message) (string, []anthropicContent) {
 			Content:   m.Content,
 		}}
 	default: // user
-		if m.Content == "" {
-			return "user", nil
+		var blocks []anthropicContent
+		if m.Content != "" {
+			blocks = append(blocks, anthropicContent{Type: "text", Text: m.Content})
 		}
-		return "user", []anthropicContent{{Type: "text", Text: m.Content}}
+		for _, img := range m.Images {
+			if b, ok := anthropicImageBlock(img); ok {
+				blocks = append(blocks, b)
+			}
+		}
+		return "user", blocks
 	}
+}
+
+// anthropicImageBlock converts an OpenAI-style image reference into an Anthropic
+// image content block: a data: URL becomes an inline base64 source, any other URL
+// becomes a url source. Returns false for an empty/unusable reference.
+func anthropicImageBlock(img ImageURL) (anthropicContent, bool) {
+	url := strings.TrimSpace(img.URL)
+	if url == "" {
+		return anthropicContent{}, false
+	}
+	if mediaType, data, ok := parseDataURL(url); ok {
+		return anthropicContent{Type: "image", Source: &anthropicImageSource{
+			Type:      "base64",
+			MediaType: mediaType,
+			Data:      data,
+		}}, true
+	}
+	return anthropicContent{Type: "image", Source: &anthropicImageSource{Type: "url", URL: url}}, true
+}
+
+// parseDataURL splits an RFC 2397 base64 data URL ("data:<media-type>;base64,<data>")
+// into its media type and base64 payload. It returns ok=false for any non-data or
+// non-base64 URL (e.g. a remote http URL), which the caller sends as a url source.
+func parseDataURL(url string) (mediaType, data string, ok bool) {
+	rest, ok := strings.CutPrefix(url, "data:")
+	if !ok {
+		return "", "", false
+	}
+	meta, payload, ok := strings.Cut(rest, ",")
+	if !ok {
+		return "", "", false
+	}
+	mediaType, isB64 := strings.CutSuffix(meta, ";base64")
+	if !isB64 {
+		return "", "", false
+	}
+	return mediaType, payload, true
 }
 
 // anthropicUsage is the usage block shared by the blocking response and the
