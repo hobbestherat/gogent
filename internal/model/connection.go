@@ -170,6 +170,47 @@ type FunctionDef struct {
 	Name        string      `json:"name"`
 	Description string      `json:"description"`
 	Parameters  interface{} `json:"parameters"`
+	// Strict marks the parameter schema as strictly enforced (OpenAI structured
+	// outputs / constrained decoding): the model's arguments are guaranteed to
+	// validate against Parameters rather than merely prompted to. It requires a
+	// closed schema (additionalProperties:false, every property listed in
+	// required) and, on OpenAI, that parallel tool calls be disabled — see
+	// buildRequest, which sets parallel_tool_calls:false whenever any advertised
+	// tool is strict. Emitted only where the provider spec supports it.
+	Strict bool `json:"strict,omitempty"`
+}
+
+// ResponseFormat is the OpenAI-style response_format request parameter, which
+// constrains the model's free-text output. "json_object" asks for syntactically
+// valid JSON; "json_schema" with a strict schema additionally guarantees the
+// output validates against that schema — true structured output rather than a
+// best-effort prompt. It is emitted only for providers whose spec advertises
+// supportsResponseFormat (OpenAI-compatible backends); providers without the
+// field (Anthropic) obtain schema-valid output through strict tool definitions
+// plus tool_choice forcing instead, so the format is dropped for them.
+type ResponseFormat struct {
+	Type       string          `json:"type"` // "text" | "json_object" | "json_schema"
+	JSONSchema *JSONSchemaSpec `json:"json_schema,omitempty"`
+}
+
+// JSONSchemaSpec is the json_schema payload of a json_schema response format: a
+// named JSON Schema document the output must conform to. Strict turns on the
+// provider's constrained-decoding guarantee and requires a closed schema
+// (additionalProperties:false with every property required).
+type JSONSchemaSpec struct {
+	Name   string      `json:"name"`
+	Schema interface{} `json:"schema"`
+	Strict bool        `json:"strict,omitempty"`
+}
+
+// JSONSchemaResponseFormat builds a strict json_schema response format from a
+// schema name and a JSON Schema document — the canonical way to request
+// deterministically schema-valid structured output.
+func JSONSchemaResponseFormat(name string, schema interface{}) *ResponseFormat {
+	return &ResponseFormat{
+		Type:       "json_schema",
+		JSONSchema: &JSONSchemaSpec{Name: name, Schema: schema, Strict: true},
+	}
 }
 
 // ToolDef is a native OpenAI-style tool definition sent in the request.
@@ -200,6 +241,15 @@ type CompletionRequest struct {
 	Model           string         `json:"model,omitempty"`
 	Tools           []ToolDef      `json:"tools,omitempty"`
 	ToolChoice      *ToolChoice    `json:"tool_choice,omitempty"`
+	// ResponseFormat constrains the model's text output to a schema (OpenAI
+	// structured outputs). Set via the structured-completion entry points; gated
+	// by the provider spec in buildRequest.
+	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
+	// ParallelToolCalls is a pointer so a deliberate false is expressible and
+	// distinguishable from "unset" (which lets the provider default apply). It is
+	// forced to false when any advertised tool is strict, because OpenAI rejects
+	// parallel tool calls alongside strict tool schemas.
+	ParallelToolCalls *bool `json:"parallel_tool_calls,omitempty"`
 }
 
 // ToolChoiceMode is the provider-independent tool-selection policy. It abstracts
@@ -518,7 +568,7 @@ func NewModelConnection() *ModelConnection {
 		adapter:        adapterFor(APITypeOpenAI),
 		Stats:          &ModelStats{},
 		Timeout:        5 * time.Minute,
-		client:         newClient(5 * time.Minute, nil),
+		client:         newClient(5*time.Minute, nil),
 		maxAttempts:    defaultMaxAttempts,
 		retryBaseDelay: defaultRetryBaseDelay,
 		retryMaxDelay:  defaultRetryMaxDelay,
@@ -624,12 +674,24 @@ func (c *ModelConnection) SetTimeout(timeout time.Duration) *ModelConnection {
 }
 
 func (c *ModelConnection) Complete(messages []Message) (*CompletionResponse, error) {
-	return c.complete(context.Background(), messages, false, nil)
+	return c.complete(context.Background(), messages, false, nil, nil)
 }
 
 // CompleteWithTools sends a completion request advertising the given native tools.
 func (c *ModelConnection) CompleteWithTools(messages []Message, tools []ToolDef) (*CompletionResponse, error) {
-	return c.complete(context.Background(), messages, false, tools)
+	return c.complete(context.Background(), messages, false, tools, nil)
+}
+
+// CompleteStructuredCtx issues a blocking completion whose output is constrained
+// to a response format (typically a strict JSON schema, see
+// JSONSchemaResponseFormat) — the reliable way to obtain schema-valid output for
+// programmatic consumers (issue #49). tools may be nil. The format is honored
+// only on providers whose spec advertises response_format support; on others it
+// is silently dropped (callers that need a hard guarantee there should force a
+// strict tool via ToolChoice instead). Like CompleteWithToolsCtx the request is
+// abandoned the moment ctx is cancelled.
+func (c *ModelConnection) CompleteStructuredCtx(ctx context.Context, messages []Message, tools []ToolDef, format *ResponseFormat) (*CompletionResponse, error) {
+	return c.complete(ctx, messages, false, tools, format)
 }
 
 // CompleteWithToolsCtx is CompleteWithTools bound to a context: the completion —
@@ -637,7 +699,7 @@ func (c *ModelConnection) CompleteWithTools(messages []Message, tools []ToolDef)
 // is cancelled, so a stopped or closed session does not run to the request
 // timeout leaking the goroutine and connection (issue #24).
 func (c *ModelConnection) CompleteWithToolsCtx(ctx context.Context, messages []Message, tools []ToolDef) (*CompletionResponse, error) {
-	return c.complete(ctx, messages, false, tools)
+	return c.complete(ctx, messages, false, tools, nil)
 }
 
 func (c *ModelConnection) CompleteStream(messages []Message) (<-chan StreamResponse, <-chan error) {
@@ -657,7 +719,7 @@ func (c *ModelConnection) CompleteStream(messages []Message) (<-chan StreamRespo
 }
 
 func (c *ModelConnection) CompleteWithStats(messages []Message) (*CompletionResponse, *TokenUsage, error) {
-	resp, err := c.complete(context.Background(), messages, false, nil)
+	resp, err := c.complete(context.Background(), messages, false, nil, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -677,7 +739,7 @@ func (c *ModelConnection) CompleteWithStats(messages []Message) (*CompletionResp
 // model, token limit and temperature applied. It is shared by the blocking and
 // streaming paths so both send identical parameters; the only difference is that
 // streaming additionally requests a final usage chunk via stream_options.
-func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []ToolDef) CompletionRequest {
+func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []ToolDef, format *ResponseFormat) CompletionRequest {
 	maxTokens := 4096
 	var temperature, topP float32
 	var reasoningEffort string
@@ -741,6 +803,22 @@ func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []
 	if len(tools) > 0 {
 		reqBody.ToolChoice = &ToolChoice{Mode: ToolChoiceAuto}
 	}
+
+	// Structured output (issue #49): emit response_format only where the provider
+	// understands it (OpenAI-compatible backends). Providers without the field
+	// (Anthropic) get schema-valid output through strict tools + tool_choice
+	// forcing, so the format is dropped here rather than sent and rejected.
+	if format != nil && c.spec.supportsResponseFormat {
+		reqBody.ResponseFormat = format
+	}
+	// OpenAI structured outputs require parallel tool calls to be disabled
+	// whenever any advertised tool uses a strict schema; honor that invariant so
+	// a strict tool set is not rejected.
+	if c.spec.supportsResponseFormat && hasStrictTool(tools) {
+		off := false
+		reqBody.ParallelToolCalls = &off
+	}
+
 	if stream {
 		reqBody.StreamOptions = &StreamOptions{IncludeUsage: true}
 	}
@@ -750,8 +828,18 @@ func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []
 	return reqBody
 }
 
-func (c *ModelConnection) complete(ctx context.Context, messages []Message, stream bool, tools []ToolDef) (*CompletionResponse, error) {
-	reqBody := c.buildRequest(messages, stream, tools)
+// hasStrictTool reports whether any advertised tool carries a strict schema.
+func hasStrictTool(tools []ToolDef) bool {
+	for _, t := range tools {
+		if t.Function.Strict {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *ModelConnection) complete(ctx context.Context, messages []Message, stream bool, tools []ToolDef, format *ResponseFormat) (*CompletionResponse, error) {
+	reqBody := c.buildRequest(messages, stream, tools, format)
 
 	// Marshal the request body ONCE, before the retry loop. Only the socket send
 	// needs retrying, so re-marshaling the (potentially large) transcript on every
@@ -865,7 +953,7 @@ func (c *ModelConnection) complete(ctx context.Context, messages []Message, stre
 // APIKeyRoundTripper (auth header) and configured timeout apply exactly as on
 // the blocking path, and asks for include_usage so token stats are populated.
 func (c *ModelConnection) completeStream(ctx context.Context, messages []Message, tools []ToolDef, streamCh chan<- StreamResponse) (string, error) {
-	reqBody := c.buildRequest(messages, true, tools)
+	reqBody := c.buildRequest(messages, true, tools, nil)
 
 	// Marshal into a pooled buffer (issue #20): the bytes stay live through the
 	// single request send and the buffer is returned to the pool on return.

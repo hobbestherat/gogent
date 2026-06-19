@@ -14,7 +14,7 @@ func boolPtr(b bool) *bool { return &b }
 // buildRequest would send.
 func buildRequestFor(cfg *config.ModelConfig) CompletionRequest {
 	conn := NewModelConnectionFromConfig(cfg)
-	return conn.buildRequest([]Message{{Role: RoleUser, Content: "hi"}}, false, nil)
+	return conn.buildRequest([]Message{{Role: RoleUser, Content: "hi"}}, false, nil, nil)
 }
 
 func TestBuildRequestReasoningParams(t *testing.T) {
@@ -50,9 +50,9 @@ func TestBuildRequestReasoningParams(t *testing.T) {
 			cfg:           &config.ModelConfig{Model: "gpt-4o", MaxTokens: 4096, Temperature: 0.7, TopP: 0.9},
 			wantMaxTokens: intPtr(4096),
 			wantTempSet:   true,
-			wantTemp:    0.7,
-			wantTopPSet: true,
-			wantTopP:    0.9,
+			wantTemp:      0.7,
+			wantTopPSet:   true,
+			wantTopP:      0.9,
 		},
 		{
 			name:                "openai reasoning effort switches to max_completion_tokens, drops temperature",

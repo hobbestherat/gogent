@@ -82,7 +82,14 @@ internal/clipboard/    System clipboard (OSC 52 + native pbcopy/xclip/wl-copy)
   with a `properties` map and strips keywords strict providers reject (`$ref`,
   `default`, `allOf`, …); `tool_choice` is a typed `ToolChoice`
   (auto/none/required/force-a-tool) each adapter serializes to its own encoding
-  (OpenAI string-or-object, Anthropic `{type:…}`). A bare base URL is normalized
+  (OpenAI string-or-object, Anthropic `{type:…}`). Structured output is a typed
+  request option (`StructuredCompleter.CompleteStructuredCtx` with a
+  `ResponseFormat`, e.g. `JSONSchemaResponseFormat`): OpenAI-compatible providers
+  (gated by `providerSpec.supportsResponseFormat`) get the real
+  `response_format: {json_schema, strict:true}` constraint, and a strict tool
+  schema (`FunctionDef.Strict`) forces `parallel_tool_calls:false` as OpenAI
+  requires; providers without the field (Anthropic) drop it and rely on strict
+  tools plus `tool_choice` forcing instead. A bare base URL is normalized
   into the concrete endpoints. Connections are rebuilt per send, so
   model/endpoint edits take effect on the next turn.
 - **Tools** (`internal/tool`, `internal/fileops`, `internal/web`, `internal/vcs`,

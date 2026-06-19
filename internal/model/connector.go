@@ -34,6 +34,16 @@ type Streamer interface {
 	CompleteStream(messages []Message) (<-chan StreamResponse, <-chan error)
 }
 
+// StructuredCompleter additionally supports constraining the model's output to a
+// response format — typically a strict JSON schema (see JSONSchemaResponseFormat)
+// — so programmatic consumers get deterministically schema-valid output instead
+// of best-effort, prompt-extracted JSON (issue #49). It is kept out of the core
+// Connector because not every backend enforces it; callers should type-assert to
+// StructuredCompleter and fall back to a prompted/tool-based approach when absent.
+type StructuredCompleter interface {
+	CompleteStructuredCtx(ctx context.Context, messages []Message, tools []ToolDef, format *ResponseFormat) (*CompletionResponse, error)
+}
+
 // StatsReporter exposes accumulated usage/latency counters collected by the
 // connector (token counts, request counts, error breakdown, ...).
 type StatsReporter interface {
@@ -93,8 +103,9 @@ type ModelLister interface {
 // Compile-time assertions that the concrete HTTP connection satisfies the full
 // Connector contract and the optional model-listing capability.
 var (
-	_ Connector   = (*ModelConnection)(nil)
-	_ ModelLister = (*ModelConnection)(nil)
+	_ Connector           = (*ModelConnection)(nil)
+	_ ModelLister         = (*ModelConnection)(nil)
+	_ StructuredCompleter = (*ModelConnection)(nil)
 )
 
 // StatsSnapshot is a mutex-free, copyable view of a connector's accumulated
