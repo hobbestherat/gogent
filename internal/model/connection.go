@@ -3,6 +3,7 @@ package model
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -361,12 +362,20 @@ func (c *ModelConnection) SetTimeout(timeout time.Duration) *ModelConnection {
 }
 
 func (c *ModelConnection) Complete(messages []Message) (*CompletionResponse, error) {
-	return c.complete(messages, false, nil)
+	return c.complete(context.Background(), messages, false, nil)
 }
 
 // CompleteWithTools sends a completion request advertising the given native tools.
 func (c *ModelConnection) CompleteWithTools(messages []Message, tools []ToolDef) (*CompletionResponse, error) {
-	return c.complete(messages, false, tools)
+	return c.complete(context.Background(), messages, false, tools)
+}
+
+// CompleteWithToolsCtx is CompleteWithTools bound to a context: the completion —
+// including its HTTP request and any retry backoff — is abandoned the moment ctx
+// is cancelled, so a stopped or closed session does not run to the request
+// timeout leaking the goroutine and connection (issue #24).
+func (c *ModelConnection) CompleteWithToolsCtx(ctx context.Context, messages []Message, tools []ToolDef) (*CompletionResponse, error) {
+	return c.complete(ctx, messages, false, tools)
 }
 
 func (c *ModelConnection) CompleteStream(messages []Message) (<-chan StreamResponse, <-chan error) {
@@ -376,7 +385,7 @@ func (c *ModelConnection) CompleteStream(messages []Message) (<-chan StreamRespo
 	go func() {
 		defer close(streamCh)
 		defer close(errCh)
-		_, err := c.completeStream(messages, nil, streamCh)
+		_, err := c.completeStream(context.Background(), messages, nil, streamCh)
 		if err != nil {
 			errCh <- err
 		}
@@ -386,7 +395,7 @@ func (c *ModelConnection) CompleteStream(messages []Message) (<-chan StreamRespo
 }
 
 func (c *ModelConnection) CompleteWithStats(messages []Message) (*CompletionResponse, *TokenUsage, error) {
-	resp, err := c.complete(messages, false, nil)
+	resp, err := c.complete(context.Background(), messages, false, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -479,7 +488,7 @@ func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []
 	return reqBody
 }
 
-func (c *ModelConnection) complete(messages []Message, stream bool, tools []ToolDef) (*CompletionResponse, error) {
+func (c *ModelConnection) complete(ctx context.Context, messages []Message, stream bool, tools []ToolDef) (*CompletionResponse, error) {
 	reqBody := c.buildRequest(messages, stream, tools)
 
 	jsonData, err := json.Marshal(reqBody)
@@ -501,7 +510,7 @@ func (c *ModelConnection) complete(messages []Message, stream bool, tools []Tool
 	startTime := time.Now()
 
 	for attempt := 0; attempt < attempts; attempt++ {
-		req, err := http.NewRequest("POST", c.URL, bytes.NewReader(jsonData))
+		req, err := http.NewRequestWithContext(ctx, "POST", c.URL, bytes.NewReader(jsonData))
 		if err != nil {
 			return nil, &ModelError{
 				Type:    ErrorConnection,
@@ -513,9 +522,16 @@ func (c *ModelConnection) complete(messages []Message, stream bool, tools []Tool
 
 		resp, err = c.client.Do(req)
 		if err != nil {
+			// A cancelled/expired context is terminal: surface it without
+			// retrying so a stopped or closed session aborts immediately.
+			if ctx.Err() != nil {
+				return nil, ctxError(ctx)
+			}
 			// Network/timeout errors are transient: retry with backoff.
 			if attempt < attempts-1 {
-				time.Sleep(c.backoff(attempt, 0))
+				if !sleepCtx(ctx, c.backoff(attempt, 0)) {
+					return nil, ctxError(ctx)
+				}
 				continue
 			}
 			return nil, &ModelError{
@@ -544,7 +560,9 @@ func (c *ModelConnection) complete(messages []Message, stream bool, tools []Tool
 			return nil, c.analyzeError(resp.StatusCode, string(bodyBytes))
 		}
 
-		time.Sleep(c.backoff(attempt, retryAfter))
+		if !sleepCtx(ctx, c.backoff(attempt, retryAfter)) {
+			return nil, ctxError(ctx)
+		}
 	}
 
 	c.Stats.Mutex.Lock()
@@ -583,7 +601,7 @@ func (c *ModelConnection) complete(messages []Message, stream bool, tools []Tool
 // on streamCh, returning the fully assembled content. It reuses c.client so the
 // APIKeyRoundTripper (auth header) and configured timeout apply exactly as on
 // the blocking path, and asks for include_usage so token stats are populated.
-func (c *ModelConnection) completeStream(messages []Message, tools []ToolDef, streamCh chan<- StreamResponse) (string, error) {
+func (c *ModelConnection) completeStream(ctx context.Context, messages []Message, tools []ToolDef, streamCh chan<- StreamResponse) (string, error) {
 	reqBody := c.buildRequest(messages, true, tools)
 
 	jsonData, err := json.Marshal(reqBody)
@@ -594,7 +612,7 @@ func (c *ModelConnection) completeStream(messages []Message, tools []ToolDef, st
 		}
 	}
 
-	req, err := http.NewRequest("POST", c.URL, bytes.NewReader(jsonData))
+	req, err := http.NewRequestWithContext(ctx, "POST", c.URL, bytes.NewReader(jsonData))
 	if err != nil {
 		return "", &ModelError{
 			Type:    ErrorConnection,
@@ -875,6 +893,32 @@ func (c *ModelConnection) backoff(attempt int, retryAfter time.Duration) time.Du
 		return 0
 	}
 	return time.Duration(rand.Int64N(int64(d) + 1))
+}
+
+// sleepCtx waits for d, or until ctx is cancelled, whichever comes first. It
+// returns true if the full delay elapsed and false if the context was cancelled,
+// so retry backoff is promptly abortable instead of blocking for the whole delay.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// ctxError wraps a cancelled/expired context as a connection-class ModelError so
+// callers see a uniform error type when work is aborted (issue #24).
+func ctxError(ctx context.Context) *ModelError {
+	return &ModelError{
+		Type:    ErrorConnection,
+		Message: fmt.Sprintf("request cancelled: %v", ctx.Err()),
+	}
 }
 
 func (c *ModelConnection) GetStats() *ModelStats {

@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -30,6 +31,12 @@ type ToolContext struct {
 	ToolCallID        string
 	PermissionService *permission.Service
 	ToolCallback      func(toolName string, args map[string]interface{}) error
+	// Context carries the cancellation scope of the agent loop that invoked the
+	// tool. Tools that themselves run a model loop (e.g. spawn_subagent) thread it
+	// down so a stopped/closed parent also cancels its in-flight children (issue
+	// #24). It may be nil for callers that pre-date context plumbing; treat nil as
+	// context.Background().
+	Context context.Context
 }
 
 type Tool struct {

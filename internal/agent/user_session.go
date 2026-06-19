@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -414,7 +415,7 @@ For final responses, use:
 // JSON tool call out of the assistant's text when no native tool_calls are
 // returned. Tool results are fed back as proper role:"tool" messages so the
 // model keeps full context across turns.
-func (s *UserSession) ExecuteTaskLoop(agentID string, initialMessage string) ([]*model.CompletionResponse, error) {
+func (s *UserSession) ExecuteTaskLoop(ctx context.Context, agentID string, initialMessage string) ([]*model.CompletionResponse, error) {
 	s.mu.Lock()
 	agent := s.RootAgent.GetAgentByID(agentID)
 	s.mu.Unlock()
@@ -432,16 +433,30 @@ func (s *UserSession) ExecuteTaskLoop(agentID string, initialMessage string) ([]
 	s.mu.Unlock()
 
 	tools := toolDefsFromRegistry(agent.ToolRegistry)
-	return s.runLoop(agent, agentID, initialMessage, buildAgentSystemPrompt(len(tools) > 0, s.SubAgentConfig()))
+	return s.runLoop(ctx, agent, agentID, initialMessage, buildAgentSystemPrompt(len(tools) > 0, s.SubAgentConfig()))
 }
 
 // runLoop is the shared multi-turn tool-calling loop used by both the top-level
 // task loop and sub-agents (sub-agents pass a different system prompt).
-func (s *UserSession) runLoop(agent *Agent, agentID, initialMessage, systemPrompt string) ([]*model.CompletionResponse, error) {
+func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initialMessage, systemPrompt string) ([]*model.CompletionResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Scope a cancellable context to this loop and publish its cancel func on the
+	// agent so StopAgent / session close can abort the in-flight model work. The
+	// child context inherits the caller's, so cancelling a parent loop (or the
+	// whole session) propagates into sub-agent loops spawned from here (issue #24).
+	ctx, cancel := context.WithCancel(ctx)
+	agent.setCancel(cancel)
+	defer func() {
+		cancel()
+		agent.setCancel(nil)
+	}()
+
 	sess := agent.ThoughtTrain
 	tools := toolDefsFromRegistry(agent.ToolRegistry)
-	if ctx := s.systemContext(); ctx != "" {
-		systemPrompt += "\n\n" + ctx
+	if sc := s.systemContext(); sc != "" {
+		systemPrompt += "\n\n" + sc
 	}
 	sess.SetSystemPrompt(systemPrompt)
 
@@ -462,7 +477,7 @@ func (s *UserSession) runLoop(agent *Agent, agentID, initialMessage, systemPromp
 
 	// First request carries the user message.
 	s.compactIfNeeded(sess, emit)
-	resp, err := sess.SendWithTools(
+	resp, err := sess.SendWithToolsCtx(ctx,
 		[]model.Message{{Role: model.RoleUser, Content: initialMessage}},
 		tools,
 	)
@@ -475,6 +490,13 @@ func (s *UserSession) runLoop(agent *Agent, agentID, initialMessage, systemPromp
 
 	const maxSteps = 25
 	for step := 0; step < maxSteps; step++ {
+		// Bail out promptly if the loop was stopped or the session closed; the
+		// in-flight request (if any) has already been cancelled via ctx.
+		if err := ctx.Err(); err != nil {
+			emit(SessionEvent{Type: SessionEventError, Err: err})
+			return responses, err
+		}
+
 		calls := s.collectToolCalls(resp)
 		if len(calls) == 0 {
 			// No tool calls -> the assistant produced its final answer.
@@ -503,7 +525,7 @@ func (s *UserSession) runLoop(agent *Agent, agentID, initialMessage, systemPromp
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					resultStr := s.runToolCall(agent, agentID, call)
+					resultStr := s.runToolCall(ctx, agent, agentID, call)
 					emit(SessionEvent{Type: SessionEventToolResult, Step: step, Tool: call.Tool, Args: call.Args, Result: resultStr})
 					toolMsgs[i] = makeToolResultMessage(call, resultStr)
 				}()
@@ -512,7 +534,7 @@ func (s *UserSession) runLoop(agent *Agent, agentID, initialMessage, systemPromp
 			sess.AppendToolResults(toolMsgs)
 			emit(SessionEvent{Type: SessionEventThinking, Step: step + 1})
 			s.compactIfNeeded(sess, emit)
-			resp, err = sess.SendWithTools(nil, tools)
+			resp, err = sess.SendWithToolsCtx(ctx, nil, tools)
 			if err != nil {
 				emit(SessionEvent{Type: SessionEventError, Err: err})
 				return responses, err
@@ -537,7 +559,7 @@ func (s *UserSession) runLoop(agent *Agent, agentID, initialMessage, systemPromp
 			}
 
 			emit(SessionEvent{Type: SessionEventToolCall, Step: step, Tool: call.Tool, Args: call.Args})
-			resultStr := s.runToolCall(agent, agentID, call)
+			resultStr := s.runToolCall(ctx, agent, agentID, call)
 			emit(SessionEvent{Type: SessionEventToolResult, Step: step, Tool: call.Tool, Args: call.Args, Result: resultStr})
 			toolMsgs = append(toolMsgs, makeToolResultMessage(call, resultStr))
 		}
@@ -549,7 +571,7 @@ func (s *UserSession) runLoop(agent *Agent, agentID, initialMessage, systemPromp
 		sess.AppendToolResults(toolMsgs)
 		emit(SessionEvent{Type: SessionEventThinking, Step: step + 1})
 		s.compactIfNeeded(sess, emit)
-		resp, err = sess.SendWithTools(nil, tools)
+		resp, err = sess.SendWithToolsCtx(ctx, nil, tools)
 		if err != nil {
 			emit(SessionEvent{Type: SessionEventError, Err: err})
 			return responses, err
@@ -673,15 +695,18 @@ func (s *UserSession) collectToolCalls(resp *model.CompletionResponse) []tool.To
 	return nil
 }
 
-// runToolCall executes a single tool call and returns a textual result.
-func (s *UserSession) runToolCall(agent *Agent, agentID string, call tool.ToolCall) string {
-	ctx := tool.ToolContext{
+// runToolCall executes a single tool call and returns a textual result. ctx is
+// the cancellation scope of the running loop; it is passed to the tool so a
+// tool that itself runs a model loop (spawn_subagent) inherits cancellation.
+func (s *UserSession) runToolCall(ctx context.Context, agent *Agent, agentID string, call tool.ToolCall) string {
+	toolCtx := tool.ToolContext{
 		SessionID:    s.ID,
 		AgentID:      agentID,
 		ToolCallID:   call.CallID,
 		ToolCallback: s.ToolCallback,
+		Context:      ctx,
 	}
-	toolResp, err := agent.ToolRegistry.ExecuteToolCall(&call, ctx)
+	toolResp, err := agent.ToolRegistry.ExecuteToolCall(&call, toolCtx)
 	switch {
 	case err != nil:
 		return fmt.Sprintf("error: %v", err)
@@ -797,9 +822,9 @@ func recursionInstructions(cfg config.SubAgentConfig) string {
 }
 
 // ExecuteTaskLoopWithModel runs the multi-turn task loop with a specific model config
-func (s *UserSession) ExecuteTaskLoopWithModel(agentID, message string, modelConfig *config.ModelConfig) ([]*model.CompletionResponse, error) {
+func (s *UserSession) ExecuteTaskLoopWithModel(ctx context.Context, agentID, message string, modelConfig *config.ModelConfig) ([]*model.CompletionResponse, error) {
 	// Call the regular ExecuteTaskLoop
-	return s.ExecuteTaskLoop(agentID, message)
+	return s.ExecuteTaskLoop(ctx, agentID, message)
 }
 
 // subAgentToolNames lists the tools that let an agent spawn or coordinate
@@ -937,7 +962,7 @@ func subAgentOutcome(final string) AgentStatus {
 // The oneShot parameter selects the sub-agent's base prompt; the surrounding
 // execution is always blocking here. Asynchronous, conversational workers use
 // LaunchInteractiveAgent instead.
-func (s *UserSession) SpawnSubAgent(parentAgentID, name, task string, oneShot bool) (string, error) {
+func (s *UserSession) SpawnSubAgent(ctx context.Context, parentAgentID, name, task string, oneShot bool) (string, error) {
 	kind := KindTool
 	if !oneShot {
 		kind = KindInteractive
@@ -953,7 +978,7 @@ func (s *UserSession) SpawnSubAgent(parentAgentID, name, task string, oneShot bo
 	child.SetStatus(StatusRunning)
 	s.emitSubAgent(child, "spawned: "+task, nil)
 
-	responses, runErr := s.runLoop(child, child.ID, task, s.subAgentPrompt(oneShot))
+	responses, runErr := s.runLoop(ctx, child, child.ID, task, s.subAgentPrompt(oneShot))
 
 	child.SetState(StateIdle)
 	parent.SetState(StateThinking)
@@ -1039,6 +1064,19 @@ func (s *UserSession) LaunchInteractiveAgent(parentAgentID, name, task string) (
 // runInteractive drives an interactive sub-agent across one or more rounds,
 // pausing for coordinator input whenever the model replies CLARIFY:.
 func (s *UserSession) runInteractive(ia *InteractiveAgent, task string) {
+	// Interactive sub-agents are asynchronous and outlive any single turn, so
+	// their loop is scoped to the session (background) rather than a turn context.
+	// Terminating the agent cancels its in-flight model work too (issue #24).
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-ia.done:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
 	message := task
 	for {
 		select {
@@ -1050,7 +1088,7 @@ func (s *UserSession) runInteractive(ia *InteractiveAgent, task string) {
 
 		ia.agent.SetState(StateThinking)
 		ia.agent.SetStatus(StatusRunning)
-		responses, err := s.runLoop(ia.agent, ia.agent.ID, message, s.subAgentPrompt(false))
+		responses, err := s.runLoop(ctx, ia.agent, ia.agent.ID, message, s.subAgentPrompt(false))
 		ia.agent.SetState(StateIdle)
 		if err != nil {
 			s.finishInteractive(ia, StatusFailed, err.Error(), AgentEventFailed)
@@ -1183,7 +1221,9 @@ func (s *UserSession) ListInteractiveAgents() []string {
 	return ids
 }
 
-// StopAgent stops an agent
+// StopAgent stops an agent, cancelling its in-flight task loop (and, since
+// sub-agent loops inherit the parent's context, any sub-agents it spawned) so
+// the work aborts immediately instead of running to the request timeout.
 func (s *UserSession) StopAgent(agentID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1193,8 +1233,24 @@ func (s *UserSession) StopAgent(agentID string) error {
 		return &NotFoundError{ID: agentID}
 	}
 
+	agent.Cancel()
 	agent.SetState(StateIdle)
 	return nil
+}
+
+// Stop cancels every in-flight task loop in the session. It is called when the
+// session is removed/closed so detached loops do not keep mutating a session
+// that is no longer reachable (issue #24).
+func (s *UserSession) Stop() {
+	s.mu.RLock()
+	root := s.RootAgent
+	s.mu.RUnlock()
+	if root == nil {
+		return
+	}
+	for _, a := range root.ListAllAgents() {
+		a.Cancel()
+	}
 }
 
 // ResumeAgent resumes an agent
@@ -1211,7 +1267,7 @@ func (s *UserSession) ResumeAgent(agentID string) error {
 	return nil
 }
 
-// InterruptAgent interrupts an agent
+// InterruptAgent interrupts an agent, cancelling its in-flight task loop.
 func (s *UserSession) InterruptAgent(agentID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1221,6 +1277,7 @@ func (s *UserSession) InterruptAgent(agentID string) error {
 		return &NotFoundError{ID: agentID}
 	}
 
+	agent.Cancel()
 	agent.SetState(StateIdle)
 	return nil
 }

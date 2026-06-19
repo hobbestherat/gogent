@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"sync"
 )
 
@@ -342,6 +343,13 @@ func (s *ModelSession) Send(messages []Message) (*CompletionResponse, error) {
 
 // SendWithTools is like Send but advertises native tools to the model.
 func (s *ModelSession) SendWithTools(messages []Message, tools []ToolDef) (*CompletionResponse, error) {
+	return s.SendWithToolsCtx(context.Background(), messages, tools)
+}
+
+// SendWithToolsCtx is SendWithTools bound to a context, so the underlying model
+// request is abandoned the moment ctx is cancelled (issue #24). The transcript
+// and history are still updated for the messages we attempted to send.
+func (s *ModelSession) SendWithToolsCtx(ctx context.Context, messages []Message, tools []ToolDef) (*CompletionResponse, error) {
 	s.mu.Lock()
 	// Append the new messages to the transcript.
 	s.Transcript = append(s.Transcript, messages...)
@@ -357,7 +365,7 @@ func (s *ModelSession) SendWithTools(messages []Message, tools []ToolDef) (*Comp
 	s.History = append(s.History, Turn{Request: messages})
 	s.mu.Unlock()
 
-	resp, err := s.Model.CompleteWithTools(fullMessages, tools)
+	resp, err := s.Model.CompleteWithToolsCtx(ctx, fullMessages, tools)
 	if err != nil {
 		s.mu.Lock()
 		s.History[len(s.History)-1].Error = &ModelError{Message: err.Error()}

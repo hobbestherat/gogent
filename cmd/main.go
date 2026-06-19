@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"flag"
@@ -125,7 +126,10 @@ func main() {
 			// OnSend runs the task loop in the background; progress (thoughts,
 			// tool calls, final answer) flows back through the observer above.
 			OnSend: func(sessionID, message, modelName string) {
-				_, err := g.SendMessageToSessionWithModel(sessionID, "root", message, modelName)
+				// The TUI loop runs in the background; cancellation comes from the
+				// session's own controls (Stop / window close), which cancel the
+				// agent loop directly, so a plain background context is correct here.
+				_, err := g.SendMessageToSessionWithModel(context.Background(), sessionID, "root", message, modelName)
 				if err != nil {
 					wb.EmitSessionEvent(sessionID, agent.SessionEvent{
 						Type: agent.SessionEventError,
@@ -349,8 +353,9 @@ const (
 // and lets them be unit-tested with a fake.
 type httpBackend interface {
 	// SendMessage runs the agent task loop for the default HTTP session and
-	// returns the final assistant response.
-	SendMessage(message, modelName string) (*model.CompletionResponse, error)
+	// returns the final assistant response. ctx cancels the loop when the client
+	// disconnects (issue #24).
+	SendMessage(ctx context.Context, message, modelName string) (*model.CompletionResponse, error)
 	// Stats returns aggregate counters for the default HTTP session, or nil.
 	Stats() map[string]interface{}
 }
@@ -358,8 +363,8 @@ type httpBackend interface {
 // gogentBackend adapts a *gogent.Gogent to the httpBackend interface.
 type gogentBackend struct{ g *gogent.Gogent }
 
-func (b gogentBackend) SendMessage(message, modelName string) (*model.CompletionResponse, error) {
-	return b.g.SendMessageToSessionWithModel("default", "root", message, modelName)
+func (b gogentBackend) SendMessage(ctx context.Context, message, modelName string) (*model.CompletionResponse, error) {
+	return b.g.SendMessageToSessionWithModel(ctx, "default", "root", message, modelName)
 }
 
 func (b gogentBackend) Stats() map[string]interface{} {
@@ -428,15 +433,16 @@ func newHTTPHandler(backend httpBackend, exitToken string, shutdown func()) http
 
 		// Run the (long) model loop off the request goroutine so we can abandon
 		// it the moment the client disconnects, instead of writing to a dead
-		// connection. The loop itself keeps running in the background — true
-		// propagation of cancellation into the model layer is a follow-up.
+		// connection. The request context is threaded into the loop so a
+		// disconnect also cancels the in-flight model work rather than leaking it
+		// (issue #24).
 		type result struct {
 			resp *model.CompletionResponse
 			err  error
 		}
 		done := make(chan result, 1)
 		go func() {
-			resp, err := backend.SendMessage(message, modelName)
+			resp, err := backend.SendMessage(r.Context(), message, modelName)
 			done <- result{resp, err}
 		}()
 

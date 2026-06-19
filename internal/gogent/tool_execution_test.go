@@ -1,6 +1,7 @@
 package gogent
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -24,7 +25,7 @@ func TestToolExecutionResult(t *testing.T) {
 	s.AddTurn([]model.Message{{Role: model.RoleUser, Content: "hi"}}, `{"tool": "calc", "args": {"expression": "2+2"}}`, nil, nil)
 
 	// Send the message (this should detect the tool call and execute it)
-	resp, err := g.SendMessageToSession("session_test", "agent_test", "calculate 2+2")
+	resp, err := g.SendMessageToSession(context.Background(), "session_test", "agent_test", "calculate 2+2")
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
