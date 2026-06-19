@@ -242,10 +242,11 @@ func NewWorkbench(models []*config.ModelConfig) *Workbench {
 		desktop:  tv.NewDesktop(app),
 		sessions: make(map[string]*SessionWindow),
 		pinned:   make(map[string]bool),
-		// Use default window config (resizable and minimizable by default)
+		// Use default window config (resizable, minimizable and maximizable by default)
 		windowConfig: config.WindowConfig{
 			Resizable:   true,
 			Minimizable: true,
+			Maximizable: true,
 			MinWidth:    50,
 			MinHeight:   12,
 		},

@@ -53,6 +53,13 @@ type SessionWindow struct {
 	turnStart     time.Time
 	turnStartOut  int
 	budgetAlerted bool
+	// maximized tracks whether the window is expanded to the available desktop
+	// area via the title-bar maximize button (issue #105); preMaximizeBounds
+	// remembers the bounds to return to on restore. maximizable mirrors
+	// config.WindowConfig.Maximizable and gates the button entirely.
+	maximized         bool
+	preMaximizeBounds tv.Rect
+	maximizable       bool
 }
 
 // newSessionWindow builds the window, its widgets and their layout/handlers. A
@@ -78,6 +85,13 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 	history.Wrap = true
 	sw.window = window
 	sw.history = history
+	// Overlay the title-bar maximize/restore button when the config opts in. It
+	// applies to both live and read-only windows, so it is wired before the
+	// readOnly branch below.
+	if wb.windowConfig.Maximizable {
+		sw.maximizable = true
+		sw.installMaximizeButton()
+	}
 	sw.transcript = newTranscriptModel(history)
 	sw.transcript.add(&transcriptRecord{
 		kind:   kindSystem,
@@ -175,6 +189,119 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 	input.OnSubmit = submit
 	sw.layer = tv.NewWindowLayer("layer-"+id, window)
 	return sw
+}
+
+// IsMaximized reports whether the window is currently expanded to the available
+// desktop area via the title-bar maximize button.
+func (sw *SessionWindow) IsMaximized() bool { return sw.maximized }
+
+// Maximize expands the window to the available desktop area (the whole desktop
+// below the menu bar, minus the reserved "Sessions & Agents" sidebar), remembering
+// its current bounds so an unmaximize can return to them. It is a no-op when the
+// window is already maximized or when maximize is disabled.
+func (sw *SessionWindow) Maximize() {
+	if sw.maximized || !sw.maximizable {
+		return
+	}
+	sw.preMaximizeBounds = sw.window.Component.Bounds
+	sw.maximized = true
+	sw.applyMaximizedBounds()
+}
+
+// unmaximize restores the window to the bounds it had before it was maximized.
+// It is a no-op when the window is not maximized.
+func (sw *SessionWindow) unmaximize() {
+	if !sw.maximized {
+		return
+	}
+	sw.maximized = false
+	sw.window.Component.SetBounds(sw.preMaximizeBounds)
+}
+
+// ToggleMaximize flips the window between its pre-maximize bounds and the
+// available desktop area.
+func (sw *SessionWindow) ToggleMaximize() {
+	if sw.maximized {
+		sw.unmaximize()
+		return
+	}
+	sw.Maximize()
+}
+
+// applyMaximizedBounds sizes the window to the current maximized area, recomputed
+// from the live desktop dimensions so a maximize after a terminal resize fills the
+// new area rather than a stale one.
+func (sw *SessionWindow) applyMaximizedBounds() {
+	sw.window.Component.SetBounds(maximizedWindowRect(sw.wb.app.Width(), sw.wb.app.Height()))
+}
+
+// installMaximizeButton overlays a maximize/restore button onto the window's
+// title bar. The turbotv Window owns its title-bar chrome (minimize/close) and
+// exposes no maximize affordance, so the button is layered by wrapping the window
+// component's draw and click handlers: the draw paints the glyph after the base
+// window draws (so it sits on top of the title bar), and the click claims the
+// button's title-bar cells before the base handler so a click toggles maximize
+// instead of starting a title-bar drag. This is the same wrap-and-fall-through
+// pattern used to intercept transcript keys (see newSessionWindow).
+func (sw *SessionWindow) installMaximizeButton() {
+	w := sw.window
+	baseDraw := w.Component.DrawFn
+	w.Component.DrawFn = func(c *tv.VisualComponent, surface tv.Surface) {
+		baseDraw(c, surface)
+		sw.drawMaximizeButton(surface)
+	}
+	baseClick := w.Component.OnClickFn
+	w.Component.OnClickFn = func(c *tv.VisualComponent, event tui.ClickEvent) bool {
+		if sw.handleMaximizeClick(event) {
+			return true
+		}
+		return baseClick(c, event)
+	}
+}
+
+// drawMaximizeButton paints the maximize/restore glyph in the title bar, to the
+// left of the minimize button. It is skipped while minimized (the collapsed
+// title bar keeps only the minimize/close affordances, matching turbotv) and on
+// windows too narrow for the button to clear the left border.
+func (sw *SessionWindow) drawMaximizeButton(surface tv.Surface) {
+	w := sw.window
+	if w.IsMinimized() {
+		return
+	}
+	abs := w.Component.AbsoluteBounds()
+	r := maximizeButtonRect(abs, w.ShowClose, w.Minimizable)
+	if r.X <= abs.X+1 {
+		return
+	}
+	glyph := maximizeGlyph
+	if sw.maximized {
+		glyph = restoreGlyph
+	}
+	surface.WriteString(r.X, r.Y, glyph, tui.Cell{FG: w.TitleFG, BG: w.TitleBG, Bold: true})
+}
+
+// handleMaximizeClick claims a title-bar press that lands on the maximize button
+// (toggling maximize) and returns true; any other click falls through to the base
+// window handler. It ignores clicks while minimized and non-press events so they
+// keep their usual behavior.
+func (sw *SessionWindow) handleMaximizeClick(event tui.ClickEvent) bool {
+	if !sw.maximizable {
+		return false
+	}
+	w := sw.window
+	abs := w.Component.AbsoluteBounds()
+	if w.IsMinimized() || !event.Down || event.Y != abs.Y {
+		return false
+	}
+	r := maximizeButtonRect(abs, w.ShowClose, w.Minimizable)
+	if r.X <= abs.X+1 {
+		return false
+	}
+	if event.X >= r.X && event.X <= r.Right() {
+		sw.ToggleMaximize()
+		return true
+	}
+	return false
 }
 
 // selectedModelName returns the backend model identifier for the current select.
@@ -850,6 +977,59 @@ func headerSelectWidth(longestName, windowWidth int) int {
 
 // runeLen returns the number of display cells (runes) in s.
 func runeLen(s string) int { return utf8.RuneCountInString(s) }
+
+// maximizeGlyph / restoreGlyph are the title-bar maximize button's two states:
+// [□] invites expanding the window to the available area, [▣] marks it expanded
+// and invites restoring the previous bounds. They pair with the minimize
+// button's [▾]/[▴] and the close button's [■] (single-cell geometric shapes, like
+// the rest of the chrome).
+const (
+	maximizeGlyph = "[□]"
+	restoreGlyph  = "[▣]"
+)
+
+// menuBarHeight is the row the desktop menu bar occupies at the top of the
+// screen; a maximized window starts below it.
+const menuBarHeight = 1
+
+// maximizedWindowRect returns the bounds a session window expands to when
+// maximized: the whole desktop below the menu bar, with the right-hand
+// "Sessions & Agents" sidebar (sidebarWidth) reserved so a maximized window never
+// covers it. On a desktop too narrow to spare the sidebar the full width is used
+// instead (mirroring openWindowAny's fallback), and the dimensions are floored at
+// 1 so the rect is never empty.
+func maximizedWindowRect(screenW, screenH int) tv.Rect {
+	width := screenW - sidebarWidth
+	if width < 1 {
+		width = screenW
+	}
+	if width < 1 {
+		width = 1
+	}
+	height := screenH - menuBarHeight
+	if height < 1 {
+		height = 1
+	}
+	return tv.Rect{X: 0, Y: menuBarHeight, W: width, H: height}
+}
+
+// maximizeButtonRect is the 3-cell maximize/restore button's hit/draw region in
+// the title bar. It is placed one slot (4 cells: 3 for the glyph + 1 gap) left of
+// the rightmost title-bar button, mirroring the minimize/close layout in
+// tv.Window so the bar reads …[□][▾][■] when all three are shown. showClose and
+// minimizable reflect which of the buttons to the right are present.
+func maximizeButtonRect(abs tv.Rect, showClose, minimizable bool) tv.Rect {
+	x := abs.Right() - 5 // rightmost slot (close, or maximize when alone)
+	switch {
+	case showClose && minimizable:
+		x = abs.Right() - 13 // left of close + minimize
+	case showClose:
+		x = abs.Right() - 9 // left of close
+	case minimizable:
+		x = abs.Right() - 9 // left of minimize
+	}
+	return tv.Rect{X: x, Y: abs.Y, W: 3, H: 1}
+}
 
 // truncateRunes returns the first max runes of s, for the rare very-narrow
 // window where even the state does not fit.

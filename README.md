@@ -141,6 +141,7 @@ Session windows are **scalable** by default. You can:
 - **Drag the bottom-right corner** to resize any session window
 - **Drag the title bar** to move windows around
 - **Minimize/restore** windows using the ▾/▴ button in the title bar
+- **Maximize/restore** windows using the □/▣ button; maximize fills the desktop minus the reserved "Sessions & Agents" sidebar
 
 These features are controlled by the `window` section of `config.json`:
 
@@ -149,6 +150,7 @@ These features are controlled by the `window` section of `config.json`:
   "window": {
     "resizable": true,
     "minimizable": true,
+    "maximizable": true,
     "min_width": 50,
     "min_height": 12
   }
