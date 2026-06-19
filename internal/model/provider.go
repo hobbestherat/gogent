@@ -2,6 +2,7 @@ package model
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -240,16 +241,45 @@ func (s providerSpec) authQuery() string {
 // dropped. This is what lets a user supply just a base URL and have the rest
 // filled in automatically.
 func normalizeBaseURL(endpoint string, spec providerSpec) string {
-	e := strings.TrimRight(strings.TrimSpace(endpoint), "/")
+	e := strings.TrimSpace(endpoint)
 	if e == "" {
-		e = strings.TrimRight(spec.defaultBaseURL, "/")
+		e = spec.defaultBaseURL
 	}
-	if i := strings.LastIndex(e, spec.chatPath); i >= 0 && i == len(e)-len(spec.chatPath) {
-		e = strings.TrimRight(e[:i], "/")
-	}
-	return e
+	return stripChatPath(e, spec.chatPath)
 }
 
-// chatURL and modelsURL build the concrete endpoints for a base URL.
-func (s providerSpec) chatURL(base string) string   { return base + s.chatPath }
-func (s providerSpec) modelsURL(base string) string { return base + s.modelsPath }
+// stripChatPath reduces a URL to its provider base by removing a trailing chat
+// path from the URL's *path component* and dropping trailing slashes, while
+// preserving any query string. Parsing with net/url (rather than raw string
+// surgery on the whole URL) keeps this correct when the endpoint carries a
+// query — e.g. Azure's ?api-version= — or a layout where the chat path is not
+// the literal tail of the string.
+func stripChatPath(raw, chatPath string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return strings.TrimRight(strings.TrimSpace(raw), "/")
+	}
+	u.Path = strings.TrimRight(u.Path, "/")
+	if chatPath != "" && strings.HasSuffix(u.Path, chatPath) {
+		u.Path = strings.TrimRight(strings.TrimSuffix(u.Path, chatPath), "/")
+	}
+	return u.String()
+}
+
+// chatURL and modelsURL build the concrete endpoints for a base URL, inserting
+// the provider path before any query string so an Azure-style ?api-version= (or
+// other carried query) survives onto the derived endpoint.
+func (s providerSpec) chatURL(base string) string   { return appendPath(base, s.chatPath) }
+func (s providerSpec) modelsURL(base string) string { return appendPath(base, s.modelsPath) }
+
+// appendPath joins a provider path onto a base URL's path component, keeping any
+// query string intact (base + "?q" + "/path" must become ".../path?q", not
+// "...?q/path"). Falls back to plain concatenation if base is unparseable.
+func appendPath(base, path string) string {
+	u, err := url.Parse(base)
+	if err != nil {
+		return strings.TrimRight(base, "/") + path
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + path
+	return u.String()
+}
