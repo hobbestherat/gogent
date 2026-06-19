@@ -63,6 +63,11 @@ type Gogent struct {
 	gitRepo bool
 	// sessionTitles records a human-friendly title per session for persistence.
 	sessionTitles map[string]string
+	// ephemeral marks sessions that must never be persisted to disk or
+	// auto-restored — the per-client sessions the headless HTTP server creates,
+	// which are bounded by LRU/TTL eviction rather than kept across restarts
+	// (issue #25). The "default" session is implicitly ephemeral.
+	ephemeral map[string]bool
 	// reviewer, when set, gates write/edit operations behind an interactive
 	// diff-review approval (issue #64). reviewApprovedAll records the sessions
 	// that chose "approve all this session", so their later edits skip the gate.
@@ -145,6 +150,7 @@ func NewGogentWithWorkspace(homeDir, workspaceRoot string) *Gogent {
 		workspaceRoot: workspaceRoot,
 		homeDir:       homeDir,
 		sessionTitles: make(map[string]string),
+		ephemeral:     make(map[string]bool),
 
 		reviewApprovedAll: make(map[string]bool),
 		log:               log,
@@ -747,6 +753,17 @@ func (g *Gogent) NewSession(id string) *agent.UserSession {
 	return g.CreateUserSession(id, rootAgent)
 }
 
+// NewEphemeralSession is like NewSession but marks the session as ephemeral, so
+// it is never persisted to disk or auto-restored. The headless HTTP server uses
+// it to create a session per client id (issue #25): such sessions live only for
+// the process and are reclaimed by LRU/TTL eviction.
+func (g *Gogent) NewEphemeralSession(id string) *agent.UserSession {
+	g.mu.Lock()
+	g.ephemeral[id] = true
+	g.mu.Unlock()
+	return g.NewSession(id)
+}
+
 // toolLoopContext returns the cancellation scope of the loop that invoked a
 // tool, falling back to context.Background() for callers that pre-date context
 // plumbing (issue #24).
@@ -761,8 +778,10 @@ func toolLoopContext(ctx tool.ToolContext) context.Context {
 func (g *Gogent) RemoveSession(id string) {
 	g.mu.Lock()
 	us := g.userSessions[id]
+	eph := g.ephemeral[id]
 	delete(g.userSessions, id)
 	delete(g.sessionTitles, id)
+	delete(g.ephemeral, id)
 	g.mu.Unlock()
 
 	// Cancel any in-flight task loops so they stop mutating a session that is no
@@ -772,7 +791,9 @@ func (g *Gogent) RemoveSession(id string) {
 	}
 
 	// Archive the on-disk transcript so it is not auto-restored next start.
-	if g.store != nil && id != "default" {
+	// Ephemeral (HTTP) sessions were never persisted, so there is nothing to
+	// archive (issue #25).
+	if g.store != nil && id != "default" && !eph {
 		if err := g.store.Archive(id); err != nil {
 			g.warnf("failed to archive session %s: %v", id, err)
 		}
@@ -795,8 +816,9 @@ func (g *Gogent) persistSession(id string) {
 	g.mu.RLock()
 	us := g.userSessions[id]
 	title := g.sessionTitles[id]
+	eph := g.ephemeral[id]
 	g.mu.RUnlock()
-	if us == nil {
+	if us == nil || eph {
 		return
 	}
 	if title == "" {

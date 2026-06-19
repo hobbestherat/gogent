@@ -156,7 +156,12 @@ internal/notify/       Desktop/terminal notifications (bell + OSC 9/777 + native
 ## Entry points
 
 - Default: interactive TUI (`./gogent`).
-- Headless HTTP server mode for API-only use (`-http -no-tui`).
+- Headless HTTP server mode for API-only use (`-http -no-tui`). `POST /message`
+  routes each client to its own `UserSession` keyed by the `X-Gogent-Session`
+  header (or a `gogent_session` cookie / `session` form field), so concurrent
+  clients are isolated rather than multiplexed onto one shared transcript; no id
+  falls back to a shared `default` session. These per-client sessions are
+  ephemeral (never persisted/restored) and bounded by an idle-TTL + LRU cap.
 - `-verbose` for extra startup/diagnostic logging.
 
 ## System context (AGENTS.md + repo map + skills)
