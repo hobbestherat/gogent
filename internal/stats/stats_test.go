@@ -17,6 +17,7 @@ func TestFromSnapshot(t *testing.T) {
 		SuccessCount:               5,
 		ErrorCount:                 2,
 		TotalTokensIn:              1000,
+		TotalCachedTokensIn:        400,
 		TotalTokensOut:             300,
 		TotalTimeMs:                14000,
 		TimeoutCount:               1,
@@ -27,7 +28,7 @@ func TestFromSnapshot(t *testing.T) {
 	got := FromSnapshot(in)
 	want := ConnectorStat{
 		Requests: 7, Success: 5, Errors: 2,
-		TokensIn: 1000, TokensOut: 300, TotalTimeMs: 14000,
+		TokensIn: 1000, CachedTokensIn: 400, TokensOut: 300, TotalTimeMs: 14000,
 		Timeouts: 1, ContextOverflows: 3, Refusals: 4, GenericErrors: 6,
 	}
 	if got != want {
@@ -49,6 +50,26 @@ func TestConnectorStatAddAndAvg(t *testing.T) {
 	}
 	if got := (ConnectorStat{}).AvgLatencyMs(); got != 0 {
 		t.Errorf("AvgLatencyMs with no requests = %d, want 0", got)
+	}
+}
+
+// TestConnectorStatCacheHitPercent covers the prompt-cache hit-rate helper,
+// including its zero-guard and that cached tokens aggregate under Add.
+func TestConnectorStatCacheHitPercent(t *testing.T) {
+	c := ConnectorStat{TokensIn: 1000, CachedTokensIn: 800}
+	if got, want := c.CacheHitPercent(), 80; got != want {
+		t.Errorf("CacheHitPercent = %d, want %d", got, want)
+	}
+	if got := (ConnectorStat{}).CacheHitPercent(); got != 0 {
+		t.Errorf("CacheHitPercent with no tokens = %d, want 0", got)
+	}
+	sum := ConnectorStat{TokensIn: 100, CachedTokensIn: 40}.
+		Add(ConnectorStat{TokensIn: 100, CachedTokensIn: 60})
+	if sum.CachedTokensIn != 100 {
+		t.Errorf("Add CachedTokensIn = %d, want 100", sum.CachedTokensIn)
+	}
+	if got, want := sum.CacheHitPercent(), 50; got != want {
+		t.Errorf("aggregated CacheHitPercent = %d, want %d", got, want)
 	}
 }
 

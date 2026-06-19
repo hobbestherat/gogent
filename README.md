@@ -180,10 +180,19 @@ collects but previously only showed in part (or not at all). It has five tabs:
 `~/.gogent/gogent-stats-<timestamp>.{csv,json}`. The CSV is long-format
 (`section,name,metric,value`) so it loads cleanly into a spreadsheet.
 
+Prompt-cache accounting is built in: the backend reads each provider's
+cached-prompt-token count (OpenAI/Z.AI `prompt_tokens_details.cached_tokens`,
+or a top-level `prompt_cache_hit_tokens`) and the Overview reports cached tokens
+and a cache-hit % per backend, so reuse of the stable prefix (tools + system
+prompt + history) is visible. OpenAI-compatible backends cache that prefix
+automatically — no request markers needed — and gogent already sends it
+stable→volatile (tools, then the frozen system prompt, then the running
+transcript with the live message last).
+
 The view is a point-in-time, in-memory snapshot. Durable/queryable history
-arrives with the structured-logging/audit stream; per-model cost, cache-hit % and
-TTFT are likewise follow-ups (they depend on a per-model pricing configuration
-and streaming/cache support).
+arrives with the structured-logging/audit stream; per-model cost and TTFT are
+likewise follow-ups (they depend on a per-model pricing configuration and
+streaming instrumentation).
 
 Each model entry has an `api_type` selecting the provider conventions:
 

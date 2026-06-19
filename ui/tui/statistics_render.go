@@ -164,7 +164,7 @@ func renderStatsModels(r stats.Report) string {
 			padName(formatTokens(m.TokensOut), cOut),
 		)
 	}
-	b.WriteString("\nCost, cache-hit % and TTFT are not yet tracked (follow-ups).\n")
+	b.WriteString("\nCache-hit % is shown per backend in the Overview. Cost and TTFT are not yet tracked (follow-ups).\n")
 	return b.String()
 }
 
@@ -191,6 +191,9 @@ func writeConnector(b *strings.Builder, c stats.ConnectorStat) {
 	fmt.Fprintf(b, "  %s %s %s\n",
 		padName("Tokens out:", 14), padName(formatTokens(c.TokensOut), 10),
 		padName("Avg latency: "+formatMs(c.AvgLatencyMs()), 20))
+	fmt.Fprintf(b, "  %s %s %s\n",
+		padName("Cached in:", 14), padName(formatTokens(c.CachedTokensIn), 10),
+		padName(fmt.Sprintf("Cache hit: %d%%", c.CacheHitPercent()), 20))
 	fmt.Fprintf(b, "  Errors: timeouts=%d overflows=%d refusals=%d generic=%d\n",
 		c.Timeouts, c.ContextOverflows, c.Refusals, c.GenericErrors)
 }
