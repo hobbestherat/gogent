@@ -1,6 +1,9 @@
 package model
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // This file defines the clean, reusable interface surface for "something that
 // can talk to a model". It is intentionally split into small capability
@@ -57,6 +60,26 @@ type ModelInfo struct {
 	ID      string `json:"id"`
 	Object  string `json:"object,omitempty"`
 	OwnedBy string `json:"owned_by,omitempty"`
+}
+
+// UnmarshalJSON reads a listing entry, falling back to a "name" field when the
+// OpenAI-style "id" is absent. Non-OpenAI listings key the identifier on name
+// (Ollama's /api/tags, Gemini's /v1beta/models), so this lets ListModels handle
+// those shapes without a per-provider response parser.
+func (m *ModelInfo) UnmarshalJSON(data []byte) error {
+	type alias ModelInfo // strips methods to avoid infinite recursion
+	var raw struct {
+		alias
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*m = ModelInfo(raw.alias)
+	if m.ID == "" {
+		m.ID = raw.Name
+	}
+	return nil
 }
 
 // ModelLister is an optional capability: a backend that can report which models

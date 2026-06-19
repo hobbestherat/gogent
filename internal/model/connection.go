@@ -80,7 +80,6 @@ type CompletionRequest struct {
 	// for providers that understand them (see providerSpec capabilities).
 	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
 	Thinking        *ThinkingParam `json:"thinking,omitempty"`
-	ContextLength   int            `json:"context_length,omitempty"`
 	Model           string         `json:"model,omitempty"`
 	Tools           []ToolDef      `json:"tools,omitempty"`
 	ToolChoice      string         `json:"tool_choice,omitempty"`
@@ -959,17 +958,15 @@ func (c *ModelConnection) GetStats() *ModelStats {
 
 // modelsURL derives the provider's model-listing endpoint from the configured
 // chat-completions URL (e.g. ".../chat/completions" -> ".../models"), honoring
-// the provider-specific path layout.
+// the provider-specific path layout. It strips the chat path from the URL's
+// path component and re-derives via the spec, so a carried query string (Azure's
+// ?api-version=) and non-/v1 layouts are handled the same way as construction.
 func (c *ModelConnection) modelsURL() string {
 	spec := c.spec
 	if spec.chatPath == "" {
 		spec = specFor(APITypeOpenAI)
 	}
-	u := strings.TrimRight(c.URL, "/")
-	if i := strings.LastIndex(u, spec.chatPath); i >= 0 {
-		return u[:i] + spec.modelsPath
-	}
-	return u + spec.modelsPath
+	return spec.modelsURL(stripChatPath(c.URL, spec.chatPath))
 }
 
 // ListModels asks the backend which models it serves, using the OpenAI/OpenRouter
