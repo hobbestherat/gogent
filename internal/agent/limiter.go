@@ -66,6 +66,34 @@ func (l *SubAgentLimiter) InFlight() int {
 	return len(l.slots)
 }
 
+// maxParallelToolCalls bounds how many independent tool calls from a single turn
+// run concurrently (issue #50). It caps the goroutine fan-out — and the pressure
+// on the workspace and network — when a model requests a large read-only batch
+// (e.g. "read a.go, b.go and c.go"); excess calls wait for a slot.
+const maxParallelToolCalls = 8
+
+// runBoundedTools runs each task concurrently with at most maxParallelToolCalls
+// active at once, blocking until every task has finished. It is the tool-call
+// analogue of RunSubAgentsBounded, but bounded by a fixed local semaphore rather
+// than the shared sub-agent limiter: tool calls are cheap and never recurse into
+// this runner, so a plain bounded worker pool suffices. Tasks are responsible for
+// their own panic recovery (see runToolCallsConcurrent).
+func runBoundedTools(tasks []func()) {
+	sem := make(chan struct{}, maxParallelToolCalls)
+	var wg sync.WaitGroup
+	for _, task := range tasks {
+		task := task
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			task()
+		}()
+	}
+	wg.Wait()
+}
+
 // RunSubAgentsBounded runs each task concurrently, but with at most the shared
 // limiter's worth of goroutines active at once; tasks that cannot get a slot run
 // inline in the caller's goroutine as backpressure (issue #23). It blocks until

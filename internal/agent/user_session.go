@@ -615,71 +615,30 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 			emit(SessionEvent{Type: SessionEventAssistantStep, Step: step, Text: thought})
 		}
 
-		// Execute each requested tool and gather result messages.
-		toolMsgs := make([]model.Message, len(calls))
-
-		// Parallel fast-path: when a single turn asks for several sub-agent
-		// spawns, run them concurrently. Sub-agents are independent and every
-		// agent-tree read and write is mutex-guarded (children are copied under
-		// lock via GetSubAgents, the parent link via GetParent), so this is
-		// safe and is what lets "delegate A, B and C at once" run in parallel.
-		if allSpawnSubAgent(calls) {
-			// Bound the goroutine fan-out: spawns run concurrently only while a
-			// global sub-agent slot is free, otherwise inline as backpressure so a
-			// deep fan-out can't thunder against the backend (issue #23).
-			tasks := make([]func(), len(calls))
-			for i, call := range calls {
-				i, call := i, call
-				emit(SessionEvent{Type: SessionEventToolCall, Step: step, Tool: call.Tool, Args: call.Args})
-				tasks[i] = func() {
-					// Keep a panic in this worker (or anything it calls) from
-					// taking down the process: turn it into a tool-result error
-					// for this slot so the batch still yields a valid message set
-					// (issue #8).
-					defer func() {
-						if r := recover(); r != nil {
-							resultStr := fmt.Sprintf("error: tool %q panicked: %v", call.Tool, r)
-							emit(SessionEvent{Type: SessionEventToolResult, Step: step, Tool: call.Tool, Args: call.Args, Result: resultStr})
-							toolMsgs[i] = makeToolResultMessage(call, resultStr)
-						}
-					}()
-					resultStr := s.runToolCall(ctx, agent, agentID, call)
-					emit(SessionEvent{Type: SessionEventToolResult, Step: step, Tool: call.Tool, Args: call.Args, Result: resultStr})
-					toolMsgs[i] = makeToolResultMessage(call, resultStr)
-				}
-			}
-			s.RunSubAgentsBounded(tasks)
-			sess.AppendToolResults(toolMsgs)
-			emit(SessionEvent{Type: SessionEventThinking, Step: step + 1})
-			s.compactIfNeeded(sess, emit)
-			resp, err = s.modelRoundTrip(ctx, sess, agent, nil, tools)
-			if err != nil {
-				emit(SessionEvent{Type: SessionEventError, Err: err})
-				return responses, err
-			}
-			responses = append(responses, resp)
-			s.emitUsage(emit)
-			continue
-		}
-
-		toolMsgs = toolMsgs[:0]
+		// Execute this turn's tool calls, gathering result messages in call order.
+		// Two fast-paths run an independent batch concurrently to cut wall-clock
+		// latency; everything else runs serially so side-effecting tools (write,
+		// edit, shell, ...) keep their requested order.
+		var toolMsgs []model.Message
 		finished := false
-		for _, call := range calls {
-			if call.Tool == "structured_output" {
-				// Terminal tool: fold its response into the assistant content.
-				if final, _ := call.Args["final"].(bool); final {
-					if text, ok := call.Args["response"].(string); ok && text != "" {
-						resp.Content = text
-					}
-					finished = true
-					break
-				}
-			}
-
-			emit(SessionEvent{Type: SessionEventToolCall, Step: step, Tool: call.Tool, Args: call.Args})
-			resultStr := s.runToolCall(ctx, agent, agentID, call)
-			emit(SessionEvent{Type: SessionEventToolResult, Step: step, Tool: call.Tool, Args: call.Args, Result: resultStr})
-			toolMsgs = append(toolMsgs, makeToolResultMessage(call, resultStr))
+		switch {
+		case allSpawnSubAgent(calls):
+			// Several one-shot sub-agent spawns. Sub-agents are independent and
+			// every agent-tree read/write is mutex-guarded (children copied under
+			// lock via GetSubAgents, the parent link via GetParent), so this is what
+			// lets "delegate A, B and C at once" run in parallel. The fan-out is
+			// bounded by the shared sub-agent limiter — a spawn that can't grab a
+			// global slot runs inline as backpressure (issue #23).
+			toolMsgs = s.runToolCallsConcurrent(ctx, agent, agentID, calls, step, emit, s.RunSubAgentsBounded)
+		case allReadOnly(agent.ToolRegistry, calls):
+			// Several independent read-only/idempotent calls (read, grep, glob,
+			// list, calc, web_fetch). They don't mutate the workspace and their
+			// ordering doesn't matter, so they run concurrently — bounded by a fixed
+			// tool semaphore — and their results are reassembled in call order
+			// before being appended (issue #50).
+			toolMsgs = s.runToolCallsConcurrent(ctx, agent, agentID, calls, step, emit, runBoundedTools)
+		default:
+			toolMsgs, finished = s.runToolCallsSerial(ctx, agent, agentID, calls, step, emit, resp)
 		}
 		if finished {
 			break
@@ -763,6 +722,79 @@ func allSpawnSubAgent(calls []tool.ToolCall) bool {
 		}
 	}
 	return true
+}
+
+// allReadOnly reports whether every call in a turn targets a registered
+// read-only tool, so the batch can be executed concurrently without racing on
+// the workspace or on tool ordering (issue #50). A single call is left to the
+// serial path; an unknown tool (e.g. an MCP tool whose effects we can't
+// classify) or any side-effecting tool makes the whole batch ineligible, so it
+// runs serially — the conservative choice.
+func allReadOnly(reg *tool.ToolRegistry, calls []tool.ToolCall) bool {
+	if reg == nil || len(calls) < 2 {
+		return false
+	}
+	for _, c := range calls {
+		t := reg.Get(c.Tool)
+		if t == nil || !t.ReadOnly {
+			return false
+		}
+	}
+	return true
+}
+
+// runToolCallsConcurrent executes every call concurrently and returns their
+// result messages in call order (so the transcript is independent of which call
+// happened to finish first). run bounds the goroutine fan-out — the shared
+// sub-agent limiter for spawn batches, a fixed tool semaphore for read-only
+// batches. A panic in any one call is contained and turned into an error result
+// for that slot, so the batch still yields a complete, ordered message set
+// (issue #8).
+func (s *UserSession) runToolCallsConcurrent(ctx context.Context, agent *Agent, agentID string, calls []tool.ToolCall, step int, emit func(SessionEvent), run func([]func())) []model.Message {
+	toolMsgs := make([]model.Message, len(calls))
+	tasks := make([]func(), len(calls))
+	for i, call := range calls {
+		i, call := i, call
+		emit(SessionEvent{Type: SessionEventToolCall, Step: step, Tool: call.Tool, Args: call.Args})
+		tasks[i] = func() {
+			defer func() {
+				if r := recover(); r != nil {
+					resultStr := fmt.Sprintf("error: tool %q panicked: %v", call.Tool, r)
+					emit(SessionEvent{Type: SessionEventToolResult, Step: step, Tool: call.Tool, Args: call.Args, Result: resultStr})
+					toolMsgs[i] = makeToolResultMessage(call, resultStr)
+				}
+			}()
+			resultStr := s.runToolCall(ctx, agent, agentID, call)
+			emit(SessionEvent{Type: SessionEventToolResult, Step: step, Tool: call.Tool, Args: call.Args, Result: resultStr})
+			toolMsgs[i] = makeToolResultMessage(call, resultStr)
+		}
+	}
+	run(tasks)
+	return toolMsgs
+}
+
+// runToolCallsSerial executes a turn's calls one at a time, in order. It is the
+// path for any batch that is not safe to parallelize (writes, shell, mixed or
+// unknown tools). A terminal structured_output{final:true} call folds its text
+// into resp and stops the loop, reported via the returned finished flag.
+func (s *UserSession) runToolCallsSerial(ctx context.Context, agent *Agent, agentID string, calls []tool.ToolCall, step int, emit func(SessionEvent), resp *model.CompletionResponse) (toolMsgs []model.Message, finished bool) {
+	for _, call := range calls {
+		if call.Tool == "structured_output" {
+			// Terminal tool: fold its response into the assistant content.
+			if final, _ := call.Args["final"].(bool); final {
+				if text, ok := call.Args["response"].(string); ok && text != "" {
+					resp.Content = text
+				}
+				return toolMsgs, true
+			}
+		}
+
+		emit(SessionEvent{Type: SessionEventToolCall, Step: step, Tool: call.Tool, Args: call.Args})
+		resultStr := s.runToolCall(ctx, agent, agentID, call)
+		emit(SessionEvent{Type: SessionEventToolResult, Step: step, Tool: call.Tool, Args: call.Args, Result: resultStr})
+		toolMsgs = append(toolMsgs, makeToolResultMessage(call, resultStr))
+	}
+	return toolMsgs, false
 }
 
 // collectToolCalls returns the tool calls for a response, preferring native
