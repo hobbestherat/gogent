@@ -74,6 +74,7 @@ type ConnectorStat struct {
 	Success          int   `json:"success"`
 	Errors           int   `json:"errors"`
 	TokensIn         int   `json:"tokens_in"`
+	CachedTokensIn   int   `json:"cached_tokens_in"`
 	TokensOut        int   `json:"tokens_out"`
 	TotalTimeMs      int64 `json:"total_time_ms"`
 	Timeouts         int   `json:"timeouts"`
@@ -89,6 +90,7 @@ func FromSnapshot(s model.StatsSnapshot) ConnectorStat {
 		Success:          s.SuccessCount,
 		Errors:           s.ErrorCount,
 		TokensIn:         s.TotalTokensIn,
+		CachedTokensIn:   s.TotalCachedTokensIn,
 		TokensOut:        s.TotalTokensOut,
 		TotalTimeMs:      s.TotalTimeMs,
 		Timeouts:         s.TimeoutCount,
@@ -106,6 +108,7 @@ func (c ConnectorStat) Add(other ConnectorStat) ConnectorStat {
 		Success:          c.Success + other.Success,
 		Errors:           c.Errors + other.Errors,
 		TokensIn:         c.TokensIn + other.TokensIn,
+		CachedTokensIn:   c.CachedTokensIn + other.CachedTokensIn,
 		TokensOut:        c.TokensOut + other.TokensOut,
 		TotalTimeMs:      c.TotalTimeMs + other.TotalTimeMs,
 		Timeouts:         c.Timeouts + other.Timeouts,
@@ -122,6 +125,18 @@ func (c ConnectorStat) AvgLatencyMs() int64 {
 		return 0
 	}
 	return c.TotalTimeMs / int64(c.Requests)
+}
+
+// CacheHitPercent is the share of prompt (input) tokens served from the
+// provider's prompt cache, as a whole-number percentage of TokensIn (0 when no
+// input tokens have been processed). It is the headline prompt-caching metric:
+// the higher it is, the more of the stable prefix was reused at the discounted
+// cache-read price.
+func (c ConnectorStat) CacheHitPercent() int {
+	if c.TokensIn <= 0 {
+		return 0
+	}
+	return int(float64(c.CachedTokensIn) / float64(c.TokensIn) * 100)
 }
 
 // ToolStat is the per-tool usage and duration breakdown.
@@ -243,6 +258,8 @@ func writeConnectorCSV(w *csv.Writer, section, name string, c ConnectorStat) {
 	set("success", int64(c.Success))
 	set("errors", int64(c.Errors))
 	set("tokens_in", int64(c.TokensIn))
+	set("cached_tokens_in", int64(c.CachedTokensIn))
+	set("cache_hit_percent", int64(c.CacheHitPercent()))
 	set("tokens_out", int64(c.TokensOut))
 	set("total_time_ms", c.TotalTimeMs)
 	set("avg_latency_ms", c.AvgLatencyMs())

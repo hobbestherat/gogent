@@ -92,6 +92,42 @@ type TokenUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	// CachedTokens is the count of prompt (input) tokens that the provider served
+	// from its prompt cache rather than reprocessing. It is a subset of
+	// PromptTokens, billed at a steep discount, so it measures how much of the
+	// stable prefix (tools + system prompt + history) was reused this turn.
+	//
+	// OpenAI-compatible backends (incl. Z.AI) report it nested under
+	// usage.prompt_tokens_details.cached_tokens; DeepSeek-style backends report it
+	// top-level as prompt_cache_hit_tokens. UnmarshalJSON reads either form. The
+	// own tag keeps it round-tripping through gogent's persistence.
+	CachedTokens int `json:"cached_tokens,omitempty"`
+}
+
+// UnmarshalJSON parses provider token usage, normalizing the cached-prompt-token
+// count from the two shapes OpenAI-compatible backends use (a nested
+// prompt_tokens_details.cached_tokens, or a top-level prompt_cache_hit_tokens)
+// into CachedTokens.
+func (u *TokenUsage) UnmarshalJSON(data []byte) error {
+	type alias TokenUsage // strips methods to avoid infinite recursion
+	var raw struct {
+		alias
+		PromptTokensDetails *struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
+		PromptCacheHitTokens int `json:"prompt_cache_hit_tokens"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*u = TokenUsage(raw.alias)
+	switch {
+	case raw.PromptTokensDetails != nil && raw.PromptTokensDetails.CachedTokens > 0:
+		u.CachedTokens = raw.PromptTokensDetails.CachedTokens
+	case raw.PromptCacheHitTokens > 0:
+		u.CachedTokens = raw.PromptCacheHitTokens
+	}
+	return nil
 }
 
 type StreamResponse struct {
@@ -109,6 +145,7 @@ type ModelStats struct {
 	SuccessCount               int
 	ErrorCount                 int
 	TotalTokensIn              int
+	TotalCachedTokensIn        int
 	TotalTokensOut             int
 	TotalTimeMs                int64
 	TimeoutCount               int
@@ -283,6 +320,7 @@ func (c *ModelConnection) CompleteWithStats(messages []Message) (*CompletionResp
 		usage = resp.Usage
 		c.Stats.Mutex.Lock()
 		c.Stats.TotalTokensIn += usage.PromptTokens
+		c.Stats.TotalCachedTokensIn += usage.CachedTokens
 		c.Stats.TotalTokensOut += usage.CompletionTokens
 		c.Stats.Mutex.Unlock()
 	}
@@ -410,6 +448,7 @@ func (c *ModelConnection) complete(messages []Message, stream bool, tools []Tool
 	c.Stats.SuccessCount++
 	if fullResp.Usage != nil {
 		c.Stats.TotalTokensIn += fullResp.Usage.PromptTokens
+		c.Stats.TotalCachedTokensIn += fullResp.Usage.CachedTokens
 		c.Stats.TotalTokensOut += fullResp.Usage.CompletionTokens
 	}
 	c.Stats.Mutex.Unlock()
@@ -518,6 +557,7 @@ func (c *ModelConnection) completeStream(messages []Message, streamCh chan<- Str
 		c.Stats.SuccessCount++
 		if usage != nil {
 			c.Stats.TotalTokensIn += usage.PromptTokens
+			c.Stats.TotalCachedTokensIn += usage.CachedTokens
 			c.Stats.TotalTokensOut += usage.CompletionTokens
 		}
 	}

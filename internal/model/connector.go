@@ -76,6 +76,7 @@ type StatsSnapshot struct {
 	SuccessCount               int
 	ErrorCount                 int
 	TotalTokensIn              int
+	TotalCachedTokensIn        int
 	TotalTokensOut             int
 	TotalTimeMs                int64
 	TimeoutCount               int
@@ -92,6 +93,7 @@ func (s StatsSnapshot) Add(other StatsSnapshot) StatsSnapshot {
 		SuccessCount:               s.SuccessCount + other.SuccessCount,
 		ErrorCount:                 s.ErrorCount + other.ErrorCount,
 		TotalTokensIn:              s.TotalTokensIn + other.TotalTokensIn,
+		TotalCachedTokensIn:        s.TotalCachedTokensIn + other.TotalCachedTokensIn,
 		TotalTokensOut:             s.TotalTokensOut + other.TotalTokensOut,
 		TotalTimeMs:                s.TotalTimeMs + other.TotalTimeMs,
 		TimeoutCount:               s.TimeoutCount + other.TimeoutCount,
@@ -110,6 +112,7 @@ func (s *ModelStats) Snapshot() StatsSnapshot {
 		SuccessCount:               s.SuccessCount,
 		ErrorCount:                 s.ErrorCount,
 		TotalTokensIn:              s.TotalTokensIn,
+		TotalCachedTokensIn:        s.TotalCachedTokensIn,
 		TotalTokensOut:             s.TotalTokensOut,
 		TotalTimeMs:                s.TotalTimeMs,
 		TimeoutCount:               s.TimeoutCount,
