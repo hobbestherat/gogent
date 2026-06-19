@@ -120,7 +120,7 @@ func presetIndex(name string) int {
 // restores the default palette.
 func (w *Workbench) showThemeEditor() {
 	if w.handlers.GetTheme == nil || w.handlers.SetTheme == nil {
-		tv.ShowConfirmYesNo(w.desktop, "Theme", "Theme editing is unavailable.", nil)
+		w.showConfirm("Theme", "Theme editing is unavailable.", nil)
 		return
 	}
 	cur := w.handlers.GetTheme()

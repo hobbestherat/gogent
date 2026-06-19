@@ -229,6 +229,9 @@ func TestApplyTheme(t *testing.T) {
 	if tv.DefaultTheme.DialogBG != tui.DefaultColor() {
 		t.Errorf("no-color: tv.DefaultTheme.DialogBG = %+v, want default", tv.DefaultTheme.DialogBG)
 	}
+	if colorDialogHeader != tui.DefaultColor() || colorDialogDetail != tui.DefaultColor() {
+		t.Errorf("no-color: dialog accents not neutralised (header=%+v detail=%+v)", colorDialogHeader, colorDialogDetail)
+	}
 
 	// High-contrast on truecolor: User picks up the Okabe sky-blue and the chrome
 	// dialog goes black.
@@ -240,19 +243,29 @@ func TestApplyTheme(t *testing.T) {
 	if tv.DefaultTheme.DialogBG != tui.RGBColor(0, 0, 0) {
 		t.Errorf("high-contrast: DialogBG = %+v, want black", tv.DefaultTheme.DialogBG)
 	}
+	// On the black high-contrast dialog the bright palette accents read well.
+	if colorDialogHeader != okabeSkyBlue || colorDialogDetail != okabeOrange {
+		t.Errorf("high-contrast: dialog accents = (header=%+v detail=%+v), want sky-blue/orange", colorDialogHeader, colorDialogDetail)
+	}
 
 	// Default palette restores turbotui's stock chrome.
 	ApplyTheme(ResolveTheme(config.ThemeConfig{}, envOf(map[string]string{"TERM": "xterm"}), false))
 	if tv.DefaultTheme != baseTVTheme {
 		t.Errorf("default: tv.DefaultTheme not restored to the stock palette")
 	}
+	// The stock light-grey dialog uses dark, high-contrast accents.
+	if colorDialogHeader != tui.ANSIColor(5) || colorDialogDetail != tui.ANSIColor(4) {
+		t.Errorf("default: dialog accents = (header=%+v detail=%+v), want ANSI 5/4", colorDialogHeader, colorDialogDetail)
+	}
 }
 
-func snapshotColors() [7]tui.Color {
-	return [7]tui.Color{colorUser, colorAgent, colorNote, colorTool, colorResult, colorInfo, colorError}
+func snapshotColors() [9]tui.Color {
+	return [9]tui.Color{colorUser, colorAgent, colorNote, colorTool, colorResult, colorInfo, colorError,
+		colorDialogHeader, colorDialogDetail}
 }
 
-func restoreColors(c [7]tui.Color) {
+func restoreColors(c [9]tui.Color) {
 	colorUser, colorAgent, colorNote, colorTool, colorResult, colorInfo, colorError =
 		c[0], c[1], c[2], c[3], c[4], c[5], c[6]
+	colorDialogHeader, colorDialogDetail = c[7], c[8]
 }

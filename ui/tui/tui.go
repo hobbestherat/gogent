@@ -445,7 +445,7 @@ func (w *Workbench) rebuildMenu() {
 			tv.NewMenuItem("&Keybindings (?)…", func() { w.showHelpOverlay() }),
 			tv.NewMenuItem("----------", nil),
 			tv.NewMenuItem("&About", func() {
-				tv.ShowConfirmYesNo(w.desktop, "Gogent",
+				w.showConfirm("Gogent",
 					"Gogent multi-session TUI.\nEach session is its own window; fold thoughts & tool calls with the >/v markers.\nPress ? for the keybinding cheatsheet or Ctrl+K for the command palette.", nil)
 			}),
 		),
@@ -596,7 +596,7 @@ func (w *Workbench) sessionTitle(id string) string {
 // the capped live view (issue #62).
 func (w *Workbench) exportActive(format string) {
 	if w.handlers.GetTranscript == nil {
-		tv.ShowConfirmYesNo(w.desktop, "Export Session", "Export is unavailable.", nil)
+		w.showConfirm("Export Session", "Export is unavailable.", nil)
 		return
 	}
 	id := w.ActiveID()
@@ -613,11 +613,11 @@ func (w *Workbench) exportActive(format string) {
 	if err != nil {
 		msg = label + " export failed:\n" + err.Error()
 	}
-	tv.ShowConfirmYesNo(w.desktop, "Export Session", msg, nil)
+	w.showConfirm("Export Session", msg, nil)
 }
 
 func (w *Workbench) confirmQuit() {
-	tv.ShowConfirmYesNo(w.desktop, "Quit Gogent", "Are you sure you want to quit?", func(yes bool) {
+	w.showConfirm("Quit Gogent", "Are you sure you want to quit?", func(yes bool) {
 		if yes && w.quit != nil {
 			w.quit()
 		}

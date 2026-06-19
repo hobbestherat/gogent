@@ -237,7 +237,7 @@ func showPermissionDialog(desktop *tv.Desktop, req permission.Request, requester
 	// (possibly scrolling) body.
 	if requesterHdr != "" {
 		r := tv.NewLabel(truncate(requesterHdr, width-4), tv.Rect{X: 2, Y: 1, W: width - 4, H: 1})
-		r.FG = colorUser
+		r.FG = colorDialogHeader
 		r.BG = tv.DefaultTheme.DialogBG
 		dialog.Window.AddContent(r)
 	}
@@ -333,7 +333,7 @@ func permissionDialogBody(req permission.Request, question string) []permissionB
 			if i == 0 {
 				line = "$ " + line
 			}
-			lines = append(lines, permissionBodyLine{text: line, color: colorTool})
+			lines = append(lines, permissionBodyLine{text: line, color: colorDialogDetail})
 		}
 	}
 	return lines
