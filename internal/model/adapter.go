@@ -94,6 +94,7 @@ type anthropicRequest struct {
 	System      string             `json:"system,omitempty"`
 	Messages    []anthropicMessage `json:"messages"`
 	Tools       []anthropicTool    `json:"tools,omitempty"`
+	ToolChoice  interface{}        `json:"tool_choice,omitempty"`
 	Temperature *float32           `json:"temperature,omitempty"`
 	TopP        *float32           `json:"top_p,omitempty"`
 	Stream      bool               `json:"stream,omitempty"`
@@ -182,7 +183,30 @@ func (anthropicAdapter) buildBody(req CompletionRequest) ([]byte, error) {
 		})
 	}
 
+	// tool_choice is only valid alongside a tool set, and gogent only sets it
+	// when offering tools; guard anyway so a stray choice can't produce a
+	// request Anthropic would reject.
+	if req.ToolChoice != nil && len(out.Tools) > 0 {
+		out.ToolChoice = anthropicToolChoice(*req.ToolChoice)
+	}
+
 	return json.Marshal(out)
+}
+
+// anthropicToolChoice maps the provider-independent ToolChoice onto Anthropic's
+// object encoding: {"type":"auto"|"any"|"none"} or {"type":"tool","name":...}.
+// "required" (force some tool) becomes Anthropic's "any".
+func anthropicToolChoice(tc ToolChoice) map[string]interface{} {
+	switch tc.Mode {
+	case ToolChoiceNone:
+		return map[string]interface{}{"type": "none"}
+	case ToolChoiceRequired:
+		return map[string]interface{}{"type": "any"}
+	case ToolChoiceTool:
+		return map[string]interface{}{"type": "tool", "name": tc.Name}
+	default:
+		return map[string]interface{}{"type": "auto"}
+	}
 }
 
 // anthropicBlocks maps one internal message to its Anthropic role and content

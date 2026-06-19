@@ -100,6 +100,11 @@ func NewToolRegistry() *ToolRegistry {
 }
 
 func (tr *ToolRegistry) Register(tool *Tool) {
+	// Normalize the advertised schema once, here, so validation, the Resources
+	// display, and every provider's wire format all share one portable schema
+	// (object root with a properties map, no provider-rejected keywords) — see
+	// NormalizeSchema. MCP servers in particular hand us arbitrary schemas.
+	tool.InputSchema = NormalizeSchema(tool.InputSchema)
 	tr.tools[tool.Name] = tool
 }
 

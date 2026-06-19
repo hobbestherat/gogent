@@ -82,7 +82,57 @@ type CompletionRequest struct {
 	Thinking        *ThinkingParam `json:"thinking,omitempty"`
 	Model           string         `json:"model,omitempty"`
 	Tools           []ToolDef      `json:"tools,omitempty"`
-	ToolChoice      string         `json:"tool_choice,omitempty"`
+	ToolChoice      *ToolChoice    `json:"tool_choice,omitempty"`
+}
+
+// ToolChoiceMode is the provider-independent tool-selection policy. It abstracts
+// over the per-provider wire encodings: OpenAI takes a string or a function
+// object, Anthropic an object with a "type" discriminator. See ToolChoice.
+type ToolChoiceMode int
+
+const (
+	// ToolChoiceAuto lets the model decide whether to call a tool (the default
+	// whenever tools are offered).
+	ToolChoiceAuto ToolChoiceMode = iota
+	// ToolChoiceNone forbids tool calls for this turn.
+	ToolChoiceNone
+	// ToolChoiceRequired forces the model to call some tool.
+	ToolChoiceRequired
+	// ToolChoiceTool forces the model to call the specific tool named in Name
+	// (e.g. always structured_output).
+	ToolChoiceTool
+)
+
+// ToolChoice is a typed, provider-independent tool_choice. The OpenAI wire form
+// is produced by MarshalJSON (so the OpenAI-compatible adapter, which marshals
+// the request struct directly, needs no special-casing); other adapters read the
+// fields and emit their own encoding (see anthropicToolChoice).
+type ToolChoice struct {
+	Mode ToolChoiceMode
+	// Name is the forced tool's name; used only when Mode is ToolChoiceTool.
+	Name string
+}
+
+// ForceTool returns a ToolChoice that compels the model to call a named tool.
+func ForceTool(name string) *ToolChoice { return &ToolChoice{Mode: ToolChoiceTool, Name: name} }
+
+// MarshalJSON encodes the choice in OpenAI's tool_choice format: the bare strings
+// "auto"/"none"/"required", or a {"type":"function","function":{"name":...}}
+// object to force a specific tool.
+func (tc ToolChoice) MarshalJSON() ([]byte, error) {
+	switch tc.Mode {
+	case ToolChoiceNone:
+		return []byte(`"none"`), nil
+	case ToolChoiceRequired:
+		return []byte(`"required"`), nil
+	case ToolChoiceTool:
+		return json.Marshal(map[string]interface{}{
+			"type":     "function",
+			"function": map[string]string{"name": tc.Name},
+		})
+	default:
+		return []byte(`"auto"`), nil
+	}
 }
 
 // ThinkingParam is the Z.AI/Anthropic-style chain-of-thought toggle, sent as
@@ -513,7 +563,7 @@ func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []
 	}
 
 	if len(tools) > 0 {
-		reqBody.ToolChoice = "auto"
+		reqBody.ToolChoice = &ToolChoice{Mode: ToolChoiceAuto}
 	}
 	if stream {
 		reqBody.StreamOptions = &StreamOptions{IncludeUsage: true}
