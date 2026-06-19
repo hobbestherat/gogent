@@ -375,8 +375,8 @@ write:
   input: {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}}
 
 edit:
-  description: Edit a file by replacing exact text. Use this for precise edits.
-  input: {"type": "object", "properties": {"path": {"type": "string"}, "find": {"type": "string"}, "replace": {"type": "string"}}}
+  description: Edit a file by replacing exact text. Use this for precise edits. The find text must match exactly once; set replace_all to true to replace every occurrence.
+  input: {"type": "object", "properties": {"path": {"type": "string"}, "find": {"type": "string"}, "replace": {"type": "string"}, "replace_all": {"type": "boolean"}}}
 
 calc:
   	description: Calculate mathematical expressions like 5+5 or 10*20/5

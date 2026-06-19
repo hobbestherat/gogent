@@ -127,13 +127,19 @@ func (fm *FileMutation) PreviewWrite(path, content string, auth Authorization) (
 }
 
 // PreviewEdit returns the file's current content and the content an EditFile
-// would produce by replacing find→replace, without writing anything.
-func (fm *FileMutation) PreviewEdit(path, find, replace string, auth Authorization) (before, after string, err error) {
+// would produce by replacing find→replace, without writing anything. It honours
+// the same uniqueness rule as EditFile, so an ambiguous edit is rejected at
+// preview time rather than being silently applied.
+func (fm *FileMutation) PreviewEdit(path, find, replace string, replaceAll bool, auth Authorization) (before, after string, err error) {
 	before, err = fm.currentContent(path, auth)
 	if err != nil {
 		return "", "", err
 	}
-	return before, strings.ReplaceAll(before, find, replace), nil
+	after, err = editContent(before, find, replace, replaceAll)
+	if err != nil {
+		return "", "", err
+	}
+	return before, after, nil
 }
 
 // currentContent reads a file's content for diff preview, returning "" (and no
@@ -155,43 +161,40 @@ func (fm *FileMutation) currentContent(path string, auth Authorization) (string,
 	return strings.TrimPrefix(string(data), "\uFEFF"), nil
 }
 
-// EditFile edits a file by replacing text. The Authorization is forwarded to the
-// underlying reads/writes.
-func (fm *FileMutation) EditFile(path, find, replace string, auth Authorization) error {
+// EditFile edits a file by replacing text. Unless replaceAll is set the find
+// text must occur exactly once (see editContent). The Authorization is forwarded
+// to the underlying reads/writes.
+func (fm *FileMutation) EditFile(path, find, replace string, replaceAll bool, auth Authorization) error {
 	current, err := fm.fileSys.Read(path, auth)
 	if err != nil {
 		return fmt.Errorf("failed to read file: %w", err)
 	}
 
-	updated := strings.ReplaceAll(string(current), find, replace)
+	updated, err := editContent(string(current), find, replace, replaceAll)
+	if err != nil {
+		return err
+	}
 
 	return fm.WriteFile(path, updated, auth)
 }
 
-// replaceString replaces all occurrences of old with new
-func replaceString(s, old, new string) string {
-	if old == "" {
-		return s
-	}
-	return replaceAll(s, old, new)
-}
-
-func replaceAll(s, old, new string) string {
-	if old == "" {
-		return s
+// editContent computes the result of replacing find with replace in content.
+// Unless replaceAll is set it requires find to occur exactly once, so an
+// ambiguous edit fails loudly instead of silently rewriting every match
+// (issue #18). It returns an error when find is empty, absent, or — in unique
+// mode — present more than once.
+func editContent(content, find, replace string, replaceAll bool) (string, error) {
+	if find == "" {
+		return "", fmt.Errorf("find text must not be empty")
 	}
 
-	var result string
-	lastIndex := 0
-
-	for i := 0; i <= len(s)-len(old); i++ {
-		if s[i:i+len(old)] == old {
-			result += s[lastIndex:i] + new
-			lastIndex = i + len(old)
-			i += len(old) - 1
-		}
+	count := strings.Count(content, find)
+	switch {
+	case count == 0:
+		return "", fmt.Errorf("no changes made: find text not found in file")
+	case count > 1 && !replaceAll:
+		return "", fmt.Errorf("find text is not unique: found %d occurrences; provide more surrounding context to identify a single match, or set replace_all to replace every occurrence", count)
 	}
 
-	result += s[lastIndex:]
-	return result
+	return strings.ReplaceAll(content, find, replace), nil
 }
