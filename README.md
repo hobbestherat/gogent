@@ -161,11 +161,29 @@ same actions:
 - **Filter by type** — toggle event types in or out: `a` messages, `t` tool
   calls/results, `r` thinking, `e` errors.
 - **Fold / unfold all** — `f` folds every entry, `u` unfolds them.
+- **Copy** — `y` (or *View → Copy Last Answer*) yanks the most recent assistant
+  answer to the system clipboard; *View → Copy Last Code Block* yanks just the
+  fenced code from that answer.
 - **Clear** — `Esc` removes any active search and filters.
 
 The live view keeps only the most recent ~1000 entries so memory and render
 cost stay bounded over a long session; older entries age out of the window (the
 durable transcript still lives in the session JSONL).
+
+Copy targets the system clipboard over an OSC 52 escape sequence, which works in
+every capable terminal — including over SSH. When a native clipboard utility is
+on your `$PATH` (`pbcopy` on macOS, `wl-copy`/`xclip` on Linux) the text is also
+piped to it as a local fallback.
+
+### Exporting a session
+
+*Session → Export Markdown…* / *Export JSON…* writes the active session's full
+transcript to `~/.gogent/gogent-session-<title>-<timestamp>.{md,json}`. Markdown
+is a readable transcript (user/assistant turns, tool calls and results folded
+into fenced blocks); JSON is the structured message list. The export reuses the
+same data the restored-session view reads, so it reflects the whole conversation
+rather than the capped live window.
+
 ### Notifications (step away from the terminal)
 
 gogent can ping you when a long task finishes or a session needs your attention,

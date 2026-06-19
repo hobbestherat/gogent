@@ -29,6 +29,7 @@ internal/permission/   Resource+action permission gate (shell/file/external/...)
 internal/compression/  Context compression
 internal/http/         HTTP client; cmd also has a headless HTTP server mode
 internal/notify/       Desktop/terminal notifications (bell + OSC 9/777 + native)
+internal/clipboard/    System clipboard (OSC 52 + native pbcopy/xclip/wl-copy)
 ```
 
 ## Core components
@@ -102,8 +103,13 @@ internal/notify/       Desktop/terminal notifications (bell + OSC 9/777 + native
   bounds) is persisted to `~/.gogent/workbench_layout.json` and restored on the
   next launch. Each transcript is backed by an indexed model (`transcript_model.go`)
   that keys entries by event kind, so the **View** menu (and the focused-transcript
-  keys `/`, `a`/`t`/`r`/`e`, `f`/`u`, `Esc`) can search and filter over the model
-  and rebuild the view rather than scanning rendered cells.
+  keys `/`, `a`/`t`/`r`/`e`, `f`/`u`, `y`, `Esc`) can search, filter, fold and
+  yank over the model and rebuild the view rather than scanning rendered cells.
+  The yank actions copy the last answer (or its fenced code) to the system
+  clipboard via `internal/clipboard` (OSC 52, SSH-safe, with a native
+  `pbcopy`/`xclip`/`wl-copy` fallback); the **Session → Export Markdown/JSON**
+  items render the full transcript — read from the same data the restored-session
+  view uses — to a file under `~/.gogent`.
   next launch. A `notify.Notifier` watches the `SessionEvent` stream for terminal
   states (final, error, sub-agent clarify) and the permission-prompt path
   (approval) and emits a bell / OSC desktop notification / native notifier so a
