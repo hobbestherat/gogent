@@ -191,6 +191,44 @@ func TestAgentUpdateState(t *testing.T) {
 	}
 }
 
+// TestAgentStateChangeCallback verifies the lifecycle observer wired for hooks
+// (issue #47): it fires on a real transition (via both SetState and UpdateState),
+// stays silent on a no-op transition, and can be cleared.
+func TestAgentStateChangeCallback(t *testing.T) {
+	a := NewAgent("agent", nil)
+
+	var got [][2]AgentState
+	a.SetStateChangeCallback(func(old, new AgentState) {
+		got = append(got, [2]AgentState{old, new})
+	})
+
+	a.SetState(StateThinking) // idle -> thinking: fires
+	a.SetState(StateThinking) // thinking -> thinking: no-op, no fire
+	if old := a.UpdateState(StateIdle); old != StateThinking {
+		t.Errorf("UpdateState returned old %v, want thinking", old)
+	}
+
+	want := [][2]AgentState{
+		{StateIdle, StateThinking},
+		{StateThinking, StateIdle},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("callback fired %d times (%v), want %d", len(got), got, len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("transition %d = %v, want %v", i, got[i], want[i])
+		}
+	}
+
+	// A nil callback disables further notifications.
+	a.SetStateChangeCallback(nil)
+	a.SetState(StateThinking)
+	if len(got) != len(want) {
+		t.Errorf("callback fired after being cleared: %v", got)
+	}
+}
+
 func TestAgentGetParent(t *testing.T) {
 	m := model.NewModelConnection()
 	s := model.NewModelSession("test10", m)

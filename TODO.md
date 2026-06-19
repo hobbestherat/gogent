@@ -87,8 +87,11 @@ Remaining / future:
 ## 7. Smaller items
 
 - [ ] Reconcile docs/README: confirm shell/file safety story everywhere.
-- [ ] Hook event types (`HookResponseComplete`, `HookError`, `HookStateChange`,
-      `HookCompression`) are defined but unused — wire them or trim them.
+- [x] Hook event types (`HookResponseComplete`, `HookError`, `HookStateChange`,
+      `HookCompression`) are now wired (issue #47): a turn fires
+      `HookStateChange` (thinking→idle on the root agent), `HookResponseComplete`
+      / `HookError` at the turn boundary, and `HookCompression` is bridged off the
+      model session's existing compaction callback.
 - [ ] Tests that hit a live endpoint (e.g. `TestUserSessionSendMessage`) should
       be skipped/mocked when no model server is available.
 - [ ] HTTP server mode: document and test the API surface (`/health`, `/message`,
