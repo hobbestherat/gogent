@@ -25,6 +25,7 @@ const (
 	ActionExternal Action = "external" // touch a path outside the workspace
 	ActionNetwork  Action = "network"  // network access
 	ActionSubagent Action = "subagent" // spawn a sub-agent
+	ActionMCP      Action = "mcp"      // launch/connect to an MCP server
 )
 
 // Effect is the resolved policy for a request.

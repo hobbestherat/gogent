@@ -17,6 +17,7 @@ import (
 	"gogent/internal/config"
 	"gogent/internal/diag"
 	"gogent/internal/fileops"
+	"gogent/internal/mcp"
 	"gogent/internal/model"
 	"gogent/internal/permission"
 	"gogent/internal/skill"
@@ -62,6 +63,9 @@ type Gogent struct {
 	// that chose "approve all this session", so their later edits skip the gate.
 	reviewer          EditReviewer
 	reviewApprovedAll map[string]bool
+	// mcpClients holds the connected MCP servers (issue #36) so their transports
+	// (e.g. stdio subprocesses) can be released on shutdown.
+	mcpClients []*mcp.Client
 }
 
 // HookEvent represents an event that triggers hooks

@@ -65,6 +65,14 @@ internal/notify/       Desktop/terminal notifications (bell + OSC 9/777 + native
   `internal/vcs`, which runs git with explicit argument vectors (no shell, no
   injection surface) and disabled interactive prompts; mutating operations are
   gated via `ActionShell`, read-only ones run freely.
+- **MCP client** (`internal/mcp`) — a stdlib-only Model Context Protocol client
+  speaking JSON-RPC 2.0 over two transports: a launched stdio subprocess and
+  streamable-HTTP (plain JSON or SSE replies). Servers are declared in the
+  `mcp_servers` section of `config.json`; at startup each is dialed (gated through
+  `ActionMCP`), its `tools/list` is wrapped, and every remote tool is registered
+  under an `mcp__<server>__<tool>` name so `ToolRegistry.ExecuteToolCall`
+  dispatches to `tools/call` transparently. A denied, disabled or unreachable
+  server is skipped with a warning rather than blocking startup.
 - **TUI** (`ui/tui`) — `Workbench` desktop hosting draggable `SessionWindow`s,
   each with a foldable transcript (turbotv `TextView`), per-session model select,
   status line, a right-hand sidebar (session/sub-agent tree), and Config / model
@@ -141,7 +149,8 @@ Each task loop injects a system-context block built by `internal/gogent`:
   each loop, so the model always sees the current branch and working-tree state and
   can checkpoint with the `git` tool without first having to ask.
   and `./skills`; they can be toggled in the TUI (Config → Resources…), which is also
-  where the registered tools (and, once MCP lands, MCP servers) are browsed and toggled.
+  where the registered tools (including those exposed by MCP servers) are browsed
+  and toggled.
 
 ## Known gaps
 

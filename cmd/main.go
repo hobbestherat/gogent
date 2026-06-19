@@ -311,6 +311,11 @@ func main() {
 		}()
 	}
 
+	// Connect any configured MCP servers and register their tools (issue #36).
+	// Done after the permission prompter is installed above so the launch gate can
+	// prompt interactively rather than defaulting to deny.
+	g.StartMCPServers()
+
 	// Keep running with graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -332,6 +337,9 @@ func main() {
 
 	sig := <-sigChan
 	fmt.Printf("\nReceived signal %v, shutting down...\n", sig)
+
+	// Release any MCP servers (terminates stdio subprocesses).
+	g.CloseMCPServers()
 
 	// Cancel TUI if running
 	if wb != nil {
