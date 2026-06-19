@@ -248,6 +248,16 @@ Every action is reachable without hunting through menus:
   action: new/close/rename session, switch model, open the Resources /
   Statistics / Saved-Sessions browsers, transcript filters, settings editors and
   more. Type to filter, ↑/↓ to move, Enter to run.
+- **@-file mentions** — type **`@`** in a session's message box to attach a
+  specific workspace file as context (issue #46). A completer pops up listing the
+  matching files (fuzzy-filtered over the whole relative path as you type); ↑/↓
+  move, **Enter**/**Tab** insert the highlighted `@path`, **Esc** dismisses. On
+  send, every `@`-mentioned file is read and its contents are appended to the
+  message so the model receives them directly instead of having to discover and
+  `read` the file itself — the precise, cheap way to steer context. The
+  transcript keeps your message as typed and adds a note listing what was
+  attached; an unreadable mention (a typo, a directory) is left as plain text for
+  the model to resolve.
 
 ### Session management
 

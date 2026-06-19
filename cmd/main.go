@@ -21,6 +21,7 @@ import (
 	"gogent/internal/command"
 	"gogent/internal/config"
 	"gogent/internal/diag"
+	"gogent/internal/fileops"
 	"gogent/internal/gogent"
 	"gogent/internal/model"
 	"gogent/internal/stats"
@@ -354,6 +355,20 @@ func main() {
 			},
 			OnUndo:   func(sessionID string) (string, error) { return g.UndoLastTurn(sessionID) },
 			OnRewind: func(sessionID string, turns int) (string, error) { return g.Rewind(sessionID, turns) },
+			// @-file mention bridge (issue #46): the completer lists workspace files
+			// and expansion reads the chosen ones, both confined to the workspace via
+			// the existing FileSystem service.
+			ListWorkspaceFiles: func() []string {
+				files, _ := g.GetFileSystem().WorkspaceFiles(0)
+				return files
+			},
+			ReadWorkspaceFile: func(path string) (string, bool) {
+				content, err := g.GetFileSystem().ReadFile(path, fileops.Authorization{})
+				if err != nil {
+					return "", false
+				}
+				return content, true
+			},
 		})
 
 		// Push the persisted notification config into the workbench's live

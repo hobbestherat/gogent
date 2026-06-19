@@ -121,6 +121,17 @@ type Handlers struct {
 	// Best-effort: the handler should not block the UI on a write failure. May
 	// be nil, in which case layout changes are kept only for the current run.
 	SaveLayout func(gogent.Layout)
+	// ListWorkspaceFiles returns workspace-relative file paths offered by the
+	// @-file mention completer (issue #46): typing "@" in a session's input lists
+	// these so a file can be attached to the message for precise, cheap context
+	// steering. May be nil, in which case the completer never finds candidates.
+	ListWorkspaceFiles func() []string
+	// ReadWorkspaceFile returns the contents of a workspace file so an @-mention is
+	// expanded into attached context in the message sent to the model (issue #46),
+	// with ok=false when the path cannot be read (a typo, a directory, outside the
+	// workspace). May be nil, in which case @-mentions are sent verbatim for the
+	// model to read themselves.
+	ReadWorkspaceFile func(path string) (content string, ok bool)
 	// OnUndo reverts the last turn's file mutations for a session (issue #41),
 	// returning a human-readable summary. May be nil (the /undo command then
 	// reports the feature as unavailable).
@@ -833,6 +844,11 @@ func (w *Workbench) CloseSession(id string) {
 	}
 	w.order = next
 	w.mu.Unlock()
+	// Dismiss a still-open @-mention popup so closing mid-completion leaves no
+	// orphaned layer (issue #46).
+	if sw.completer != nil {
+		sw.completer.hide()
+	}
 	w.desktop.RemoveLayer(sw.layer)
 	if w.sidebar != nil {
 		w.sidebar.removeSession(id)

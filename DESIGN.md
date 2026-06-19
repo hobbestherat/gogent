@@ -151,6 +151,14 @@ internal/clipboard/    System clipboard (OSC 52 + native pbcopy/xclip/wl-copy)
   `pbcopy`/`xclip`/`wl-copy` fallback); the **Session → Export Markdown/JSON**
   items render the full transcript — read from the same data the restored-session
   view uses — to a file under `~/.gogent`.
+  The message box carries an **@-file mention** completer (`mention_completer.go`,
+  issue #46): typing `@` floats a workspace-file list (fuzzy-filtered as you type,
+  sourced from `FileSystem.WorkspaceFiles` via the `ListWorkspaceFiles` handler);
+  accepting inserts the `@path`, and on send `expandMentions` reads each mentioned
+  file (`ReadWorkspaceFile` handler) and appends its contents to the message so
+  the model gets the file as attached context. The pure parse/filter/expand
+  helpers live in `mentions.go`; the popup is a non-modal layer the input drives
+  while keeping focus.
   The **Session → Saved Sessions…** browser lists past sessions from index
   metadata only (no transcript replay) and opens one read-only in an analysis
   window or re-opens it live to continue; analysis windows are static, unbound to
