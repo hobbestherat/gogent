@@ -66,6 +66,12 @@ type Gogent struct {
 	// mcpClients holds the connected MCP servers (issue #36) so their transports
 	// (e.g. stdio subprocesses) can be released on shutdown.
 	mcpClients []*mcp.Client
+	// subAgentLimiter bounds the number of sub-agent loops running concurrently
+	// across every session, so the multiplicative fan-out (MaxSubAgents^MaxDepth)
+	// cannot spawn an unbounded goroutine herd against the backend (issue #23). It
+	// is shared by all sessions, created once at startup from the configured
+	// SubAgents.MaxConcurrent.
+	subAgentLimiter *agent.SubAgentLimiter
 }
 
 // HookEvent represents an event that triggers hooks
@@ -137,6 +143,7 @@ func NewGogentWithWorkspace(homeDir, workspaceRoot string) *Gogent {
 
 		reviewApprovedAll: make(map[string]bool),
 		log:               log,
+		subAgentLimiter:   agent.NewSubAgentLimiter(cfg.SubAgents.MaxConcurrentOrDefault()),
 	}
 
 	// Session transcript persistence (best-effort; a nil store disables it).
@@ -395,7 +402,10 @@ func (g *Gogent) initializeToolRegistry() {
 					Error  string `json:"error,omitempty"`
 				}
 				results := make([]out, len(items))
-				var wg sync.WaitGroup
+				// Bound the goroutine fan-out via the session's shared concurrency
+				// limiter: each subtask runs concurrently only while a global slot
+				// is free, otherwise inline as backpressure (issue #23).
+				tasks := make([]func(), 0, len(items))
 				for i, raw := range items {
 					i, raw := i, raw
 					obj, ok := raw.(map[string]interface{})
@@ -411,9 +421,7 @@ func (g *Gogent) initializeToolRegistry() {
 						results[i].Error = "missing subtask.task"
 						continue
 					}
-					wg.Add(1)
-					go func() {
-						defer wg.Done()
+					tasks = append(tasks, func() {
 						// A panic in a spawn worker must fail only its own
 						// subtask, not crash the process and every other session
 						// (issue #8).
@@ -428,9 +436,9 @@ func (g *Gogent) initializeToolRegistry() {
 							return
 						}
 						results[i].Result = text
-					}()
+					})
 				}
-				wg.Wait()
+				session.RunSubAgentsBounded(tasks)
 				return map[string]interface{}{"success": true, "mode": map[string]bool{"one_shot": g.SubAgentOneShot(), "interactive": !g.SubAgentOneShot()}, "results": results}, nil
 			}
 
@@ -644,6 +652,9 @@ func (g *Gogent) CreateUserSession(id string, rootAgent *agent.Agent) *agent.Use
 	userSession := agent.NewUserSession(id, rootAgent)
 	userSession.SetSubAgentConfig(g.config.SubAgents)
 	userSession.SetSubAgentTimeout(time.Duration(g.config.Timeouts.SubAgentSecondsOrDefault()) * time.Second)
+	// Share the process-wide concurrency limiter so sub-agent fan-out across all
+	// sessions is globally bounded (issue #23).
+	userSession.SetSubAgentLimiter(g.subAgentLimiter)
 	userSession.SetSystemContextProvider(g.buildSystemContext)
 	// Route context compression to the configured fast model when its role
 	// resolves to a model other than the session's primary one; otherwise leave

@@ -45,7 +45,10 @@ internal/notify/       Desktop/terminal notifications (bell + OSC 9/777 + native
 - **Sub-agents** — two execution models: *one-shot* (blocking, must end in
   `SUCCESS:`/`FAILURE:`) and *interactive* (async, may return `CLARIFY`). Mode,
   recursion depth, and fan-out limits are configurable. Batched
-  `spawn_subagent` calls run concurrently.
+  `spawn_subagent` calls run concurrently, but a process-wide `SubAgentLimiter`
+  (`max_concurrent`, default 8) caps how many sub-agent loops run at once so the
+  multiplicative fan-out (`max_subagents ^ max_depth`) cannot spawn an unbounded
+  goroutine herd against the backend; overflow tasks run inline as backpressure.
 - **Model layer** (`internal/model`) — split into small capability interfaces
   (`Completer`, streaming, tools, stats) so it can later be extracted into its
   own library. A provider abstraction (`provider.go`, `APIType`) maps each
