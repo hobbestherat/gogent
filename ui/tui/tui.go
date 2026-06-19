@@ -209,7 +209,14 @@ type Workbench struct {
 	nextAnalysis int
 	handlers     Handlers
 	sidebar      *sidebar
-	monolog      *tv.Layer
+	// sidebarPinned reserves the right-hand sidebar strip as a hard window
+	// boundary when true (the default): windows are dragged, resized, maximized,
+	// created and restored within the area left of the "Sessions & Agents" panel
+	// so it is never covered (issue #106). Toggling it off restores free,
+	// overlapping windows. Read/written on the UI thread, like the sidebar's own
+	// approval state, so the geometry helpers below read it without the lock.
+	sidebarPinned bool
+	monolog       *tv.Layer
 	// shutdown is cancelled (via quit) when the UI loop stops. Background
 	// goroutines blocked on a permission prompt select on it so they unblock
 	// instead of leaking when the user quits. See AskPermission.
@@ -255,10 +262,11 @@ func NewWorkbench(models []*config.ModelConfig) *Workbench {
 		panic(fmt.Sprintf("failed to initialize TUI: %v", err))
 	}
 	w := &Workbench{
-		app:      app,
-		desktop:  tv.NewDesktop(app),
-		sessions: make(map[string]*SessionWindow),
-		pinned:   make(map[string]bool),
+		app:           app,
+		desktop:       tv.NewDesktop(app),
+		sessions:      make(map[string]*SessionWindow),
+		pinned:        make(map[string]bool),
+		sidebarPinned: true,
 		// Use default window config (resizable, minimizable and maximizable by default)
 		windowConfig: config.WindowConfig{
 			Resizable:   true,
@@ -532,10 +540,14 @@ func (w *Workbench) RefreshTheme() {
 
 // viewItems builds the View submenu: find-in-transcript, the event-type filter
 // toggles, fold/unfold and yank-to-clipboard — all acting on the active
-// session's transcript. The same operations are available from the keyboard
-// while the transcript is focused ('/', a/t/r/e, f/u, y, Esc); the menu makes
-// them discoverable.
+// session's transcript — plus the sidebar pin toggle. The transcript operations
+// are also available from the keyboard while the transcript is focused ('/',
+// a/t/r/e, f/u, y, Esc); the menu makes them discoverable.
 func (w *Workbench) viewItems() []*tv.MenuItem {
+	pinLabel := "Pin &Sidebar"
+	if w.IsSidebarPinned() {
+		pinLabel = "Unpin &Sidebar"
+	}
 	return []*tv.MenuItem{
 		tv.NewMenuItem("&Find…", func() { w.withActiveTranscript((*SessionWindow).promptFind) }).
 			WithShortcut("Ctrl+F", tui.KeyRune, 'f', true),
@@ -555,6 +567,8 @@ func (w *Workbench) viewItems() []*tv.MenuItem {
 		tv.NewMenuItem("Copy Last &Code Block", func() {
 			w.withActiveTranscript((*SessionWindow).copyLastCode)
 		}),
+		tv.NewMenuItem("----------", nil),
+		tv.NewMenuItem(pinLabel, func() { w.ToggleSidebarPin() }),
 	}
 }
 
@@ -708,7 +722,10 @@ func (w *Workbench) openWindow(id, title string) *SessionWindow {
 // from the Sessions browser.
 func (w *Workbench) openWindowAny(id, title string, readOnly bool) *SessionWindow {
 	w.mu.Lock()
-	// Cascade windows so they don't perfectly overlap.
+	// Cascade windows so they don't perfectly overlap. New windows open in the
+	// area left of the sidebar (with a fallback to the full width on a terminal
+	// too narrow to spare it); dragging/resizing/maximizing then keep them there
+	// via the pinned window area (issue #106).
 	offset := len(w.order) % 6
 	avail := w.app.Width() - sidebarWidth
 	if avail < 50 {
@@ -931,6 +948,51 @@ func (w *Workbench) IsPinned(id string) bool {
 	return w.pinned[id]
 }
 
+// IsSidebarPinned reports whether the "Sessions & Agents" sidebar boundary is
+// enforced (windows kept left of it). It is on by default (issue #106).
+func (w *Workbench) IsSidebarPinned() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.sidebarPinned
+}
+
+// windowArea returns the desktop rectangle session windows are constrained to:
+// the full screen when the sidebar is unpinned, or the screen minus the reserved
+// right-hand sidebar strip when it is pinned (issue #106). Dragging, resizing,
+// maximizing, creating and restoring a window all stay within it so a pinned
+// sidebar is never covered. On a desktop too narrow to spare the sidebar the full
+// width is used (mirroring maximizedWindowRect). Read on the UI thread.
+func (w *Workbench) windowArea() tv.Rect {
+	sw, sh := w.app.Width(), w.app.Height()
+	if w.sidebarPinned && sw > sidebarWidth {
+		sw -= sidebarWidth
+	}
+	return tv.Rect{X: 0, Y: 0, W: sw, H: sh}
+}
+
+// ToggleSidebarPin flips whether the sidebar boundary constrains windows (issue
+// #106). When pinning, every open window is clamped into the now-reserved area so
+// none is left covering the sidebar; unpinning leaves windows where they are and
+// restores free dragging. The View menu label and command palette reflect the new
+// state via rebuildMenu.
+func (w *Workbench) ToggleSidebarPin() {
+	w.mu.Lock()
+	w.sidebarPinned = !w.sidebarPinned
+	pinned := w.sidebarPinned
+	windows := make([]*SessionWindow, 0, len(w.sessions))
+	for _, sw := range w.sessions {
+		windows = append(windows, sw)
+	}
+	w.mu.Unlock()
+	if pinned {
+		for _, sw := range windows {
+			sw.clampToWindowArea()
+		}
+	}
+	w.rebuildMenu()
+	w.desktop.Redraw()
+}
+
 // TogglePin flips a session's favorite state. Pinning also moves it to the front
 // of the sidebar so favorites stay on top; unpinning leaves it in place. The
 // state is reflected in the sidebar marker and menu, then persisted.
@@ -1095,7 +1157,9 @@ func (w *Workbench) applyLayout(layout gogent.Layout) {
 		w.mu.Unlock()
 		return
 	}
-	screenW, screenH := w.app.Width(), w.app.Height()
+	// Restored windows are clamped to the pinned window area (issue #106) so a
+	// layout saved while overlapping the sidebar does not cover it once applied.
+	area := w.windowArea()
 	// relabel captures each applied session's final title + pin so the sidebar
 	// refresh runs without re-reading workbench state outside the lock.
 	type relabel struct {
@@ -1114,7 +1178,7 @@ func (w *Workbench) applyLayout(layout gogent.Layout) {
 		}
 		w.pinned[e.ID] = e.Pinned
 		bounds := clampWindowRect(tv.Rect{X: e.X, Y: e.Y, W: e.W, H: e.H},
-			screenW, screenH, sw.window.MinWidth, sw.window.MinHeight)
+			area.W, area.H, sw.window.MinWidth, sw.window.MinHeight)
 		sw.window.Component.SetBounds(bounds)
 		if e.Minimized && !sw.window.IsMinimized() {
 			sw.window.Minimize()
@@ -1130,9 +1194,12 @@ func (w *Workbench) applyLayout(layout gogent.Layout) {
 	w.rebuildMenu()
 }
 
-// clampWindowRect keeps a restored window on-screen and at least minW×minH after
-// a possible terminal resize since the layout was saved, so a layout from a
-// larger terminal can't strand a window off-screen.
+// clampWindowRect keeps a window inside the given screenW×screenH area and at
+// least minW×minH. Callers pass the workbench's window area (Workbench.windowArea,
+// which excludes a pinned sidebar — issue #106) so a window can be dragged,
+// resized or restored up to the sidebar boundary but never past it; the same
+// call keeps a restored window on-screen after a terminal resize since the layout
+// was saved, so a layout from a larger terminal can't strand a window off-screen.
 func clampWindowRect(r tv.Rect, screenW, screenH, minW, minH int) tv.Rect {
 	if minW < 1 {
 		minW = 1

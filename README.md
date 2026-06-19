@@ -177,6 +177,9 @@ Session windows are **scalable** by default. You can:
 - **Drag the title bar** to move windows around
 - **Minimize/restore** windows using the ▾/▴ button in the title bar
 - **Maximize/restore** windows using the □/▣ button; maximize fills the desktop minus the reserved "Sessions & Agents" sidebar
+- **Pin/unpin the sidebar** — the sidebar is pinned by default, so windows can't
+  be dragged, resized or maximized over it. *View → Unpin Sidebar* (or the command
+  palette's *Pin / unpin sidebar*) lifts the boundary so windows can overlap it.
 
 These features are controlled by the `window` section of `config.json`:
 

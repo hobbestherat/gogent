@@ -97,6 +97,10 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 		sw.maximizable = true
 		sw.installMaximizeButton()
 	}
+	// Constrain drag/resize to the pinned sidebar area (issue #106). Installed
+	// for every window (live and read-only) and as the outermost click wrapper so
+	// it runs after the maximize button and the base drag/resize handler.
+	sw.installSidebarClamp()
 	sw.transcript = newTranscriptModel(history)
 	sw.transcript.add(&transcriptRecord{
 		kind:   kindSystem,
@@ -261,9 +265,11 @@ func (sw *SessionWindow) ToggleMaximize() {
 
 // applyMaximizedBounds sizes the window to the current maximized area, recomputed
 // from the live desktop dimensions so a maximize after a terminal resize fills the
-// new area rather than a stale one.
+// new area rather than a stale one. It fills the pinned window area (left of the
+// sidebar), or the full desktop when the sidebar is unpinned (issue #106).
 func (sw *SessionWindow) applyMaximizedBounds() {
-	sw.window.Component.SetBounds(maximizedWindowRect(sw.wb.app.Width(), sw.wb.app.Height()))
+	area := sw.wb.windowArea()
+	sw.window.Component.SetBounds(maximizedWindowRect(area.W, area.H))
 }
 
 // installMaximizeButton overlays a maximize/restore button onto the window's
@@ -333,6 +339,102 @@ func (sw *SessionWindow) handleMaximizeClick(event tui.ClickEvent) bool {
 		return true
 	}
 	return false
+}
+
+// installSidebarClamp wraps the window's click handler so that once the base
+// handler (and the maximize button) has moved or resized the window, its bounds
+// are constrained back into the pinned window area (issue #106). It is the
+// outermost click wrapper, so every drag, resize and maximize-button press is
+// constrained. constrainToBounds is a no-op while the sidebar is unpinned, so free
+// dragging is left untouched; it also skips minimized windows so their single-row
+// title bar is not enlarged back to MinHeight.
+func (sw *SessionWindow) installSidebarClamp() {
+	base := sw.window.Component.OnClickFn
+	sw.window.Component.OnClickFn = func(c *tv.VisualComponent, event tui.ClickEvent) bool {
+		before := sw.window.Component.Bounds
+		handled := base(c, event)
+		sw.constrainToBounds(before)
+		return handled
+	}
+}
+
+// constrainToBounds pulls the window back inside the pinned window area after a
+// click moved or resized it. It tells drag and resize apart by what changed: a
+// resize (width/height changed) keeps the origin and caps the size at the area, so
+// the anchored edges stay put and only the dragged edge stops at the sidebar; a
+// drag (only the origin changed) keeps the size and shifts the origin, so the
+// window slides along the boundary instead of jumping. It is a no-op while the
+// sidebar is unpinned, the window is minimized, or the click changed nothing
+// (issue #106).
+func (sw *SessionWindow) constrainToBounds(before tv.Rect) {
+	if !sw.wb.sidebarPinned || sw.window.IsMinimized() {
+		return
+	}
+	b := sw.window.Component.Bounds
+	if b == before {
+		return
+	}
+	area := sw.wb.windowArea()
+	minW, minH := sw.window.MinWidth, sw.window.MinHeight
+	var clamped tv.Rect
+	if b.W != before.W || b.H != before.H {
+		clamped = clampWindowSize(b, area, minW, minH)
+	} else {
+		clamped = clampWindowRect(b, area.W, area.H, minW, minH)
+	}
+	if clamped != b {
+		sw.window.Component.SetBounds(clamped)
+	}
+}
+
+// clampToWindowArea fully clamps the window (size and origin) into the pinned
+// window area. It is used when the sidebar is pinned on so any window left
+// covering the sidebar is pulled back in. No-op while unpinned or minimized.
+func (sw *SessionWindow) clampToWindowArea() {
+	if !sw.wb.sidebarPinned || sw.window.IsMinimized() {
+		return
+	}
+	area := sw.wb.windowArea()
+	b := sw.window.Component.Bounds
+	clamped := clampWindowRect(b, area.W, area.H, sw.window.MinWidth, sw.window.MinHeight)
+	if clamped != b {
+		sw.window.Component.SetBounds(clamped)
+	}
+}
+
+// clampWindowSize caps a rect's size so it fits inside area without moving its
+// origin — the constraint a resize drag expects. The anchored top-left corner
+// stays fixed and only the dragged bottom-right edge is capped at the area's
+// right/bottom, so resizing up to the sidebar stops smoothly there instead of
+// snapping the window left. When the origin already sits too close to an edge for
+// the minimum size to fit, the minimum wins (the drag clamp handles the origin on
+// the next move).
+func clampWindowSize(r tv.Rect, area tv.Rect, minW, minH int) tv.Rect {
+	if minW < 1 {
+		minW = 1
+	}
+	if minH < 1 {
+		minH = 1
+	}
+	if r.W < minW {
+		r.W = minW
+	}
+	if r.H < minH {
+		r.H = minH
+	}
+	if area.W > 0 && r.X >= 0 && r.X < area.W && r.X+r.W > area.W {
+		r.W = area.W - r.X
+	}
+	if area.H > 0 && r.Y >= 0 && r.Y < area.H && r.Y+r.H > area.H {
+		r.H = area.H - r.Y
+	}
+	if r.W < minW {
+		r.W = minW
+	}
+	if r.H < minH {
+		r.H = minH
+	}
+	return r
 }
 
 // selectedModelName returns the backend model identifier for the current select.
@@ -1024,16 +1126,13 @@ const (
 const menuBarHeight = 1
 
 // maximizedWindowRect returns the bounds a session window expands to when
-// maximized: the whole desktop below the menu bar, with the right-hand
-// "Sessions & Agents" sidebar (sidebarWidth) reserved so a maximized window never
-// covers it. On a desktop too narrow to spare the sidebar the full width is used
-// instead (mirroring openWindowAny's fallback), and the dimensions are floored at
-// 1 so the rect is never empty.
-func maximizedWindowRect(screenW, screenH int) tv.Rect {
-	width := screenW - sidebarWidth
-	if width < 1 {
-		width = screenW
-	}
+// maximized: the whole available width (the caller's window area — already
+// reduced by a pinned sidebar, issue #106) below the menu bar. Passing the window
+// area keeps a maximized window left of the sidebar when pinned and lets it cover
+// the full desktop when unpinned. Dimensions are floored at 1 so the rect is never
+// empty.
+func maximizedWindowRect(availW, screenH int) tv.Rect {
+	width := availW
 	if width < 1 {
 		width = 1
 	}
