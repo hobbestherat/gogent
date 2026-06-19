@@ -23,6 +23,7 @@ internal/model/        Connector interfaces + HTTP model connection + session
 internal/tool/         Tool registry, shell/git/web tools, structured-output tool
 internal/vcs/          Thin, safe git wrapper (backs the git tool + git-status context)
 internal/diagnostics/  Runs the project compiler/linter; parses file:line:col errors
+internal/verify/       Runs the project test command; parses test pass/fail + failures
 internal/fileops/      Path resolution, file I/O, file mutation
 internal/command/      Shell exec + internal commands (calc/echo/help)
 internal/skill/        SKILL.md loader + registry (wired via syscontext + skill tool)
@@ -93,10 +94,10 @@ internal/clipboard/    System clipboard (OSC 52 + native pbcopy/xclip/wl-copy)
   into the concrete endpoints. Connections are rebuilt per send, so
   model/endpoint edits take effect on the next turn.
 - **Tools** (`internal/tool`, `internal/fileops`, `internal/web`, `internal/vcs`,
-  `internal/diagnostics`) —
+  `internal/diagnostics`, `internal/verify`) —
   `read`, `write`, `edit`, `multi_edit`, `apply_patch`, `grep`, `glob`, `list`,
-  `shell`, `web_fetch`, `git`, `diagnostics`, `spawn_subagent`, agent-control
-  tools, and `structured_output`. `multi_edit` applies a batch of exact
+  `shell`, `web_fetch`, `git`, `diagnostics`, `verify`, `spawn_subagent`,
+  agent-control tools, and `structured_output`. `multi_edit` applies a batch of exact
   find→replace edits to one file atomically; `apply_patch` applies a unified-diff
   `*** Begin Patch` envelope that can add/update/delete several files at once.
   File ops resolve
@@ -118,6 +119,13 @@ internal/clipboard/    System clipboard (OSC 52 + native pbcopy/xclip/wl-copy)
   fixed command pinned to the workspace but executes build-time code, so it is
   gated through a dedicated `ActionDiagnostics` (an *always* grant scopes to
   diagnostics alone, never the shell) and backed by `internal/diagnostics`.
+  `verify` runs the project's test command and parses its output into structured
+  pass/fail results plus the failing package/test/message (default `go test
+  ./...`, configurable); like `diagnostics` it runs a fixed command pinned to the
+  workspace but executes arbitrary test code, so it is gated through a dedicated
+  `ActionVerify` (an *always* grant scopes to verify alone, never the shell or
+  diagnostics) and backed by `internal/verify`. It closes the
+  edit→test→read-failures loop that lets the agent reliably land green.
 - **MCP client** (`internal/mcp`) — a stdlib-only Model Context Protocol client
   speaking JSON-RPC 2.0 over two transports: a launched stdio subprocess and
   streamable-HTTP (plain JSON or SSE replies). Servers are declared in the

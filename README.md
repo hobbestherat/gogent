@@ -44,6 +44,17 @@ gogent gates every side-effecting tool through a single permission service
   `ActionDiagnostics` — an *Always* grant is scoped to diagnostics alone and
   never blesses the shell tool. Prefer it over running the compiler through the
   shell after edits.
+- **Verify** — the `verify` tool runs the project's test suite and returns a
+  structured pass/fail verdict plus the parsed failures (failing package, test
+  name, message), giving the agent the tight edit→test→read-failures loop that
+  reliably lands green — without shelling out to the runner and eyeballing text.
+  The default is `go test ./...` (output parsed into per-test and per-package
+  failures, including build failures and panics); the command is configurable
+  under `verify` in `config.json`. It runs a **fixed** command pinned to the
+  workspace (the model cannot inject arguments), but it executes arbitrary test
+  code, so each call is gated through a dedicated `ActionVerify` — an *Always*
+  grant is scoped to verify alone and never blesses the shell or diagnostics
+  tools. Prefer it over running the suite through the shell after edits.
 - **MCP servers** — each [Model Context Protocol](https://modelcontextprotocol.info/)
   server declared under `mcp_servers` is dialed at startup, its tools discovered via
   `tools/list`, and each registered under an `mcp__<server>__<tool>` name so the
@@ -133,6 +144,30 @@ Any command that emits `path:line:column: message` lines (Go `vet`/`build`, and
 most linters) is parsed into actionable diagnostics. Each run is gated through
 `ActionDiagnostics` (see **Diagnostics** above); in headless runs add a
 `diagnostics` allow rule to `~/.gogent/permissions.json` or it will be denied.
+
+### Verify
+
+The `verify` tool runs the project's test suite and returns a structured
+pass/fail verdict plus the parsed failures, so the agent can confirm its edits
+did not break anything and get the exact failures to fix — the tight
+edit→test→read-failures loop. It defaults to `go test ./...` (no config needed);
+override the command under the `verify` key:
+
+```json
+{
+  "verify": {
+    "command": ["go", "test", "-count=1", "./..."]
+  }
+}
+```
+
+`go test` text output is parsed into per-test failures (package, test name,
+message), with build/compile failures and panics captured too; any command whose
+exit status signals suite pass/fail works, with the raw output retained as a
+fallback for anything the parser misses. Each run is gated through a dedicated
+`ActionVerify` (an *Always* grant is scoped to verify alone, never the shell or
+diagnostics); in headless runs add a `verify` allow rule to
+`~/.gogent/permissions.json` or it will be denied.
 
 ### Window scaling
 

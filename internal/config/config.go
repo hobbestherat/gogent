@@ -349,6 +349,18 @@ type DiagnosticsConfig struct {
 	WarningPattern string `json:"warning_pattern,omitempty"`
 }
 
+// VerifyConfig configures the `verify` tool (issue #44), which runs the
+// project's test command and returns structured pass/fail results. The zero
+// value leaves the tool working out of the box with the Go default
+// (`go test ./...`), so an older config.json without a "verify" key is
+// unaffected; the field only customizes the command.
+type VerifyConfig struct {
+	// Command is the argument vector run as the test suite. Empty defaults to
+	// ["go", "test", "./..."]. Use any command whose exit status signals suite
+	// pass/fail; output is parsed for `go test`-style failures.
+	Command []string `json:"command,omitempty"`
+}
+
 // MCPServerConfig declares one Model Context Protocol (MCP) server whose tools
 // gogent surfaces through its own tool registry (issue #36). Transport selects
 // the wire — "stdio" (default, a launched subprocess) or "http"/"streamable-http"
@@ -431,6 +443,10 @@ type Config struct {
 	// Diagnostics configures the `diagnostics` tool (issue #42). The zero value
 	// keeps the Go default, so an older config.json without the key is unaffected.
 	Diagnostics DiagnosticsConfig `json:"diagnostics,omitempty"`
+	// Verify configures the `verify` tool (issue #44). The zero value keeps the
+	// Go default (`go test ./...`), so an older config.json without the key is
+	// unaffected.
+	Verify VerifyConfig `json:"verify,omitempty"`
 	// Theme selects and customises the TUI colour palette (issue #66). The zero
 	// value is the coloured "default" palette, so an older config.json without the
 	// key is unaffected.
