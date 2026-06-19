@@ -54,7 +54,11 @@ func (w *Workbench) showStatisticsDialog() {
 	listX := 2
 	headerY := 3
 	listY := 4
-	paneH := height - listY - 4 // hint/button row + bottom margin + border
+	// The footer is two rows: the keyboard hint on its own row (so it can never
+	// overlap the buttons) and the action-button row beneath it.
+	hintY := height - 4
+	buttonY := height - 3
+	paneH := hintY - listY // detail fills every row up to the hint
 	if paneH < 3 {
 		paneH = 3
 	}
@@ -71,8 +75,10 @@ func (w *Workbench) showStatisticsDialog() {
 	detail.BG = tv.DefaultTheme.DialogBG
 	dialog.Window.AddContent(detail)
 
+	// The hint sits on its own row above the buttons, spanning the full content
+	// width, so it never collides with the action buttons (issue #104).
 	dialog.Window.AddContent(dialogLabel("Tab move · Esc close",
-		tv.Rect{X: 2, Y: height - 3, W: width - 40, H: 1}))
+		tv.Rect{X: 2, Y: hintY, W: width - 4, H: 1}))
 
 	var layer *tv.Layer
 	closeFn := func() { w.desktop.RemoveLayer(layer) }
@@ -100,12 +106,15 @@ func (w *Workbench) showStatisticsDialog() {
 		tv.ShowConfirmYesNo(w.desktop, "Export", msg, nil)
 	}
 
-	dialog.Window.AddContent(tv.NewButton("Export &CSV",
-		tv.Rect{X: width - 38, Y: height - 3, W: 11, H: 1}, exportCSV))
-	dialog.Window.AddContent(tv.NewButton("Export &JSON",
-		tv.Rect{X: width - 25, Y: height - 3, W: 12, H: 1}, exportJSON))
-	dialog.Window.AddContent(tv.NewButton("Close",
-		tv.Rect{X: width - 11, Y: height - 3, W: 9, H: 1}, closeFn))
+	// Action buttons are sized from their rendered labels and right-aligned to
+	// the dialog interior, so they stay a clean, non-overlapping row at any width
+	// (issue #104) instead of the previous hand-tuned fixed offsets.
+	footer := footerButtonRects(
+		[]string{"Export &CSV", "Export &JSON", "Close"},
+		listX, width-3, buttonY, 2)
+	dialog.Window.AddContent(tv.NewButton("Export &CSV", footer[0], exportCSV))
+	dialog.Window.AddContent(tv.NewButton("Export &JSON", footer[1], exportJSON))
+	dialog.Window.AddContent(tv.NewButton("Close", footer[2], closeFn))
 
 	sel.OnChange = func(idx int) { render(statisticsSection(idx)) }
 
