@@ -221,6 +221,11 @@ func (n *Notifier) Notify(title, body string) {
 	}
 	if cfg.Native && n.native != nil {
 		runner := n.native
-		go func() { _ = runner(title, body) }()
+		// Fire-and-forget: recover so a panicking notifier binary wrapper cannot
+		// take down the process (issue #8). The result is already ignored.
+		go func() {
+			defer func() { _ = recover() }()
+			_ = runner(title, body)
+		}()
 	}
 }

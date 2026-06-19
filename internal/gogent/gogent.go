@@ -363,6 +363,15 @@ func (g *Gogent) initializeToolRegistry() {
 					wg.Add(1)
 					go func() {
 						defer wg.Done()
+						// Contain a panicking sub-agent to this one batch entry
+						// (issue #8): record it as the subtask's error rather
+						// than crashing the process. Runs before wg.Done so the
+						// WaitGroup is always decremented.
+						defer func() {
+							if r := recover(); r != nil {
+								results[i].Error = fmt.Sprintf("sub-agent panicked: %v", r)
+							}
+						}()
 						text, err := session.SpawnSubAgent(ctx.AgentID, name, task, g.SubAgentOneShot())
 						if err != nil {
 							results[i].Error = err.Error()

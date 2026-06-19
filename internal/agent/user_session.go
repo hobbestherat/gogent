@@ -503,6 +503,18 @@ func (s *UserSession) runLoop(agent *Agent, agentID, initialMessage, systemPromp
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
+					// Contain a panic in this parallel tool call to the one
+					// entry (issue #8): surface it as a tool error/event and a
+					// result message instead of crashing the loop. Runs before
+					// wg.Done so the WaitGroup is always decremented.
+					defer func() {
+						if r := recover(); r != nil {
+							msg := fmt.Sprintf("tool %q panicked: %v", call.Tool, r)
+							emit(SessionEvent{Type: SessionEventError, Err: fmt.Errorf("%s", msg)})
+							emit(SessionEvent{Type: SessionEventToolResult, Step: step, Tool: call.Tool, Args: call.Args, Result: msg})
+							toolMsgs[i] = makeToolResultMessage(call, msg)
+						}
+					}()
 					resultStr := s.runToolCall(agent, agentID, call)
 					emit(SessionEvent{Type: SessionEventToolResult, Step: step, Tool: call.Tool, Args: call.Args, Result: resultStr})
 					toolMsgs[i] = makeToolResultMessage(call, resultStr)
@@ -1039,6 +1051,14 @@ func (s *UserSession) LaunchInteractiveAgent(parentAgentID, name, task string) (
 // runInteractive drives an interactive sub-agent across one or more rounds,
 // pausing for coordinator input whenever the model replies CLARIFY:.
 func (s *UserSession) runInteractive(ia *InteractiveAgent, task string) {
+	// runInteractive always runs on its own goroutine (LaunchInteractiveAgent),
+	// so recover any panic and mark the agent failed (issue #8): otherwise the
+	// crash takes down the process and the agent is left hanging in "running".
+	defer func() {
+		if r := recover(); r != nil {
+			s.finishInteractive(ia, StatusFailed, fmt.Sprintf("interactive agent panicked: %v", r), AgentEventFailed)
+		}
+	}()
 	message := task
 	for {
 		select {

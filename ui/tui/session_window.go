@@ -7,6 +7,7 @@ import (
 	tv "github.com/hobbestherat/turbotui/turbotv"
 	"gogent/internal/agent"
 	"gogent/internal/config"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -131,7 +132,17 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect) *SessionW
 		sw.setBusy(true)
 		modelName := sw.selectedModelName()
 		if wb.handlers.OnSend != nil {
-			go wb.handlers.OnSend(sw.id, text, modelName)
+			handler := wb.handlers.OnSend
+			// Fire-and-forget: recover so a panic in the send handler cannot
+			// crash the TUI (issue #8).
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("OnSend panicked: %v", r)
+					}
+				}()
+				handler(sw.id, text, modelName)
+			}()
 		}
 	}
 	sendButton.OnPress = submit

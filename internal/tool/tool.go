@@ -318,7 +318,11 @@ func (tr *ToolRegistry) ExecuteToolCall(toolCall *ToolCall, ctx ToolContext) (*T
 	}
 
 	start := time.Now()
-	result, err := tool.Execute(toolCall.Args, ctx)
+	// Recover from a panicking tool so the crash is contained to this one call
+	// (issue #8): a malformed, model-supplied input can panic a tool's unchecked
+	// type assertions or the shared math parser, and without this the panic
+	// would take down the whole multi-session process.
+	result, err := executeRecovered(toolCall.Tool, tool.Execute, toolCall.Args, ctx)
 	tr.recordOutcome(toolCall.Tool, err == nil, time.Since(start).Milliseconds())
 	if err != nil {
 		return &ToolCallResponse{
@@ -331,6 +335,20 @@ func (tr *ToolRegistry) ExecuteToolCall(toolCall *ToolCall, ctx ToolContext) (*T
 		Success: true,
 		Result:  result,
 	}, nil
+}
+
+// executeRecovered invokes a tool's Execute closure, converting any panic into
+// an error. It is the single containment point for tool/parser panics: a
+// recovered panic surfaces as a normal tool error (recorded as a failure and
+// fed back to the model) instead of aborting the process.
+func executeRecovered(name string, exec func(args map[string]interface{}, ctx ToolContext) (interface{}, error), args map[string]interface{}, ctx ToolContext) (result interface{}, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("tool %q panicked: %v", name, r)
+			result = nil
+		}
+	}()
+	return exec(args, ctx)
 }
 
 // RegisterCalcTool registers the calc tool for calculations
