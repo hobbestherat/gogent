@@ -12,9 +12,20 @@ import (
 	tv "github.com/hobbestherat/turbotui/turbotv"
 )
 
-// sidebarWidth is the number of columns reserved on the right of the desktop for
-// the always-visible session / sub-agent tree.
-const sidebarWidth = 32
+// defaultSidebarWidth is the number of columns reserved on the right of the
+// desktop for the always-visible session / sub-agent tree when no width has been
+// persisted. The live width is mutable (issue #175): it is stored on the
+// Workbench and changed by dragging the sidebar's left-edge divider.
+const defaultSidebarWidth = 32
+
+// minSidebarWidth / minWorkAreaWidth bound the draggable sidebar width (issue
+// #175): the sidebar may not shrink below minSidebarWidth (so the tree and the
+// Overall stats band stay legible — cf. minSidebarTreeHeight) nor grow so wide
+// that the work area left of it drops below minWorkAreaWidth.
+const (
+	minSidebarWidth  = 24
+	minWorkAreaWidth = 40
+)
 
 // minSidebarTreeHeight is the smallest tree region worth showing. When the
 // Overall stats band would leave the tree shorter than this, the band is dropped
@@ -55,6 +66,11 @@ type sidebar struct {
 	// too short to show the panel); DrawFn reads it to place the band.
 	overall      overallStats
 	overallBandH int
+
+	// divider is a 1-column drag handle pinned to the sidebar's left edge (issue
+	// #175). Dragging it left/right changes the live sidebar width; it sits in
+	// front of the tree so it claims clicks landing on column 0.
+	divider *tv.VisualComponent
 }
 
 // nodeRef identifies what a tree node points at: a session (agentID empty) or a
@@ -116,6 +132,10 @@ func newSidebar(wb *Workbench) *sidebar {
 		s.overallBandH = bandH
 		// Leave the first column for the divider and the first row for the title.
 		tree.Root().SetBounds(tv.Rect{X: 2, Y: 1, W: w - 3, H: h - 1 - bandH})
+		// The drag handle overlays the left-edge divider glyph (col 0, full height).
+		if s.divider != nil {
+			s.divider.SetBounds(tv.Rect{X: 0, Y: 0, W: 1, H: h})
+		}
 	}
 
 	// Selecting (navigating to) a node raises the owning session. Activating a
@@ -138,15 +158,39 @@ func newSidebar(wb *Workbench) *sidebar {
 		s.wb.Focus(ref.sessionID)
 	}
 
+	// Draggable left-edge divider (issue #175), ported from turbotui's chat-demo
+	// pattern. It is a 1-column child overlaying the panel's divider glyph; its
+	// OnClickFn maps the drag X to a new width (screen-right-edge minus X), clamps
+	// it and reflows. Added last so HitTestDeep (last child first) routes clicks on
+	// column 0 here rather than to the tree. The desktop's mouse-capture keeps
+	// delivering the move/release events to it during a drag even past its column.
+	divider := tv.NewComponent(tv.Rect{})
+	divider.DrawFn = func(c *tv.VisualComponent, surface tv.Surface) {
+		abs := c.AbsoluteBounds()
+		for y := 0; y < abs.H; y++ {
+			surface.SetCell(abs.X, abs.Y+y, tui.Cell{Ch: '│', FG: chromeDivider, BG: chromePanelBG})
+		}
+	}
+	divider.OnClickFn = func(c *tv.VisualComponent, event tui.ClickEvent) bool {
+		if !event.Down {
+			return true
+		}
+		s.wb.dragSidebarWidth(event.X)
+		return true
+	}
+	panel.AddChild(divider)
+
 	s.panel = panel
 	s.tree = tree
+	s.divider = divider
 	s.layer = tv.NewWindowLayer("sidebar", panel)
 	return s
 }
 
-// reposition pins the sidebar to the right edge of the desktop.
+// reposition pins the sidebar to the right edge of the desktop, using the
+// workbench's live (persisted, draggable) sidebar width (issue #175).
 func (s *sidebar) reposition(screenW, screenH int) {
-	w := sidebarWidth
+	w := s.wb.sidebarWidth()
 	if w > screenW {
 		w = screenW
 	}
