@@ -101,3 +101,65 @@ func TestLayoutEntryLookup(t *testing.T) {
 		t.Fatalf("Entry(missing) = %+v, want nil", e)
 	}
 }
+
+// TestLayoutOverallModelRoundTrip covers the persistence of the Overall band's
+// per-model selection (issue #191, acceptance #3): a saved OverallModel must
+// survive a save+load cycle alongside the rest of the layout, so the choice
+// survives a restart.
+func TestLayoutOverallModelRoundTrip(t *testing.T) {
+	home := t.TempDir()
+	g := NewGogent(home)
+
+	in := Layout{
+		Entries:      []LayoutEntry{{ID: "s1", Title: "Work", X: 1, Y: 1, W: 80, H: 24}},
+		SidebarWidth: 30,
+		OverallModel: "glm",
+	}
+	if err := g.SaveLayout(in); err != nil {
+		t.Fatalf("SaveLayout: %v", err)
+	}
+	out := g.LoadLayout()
+	if out.OverallModel != "glm" {
+		t.Errorf("OverallModel = %q, want glm (must round-trip)", out.OverallModel)
+	}
+	if out.SidebarWidth != 30 {
+		t.Errorf("SidebarWidth = %d, want 30 (unrelated field unaffected)", out.SidebarWidth)
+	}
+}
+
+// TestLayoutOverallModelOmittedDefaultsEmpty ensures a layout file written
+// before the OverallModel field existed (issue #175 era, or any older build)
+// loads cleanly as the aggregate ("all models") view rather than breaking or
+// inheriting garbage. This is the back-compat guarantee the field's omitempty
+// tag provides.
+func TestLayoutOverallModelOmittedDefaultsEmpty(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".gogent")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A pre-#191 layout file: no overall_model key.
+	old := []byte(`{"entries":[{"id":"s1","title":"Old"}],"sidebar_width":24}`)
+	if err := os.WriteFile(filepath.Join(dir, layoutFileName), old, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g := NewGogent(home)
+	out := g.LoadLayout()
+	if out.OverallModel != "" {
+		t.Errorf("OverallModel = %q on an old-format file, want empty (aggregate)", out.OverallModel)
+	}
+}
+
+// TestLayoutOverallModelEmptyRoundTrip confirms the aggregate selection (empty
+// string) is stable across a round-trip, so the default does not get mutated.
+func TestLayoutOverallModelEmptyRoundTrip(t *testing.T) {
+	home := t.TempDir()
+	g := NewGogent(home)
+	if err := g.SaveLayout(Layout{OverallModel: "", Entries: []LayoutEntry{{ID: "x"}}}); err != nil {
+		t.Fatalf("SaveLayout: %v", err)
+	}
+	out := g.LoadLayout()
+	if out.OverallModel != "" {
+		t.Errorf("OverallModel = %q, want empty", out.OverallModel)
+	}
+}
