@@ -738,46 +738,230 @@ func TestHandleMarkdownCommandToggle(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
-// DEFECTS FOUND. The two tests below assert CORRECT behaviour that the current
-// implementation does NOT yet provide; they are expected to fail and document
-// the defects so they can be fixed. See the accompanying report.
+// Fixes round 1 (entities, tables, inline-code emphasis, blank-code background,
+// render caching, fold switching) are verified here, with extended coverage of
+// the new code paths. These double as regression guards.
 // ----------------------------------------------------------------------------
 
-// DEFECT: HTML entities are emitted verbatim instead of being decoded. A user
-// sees "Tom &amp; Jerry" rather than "Tom & Jerry". CommonMark requires entity
-// references in text to be decoded for display; the raw source is already
-// preserved separately for copy/export via body(), so the rendered spans should
-// decode them.
+// HTML entities in prose are decoded for display (the raw Markdown is still
+// preserved for copy/export via body()).
 func TestRenderMarkdownDecodesHTMLEntities(t *testing.T) {
 	withTestPalette(t)
-	lines := renderMarkdown("Tom &amp; Jerry uses &lt;tags&gt; and &#39;quotes&#39;")
-	all := mdAllText(lines)
+	all := mdAllText(renderMarkdown("Tom &amp; Jerry uses &lt;tags&gt; and &#39;quotes&#39;"))
 	for _, bad := range []string{"&amp;", "&lt;", "&gt;", "&#39;"} {
 		if strings.Contains(all, bad) {
-			t.Errorf("HTML entity %q should be decoded for display, but appears verbatim in %q", bad, all)
+			t.Errorf("HTML entity %q should be decoded for display, got %q", bad, all)
 		}
 	}
-	if !strings.Contains(all, "&") || !strings.Contains(all, "<") || !strings.Contains(all, ">") {
-		t.Errorf("decoded entity text missing from %q", all)
+	for _, want := range []string{"Tom & Jerry", "<tags>", "'quotes'"} {
+		if !strings.Contains(all, want) {
+			t.Errorf("decoded text missing %q in %q", want, all)
+		}
 	}
 }
 
-// DEFECT: a GFM table collapses to a single garbled token. The input
-//
-//	| a | b |
-//	|---|---|
-//	| 1 | 2 |
-//
-// renders as the single line "ab12" — the pipes and row/cell structure are
-// discarded, and the cells run together with no separator. Tables are extremely
-// common in model output, so this produces unreadable transcripts. (Tables are
-// not in the renderer's supported subset; the acceptable fallback would be the
-// raw source lines or one cell per line — not "ab12".)
-func TestRenderMarkdownTableReadable(t *testing.T) {
+// Inline and fenced code must NOT be unescaped — code is literal, so `&amp;`
+// inside backticks stays `&amp;`. (Entities are decoded only in prose.)
+func TestRenderMarkdownCodeNotUnescaped(t *testing.T) {
 	withTestPalette(t)
-	lines := renderMarkdown("| a | b |\n|---|---|\n| 1 | 2 |\n")
-	joined := mdAllText(lines)
-	if joined == "ab12" {
-		t.Errorf("GFM table collapsed to a single garbled token %q — cell structure and separators lost", joined)
+	pal := mdPalette
+	lines := renderMarkdown("use `&amp;` and `<b>` tags\n\n```\nx &lt; y\n```\n")
+	amp, ok := mdFindSpan(lines, "&amp;")
+	if !ok {
+		t.Errorf("inline code &amp; lost; got %q", mdAllText(lines))
+	} else if !spanIs(amp, pal.code) {
+		t.Errorf("inline code &amp; should be code-coloured, got FG=%v", amp.FG)
 	}
+	if lt, ok := mdFindSpan(lines, "<b>"); !ok {
+		t.Errorf("inline code <b> lost")
+	} else if !spanIs(lt, pal.code) {
+		t.Errorf("inline code <b> should be code-coloured, got FG=%v", lt.FG)
+	}
+	// Fenced code keeps its literal entity.
+	if all := mdAllText(lines); !strings.Contains(all, "&lt;") {
+		t.Errorf("fenced code should keep literal &lt;, got %q", all)
+	}
+}
+
+// A bare '&' that is not an entity is left untouched (no over-decoding).
+func TestRenderMarkdownLiteralAmpersand(t *testing.T) {
+	withTestPalette(t)
+	all := mdAllText(renderMarkdown("Tom & Jerry rock"))
+	if !strings.Contains(all, "Tom & Jerry rock") {
+		t.Errorf("literal ampersand mangled: %q", all)
+	}
+}
+
+// A GFM table renders as: a bold header row, a dashed rule, then data rows,
+// with cells separated by a dim "│". It must NOT collapse to a run-on token.
+func TestRenderMarkdownTable(t *testing.T) {
+	withTestPalette(t)
+	pal := mdPalette
+	lines := renderMarkdown("| a | b |\n|---|---|\n| 1 | 2 |\n")
+	if len(lines) < 3 {
+		t.Fatalf("table should render header+rule+row (>=3 lines), got %d: %v", len(lines), lines)
+	}
+	// Header cells are bold; a separator span is present in the rule colour.
+	header := lines[0]
+	if ha, ok := spanExact(header, "a"); !ok || !ha.Bold {
+		t.Errorf("header cell 'a' should be bold, got %+v", ha)
+	} else if !spanIs(ha, pal.text) {
+		t.Errorf("header cell 'a' should use text colour, got FG=%v", ha.FG)
+	}
+	if hb, ok := spanExact(header, "b"); !ok || !hb.Bold {
+		t.Errorf("header cell 'b' should be bold, got %+v", hb)
+	}
+	if sep, ok := mdFindSpan(lines, "│"); !ok || !spanIs(sep, pal.rule) {
+		t.Errorf("column separator should use rule colour, got %+v", sep)
+	}
+	// A dashed rule line exists.
+	var hasRule bool
+	for _, ln := range lines {
+		if txt := mdLineText(ln); txt != "" && strings.Trim(txt, "─") == "" {
+			hasRule = true
+		}
+	}
+	if !hasRule {
+		t.Errorf("table should have a dashed rule line")
+	}
+	// Data-row cells are present and NOT bold.
+	if one, ok := spanExact(lines[len(lines)-1], "1"); !ok {
+		t.Errorf("data cell '1' missing")
+	} else if one.Bold {
+		t.Errorf("data cell '1' should not be bold")
+	}
+}
+
+// Inline formatting inside table cells is preserved: header code is bold AND
+// code-coloured; data-row emphasis/code keeps its attribute.
+func TestRenderMarkdownTableCellFormatting(t *testing.T) {
+	withTestPalette(t)
+	pal := mdPalette
+	lines := renderMarkdown("| **h1** | `h2` |\n|---|---|\n| *a* | `b` |\n")
+	// Header: "h1" bold; "h2" bold (inherited from header) + code colour.
+	if h1, ok := mdFindSpan(lines, "h1"); !ok || !h1.Bold {
+		t.Errorf("header bold cell 'h1' should be bold: %+v", h1)
+	}
+	if h2, ok := mdFindSpan(lines, "h2"); !ok || !h2.Bold || !spanIs(h2, pal.code) {
+		t.Errorf("header code cell 'h2' should be bold+code colour: %+v", h2)
+	}
+	// Data row: "a" italic; "b" code colour.
+	if a, ok := mdFindSpan(lines, "a"); !ok || !a.Italic {
+		t.Errorf("data italic cell 'a' should be italic: %+v", a)
+	}
+	if b, ok := mdFindSpan(lines, "b"); !ok || !spanIs(b, pal.code) {
+		t.Errorf("data code cell 'b' should be code colour: %+v", b)
+	}
+}
+
+// Inline code inherits surrounding emphasis: `code` inside **bold** is bold,
+// inside *italic* is italic, and inside a heading is bold.
+func TestRenderMarkdownInlineCodeInheritsEmphasis(t *testing.T) {
+	withTestPalette(t)
+	pal := mdPalette
+	c, ok := mdFindSpan(renderMarkdown("**bold `code`**"), "code")
+	if !ok {
+		t.Fatal("inline code span not found in bold")
+	} else if !c.Bold || !spanIs(c, pal.code) {
+		t.Errorf("inline code in bold should be bold+code: %+v", c)
+	}
+	c, ok = mdFindSpan(renderMarkdown("*italic `code`*"), "code")
+	if !ok {
+		t.Fatal("inline code span not found in italic")
+	} else if !c.Italic || !spanIs(c, pal.code) {
+		t.Errorf("inline code in italic should be italic+code: %+v", c)
+	}
+	c, ok = mdFindSpan(renderMarkdown("# Heading `code`"), "code")
+	if !ok {
+		t.Fatal("inline code span not found in heading")
+	} else if !c.Bold || !spanIs(c, pal.code) {
+		t.Errorf("inline code in heading should be bold+code: %+v", c)
+	}
+}
+
+// An interior blank line in a fenced code block is painted with the code
+// background so the block reads as one continuous panel.
+func TestRenderMarkdownBlankCodeLineHasBackground(t *testing.T) {
+	withTestPalette(t)
+	lines := renderMarkdown("```go\nfoo()\n\nbar()\n```\n")
+	var blanks int
+	for _, ln := range lines {
+		if len(ln) == 0 {
+			t.Errorf("interior blank code line should be filled, found empty span slice")
+			continue
+		}
+		if mdLineText(ln) == " " {
+			blanks++
+			if !ln[0].HasBG {
+				t.Errorf("filled blank code line should carry the code background")
+			}
+		}
+	}
+	if blanks == 0 {
+		t.Errorf("expected a background-filled blank line inside the code block; lines=%v", lines)
+	}
+}
+
+// markdownSpans caches the rendered spans and recomputes only when the palette
+// generation changes (a theme switch), so repeated renders don't re-parse.
+func TestMarkdownSpansCacheInvalidation(t *testing.T) {
+	withRichState(t, true)
+	sw := newTestSession()
+	sw.addAssistant("# H\n\nbody\n")
+	rec := sw.transcript.lastAssistantRecord()
+	s1 := rec.markdownSpans()
+	if len(s1) == 0 {
+		t.Fatal("expected rendered spans")
+	}
+	if rec.styledGen != mdPaletteGen {
+		t.Errorf("after first render styledGen=%d, want mdPaletteGen=%d", rec.styledGen, mdPaletteGen)
+	}
+	// A second call with no theme change is a cache hit (generation unchanged).
+	gen := rec.styledGen
+	rec.markdownSpans()
+	if rec.styledGen != gen {
+		t.Errorf("cache hit should not bump generation: got %d, want %d", rec.styledGen, gen)
+	}
+	// A theme change (generation bump) invalidates the cache.
+	mdPaletteGen++
+	rec.markdownSpans()
+	if rec.styledGen != mdPaletteGen {
+		t.Errorf("after generation bump styledGen=%d, want %d (cache should recompute)", rec.styledGen, mdPaletteGen)
+	}
+}
+
+// Fold-all toggles the collapse state of rich records, and crucially the raw
+// body stays available for copy/yank (body() is independent of fold state).
+func TestRichFoldAllKeepsBodyCopyable(t *testing.T) {
+	withRichState(t, true)
+	sw := newTestSession()
+	sw.addAssistant("# Title\n\n**important** body text\n")
+	rec := sw.transcript.lastAssistantRecord()
+	rawBody := rec.body()
+
+	sw.transcript.setFold(true)
+	if !rec.collapsed {
+		t.Errorf("rich record should be collapsed after fold-all")
+	}
+	if rec.body() != rawBody {
+		t.Errorf("body() changed after folding: want %q, got %q", rawBody, rec.body())
+	}
+
+	sw.transcript.setFold(false)
+	if rec.collapsed {
+		t.Errorf("rich record should be expanded after unfold-all")
+	}
+	if rec.body() != rawBody {
+		t.Errorf("body() changed after unfolding: want %q, got %q", rawBody, rec.body())
+	}
+}
+
+// spanExact returns the span on a line whose Text equals s exactly.
+func spanExact(line []tv.StyledSpan, s string) (tv.StyledSpan, bool) {
+	for _, sp := range line {
+		if sp.Text == s {
+			return sp, true
+		}
+	}
+	return tv.StyledSpan{}, false
 }
