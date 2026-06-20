@@ -1650,7 +1650,12 @@ func statusColor(idle bool, stats agent.SessionStats, budget config.BudgetConfig
 	if idle {
 		return colorNote
 	}
-	return colorInfo
+	// Running: colorInfo (bright blue) is too low-contrast on the blue desktop
+	// background to read (issue #193). colorAgent (bright green / Okabe green in
+	// high-contrast) reads well on both the default blue and the high-contrast
+	// black backgrounds, and signals an active turn without colliding with the
+	// amber/red severity colours above.
+	return colorAgent
 }
 
 // budgetStatus classifies a session's cumulative token usage against the
