@@ -366,6 +366,12 @@ func (w *Workbench) SetModels(models []*config.ModelConfig) {
 		}
 		w.modelNames[i] = name
 	}
+	// Keep the Overall band's model selector in sync with the available models
+	// (issue #191). No-op before the sidebar is built (initial SetModels in the
+	// constructor runs first).
+	if w.sidebar != nil {
+		w.sidebar.rebuildModelOptions()
+	}
 }
 
 // longestModelNameWidth returns the display width (in cells) of the widest model
@@ -1275,6 +1281,7 @@ func (w *Workbench) captureLayout() gogent.Layout {
 	layout := gogent.Layout{
 		Entries:      make([]gogent.LayoutEntry, 0, len(w.order)),
 		SidebarWidth: w.sidebarW,
+		OverallModel: w.sidebarOverallModel(),
 	}
 	for _, id := range w.order {
 		sw := w.sessions[id]
@@ -1303,6 +1310,16 @@ func (w *Workbench) captureLayout() gogent.Layout {
 	return layout
 }
 
+// sidebarOverallModel returns the model config name the Overall band is scoped to
+// (issue #191), or "" for the aggregate view / before the sidebar exists. It is the
+// value persisted in the layout so the selection survives a restart.
+func (w *Workbench) sidebarOverallModel() string {
+	if w.sidebar == nil {
+		return ""
+	}
+	return w.sidebar.selectedOverallModel()
+}
+
 // persistLayout captures the current layout and writes it via the SaveLayout
 // handler. It is best-effort and a no-op when the handler is unset, so layout
 // changes are kept only for the current run when persistence is unavailable.
@@ -1327,6 +1344,11 @@ func (w *Workbench) applyLayout(layout gogent.Layout) {
 		if w.sidebar != nil {
 			w.sidebar.reposition(w.app.Width(), w.app.Height())
 		}
+	}
+	// Restore the Overall band's per-model scope (issue #191). A model that no
+	// longer exists falls back to the aggregate view inside setSelectedOverallModel.
+	if w.sidebar != nil {
+		w.sidebar.setSelectedOverallModel(layout.OverallModel)
 	}
 	w.mu.Lock()
 	if len(layout.Entries) == 0 {
@@ -1646,7 +1668,30 @@ func (w *Workbench) refreshOverall() {
 	if w.handlers.GetStatistics == nil {
 		return
 	}
-	w.sidebar.refreshOverallStats(w.handlers.GetStatistics(), w.activeModelConfig())
+	// The Overall band's model selector scopes every metric to one model (issue
+	// #191). When a specific model is selected, the "model"/"api" rows describe that
+	// model's backend; the aggregate "all models" view keeps following the focused
+	// session's model (issue #107).
+	selected := w.sidebar.selectedOverallModel()
+	modelCfg := w.activeModelConfig()
+	if selected != "" {
+		if m := w.modelByName(selected); m != nil {
+			modelCfg = m
+		}
+	}
+	w.sidebar.refreshOverallStats(w.handlers.GetStatistics(), modelCfg, selected)
+}
+
+// modelByName returns the model config with the given config Name, or nil. Unlike
+// modelByDisplayName it matches the stable name the Statistics report and the
+// persisted layout key the Overall selector on (issue #191).
+func (w *Workbench) modelByName(name string) *config.ModelConfig {
+	for _, m := range w.models {
+		if m.Name == name {
+			return m
+		}
+	}
+	return nil
 }
 
 // activeModelConfig returns the model config selected in the focused (top-most)

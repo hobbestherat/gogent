@@ -92,6 +92,16 @@ type sidebar struct {
 	// #175). Dragging it left/right changes the live sidebar width; it sits in
 	// front of the tree so it claims clicks landing on column 0.
 	divider *tv.VisualComponent
+
+	// overallSelect is the model-selector dropdown at the top of the Overall band
+	// (issue #191): it scopes every metric below it to one model. Its options are
+	// [overallAllModelsOption] + the same model display names offered in each session
+	// window's model row. overallModelKeys is the parallel slice of model config
+	// names (the keys the Statistics report is keyed on), with "" for the "all models"
+	// aggregate option, so the selected label maps back to a report key. Both run on
+	// the UI thread.
+	overallSelect    *tv.Select
+	overallModelKeys []string
 }
 
 // nodeRef identifies what a tree node points at: a session (agentID empty) or a
@@ -170,6 +180,17 @@ func newSidebar(wb *Workbench) *sidebar {
 		if s.divider != nil {
 			s.divider.SetBounds(tv.Rect{X: 0, Y: 0, W: 1, H: h})
 		}
+		// Model selector on the band's top row (issue #191), or hidden when the band
+		// was dropped (sidebar too short). The band occupies the bottom bandH rows, so
+		// its top row is at panel-relative Y = h-bandH.
+		if s.overallSelect != nil {
+			if bandH > 0 {
+				s.overallSelect.Root().Visible = true
+				s.overallSelect.Root().SetBounds(tv.Rect{X: 2, Y: h - bandH, W: w - 3, H: 1})
+			} else {
+				s.overallSelect.Root().Visible = false
+			}
+		}
 	}
 
 	// Selecting (navigating to) a node raises the owning session. Activating a
@@ -214,10 +235,25 @@ func newSidebar(wb *Workbench) *sidebar {
 	}
 	panel.AddChild(divider)
 
+	// Model selector at the top of the Overall band (issue #191). It is a real,
+	// focusable/clickable component (its popup is desktop-owned so it is never
+	// clipped by the narrow panel), positioned by LayoutFn on the band's top row.
+	// Picking a model scopes the metrics below and persists the choice in the layout
+	// store (consistent with the sidebar width, issue #175).
+	overallSelect := tv.NewSelect(wb.desktop, []string{overallAllModelsOption}, tv.Rect{})
+	overallSelect.OnChange = func(int) {
+		s.wb.persistLayout()
+		s.wb.scheduleOverallRefresh()
+	}
+	panel.AddChild(overallSelect.Root())
+
 	s.panel = panel
 	s.tree = tree
 	s.divider = divider
+	s.overallSelect = overallSelect
+	s.overallModelKeys = []string{""}
 	s.layer = tv.NewWindowLayer("sidebar", panel)
+	s.rebuildModelOptions()
 	return s
 }
 
@@ -308,8 +344,63 @@ func (s *sidebar) setGlobalApprovals(n int) {
 // session's active model config (issue #107's model / endpoint rows). It only
 // updates the stored struct; the caller owns the redraw (mirrors SessionWindow's
 // refreshStatus contract). Runs on the UI thread.
-func (s *sidebar) refreshOverallStats(report stats.Report, model *config.ModelConfig) {
-	s.overall = buildOverallStats(report, len(s.sessions), len(s.agents), model)
+func (s *sidebar) refreshOverallStats(report stats.Report, model *config.ModelConfig, selectedModel string) {
+	s.overall = buildOverallStats(report, len(s.sessions), len(s.agents), model, selectedModel)
+}
+
+// rebuildModelOptions resyncs the Overall band's model-selector options with the
+// workbench's current model list (issue #191): the aggregate "all models" entry
+// followed by each model's display name, with overallModelKeys carrying the parallel
+// config names ("" for the aggregate). The current selection is preserved by config
+// name when possible, so refreshing the list (e.g. after editing models) does not
+// silently re-scope the panel. Runs on the UI thread.
+func (s *sidebar) rebuildModelOptions() {
+	if s.overallSelect == nil {
+		return
+	}
+	prev := s.selectedOverallModel()
+	options := []string{overallAllModelsOption}
+	keys := []string{""}
+	for _, m := range s.wb.models {
+		display := m.DisplayName
+		if display == "" {
+			display = m.Name
+		}
+		options = append(options, display)
+		keys = append(keys, m.Name)
+	}
+	s.overallSelect.Options = options
+	s.overallModelKeys = keys
+	s.setSelectedOverallModel(prev)
+}
+
+// selectedOverallModel returns the config name of the model the Overall band is
+// scoped to, or "" for the aggregate "all models" view. Runs on the UI thread.
+func (s *sidebar) selectedOverallModel() string {
+	if s.overallSelect == nil {
+		return ""
+	}
+	i := s.overallSelect.GetSelected()
+	if i < 0 || i >= len(s.overallModelKeys) {
+		return ""
+	}
+	return s.overallModelKeys[i]
+}
+
+// setSelectedOverallModel selects the option whose model config name is key, or the
+// aggregate "all models" option when key is empty or no longer present (a renamed/
+// removed model gracefully falls back to the aggregate). Runs on the UI thread.
+func (s *sidebar) setSelectedOverallModel(key string) {
+	if s.overallSelect == nil {
+		return
+	}
+	for i, k := range s.overallModelKeys {
+		if k == key {
+			s.overallSelect.SetSelected(i)
+			return
+		}
+	}
+	s.overallSelect.SetSelected(0)
 }
 
 // todoLineCount is the number of checklist rows the middle region renders for
@@ -379,7 +470,10 @@ func (s *sidebar) drawOverall(surface tv.Surface, abs tv.Rect) {
 	if contentW < 1 {
 		return
 	}
-	top := abs.Y + abs.H - bandH
+	// The band's top row holds the model selector (a real component drawn over this
+	// region by the framework, issue #191); the separator/title/metrics start one
+	// row below it.
+	top := abs.Y + abs.H - bandH + overallSelectorLines
 	// Separator under the session tree.
 	for x := 1; x < abs.W-1; x++ {
 		surface.SetCell(abs.X+x, top, tui.Cell{Ch: '─', FG: chromeDivider, BG: chromePanelBG})

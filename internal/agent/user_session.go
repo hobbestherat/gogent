@@ -197,6 +197,20 @@ type UserSession struct {
 	// perModelTokens attributes prompt/completion tokens to each model the
 	// session has used. Keyed by model config name.
 	perModelTokens map[string]modelTokens
+
+	// perModelConn is the STABLE, always-monotonic per-model accumulator for the
+	// low-level connector metrics (requests, errors, cached tokens, timeouts,
+	// latency) that only the connector tracks. It mirrors perModelTokens (keyed by
+	// model config name) and is the fix for issue #191: the live *ModelConnection
+	// the panel used to read is rebuilt-and-zeroed every turn, shared by sub-agents
+	// (double-counted) and lost on restart. Instead, recordConnectorUsage folds the
+	// per-read DELTA of the connector snapshot into this accumulator, attributed to
+	// the active primaryModel, so totals never reset across turns, model switches or
+	// sub-agent spawns and are never double-counted. Guarded by mu.
+	perModelConn map[string]model.StatsSnapshot
+	// lastConnSnap is the connector snapshot read on the previous recordConnectorUsage
+	// call, the baseline the next delta is measured against. Guarded by mu.
+	lastConnSnap model.StatsSnapshot
 }
 
 // modelTokens is the per-model token accumulator (prompt/completion totals).
@@ -221,6 +235,7 @@ func NewUserSession(id string, agent *Agent) *UserSession {
 		toolCallCount:  0,
 		turnCount:      0,
 		perModelTokens: make(map[string]modelTokens),
+		perModelConn:   make(map[string]model.StatsSnapshot),
 	}
 }
 
@@ -654,6 +669,15 @@ func (s *UserSession) modelRoundTrip(ctx context.Context, sess *model.ModelSessi
 		return nil, err
 	}
 	resp, err := sess.SendWithToolsCtx(ctx, messages, tools)
+	// Fold this round-trip's connector activity into the stable per-model
+	// accumulator (issue #191), reading the snapshot once as a delta. Done even on
+	// error: the connector records error/timeout outcomes on its own counters, so
+	// those must be captured too. sess.Model is the connector that did the work;
+	// sub-agents share the root's connector pointer, so reading it here (one read
+	// per round-trip) attributes usage exactly once with no double-counting.
+	if sess != nil && sess.Model != nil {
+		s.recordConnectorUsage(sess.Model)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("model round-trip: %w", err)
 	}
@@ -661,6 +685,34 @@ func (s *UserSession) modelRoundTrip(ctx context.Context, sess *model.ModelSessi
 		agent.AddTokensUsed(resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 	}
 	return resp, nil
+}
+
+// recordConnectorUsage folds the delta of a connector's snapshot (since the last
+// read) into the stable per-model connector accumulator, attributed to the
+// session's current primary model (issue #191). It is the connector-metric sibling
+// of AddTokenUsage: where that keeps tokenCountIn/Out and perModelTokens monotonic
+// with a plain +=, this keeps requests/errors/cache/timeouts/latency monotonic by
+// accumulating per-read deltas rather than reading the live, per-turn-rebuilt
+// connector.
+//
+// A negative delta means the connector was replaced with a zeroed one between
+// reads (the per-turn rebuild without a carry); the snapshot is then treated as a
+// fresh baseline so the accumulator only ever grows. This makes the accumulator
+// correct independently of the ModelStats.Carry mitigation, which is left in place.
+func (s *UserSession) recordConnectorUsage(conn model.StatsReporter) {
+	if conn == nil {
+		return
+	}
+	cur := conn.StatsSnapshot()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delta := cur.Sub(s.lastConnSnap)
+	if delta.RequestCount < 0 {
+		// Connector was rebuilt/zeroed; restart the delta from this snapshot.
+		delta = cur
+	}
+	s.lastConnSnap = cur
+	s.perModelConn[s.primaryModel] = s.perModelConn[s.primaryModel].Add(delta)
 }
 
 // stopForBudget folds a graceful BUDGET_EXCEEDED notice into the agent's last
@@ -1834,23 +1886,103 @@ func (s *UserSession) emitUsage(emit func(SessionEvent)) {
 	emit(SessionEvent{Type: SessionEventUsage, Stats: s.Snapshot()})
 }
 
-// ConnectorStats aggregates the low-level model-connector statistics across all
-// of this session's agents. These come straight from the HTTP layer (request
-// counts, token totals, timing) and complement the higher-level session stats.
+// ConnectorStats returns the session's grand-total low-level connector statistics
+// (request counts, token totals, timing, error breakdown), summed across every
+// model the session has used.
+//
+// It reads the STABLE per-model accumulator (perModelConn) rather than summing the
+// live per-agent connectors, which fixes issue #191: the live connector is rebuilt
+// and zeroed every turn, is shared by sub-agents (so summing per agent
+// double-counts it), and is lost on restart. The accumulator is fed monotonic
+// deltas by recordConnectorUsage, so this total never resets across turns, model
+// switches or sub-agent spawns and is never double-counted.
 func (s *UserSession) ConnectorStats() model.StatsSnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.connectorStatsLocked("")
+}
 
-	var total model.StatsSnapshot
-	if s.RootAgent == nil {
-		return total
+// ModelConnectorStats returns the stable connector accumulator for a single model
+// (by config name), or the grand total across all models when name is empty.
+// Callers hold no lock.
+func (s *UserSession) ModelConnectorStats(name string) model.StatsSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.connectorStatsLocked(name)
+}
+
+// connectorStatsLocked sums the per-model connector accumulator: a single model's
+// bucket when name is non-empty, otherwise every bucket. Callers must hold s.mu.
+func (s *UserSession) connectorStatsLocked(name string) model.StatsSnapshot {
+	if name != "" {
+		return s.perModelConn[name]
 	}
-	for _, a := range s.RootAgent.ListAllAgents() {
-		if a.ThoughtTrain != nil && a.ThoughtTrain.Model != nil {
-			total = total.Add(a.ThoughtTrain.Model.StatsSnapshot())
-		}
+	var total model.StatsSnapshot
+	for _, snap := range s.perModelConn {
+		total = total.Add(snap)
 	}
 	return total
+}
+
+// ModelUsage is a UI/report-facing view of one model's full usage within a session:
+// the session-layer token attribution (perModelTokens) joined with the stable
+// connector accumulator (perModelConn). It lets the Statistics report present a
+// per-model breakdown of every metric the Overall panel scopes (issue #191).
+type ModelUsage struct {
+	Name      string
+	TokensIn  int
+	TokensOut int
+	Connector model.StatsSnapshot
+}
+
+// PerModelStats returns the per-model token + connector usage accumulated by the
+// session, keyed by model config name. The order is stable (sorted by name) so the
+// Statistics view renders deterministically. A model appears if it has either token
+// or connector activity attributed to it.
+func (s *UserSession) PerModelStats() []ModelUsage {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	names := make(map[string]struct{}, len(s.perModelTokens)+len(s.perModelConn))
+	for name := range s.perModelTokens {
+		names[name] = struct{}{}
+	}
+	for name := range s.perModelConn {
+		names[name] = struct{}{}
+	}
+	ordered := make([]string, 0, len(names))
+	for name := range names {
+		ordered = append(ordered, name)
+	}
+	sort.Strings(ordered)
+	out := make([]ModelUsage, 0, len(ordered))
+	for _, name := range ordered {
+		t := s.perModelTokens[name]
+		out = append(out, ModelUsage{
+			Name:      name,
+			TokensIn:  t.In,
+			TokensOut: t.Out,
+			Connector: s.perModelConn[name],
+		})
+	}
+	return out
+}
+
+// SubAgentCount returns how many sub-agents the session currently holds (every
+// agent in the tree except the root). The Statistics report uses it to attribute a
+// session's sub-agents to its primary model for the per-model Overall view (issue
+// #191).
+func (s *UserSession) SubAgentCount() int {
+	s.mu.RLock()
+	root := s.RootAgent
+	s.mu.RUnlock()
+	if root == nil {
+		return 0
+	}
+	n := len(root.ListAllAgents()) - 1
+	if n < 0 {
+		n = 0
+	}
+	return n
 }
 
 // IncrementToolCall increments the tool call count

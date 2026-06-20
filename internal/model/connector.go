@@ -144,6 +144,28 @@ func (s StatsSnapshot) Add(other StatsSnapshot) StatsSnapshot {
 	}
 }
 
+// Sub returns the element-wise difference s-other. It is how a stable per-model
+// accumulator folds in the *delta* of a connector snapshot since it was last read
+// (see UserSession.recordConnectorUsage): the connector counters grow within a
+// turn, so subtracting the previously-read snapshot yields just the new activity
+// to attribute to the active model. The result can be negative if the connector
+// was rebuilt/zeroed between reads; callers that require monotonicity guard for it.
+func (s StatsSnapshot) Sub(other StatsSnapshot) StatsSnapshot {
+	return StatsSnapshot{
+		RequestCount:               s.RequestCount - other.RequestCount,
+		SuccessCount:               s.SuccessCount - other.SuccessCount,
+		ErrorCount:                 s.ErrorCount - other.ErrorCount,
+		TotalTokensIn:              s.TotalTokensIn - other.TotalTokensIn,
+		TotalCachedTokensIn:        s.TotalCachedTokensIn - other.TotalCachedTokensIn,
+		TotalTokensOut:             s.TotalTokensOut - other.TotalTokensOut,
+		TotalTimeMs:                s.TotalTimeMs - other.TotalTimeMs,
+		TimeoutCount:               s.TimeoutCount - other.TimeoutCount,
+		ContextWindowOverflowCount: s.ContextWindowOverflowCount - other.ContextWindowOverflowCount,
+		RefusalCount:               s.RefusalCount - other.RefusalCount,
+		GenericErrorCount:          s.GenericErrorCount - other.GenericErrorCount,
+	}
+}
+
 // Snapshot returns a mutex-free copy of the current counters.
 func (s *ModelStats) Snapshot() StatsSnapshot {
 	s.Mutex.Lock()
