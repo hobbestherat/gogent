@@ -212,6 +212,53 @@ func TestTodosRegionHeightZeroCases(t *testing.T) {
 	}
 }
 
+// TestSidebarTodosFollowActiveWindow is the regression guard for the focus
+// wiring: the middle TODO region must follow the active top-most window through
+// the real session-open path (openWindow -> AddLayer -> refreshOverall), WITHOUT
+// any manual focusSession call or a Workbench.Focus hop. An earlier revision set
+// s.focused only from Workbench.Focus, so a freshly opened session (the common
+// case) never surfaced its todos; the fix resolves focus from the same top
+// window the Overall band uses (refreshOverall -> focusSession(ActiveID)). This
+// test would fail against that earlier revision.
+func TestSidebarTodosFollowActiveWindow(t *testing.T) {
+	w := newTestWorkbench(t)
+
+	// Opening a window makes it the active top window; the sidebar's focus must
+	// follow it without an explicit focusSession / Focus call.
+	w.openWindow("s1", "Session 1")
+	if w.sidebar.focused != "s1" {
+		t.Fatalf("after opening s1: focused = %q, want s1 (must follow active window)", w.sidebar.focused)
+	}
+	if w.sidebar.focused != w.ActiveID() {
+		t.Fatalf("focused %q diverges from active window %q (must mirror the Overall band)", w.sidebar.focused, w.ActiveID())
+	}
+
+	// A second open becomes the new top window; focus tracks it.
+	w.openWindow("s2", "Session 2")
+	if w.sidebar.focused != "s2" {
+		t.Fatalf("after opening s2: focused = %q, want s2", w.sidebar.focused)
+	}
+
+	// Workbench.Focus (sidebar/menu/cycle path) still updates the region's focus
+	// now that the explicit focusSession call lives in refreshOverall.
+	w.Focus("s1")
+	if w.sidebar.focused != "s1" {
+		t.Fatalf("after Focus(s1): focused = %q, want s1", w.sidebar.focused)
+	}
+
+	// The region renders the focused/active session's todos only.
+	w.sidebar.applyTodo("s1", threeTodos())
+	w.sidebar.applyTodo("s2", threeTodos())
+	w.Focus("s2")
+	if w.sidebar.focused != "s2" || w.sidebar.todoLineCount() != 3 {
+		t.Errorf("focused s2: focused=%q todoLineCount=%d, want s2/3", w.sidebar.focused, w.sidebar.todoLineCount())
+	}
+	w.Focus("s1")
+	if w.sidebar.focused != "s1" || w.sidebar.todoLineCount() != 3 {
+		t.Errorf("focused s1: focused=%q todoLineCount=%d, want s1/3", w.sidebar.focused, w.sidebar.todoLineCount())
+	}
+}
+
 // TestRemoveSessionClearsTodosAndFocus verifies removeSession drops the closed
 // session's todos and, when it was the focused one, resets focus so the middle
 // region does not point at a removed session.

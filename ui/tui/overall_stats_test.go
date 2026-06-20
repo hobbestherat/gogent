@@ -321,16 +321,17 @@ func TestSidebarRegionDropKeepsTreeMinimum(t *testing.T) {
 	}
 }
 
-// TestSidebarShortHeightCharacterization documents the actual drop sequence as
-// the sidebar shrinks with a 3-item checklist. It is a characterization (not a
-// spec assertion): once the panel is too short for the 11-row Overall band, the
-// band is dropped while the shorter 4-row TODO region is STILL shown, then both
-// are dropped. That middle step (band gone, todos kept) is a non-monotonic
-// priority inversion worth a future look — the Overall band is the persistent
-// global summary — but the issue's "(and/or)" acceptance permits it and the
-// plan's specified algorithm produces it. Pinned here so any change is a
-// deliberate decision.
-func TestSidebarShortHeightCharacterization(t *testing.T) {
+// TestSidebarRegionDropMonotonic is the regression guard for the drop
+// precedence: as the sidebar shrinks, the per-session TODO region must disappear
+// before (and never outlive) the Overall band, so shrinking never makes the
+// todos reappear after the band is gone and the persistent global summary is the
+// last region standing. An earlier revision computed bandH independently of
+// todosH, which produced a non-monotonic window (h≈9–15 for 3 todos) where the
+// band was dropped while the TODO region was still shown; the fix cascades the
+// drops (todos first, then band). This test pins both the corrected boundary
+// sequence and the strong invariant across a full height sweep.
+func TestSidebarRegionDropMonotonic(t *testing.T) {
+	// Corrected boundary sequence with a 3-item checklist (region height 4).
 	for _, tc := range []struct {
 		h         int
 		wantBand  int
@@ -339,8 +340,10 @@ func TestSidebarShortHeightCharacterization(t *testing.T) {
 	}{
 		{20, overallBandHeight, todoRegionTitleLines + 3, "both regions shown"},
 		{19, overallBandHeight, 0, "todos dropped, band kept"},
-		{12, 0, todoRegionTitleLines + 3, "band dropped, todos kept (priority inversion)"},
-		{8, 0, 0, "both regions dropped"},
+		{16, overallBandHeight, 0, "todos dropped, band still kept at the edge"},
+		{15, 0, 0, "both dropped once the band no longer fits"},
+		{12, 0, 0, "both dropped (no todos-without-band inversion)"},
+		{8, 0, 0, "both dropped on a short sidebar"},
 	} {
 		s := newTestSidebar()
 		s.addSession("s1", "Session 1", false)
@@ -350,6 +353,20 @@ func TestSidebarShortHeightCharacterization(t *testing.T) {
 		if s.overallBandH != tc.wantBand || s.todosBandH != tc.wantTodos {
 			t.Errorf("h=%d (%s): overallBandH=%d todosBandH=%d, want band=%d todos=%d",
 				tc.h, tc.note, s.overallBandH, s.todosBandH, tc.wantBand, tc.wantTodos)
+		}
+	}
+
+	// Strong invariant across every height: the TODO region is never shown
+	// without the Overall band (todos drops first / with the band, never after).
+	s := newTestSidebar()
+	s.addSession("s1", "Session 1", false)
+	s.applyTodo("s1", threeTodos())
+	s.focusSession("s1")
+	for h := 2; h <= 40; h++ {
+		s.panel.SetBounds(tv.Rect{X: 0, Y: 0, W: defaultSidebarWidth, H: h})
+		if s.todosBandH > 0 && s.overallBandH == 0 {
+			t.Errorf("h=%d: TODO region shown (todosBandH=%d) while Overall band dropped — todos must not outlive the band",
+				h, s.todosBandH)
 		}
 	}
 }
