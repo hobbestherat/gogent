@@ -1,8 +1,6 @@
 package ui
 
 import (
-	"html"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -15,6 +13,7 @@ import (
 	"github.com/yuin/goldmark/extension"
 	extast "github.com/yuin/goldmark/extension/ast"
 	"github.com/yuin/goldmark/text"
+	"github.com/yuin/goldmark/util"
 )
 
 // richMarkdown is the user's intent to render assistant answers with Markdown
@@ -600,20 +599,18 @@ func (r *markdownRenderer) collectText(n ast.Node) string {
 	return b.String()
 }
 
-// entityRef matches a well-formed HTML entity reference: a named (&amp;), decimal
-// (&#39;) or hex (&#x2F;) reference that ends with a semicolon. CommonMark only
-// recognises entities in this terminated form.
-var entityRef = regexp.MustCompile(`&(?:#[0-9]+|#[xX][0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);`)
-
-// decodeEntities decodes HTML entity references in prose text for display, while
-// matching CommonMark's rule that a reference must end with a semicolon. It only
-// hands the matched "&…;" runs to html.UnescapeString, so a bare legacy entity
-// such as "&copyX" or "&ampb" stays literal (Go's html.UnescapeString would
-// otherwise decode those, deviating from CommonMark). Unknown references like
-// "&notreal;" are left unchanged by html.UnescapeString.
+// decodeEntities decodes HTML entity references in prose text for display, using
+// goldmark's own CommonMark-accurate resolvers. ResolveEntityNames decodes only
+// "&name;" runs whose name is a real HTML5 entity (validated against goldmark's
+// named-character table and requiring the trailing ";"), and
+// ResolveNumericReferences decodes "&#39;"/"&#x2F;" — so bare legacy forms
+// ("&copyX") and unknown references ("&notreal;") correctly stay literal. The raw
+// Markdown is preserved separately for copy/export; this affects display only.
 func decodeEntities(s string) string {
 	if !strings.Contains(s, "&") {
 		return s
 	}
-	return entityRef.ReplaceAllStringFunc(s, html.UnescapeString)
+	b := util.ResolveEntityNames([]byte(s))
+	b = util.ResolveNumericReferences(b)
+	return string(b)
 }
