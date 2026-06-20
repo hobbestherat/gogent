@@ -162,9 +162,14 @@ func (s *ModelSession) AddTurn(request []Message, response string, usage *TokenU
 		Error:    err,
 	})
 
-	// Update token count
-	if usage != nil {
-		s.CurrentTokenCount += usage.TotalTokens
+	// A turn's Usage.TotalTokens is the size of the entire context at that turn
+	// (the whole conversation is re-sent every request), so it is the current
+	// context size — it supersedes, rather than adds to, the running count.
+	// Adding would double-count the growing prefix and inflate the count
+	// quadratically (the premature-compaction bug). Mirror SendWithToolsCtx,
+	// which sets CurrentTokenCount = resp.Usage.TotalTokens for the same reason.
+	if usage != nil && usage.TotalTokens > 0 {
+		s.CurrentTokenCount = usage.TotalTokens
 	}
 }
 
@@ -290,6 +295,17 @@ func (s *ModelSession) ApplyCompressedTranscript(newTranscript []Message) {
 // changes, the running token count is recomputed from the recorded per-turn
 // usage so it no longer reflects the previous model's (possibly differently
 // sized) context window.
+//
+// The count is the LAST recorded turn's usage total, NOT the sum of every
+// turn's total. A turn's Usage.TotalTokens is the size of the entire context at
+// that turn (system prompt + full transcript + the new content), because the
+// whole conversation is re-sent on every request (see SendWithToolsCtx, which
+// sets CurrentTokenCount = Usage.TotalTokens). Summing the per-turn totals
+// therefore counts the same growing prefix over and over and inflates the count
+// roughly quadratically — which made compaction's 80% high-water mark fire far
+// too early (on a 1M-window model at ~10% real usage). Taking the last turn's
+// total mirrors exactly what SendWithToolsCtx records and keeps the count
+// honest across the per-send connection rebuild gogent performs.
 func (s *ModelSession) Resume(newModel Connector) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -316,14 +332,27 @@ func (s *ModelSession) Resume(newModel Connector) {
 				}
 			}
 		}
-		newCount := 0
-		for _, turn := range s.History {
-			if turn.Usage != nil {
-				newCount += turn.Usage.TotalTokens
-			}
-		}
-		s.CurrentTokenCount = newCount
+		// The running context size is the latest turn's usage total — it already
+		// covers the whole conversation, so summing every turn's total would
+		// double-count the growing prefix (see the method doc). Walk back-to-front
+		// for the most recent real measurement; falls back to 0 when no turn has
+		// reported usage yet.
+		s.CurrentTokenCount = lastUsageTotal(s.History)
 	}
+}
+
+// lastUsageTotal returns the Usage.TotalTokens of the most recent history turn
+// that has one, or 0 when none does. It is the honest "current context size"
+// after a model/backend swap: a turn's total already counts the entire context
+// at that point, so the newest one supersedes its predecessors rather than
+// adding to them.
+func lastUsageTotal(history []Turn) int {
+	for i := len(history) - 1; i >= 0; i-- {
+		if u := history[i].Usage; u != nil && u.TotalTokens > 0 {
+			return u.TotalTokens
+		}
+	}
+	return 0
 }
 
 // AddCallback adds a callback hook
