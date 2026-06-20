@@ -873,8 +873,12 @@ func (w *Workbench) Focus(id string) {
 	w.desktop.RemoveLayer(sw.layer)
 	w.desktop.AddLayer(sw.layer)
 	w.desktop.SetFocus(sw.input)
-	// The Overall panel's "model"/"api" rows follow the focused session (issue
-	// #107); refresh before the redraw below so the new model shows immediately.
+	// The middle TODO region (issue #190) and the Overall panel's "model"/"api"
+	// rows (issue #107) both follow the focused session; point them at it and
+	// refresh before the redraw below so the new session's state shows at once.
+	if w.sidebar != nil {
+		w.sidebar.focusSession(id)
+	}
 	w.refreshOverall()
 	w.desktop.Redraw()
 }
