@@ -263,10 +263,7 @@ type Workbench struct {
 
 // NewWorkbench creates the workbench and its desktop chrome.
 func NewWorkbench(models []*config.ModelConfig) *Workbench {
-	app, err := tui.New()
-	if err != nil {
-		panic(fmt.Sprintf("failed to initialize TUI: %v", err))
-	}
+	app := tui.New()
 	w := &Workbench{
 		app:           app,
 		desktop:       tv.NewDesktop(app),

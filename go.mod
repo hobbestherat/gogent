@@ -8,3 +8,5 @@ require (
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/term v0.44.0 // indirect
 )
+
+replace github.com/hobbestherat/turbotui => github.com/kloune/turbotui v0.3.1-0.20260620055109-e1a0168f0384
