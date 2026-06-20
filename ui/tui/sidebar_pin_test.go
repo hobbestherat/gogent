@@ -31,7 +31,7 @@ func resizeWindowTo(sw *SessionWindow, toX, toY int) {
 }
 
 // rightEdge returns the column just past a window's right border (X+W), the value
-// the sidebar clamp holds at or below screenW-sidebarWidth when pinned.
+// the sidebar clamp holds at or below screenW-defaultSidebarWidth when pinned.
 func rightEdge(sw *SessionWindow) int {
 	b := sw.window.Component.Bounds
 	return b.X + b.W
@@ -72,7 +72,7 @@ func TestSidebarPinDefault(t *testing.T) {
 	if !w.IsSidebarPinned() {
 		t.Fatal("sidebar should be pinned by default")
 	}
-	want := tv.Rect{X: 0, Y: 0, W: w.app.Width() - sidebarWidth, H: w.app.Height()}
+	want := tv.Rect{X: 0, Y: 0, W: w.app.Width() - defaultSidebarWidth, H: w.app.Height()}
 	if got := w.windowArea(); got != want {
 		t.Errorf("pinned windowArea = %+v, want %+v", got, want)
 	}
@@ -83,7 +83,7 @@ func TestSidebarPinDefault(t *testing.T) {
 func TestWindowAreaPinnedVsUnpinned(t *testing.T) {
 	w := newTestWorkbench(t)
 	full := tv.Rect{X: 0, Y: 0, W: w.app.Width(), H: w.app.Height()}
-	reduced := tv.Rect{X: 0, Y: 0, W: w.app.Width() - sidebarWidth, H: w.app.Height()}
+	reduced := tv.Rect{X: 0, Y: 0, W: w.app.Width() - defaultSidebarWidth, H: w.app.Height()}
 
 	if got := w.windowArea(); got != reduced {
 		t.Errorf("pinned windowArea = %+v, want %+v", got, reduced)
@@ -111,7 +111,7 @@ func TestToggleSidebarPinClampsExistingWindows(t *testing.T) {
 	sw := w.sessions["a"]
 	// Park the window so its right edge is well past the sidebar boundary.
 	sw.window.Component.SetBounds(tv.Rect{X: 30, Y: 2, W: 50, H: 14})
-	if rightEdge(sw) <= w.app.Width()-sidebarWidth {
+	if rightEdge(sw) <= w.app.Width()-defaultSidebarWidth {
 		t.Fatalf("precondition: window should cover the sidebar, right edge %d", rightEdge(sw))
 	}
 
@@ -119,9 +119,9 @@ func TestToggleSidebarPinClampsExistingWindows(t *testing.T) {
 	if !w.IsSidebarPinned() {
 		t.Fatal("expected sidebar pinned after toggle")
 	}
-	if got := rightEdge(sw); got > w.app.Width()-sidebarWidth {
+	if got := rightEdge(sw); got > w.app.Width()-defaultSidebarWidth {
 		t.Errorf("window still covers the sidebar after pinning, right edge %d > %d",
-			got, w.app.Width()-sidebarWidth)
+			got, w.app.Width()-defaultSidebarWidth)
 	}
 }
 
@@ -136,9 +136,9 @@ func TestSidebarPinConstrainsDrag(t *testing.T) {
 	// sidebar boundary and the window width is unchanged (a slide, not a resize).
 	dragWindowTo(sw, 30, 2)
 	b := sw.window.Component.Bounds
-	if rightEdge(sw) > w.app.Width()-sidebarWidth {
+	if rightEdge(sw) > w.app.Width()-defaultSidebarWidth {
 		t.Errorf("pinned drag covered the sidebar, right edge %d > %d",
-			rightEdge(sw), w.app.Width()-sidebarWidth)
+			rightEdge(sw), w.app.Width()-defaultSidebarWidth)
 	}
 	if b.W != 40 {
 		t.Errorf("pinned drag changed width to %d, want 40 (drag must not resize)", b.W)
@@ -148,9 +148,9 @@ func TestSidebarPinConstrainsDrag(t *testing.T) {
 	w.ToggleSidebarPin()
 	sw.window.Component.SetBounds(tv.Rect{X: 2, Y: 2, W: 40, H: 14})
 	dragWindowTo(sw, 30, 2)
-	if rightEdge(sw) <= w.app.Width()-sidebarWidth {
+	if rightEdge(sw) <= w.app.Width()-defaultSidebarWidth {
 		t.Errorf("unpinned drag should cover the sidebar, right edge %d <= %d",
-			rightEdge(sw), w.app.Width()-sidebarWidth)
+			rightEdge(sw), w.app.Width()-defaultSidebarWidth)
 	}
 }
 
@@ -165,9 +165,9 @@ func TestSidebarPinConstrainsResize(t *testing.T) {
 	// boundary and the left origin (X=2) is preserved.
 	resizeWindowTo(sw, 70, 15)
 	b := sw.window.Component.Bounds
-	if rightEdge(sw) > w.app.Width()-sidebarWidth {
+	if rightEdge(sw) > w.app.Width()-defaultSidebarWidth {
 		t.Errorf("pinned resize covered the sidebar, right edge %d > %d",
-			rightEdge(sw), w.app.Width()-sidebarWidth)
+			rightEdge(sw), w.app.Width()-defaultSidebarWidth)
 	}
 	if b.X != 2 {
 		t.Errorf("pinned resize moved origin to X=%d, want 2 (anchored edge should stay)", b.X)
@@ -177,9 +177,9 @@ func TestSidebarPinConstrainsResize(t *testing.T) {
 	w.ToggleSidebarPin()
 	sw.window.Component.SetBounds(tv.Rect{X: 2, Y: 2, W: 40, H: 14})
 	resizeWindowTo(sw, 70, 15)
-	if rightEdge(sw) <= w.app.Width()-sidebarWidth {
+	if rightEdge(sw) <= w.app.Width()-defaultSidebarWidth {
 		t.Errorf("unpinned resize should cover the sidebar, right edge %d <= %d",
-			rightEdge(sw), w.app.Width()-sidebarWidth)
+			rightEdge(sw), w.app.Width()-defaultSidebarWidth)
 	}
 }
 
@@ -191,9 +191,9 @@ func TestSidebarPinConstrainsMaximize(t *testing.T) {
 	sw := w.sessions["a"]
 
 	sw.Maximize()
-	if got := rightEdge(sw); got > w.app.Width()-sidebarWidth {
+	if got := rightEdge(sw); got > w.app.Width()-defaultSidebarWidth {
 		t.Errorf("pinned maximize covered the sidebar, right edge %d > %d",
-			got, w.app.Width()-sidebarWidth)
+			got, w.app.Width()-defaultSidebarWidth)
 	}
 	sw.ToggleMaximize() // restore before changing the pin state
 
@@ -217,9 +217,9 @@ func TestSidebarPinConstrainsRestoredLayout(t *testing.T) {
 	w.applyLayout(gogent.Layout{Entries: []gogent.LayoutEntry{
 		{ID: "a", Title: "A", X: 30, Y: 2, W: 50, H: 14},
 	}})
-	if rightEdge(sw) > w.app.Width()-sidebarWidth {
+	if rightEdge(sw) > w.app.Width()-defaultSidebarWidth {
 		t.Errorf("restored window covers the sidebar, right edge %d > %d",
-			rightEdge(sw), w.app.Width()-sidebarWidth)
+			rightEdge(sw), w.app.Width()-defaultSidebarWidth)
 	}
 }
 

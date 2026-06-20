@@ -222,7 +222,13 @@ type Workbench struct {
 	// overlapping windows. Read/written on the UI thread, like the sidebar's own
 	// approval state, so the geometry helpers below read it without the lock.
 	sidebarPinned bool
-	monolog       *tv.Layer
+	// sidebarW is the live width (columns) of the right-hand sidebar strip (issue
+	// #175). It is mutated by dragging the sidebar's left-edge divider, clamped to
+	// [minSidebarWidth, screen-minWorkAreaWidth], persisted in the layout store and
+	// restored on launch. Read/written on the UI thread, like sidebarPinned, so the
+	// geometry helpers read it without the lock. Zero means "use the default".
+	sidebarW int
+	monolog  *tv.Layer
 	// shutdown is cancelled (via quit) when the UI loop stops. Background
 	// goroutines blocked on a permission prompt select on it so they unblock
 	// instead of leaking when the user quits. See AskPermission.
@@ -270,6 +276,7 @@ func NewWorkbench(models []*config.ModelConfig) *Workbench {
 		sessions:      make(map[string]*SessionWindow),
 		pinned:        make(map[string]bool),
 		sidebarPinned: true,
+		sidebarW:      defaultSidebarWidth,
 		// Use default window config (resizable, minimizable and maximizable by default)
 		windowConfig: config.WindowConfig{
 			Resizable:   true,
@@ -580,7 +587,22 @@ func (w *Workbench) viewItems() []*tv.MenuItem {
 		}),
 		tv.NewMenuItem("----------", nil),
 		tv.NewMenuItem(pinLabel, func() { w.ToggleSidebarPin() }),
+		// Keyboard fallback for the draggable divider, for terminals that do not
+		// report mouse drags (issue #175).
+		tv.NewMenuItem("&Widen Sidebar", func() { w.nudgeSidebarWidth(+sidebarNudge) }),
+		tv.NewMenuItem("Narro&w Sidebar", func() { w.nudgeSidebarWidth(-sidebarNudge) }),
 	}
+}
+
+// sidebarNudge is the column step used by the Widen/Narrow Sidebar commands (the
+// keyboard fallback for the draggable divider, issue #175).
+const sidebarNudge = 2
+
+// nudgeSidebarWidth widens (delta>0) or narrows (delta<0) the sidebar by delta
+// columns, clamped to the usual range. It is the keyboard/command fallback for
+// the draggable divider (issue #175).
+func (w *Workbench) nudgeSidebarWidth(delta int) {
+	w.setSidebarWidth(w.sidebarWidth() + delta)
 }
 
 // withActiveTranscript runs fn against the currently active session window, if
@@ -757,7 +779,7 @@ func (w *Workbench) openWindowAny(id, title string, readOnly bool) *SessionWindo
 	// too narrow to spare it); dragging/resizing/maximizing then keep them there
 	// via the pinned window area (issue #106).
 	offset := len(w.order) % 6
-	avail := w.app.Width() - sidebarWidth
+	avail := w.app.Width() - w.sidebarWidth()
 	if avail < 50 {
 		avail = w.app.Width()
 	}
@@ -986,16 +1008,87 @@ func (w *Workbench) IsSidebarPinned() bool {
 	return w.sidebarPinned
 }
 
+// sidebarWidth returns the live width of the right-hand sidebar strip (issue
+// #175), clamped to the sensible range for the current terminal so a stale or
+// out-of-bounds stored value can never strand the work area. A zero/unset width
+// falls back to the default. Read on the UI thread.
+func (w *Workbench) sidebarWidth() int {
+	return w.clampSidebarWidth(w.sidebarW)
+}
+
+// clampSidebarWidth holds a requested sidebar width within [minSidebarWidth,
+// max], where max keeps at least minWorkAreaWidth columns for the work area
+// (issue #175). On a terminal too narrow to honour both, the work-area floor
+// wins so the sidebar shrinks rather than swallowing the desktop. A zero/negative
+// request is treated as the default width.
+func (w *Workbench) clampSidebarWidth(req int) int {
+	if req <= 0 {
+		req = defaultSidebarWidth
+	}
+	if req < minSidebarWidth {
+		req = minSidebarWidth
+	}
+	// Cap last so the work-area floor wins on a terminal too narrow to honour both
+	// bounds: the sidebar shrinks below minSidebarWidth rather than swallowing the
+	// desktop (and never goes negative on a vanishingly small terminal).
+	max := w.app.Width() - minWorkAreaWidth
+	if req > max {
+		req = max
+	}
+	if req < 0 {
+		req = 0
+	}
+	return req
+}
+
+// dragSidebarWidth recomputes the sidebar width from a drag X (the screen column
+// the divider was dragged to) and applies it: the width is the distance from that
+// column to the right edge (issue #175). It reflows the sidebar, re-clamps any
+// pinned windows to the moved boundary and persists the new width. Runs on the UI
+// thread (driven by the divider's OnClickFn).
+func (w *Workbench) dragSidebarWidth(x int) {
+	w.setSidebarWidth(w.app.Width() - x)
+}
+
+// setSidebarWidth stores a new (clamped) sidebar width, repositions the sidebar,
+// clamps pinned windows into the new work area and persists the layout. It is a
+// no-op when the clamped width is unchanged so a drag that hits a bound does not
+// thrash the layout file. Runs on the UI thread (issue #175).
+func (w *Workbench) setSidebarWidth(req int) {
+	width := w.clampSidebarWidth(req)
+	if width == w.sidebarWidth() {
+		return
+	}
+	w.sidebarW = width
+	if w.sidebar != nil {
+		w.sidebar.reposition(w.app.Width(), w.app.Height())
+	}
+	if w.sidebarPinned {
+		w.mu.Lock()
+		windows := make([]*SessionWindow, 0, len(w.sessions))
+		for _, sw := range w.sessions {
+			windows = append(windows, sw)
+		}
+		w.mu.Unlock()
+		for _, sw := range windows {
+			sw.clampToWindowArea()
+		}
+	}
+	w.persistLayout()
+	w.desktop.Redraw()
+}
+
 // windowArea returns the desktop rectangle session windows are constrained to:
 // the full screen when the sidebar is unpinned, or the screen minus the reserved
 // right-hand sidebar strip when it is pinned (issue #106). Dragging, resizing,
 // maximizing, creating and restoring a window all stay within it so a pinned
 // sidebar is never covered. On a desktop too narrow to spare the sidebar the full
-// width is used (mirroring maximizedWindowRect). Read on the UI thread.
+// width is used (mirroring maximizedWindowRect). The strip width is the live,
+// draggable sidebar width (issue #175). Read on the UI thread.
 func (w *Workbench) windowArea() tv.Rect {
 	sw, sh := w.app.Width(), w.app.Height()
-	if w.sidebarPinned && sw > sidebarWidth {
-		sw -= sidebarWidth
+	if bw := w.sidebarWidth(); w.sidebarPinned && sw > bw {
+		sw -= bw
 	}
 	return tv.Rect{X: 0, Y: 0, W: sw, H: sh}
 }
@@ -1142,7 +1235,10 @@ func (w *Workbench) CloseAll() {
 func (w *Workbench) captureLayout() gogent.Layout {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	layout := gogent.Layout{Entries: make([]gogent.LayoutEntry, 0, len(w.order))}
+	layout := gogent.Layout{
+		Entries:      make([]gogent.LayoutEntry, 0, len(w.order)),
+		SidebarWidth: w.sidebarW,
+	}
 	for _, id := range w.order {
 		sw := w.sessions[id]
 		if sw == nil {
@@ -1182,6 +1278,17 @@ func (w *Workbench) persistLayout() {
 // layout onto already-open windows. Entries for sessions that no longer exist
 // are ignored; the next persistLayout drops them (the layout is self-healing).
 func (w *Workbench) applyLayout(layout gogent.Layout) {
+	// Restore the persisted sidebar width first (issue #175): it is independent of
+	// the per-session entries (a layout may carry a width with no sessions), and
+	// reposition + clamp below must already see the restored boundary. An
+	// unset/0 width keeps the default. clampSidebarWidth guards out-of-range values
+	// (e.g. a width saved on a wider terminal).
+	if layout.SidebarWidth > 0 {
+		w.sidebarW = w.clampSidebarWidth(layout.SidebarWidth)
+		if w.sidebar != nil {
+			w.sidebar.reposition(w.app.Width(), w.app.Height())
+		}
+	}
 	w.mu.Lock()
 	if len(layout.Entries) == 0 {
 		w.mu.Unlock()

@@ -26,8 +26,12 @@ type LayoutEntry struct {
 // Layout is the persisted workbench layout. The Entries slice order is the
 // sidebar order; a pinned entry carries its flag (the UI floats it to the top
 // on pin). Entries whose session no longer exists are ignored on load.
+// SidebarWidth is the draggable right-hand sidebar's width in columns (issue
+// #175); 0/omitted means "use the default" so layout files written before the
+// field existed still load cleanly.
 type Layout struct {
-	Entries []LayoutEntry `json:"entries"`
+	Entries      []LayoutEntry `json:"entries"`
+	SidebarWidth int           `json:"sidebar_width,omitempty"`
 }
 
 // Entry returns the layout entry for id, or nil if none is recorded. It lets

@@ -116,9 +116,9 @@ func TestMaximizeLeavesSidebarUncovered(t *testing.T) {
 	b := sw.window.Component.Bounds
 	screenW := w.app.Width()
 
-	if b.X+b.W > screenW-sidebarWidth {
+	if b.X+b.W > screenW-defaultSidebarWidth {
 		t.Errorf("maximized window cols [%d,%d) overlap sidebar at col %d",
-			b.X, b.X+b.W, screenW-sidebarWidth)
+			b.X, b.X+b.W, screenW-defaultSidebarWidth)
 	}
 	if b.Y < menuBarHeight {
 		t.Errorf("maximized window starts at Y=%d, would cover the menu bar", b.Y)

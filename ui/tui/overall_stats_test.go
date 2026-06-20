@@ -220,7 +220,7 @@ func TestSidebarOverallBandReservation(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newTestSidebar()
-			s.panel.SetBounds(tv.Rect{X: 0, Y: 0, W: sidebarWidth, H: tc.h})
+			s.panel.SetBounds(tv.Rect{X: 0, Y: 0, W: defaultSidebarWidth, H: tc.h})
 			if s.overallBandH != tc.wantBand {
 				t.Errorf("overallBandH = %d, want %d", s.overallBandH, tc.wantBand)
 			}
@@ -228,8 +228,8 @@ func TestSidebarOverallBandReservation(t *testing.T) {
 			if got.H != tc.wantTreeH {
 				t.Errorf("tree height = %d, want %d", got.H, tc.wantTreeH)
 			}
-			if got.W != sidebarWidth-3 || got.X != 2 || got.Y != 1 {
-				t.Errorf("tree rect = %+v, want W=%d X=2 Y=1", got, sidebarWidth-3)
+			if got.W != defaultSidebarWidth-3 || got.X != 2 || got.Y != 1 {
+				t.Errorf("tree rect = %+v, want W=%d X=2 Y=1", got, defaultSidebarWidth-3)
 			}
 		})
 	}
