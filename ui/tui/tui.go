@@ -39,8 +39,10 @@ type Handlers struct {
 	// title lets the backend persist a human-friendly session name.
 	OnCreate func(sessionID, title string)
 	// OnSend processes a user message for a session. It is called on a background
-	// goroutine; progress is reported through EmitSessionEvent.
-	OnSend func(sessionID, message, modelName string)
+	// goroutine; progress is reported through EmitSessionEvent. effort is the
+	// per-session reasoning-effort override (issue #177): empty means "no override
+	// — use the selected model config's reasoning_effort".
+	OnSend func(sessionID, message, modelName, effort string)
 	// OnClose tears down the backend session when its window is closed.
 	OnClose func(sessionID string)
 	// GetSettings returns the current sub-agent execution-model settings so the
@@ -1271,6 +1273,7 @@ func (w *Workbench) captureLayout() gogent.Layout {
 			Title:     sw.title,
 			Pinned:    w.pinned[id],
 			Minimized: sw.window.IsMinimized(),
+			Effort:    sw.selectedEffort(),
 			X:         bounds.X,
 			Y:         bounds.Y,
 			W:         bounds.W,
@@ -1330,6 +1333,10 @@ func (w *Workbench) applyLayout(layout gogent.Layout) {
 			sw.window.Title = e.Title
 		}
 		w.pinned[e.ID] = e.Pinned
+		// Restore the per-session reasoning-effort override (issue #177). It is a
+		// no-op when the saved effort is not among the current model's options
+		// (e.g. the model's effort set changed since the layout was written).
+		sw.applyEffort(e.Effort)
 		bounds := clampWindowRect(tv.Rect{X: e.X, Y: e.Y, W: e.W, H: e.H},
 			area.W, area.H, sw.window.MinWidth, sw.window.MinHeight)
 		sw.window.Component.SetBounds(bounds)
