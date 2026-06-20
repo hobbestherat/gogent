@@ -166,6 +166,20 @@ func (s StatsSnapshot) Sub(other StatsSnapshot) StatsSnapshot {
 	}
 }
 
+// IsReset reports whether s — a delta produced by Sub — indicates the underlying
+// connector was rebuilt/zeroed between the two reads: a monotonic counter going
+// backwards. A live connector's counters only ever grow, so ANY negative component
+// means the previous baseline no longer applies and the current snapshot should be
+// treated as a fresh start. Checking every field (not just RequestCount) is what
+// keeps the per-model accumulator monotonic even when a rebuild's request count
+// happens to recover to its prior level while token counters drop.
+func (s StatsSnapshot) IsReset() bool {
+	return s.RequestCount < 0 || s.SuccessCount < 0 || s.ErrorCount < 0 ||
+		s.TotalTokensIn < 0 || s.TotalCachedTokensIn < 0 || s.TotalTokensOut < 0 ||
+		s.TotalTimeMs < 0 || s.TimeoutCount < 0 || s.ContextWindowOverflowCount < 0 ||
+		s.RefusalCount < 0 || s.GenericErrorCount < 0
+}
+
 // Snapshot returns a mutex-free copy of the current counters.
 func (s *ModelStats) Snapshot() StatsSnapshot {
 	s.Mutex.Lock()

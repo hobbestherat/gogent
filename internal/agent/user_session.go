@@ -695,20 +695,36 @@ func (s *UserSession) modelRoundTrip(ctx context.Context, sess *model.ModelSessi
 // accumulating per-read deltas rather than reading the live, per-turn-rebuilt
 // connector.
 //
-// A negative delta means the connector was replaced with a zeroed one between
-// reads (the per-turn rebuild without a carry); the snapshot is then treated as a
-// fresh baseline so the accumulator only ever grows. This makes the accumulator
-// correct independently of the ModelStats.Carry mitigation, which is left in place.
+// A reset delta (any counter going backwards — see StatsSnapshot.IsReset) means the
+// connector was replaced with a zeroed one between reads (a per-turn rebuild without
+// a carry); the snapshot is then treated as a fresh baseline so the accumulator only
+// ever grows. This makes the accumulator correct independently of the
+// ModelStats.Carry mitigation, which is left in place. The snapshot is read under the
+// session lock so concurrent sub-agents sharing the connector cannot interleave a
+// stale read with the baseline update.
 func (s *UserSession) recordConnectorUsage(conn model.StatsReporter) {
 	if conn == nil {
 		return
 	}
-	cur := conn.StatsSnapshot()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Read the snapshot under the session lock. Sub-agents share the root's
+	// connector pointer and run concurrently — one-shot spawns fan out across
+	// goroutines (RunSubAgentsBounded) and interactive agents run in their own
+	// goroutine — so each calls this on the same *s and the same connector. Reading
+	// cur outside the lock opened a TOCTOU window: a stale cur could be written back
+	// to lastConnSnap, rewinding the baseline and double-counting the next delta.
+	// Reading inside the lock serializes read+update so each call folds exactly its
+	// share of the monotonic growth. The snapshot only briefly takes the connector's
+	// own stats mutex (lock order s.mu -> Stats.Mutex; the token callback never holds
+	// Stats.Mutex, so there is no inverse ordering / deadlock).
+	cur := conn.StatsSnapshot()
 	delta := cur.Sub(s.lastConnSnap)
-	if delta.RequestCount < 0 {
-		// Connector was rebuilt/zeroed; restart the delta from this snapshot.
+	if delta.IsReset() {
+		// Connector was rebuilt/zeroed between reads; treat cur as a fresh baseline
+		// so the accumulator only ever grows (it never loses prior totals). IsReset
+		// checks every counter, not just RequestCount, so a rebuild whose request
+		// count recovers to its prior level with lower token counters is still caught.
 		delta = cur
 	}
 	s.lastConnSnap = cur
