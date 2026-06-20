@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -196,6 +197,103 @@ func TestFinalRecoversAnswerWhenTerminalTurnEmpty(t *testing.T) {
 	}
 	if !strings.Contains(finalText, "4") {
 		t.Errorf("final text should recover the answer, got %q", finalText)
+	}
+}
+
+// TestInjectUserNoteSplicesAtTurnBoundary verifies issue #170 phase 2: with
+// mid-turn injection enabled, a note handed to the running session via
+// InjectUserNote is spliced into the conversation at the next turn boundary
+// (between the tool round and the following model call) framed as a clarification,
+// so it reaches the model's next request rather than waiting for full idle.
+func TestInjectUserNoteSplicesAtTurnBoundary(t *testing.T) {
+	fs := &fakeServer{responses: []map[string]interface{}{
+		toolCallResponse("call_1", "calc", `{"expression":"2+2"}`),
+		finalResponse("The answer is 4."),
+	}}
+	server := httptest.NewServer(http.HandlerFunc(fs.handler))
+	defer server.Close()
+
+	us, _ := newLoopSession(t, server.URL)
+	us.SetInjectQueuedInput(true)
+	// Queue the note before the loop starts; it is drained at the first turn
+	// boundary (after the calc tool round), so it must appear in the second request.
+	us.InjectUserNote("actually use base 16")
+
+	if _, err := us.ExecuteTaskLoop(context.Background(), "root", "what is 2+2?"); err != nil {
+		t.Fatalf("loop returned error: %v", err)
+	}
+	if len(fs.requests) != 2 {
+		t.Fatalf("expected 2 requests to the model, got %d", len(fs.requests))
+	}
+
+	want := fmt.Sprintf(injectedNoteTemplate, "actually use base 16")
+	var sawInjected bool
+	for _, m := range fs.requests[1] {
+		if m["role"] != "user" {
+			continue
+		}
+		if content, _ := m["content"].(string); strings.Contains(content, want) {
+			sawInjected = true
+		}
+	}
+	if !sawInjected {
+		t.Errorf("second request did not carry the injected clarification %q; messages: %v", want, fs.requests[1])
+	}
+
+	// The slot is single-use: a second turn with nothing queued must not re-inject.
+	if note := us.takePendingNote(); note != "" {
+		t.Errorf("pending note should be cleared after injection, got %q", note)
+	}
+}
+
+// TestInjectUserNoteDisabledIsNotInjected verifies the experimental flag gates
+// the splice: with injection off (the default), a queued note is not spliced into
+// the running turn — the drain-on-idle path (phase 1) owns it instead.
+func TestInjectUserNoteDisabledIsNotInjected(t *testing.T) {
+	fs := &fakeServer{responses: []map[string]interface{}{
+		toolCallResponse("call_1", "calc", `{"expression":"2+2"}`),
+		finalResponse("The answer is 4."),
+	}}
+	server := httptest.NewServer(http.HandlerFunc(fs.handler))
+	defer server.Close()
+
+	us, _ := newLoopSession(t, server.URL) // injection left off (default)
+	us.InjectUserNote("should not be injected")
+
+	if _, err := us.ExecuteTaskLoop(context.Background(), "root", "what is 2+2?"); err != nil {
+		t.Fatalf("loop returned error: %v", err)
+	}
+	for _, req := range fs.requests {
+		for _, m := range req {
+			if content, _ := m["content"].(string); strings.Contains(content, "should not be injected") {
+				t.Fatal("note was injected even though the flag is off")
+			}
+		}
+	}
+	// With injection off the note is left pending for the UI's idle drain.
+	if note := us.takePendingNote(); note != "should not be injected" {
+		t.Errorf("pending note = %q, want it left intact for drain-on-idle", note)
+	}
+}
+
+// TestInjectUserNoteSafeWhenIdle verifies InjectUserNote is safe to call when no
+// loop is running: it does not panic, ignores empty/whitespace text, and queues a
+// real note for the next turn (issue #170).
+func TestInjectUserNoteSafeWhenIdle(t *testing.T) {
+	conn := model.NewModelConnection()
+	sess := model.NewModelSession("test", conn)
+	ag := NewAgent("root", sess)
+	us := NewUserSession("idle", ag)
+
+	// No loop running: these must not panic.
+	us.InjectUserNote("")
+	us.InjectUserNote("   ")
+	if note := us.takePendingNote(); note != "" {
+		t.Errorf("blank notes should be ignored, got %q", note)
+	}
+	us.InjectUserNote("queued while idle")
+	if note := us.takePendingNote(); note != "queued while idle" {
+		t.Errorf("idle InjectUserNote should queue the note, got %q", note)
 	}
 }
 

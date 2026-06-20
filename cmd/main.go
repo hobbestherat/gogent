@@ -375,6 +375,25 @@ func main() {
 					})
 				}
 			},
+			// Input queue & interruptibility (issue #170). OnStop cancels the
+			// in-flight root turn (the window discards its queue on a manual stop);
+			// OnInject hands a queued message to the running session for mid-turn
+			// injection, acted on only when the experimental flag is enabled; the
+			// predicate lets the window know whether injection or drain-on-idle
+			// applies.
+			OnStop: func(sessionID string) {
+				if s := g.GetUserSession(sessionID); s != nil {
+					_ = s.StopAgent("root")
+				}
+			},
+			OnInject: func(sessionID, message string) {
+				if s := g.GetUserSession(sessionID); s != nil {
+					s.InjectUserNote(message)
+				}
+			},
+			InjectQueuedInputEnabled: func() bool {
+				return g.GetConfig().Experimental.InjectQueuedInput
+			},
 			// @-file mention bridge (issue #46): the completer lists workspace files
 			// and expansion reads the chosen ones, both confined to the workspace via
 			// the existing FileSystem service.

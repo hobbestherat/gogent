@@ -157,6 +157,20 @@ type UserSession struct {
 	planMode    bool
 	pendingPlan string
 
+	// injectQueuedInput enables mid-turn injection of a queued user note at the
+	// next turn boundary in runLoop, instead of the UI waiting for full idle to
+	// drain its queue (issue #170, phase 2). Off by default; set from
+	// config.Experimental.InjectQueuedInput via SetInjectQueuedInput. Guarded by
+	// mu.
+	injectQueuedInput bool
+	// pendingNote holds a user note (a queued message or a future supervisor nudge,
+	// issue #172) to splice into the running loop at the next turn boundary. It is
+	// a single latest-wins slot — the same edit-in-place semantics as the UI queue
+	// — written from the UI goroutine via InjectUserNote and drained by the loop
+	// goroutine in runLoop, both under mu (mirroring how agent.cancel is published
+	// and read under the agent mutex). Empty means nothing pending.
+	pendingNote string
+
 	// compressionCompleter, when set, runs context compression on a separate
 	// (typically smaller/faster) model backend instead of the session's primary
 	// model. When it also reports connector stats, its usage is tracked apart
@@ -208,6 +222,64 @@ func NewUserSession(id string, agent *Agent) *UserSession {
 		turnCount:      0,
 		perModelTokens: make(map[string]modelTokens),
 	}
+}
+
+// injectedNoteTemplate is the wording used when a queued user note is spliced
+// into a running turn at the next turn boundary (issue #170, phase 2). It is a
+// named constant (not inline prose) so the phrasing is easy to tune in one
+// place; %s is the queued text. A future supervisor (issue #172) reuses the same
+// injection path via InjectUserNote and gets the same framing.
+const injectedNoteTemplate = "[The user added a clarification: %s]"
+
+// SetInjectQueuedInput toggles mid-turn injection of queued user notes at the
+// next turn boundary (issue #170, phase 2). It is wired from
+// config.Experimental.InjectQueuedInput and is off by default, so an existing
+// setup keeps the drain-on-idle behaviour (phase 1) unless explicitly opted in.
+func (s *UserSession) SetInjectQueuedInput(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.injectQueuedInput = on
+}
+
+// InjectQueuedInput reports whether mid-turn injection is enabled (issue #170).
+func (s *UserSession) InjectQueuedInput() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.injectQueuedInput
+}
+
+// InjectUserNote hands the running task loop a user note to splice into the
+// conversation at the next turn boundary, before the next model round-trip
+// (issue #170, phase 2). It is the single, reusable entry point a UI uses to
+// inject a queued message mid-turn, and that a future idle-watchdog supervisor
+// (issue #172) reuses to nudge a session — neither has to touch the loop's
+// internals.
+//
+// The note is held in a latest-wins slot (a newer note replaces an undrained
+// one) and is guarded by the session mutex, so it is safe to call from any
+// goroutine and at any time, including when no loop is running: an idle session
+// simply holds the note until its next turn starts, where the loop drains it.
+// Empty/whitespace text is ignored. The text is framed by the loop at drain
+// time (see injectedNoteTemplate); callers pass the raw user text.
+func (s *UserSession) InjectUserNote(text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	s.mu.Lock()
+	s.pendingNote = text
+	s.mu.Unlock()
+}
+
+// takePendingNote atomically reads and clears the pending user note, returning
+// "" when none is queued. The loop calls it at each turn boundary so a note is
+// spliced once and not re-injected on the following turn.
+func (s *UserSession) takePendingNote() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	note := s.pendingNote
+	s.pendingNote = ""
+	return note
 }
 
 // SetSubAgentConfig updates the sub-agent execution-model settings used when
@@ -742,9 +814,26 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 
 		// Feed results back and ask the model to continue.
 		sess.AppendToolResults(toolMsgs)
+
+		// Turn boundary: between this tool round and the next model call, splice in
+		// any queued user note as a clarification when mid-turn injection is enabled
+		// (issue #170, phase 2). This is the safe splice point — no hard cancel, no
+		// lost tool results; the note rides into the same request as the tool
+		// results. Only the root agent injects (sub-agents share the slot but run
+		// their own focused loops), and only when the experimental flag is on; with
+		// it off the UI's drain-on-idle path (phase 1) handles the queue instead.
+		var nextMessages []model.Message
+		if agent.Kind == KindRoot && s.InjectQueuedInput() {
+			if note := s.takePendingNote(); note != "" {
+				injected := fmt.Sprintf(injectedNoteTemplate, note)
+				nextMessages = []model.Message{{Role: model.RoleUser, Content: injected}}
+				emit(SessionEvent{Type: SessionEventAssistantStep, Step: step + 1, Text: injected})
+			}
+		}
+
 		emit(SessionEvent{Type: SessionEventThinking, Step: step + 1})
 		s.compactIfNeeded(sess, emit)
-		resp, err = s.modelRoundTrip(ctx, sess, agent, nil, tools)
+		resp, err = s.modelRoundTrip(ctx, sess, agent, nextMessages, tools)
 		if err != nil {
 			emit(SessionEvent{Type: SessionEventError, Err: err})
 			return responses, err
