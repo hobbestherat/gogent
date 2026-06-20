@@ -13,7 +13,7 @@ func TestGogentCreate(t *testing.T) {
 	g := NewGogent(t.TempDir())
 
 	if g == nil {
-		t.Error("Expected Gogent to be created")
+		t.Fatal("Expected Gogent to be created")
 	}
 
 	if len(g.userSessions) != 0 {

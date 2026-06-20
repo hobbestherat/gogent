@@ -20,10 +20,13 @@ func TestClientPost(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient().SetBaseURL(server.URL)
-	_, err := client.Post("/test", nil)
+	resp, err := client.Post("/test", nil)
 
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
+	}
+	if resp != nil {
+		defer resp.Body.Close()
 	}
 }
 

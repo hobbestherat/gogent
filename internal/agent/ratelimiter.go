@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"sync"
 	"time"
@@ -90,7 +91,7 @@ func (l *RateLimiter) Wait(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return ctx.Err()
+			return fmt.Errorf("rate limit wait: %w", ctx.Err())
 		case <-timer.C:
 		}
 	}

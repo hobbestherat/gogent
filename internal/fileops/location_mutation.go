@@ -1,6 +1,7 @@
 package fileops
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 )
@@ -38,7 +39,7 @@ func (lm *LocationMutation) IsExternal(path string) (bool, error) {
 
 	rel, err := filepath.Rel(lm.workspaceRoot, resolved)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("compute relative path: %w", err)
 	}
 
 	// If path starts with .., it's external
@@ -54,7 +55,7 @@ func (lm *LocationMutation) GetResource(path string) (string, error) {
 
 	rel, err := filepath.Rel(lm.workspaceRoot, resolved)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("compute relative path: %w", err)
 	}
 
 	if rel == "." {

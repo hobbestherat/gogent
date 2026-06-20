@@ -116,7 +116,7 @@ func Run(cfg Config) (*Report, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	c := exec.CommandContext(ctx, cmd[0], cmd[1:]...)
+	c := exec.CommandContext(ctx, cmd[0], cmd[1:]...) //nolint:gosec // launches the configured/trusted diagnostics command
 	if cfg.Dir != "" {
 		c.Dir = cfg.Dir
 	}

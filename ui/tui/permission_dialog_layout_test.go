@@ -249,10 +249,10 @@ func TestPermissionButtonRow(t *testing.T) {
 				t.Errorf("always width = %d, want label width %d (%q)", always.W, buttonLabelWidth(alwaysText), alwaysText)
 			}
 			// Non-overlapping, ordered left -> right.
-			if !(allow.X+allow.W-1 < always.X) {
+			if allow.X+allow.W-1 >= always.X {
 				t.Errorf("allow overlaps always: %+v %+v", allow, always)
 			}
-			if !(always.X+always.W-1 < deny.X) {
+			if always.X+always.W-1 >= deny.X {
 				t.Errorf("always overlaps deny: %+v %+v", always, deny)
 			}
 		})
@@ -274,7 +274,7 @@ func TestPermissionButtonRowElidesLongResource(t *testing.T) {
 	if always.W != buttonLabelWidth(alwaysText) {
 		t.Errorf("always width %d != label width %d", always.W, buttonLabelWidth(alwaysText))
 	}
-	if !(allow.X+allow.W-1 < always.X && always.X+always.W-1 < deny.X) {
+	if allow.X+allow.W-1 >= always.X || always.X+always.W-1 >= deny.X {
 		t.Errorf("buttons collide after elision: %+v %+v %+v", allow, always, deny)
 	}
 }

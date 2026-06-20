@@ -32,7 +32,7 @@ func newStreamTransport(r io.Reader, w io.Writer, closer func() error) *streamTr
 // stdin/stdout. The child's stderr is forwarded to gogent's so server diagnostics
 // remain visible.
 func newStdioTransport(command string, args []string, env map[string]string) (*streamTransport, error) {
-	cmd := exec.Command(command, args...)
+	cmd := exec.Command(command, args...) //nolint:gosec // launches user-configured MCP server command
 	cmd.Env = os.Environ()
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
@@ -67,7 +67,7 @@ func newStdioTransport(command string, args []string, env map[string]string) (*s
 func (t *streamTransport) writeMessage(v interface{}) error {
 	b, err := json.Marshal(v)
 	if err != nil {
-		return err
+		return fmt.Errorf("mcp stdio: marshal message: %w", err)
 	}
 	b = append(b, '\n')
 	if _, err := t.w.Write(b); err != nil {

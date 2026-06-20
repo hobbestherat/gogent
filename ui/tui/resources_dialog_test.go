@@ -330,9 +330,9 @@ func TestSelectionColorsFor(t *testing.T) {
 	accent := tui.ANSIColor(11)
 	def := tui.DefaultColor()
 	for _, tc := range []struct {
-		name                              string
-		dialogFG, dialogBG, selFG, selBG  tui.Color
-		wantFG, wantBG                    tui.Color
+		name                             string
+		dialogFG, dialogBG, selFG, selBG tui.Color
+		wantFG, wantBG                   tui.Color
 	}{
 		{
 			"collision inverts dialog colours",

@@ -53,13 +53,11 @@ func TestCloneForPlanMode(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			parent := NewToolRegistry()
-			names := make([]string, 0, len(tt.ReadOnly))
 			for name, ro := range tt.ReadOnly {
 				parent.Register(&Tool{
 					Name: name, Description: "d", ReadOnly: ro, InputSchema: nil,
 					Execute: func(map[string]interface{}, ToolContext) (interface{}, error) { return nil, nil },
 				})
-				names = append(names, name)
 			}
 			clone := parent.CloneForPlanMode(tt.keep...)
 			got := clone.List()

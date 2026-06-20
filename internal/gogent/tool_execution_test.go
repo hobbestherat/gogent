@@ -31,7 +31,7 @@ func TestToolExecutionResult(t *testing.T) {
 	}
 
 	if resp == nil {
-		t.Error("Expected response")
+		t.Fatal("Expected response")
 	}
 
 	// Give time for hooks to process

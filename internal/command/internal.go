@@ -97,7 +97,7 @@ func (r *CommandRegistry) RegisterBuiltInCommands() {
 					Success:  false,
 					Stderr:   err.Error(),
 					ExitCode: 1,
-				}, err
+				}, fmt.Errorf("evaluate expression: %w", err)
 			}
 
 			return &CommandResult{

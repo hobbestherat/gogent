@@ -151,8 +151,8 @@ func TestCopyNilNativeOnlyWritesSequence(t *testing.T) {
 
 // buf is a minimal io.Writer for tests.
 type buf struct {
-	mu  sync.Mutex
-	b   strings.Builder
+	mu sync.Mutex
+	b  strings.Builder
 }
 
 func (b *buf) Write(p []byte) (int, error) {

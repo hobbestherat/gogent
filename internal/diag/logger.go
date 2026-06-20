@@ -85,10 +85,14 @@ func (l *Logger) Error(msg string, args ...any) { l.log(slog.LevelError, msg, ar
 
 // Infof logs a preformatted informational message. Prefer Info with attributes
 // for new code; this exists for call sites that pre-date structured logging.
-func (l *Logger) Infof(format string, args ...any) { l.log(slog.LevelInfo, fmt.Sprintf(format, args...)) }
+func (l *Logger) Infof(format string, args ...any) {
+	l.log(slog.LevelInfo, fmt.Sprintf(format, args...))
+}
 
 // Warnf logs a preformatted warning.
-func (l *Logger) Warnf(format string, args ...any) { l.log(slog.LevelWarn, fmt.Sprintf(format, args...)) }
+func (l *Logger) Warnf(format string, args ...any) {
+	l.log(slog.LevelWarn, fmt.Sprintf(format, args...))
+}
 
 // Errorf logs a preformatted error.
 func (l *Logger) Errorf(format string, args ...any) {
@@ -99,11 +103,11 @@ func (l *Logger) Errorf(format string, args ...any) {
 // file as needed. It backs both the diagnostic and audit file sinks.
 func openAppend(path string) (*os.File, error) {
 	if dir := filepath.Dir(path); dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return nil, fmt.Errorf("create log dir: %w", err)
 		}
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // opens caller-controlled log/audit file path
 	if err != nil {
 		return nil, fmt.Errorf("open log file: %w", err)
 	}

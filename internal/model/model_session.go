@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"fmt"
 	"sync"
 )
 
@@ -425,7 +426,7 @@ func (s *ModelSession) SendWithToolsCtx(ctx context.Context, messages []Message,
 		s.mu.Lock()
 		s.History[len(s.History)-1].Error = &ModelError{Message: err.Error()}
 		s.mu.Unlock()
-		return nil, err
+		return nil, fmt.Errorf("complete with tools: %w", err)
 	}
 
 	s.mu.Lock()

@@ -18,6 +18,7 @@
 package notify
 
 import (
+	"fmt"
 	"io"
 	"os/exec"
 	"runtime"
@@ -119,11 +120,14 @@ func defaultNative(title, body string) error {
 	if name == "" {
 		return nil
 	}
-	cmd := exec.Command(name, args...)
+	cmd := exec.Command(name, args...) //nolint:gosec // launches configured/trusted local notifier binary
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("run notifier: %w", err)
+	}
+	return nil
 }
 
 // Notifier emits user-facing notifications for session attention events. It is

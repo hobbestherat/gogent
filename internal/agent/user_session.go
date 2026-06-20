@@ -383,7 +383,7 @@ func (s *UserSession) SendMessage(agentID, message string) (*model.CompletionRes
 	if agent.ThoughtTrain != nil {
 		resp, err := agent.ThoughtTrain.Send([]model.Message{msg})
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("send message: %w", err)
 		}
 		return resp, nil
 	}
@@ -411,7 +411,7 @@ func (s *UserSession) SendMessageNoTools(agentID, message string) (*model.Comple
 	if agent.ThoughtTrain != nil {
 		resp, err := agent.ThoughtTrain.Send([]model.Message{msg})
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("send message: %w", err)
 		}
 		return resp, nil
 	}
@@ -583,7 +583,7 @@ func (s *UserSession) modelRoundTrip(ctx context.Context, sess *model.ModelSessi
 	}
 	resp, err := sess.SendWithToolsCtx(ctx, messages, tools)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("model round-trip: %w", err)
 	}
 	if resp != nil && resp.Usage != nil {
 		agent.AddTokensUsed(resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
@@ -680,7 +680,7 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 		// in-flight request (if any) has already been cancelled via ctx.
 		if err := ctx.Err(); err != nil {
 			emit(SessionEvent{Type: SessionEventError, Err: err})
-			return responses, err
+			return responses, fmt.Errorf("session loop cancelled: %w", err)
 		}
 
 		// Stop gracefully before spending another round-trip once the agent has

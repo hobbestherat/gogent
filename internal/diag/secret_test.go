@@ -24,7 +24,7 @@ func TestSecretRedactedInLog(t *testing.T) {
 
 func TestSecretRedactedUnderFmt(t *testing.T) {
 	key := Secret("token-abc")
-	if got := fmt.Sprintf("%s", key); got != redacted {
+	if got := key.String(); got != redacted {
 		t.Errorf("Sprintf %%s = %q, want %q", got, redacted)
 	}
 	if got := fmt.Sprintf("%v", key); got != redacted {

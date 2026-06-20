@@ -127,16 +127,11 @@ func renderTranscriptJSON(msgs []ChatMessage, title, exportedAt string) (string,
 		Messages: make([]exportedMessage, 0, len(msgs)),
 	}
 	for _, m := range msgs {
-		out.Messages = append(out.Messages, exportedMessage{
-			Role:    m.Role,
-			Content: m.Content,
-			Tool:    m.Tool,
-			Args:    m.Args,
-		})
+		out.Messages = append(out.Messages, exportedMessage(m))
 	}
 	b, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("marshal transcript json: %w", err)
 	}
 	return string(b), nil
 }
@@ -144,7 +139,7 @@ func renderTranscriptJSON(msgs []ChatMessage, title, exportedAt string) (string,
 // transcriptExporter decouples the export path from the filesystem so it can be
 // unit tested with an in-memory writer. It defaults to writing a real file.
 var transcriptExporter = func(path, data string) error {
-	return os.WriteFile(path, []byte(data), 0o644)
+	return os.WriteFile(path, []byte(data), 0o600)
 }
 
 // writeTranscriptExport renders the transcript in the given format ("md" or
@@ -154,11 +149,11 @@ var transcriptExporter = func(path, data string) error {
 func writeTranscriptExport(msgs []ChatMessage, title, format string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("resolve home dir: %w", err)
 	}
 	dir := filepath.Join(home, ".gogent")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return "", fmt.Errorf("create export dir: %w", err)
 	}
 
 	now := time.Now()

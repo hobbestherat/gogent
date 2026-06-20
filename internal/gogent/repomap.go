@@ -70,7 +70,7 @@ func collectGoSymbols(root string) ([]repoSymbol, map[string]int) {
 		if parsed >= maxRepoMapFiles || !strings.HasSuffix(path, ".go") {
 			return nil
 		}
-		src, err := os.ReadFile(path)
+		src, err := os.ReadFile(path) //nolint:gosec // path is caller-controlled repo file discovered by walking the project tree
 		if err != nil {
 			return nil
 		}

@@ -89,7 +89,10 @@ func TestGrepTool(t *testing.T) {
 			t.Fatalf("matches: want []map, got %T", out["matches"])
 		}
 		// a.go:3, sub/b.go:3, sub/note.md:1
-		type ref struct{ path string; line int }
+		type ref struct {
+			path string
+			line int
+		}
 		got := make([]ref, 0, len(matches))
 		for _, m := range matches {
 			line, _ := m["line"].(int)

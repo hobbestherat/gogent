@@ -166,9 +166,9 @@ func TestFormatMs(t *testing.T) {
 // TestStatisticsDialogSize covers clamping to the terminal and the min floors.
 func TestStatisticsDialogSize(t *testing.T) {
 	for _, tc := range []struct {
-		name               string
-		screenW, screenH   int
-		wantW, wantH       int
+		name             string
+		screenW, screenH int
+		wantW, wantH     int
 	}{
 		{"large screen caps at 80x24", 200, 100, 80, 24},
 		{"fits narrow terminal", 70, 30, 68, 24},

@@ -1,6 +1,7 @@
 package fileops
 
 import (
+	"fmt"
 	"path/filepath"
 
 	"gogent/internal/permission"
@@ -50,7 +51,7 @@ func CheckFileAccess(perm *permission.Service, loc *LocationMutation, write bool
 			return Authorization{}, err
 		}
 		if err := perm.CheckWithContext(rc, permission.ActionExternal, filepath.Dir(abs), path); err != nil {
-			return Authorization{}, err
+			return Authorization{}, fmt.Errorf("permission check: %w", err)
 		}
 		return Authorization{external: true}, nil
 	}
@@ -65,7 +66,7 @@ func CheckFileAccess(perm *permission.Service, loc *LocationMutation, write bool
 		action = permission.ActionWrite
 	}
 	if err := perm.CheckWithContext(rc, action, resource, ""); err != nil {
-		return Authorization{}, err
+		return Authorization{}, fmt.Errorf("permission check: %w", err)
 	}
 	return Authorization{}, nil
 }

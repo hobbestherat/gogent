@@ -2,6 +2,7 @@ package fileops
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -234,7 +235,7 @@ func restoreSnapshot(snap FileSnapshot) error {
 	if !snap.Existed {
 		// The turn created this file; remove it. "already gone" is a success.
 		if err := os.Remove(snap.Path); err != nil && !os.IsNotExist(err) {
-			return err
+			return fmt.Errorf("remove snapshot file: %w", err)
 		}
 		return nil
 	}
@@ -243,7 +244,10 @@ func restoreSnapshot(snap FileSnapshot) error {
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(snap.Path), 0o755); err != nil {
-		return err
+		return fmt.Errorf("create snapshot dir: %w", err)
 	}
-	return os.WriteFile(snap.Path, snap.Content, snap.Mode)
+	if err := os.WriteFile(snap.Path, snap.Content, snap.Mode); err != nil {
+		return fmt.Errorf("restore snapshot file: %w", err)
+	}
+	return nil
 }

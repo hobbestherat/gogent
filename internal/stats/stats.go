@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -177,7 +178,7 @@ type ModelStat struct {
 func (r Report) JSON() (string, error) {
 	b, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("marshal report: %w", err)
 	}
 	return string(b), nil
 }
@@ -190,7 +191,7 @@ func (r Report) CSV() (string, error) {
 	var buf bytes.Buffer
 	w := csv.NewWriter(&buf)
 	if err := w.Write([]string{"section", "name", "metric", "value"}); err != nil {
-		return "", err
+		return "", fmt.Errorf("write csv header: %w", err)
 	}
 
 	row := func(section, name, metric string, value int64) {
@@ -237,7 +238,7 @@ func (r Report) CSV() (string, error) {
 
 	w.Flush()
 	if err := w.Error(); err != nil {
-		return "", err
+		return "", fmt.Errorf("flush csv: %w", err)
 	}
 	return strings.TrimRight(buf.String(), "\n"), nil
 }

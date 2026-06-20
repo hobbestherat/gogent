@@ -8,8 +8,8 @@ import (
 	"gogent/internal/agent"
 	"gogent/internal/config"
 	"gogent/internal/fileops"
-	"gogent/internal/permission"
 	"gogent/internal/model"
+	"gogent/internal/permission"
 )
 
 // TestFileOpsWithModel tests file operations through the model session

@@ -301,7 +301,7 @@ func parseColor(spec string) (tui.Color, bool) {
 	hex := strings.TrimPrefix(s, "#")
 	if len(hex) == 6 {
 		if v, err := strconv.ParseUint(hex, 16, 32); err == nil {
-			return tui.RGBColor(uint8(v>>16), uint8(v>>8), uint8(v)), true
+			return tui.RGBColor(uint8((v>>16)&0xFF), uint8((v>>8)&0xFF), uint8(v&0xFF)), true
 		}
 	}
 	if n, err := strconv.Atoi(s); err == nil && n >= 0 && n <= 255 {
@@ -323,14 +323,14 @@ func degrade(c tui.Color, level ColorLevel) tui.Color {
 	}
 	switch c.Mode {
 	case tui.ColorRGB:
-		r, g, b := uint8(c.Value>>16), uint8(c.Value>>8), uint8(c.Value)
+		r, g, b := uint8((c.Value>>16)&0xFF), uint8((c.Value>>8)&0xFF), uint8(c.Value&0xFF)
 		if level == Color256 {
 			return tui.ANSIColor(rgbTo256(r, g, b))
 		}
 		return tui.ANSIColor(rgbTo16(r, g, b))
 	case tui.ColorANSI:
 		if level == Color16 && c.Value >= 16 {
-			r, g, b := xterm256ToRGB(uint8(c.Value))
+			r, g, b := xterm256ToRGB(uint8(c.Value & 0xFF)) //nolint:gosec // ANSI index already in 0-255
 			return tui.ANSIColor(rgbTo16(r, g, b))
 		}
 		return c
@@ -349,9 +349,9 @@ func rgbTo256(r, g, b uint8) uint8 {
 		if r > 248 {
 			return 231
 		}
-		return uint8(232 + (int(r)-8)/10)
+		return uint8(232 + (int(r)-8)/10) //nolint:gosec // result is within 232-255
 	}
-	return uint8(16 + 36*cubeIndex(r) + 6*cubeIndex(g) + cubeIndex(b))
+	return uint8(16 + 36*cubeIndex(r) + 6*cubeIndex(g) + cubeIndex(b)) //nolint:gosec // colour-cube result is within 16-231
 }
 
 // cubeIndex maps an 8-bit channel to its 0..5 slot in the xterm colour cube.
@@ -396,7 +396,7 @@ func xterm256ToRGB(idx uint8) (r, g, b uint8) {
 		c := ansi16RGB[idx]
 		return c[0], c[1], c[2]
 	case idx >= 232:
-		v := uint8(8 + (int(idx)-232)*10)
+		v := uint8(8 + (int(idx)-232)*10) //nolint:gosec // grayscale ramp result is within 8-238
 		return v, v, v
 	default:
 		i := int(idx) - 16
@@ -409,7 +409,7 @@ func cubeChannel(n int) uint8 {
 	if n == 0 {
 		return 0
 	}
-	return uint8(55 + n*40)
+	return uint8(55 + n*40) //nolint:gosec // cube channel result is within 95-255
 }
 
 // ApplyTheme installs t as the active theme: it sets the package-level colour

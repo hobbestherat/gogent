@@ -154,7 +154,7 @@ type LoadedSession struct {
 
 // NewSessionStore creates (and ensures the directory for) a session store.
 func NewSessionStore(dir string) (*SessionStore, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("create sessions dir: %w", err)
 	}
 	return &SessionStore{
@@ -404,19 +404,19 @@ func writeLinesToShards(base string, sms []shardMeta, lines [][]byte) ([]shardMe
 			idx := len(sms)
 			path := shardFilePath(base, idx)
 			tmp := path + ".tmp"
-			if err := os.WriteFile(tmp, nil, 0o644); err != nil {
-				return sms, written, err
+			if err := os.WriteFile(tmp, nil, 0o600); err != nil {
+				return sms, written, fmt.Errorf("create shard file: %w", err)
 			}
 			if err := os.Rename(tmp, path); err != nil {
-				return sms, written, err
+				return sms, written, fmt.Errorf("rename shard file: %w", err)
 			}
 			sms = append(sms, shardMeta{Index: idx})
 			last = idx
 		}
 		path := shardFilePath(base, sms[last].Index)
-		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // path is a session shard file built from the store dir, not user input
 		if err != nil {
-			return sms, written, err
+			return sms, written, fmt.Errorf("open shard file: %w", err)
 		}
 		n, err := f.Write(append(line, '\n'))
 		if cerr := f.Close(); err == nil {
@@ -529,7 +529,7 @@ func (s *SessionStore) Archive(sessionID string) error {
 		if err == nil || os.IsNotExist(err) {
 			return nil
 		}
-		return err
+		return fmt.Errorf("rename session file: %w", err)
 	}
 	if err := renameFile(indexFilePath(base), indexFilePath(archivedBase)); err != nil {
 		return err
@@ -582,7 +582,7 @@ func (s *SessionStore) ListActive() ([]LoadedSession, error) {
 func (s *SessionStore) activeBases() ([]string, error) {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read sessions dir: %w", err)
 	}
 	var bases []string
 	for _, e := range entries {
@@ -704,9 +704,9 @@ func (s *SessionStore) loadShard(path string) ([]shardRecord, error) {
 	if records, ok := s.cache.get(path); ok {
 		return records, nil
 	}
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // path is a caller-controlled session shard file under the store dir
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open shard: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
@@ -732,7 +732,7 @@ func (s *SessionStore) loadShard(path string) ([]shardRecord, error) {
 		records = append(records, shardRecord{agentID: aid, msg: *rec.Message})
 	}
 	if err := sc.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("scan shard: %w", err)
 	}
 	s.cache.put(path, records)
 	return records, nil
@@ -819,7 +819,7 @@ func flushPaths(paths []string) {
 }
 
 func fsyncFile(path string) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // path is a caller-controlled session file under the store dir
 	if err != nil {
 		return
 	}
@@ -828,7 +828,7 @@ func fsyncFile(path string) {
 }
 
 func fsyncDir(dir string) {
-	f, err := os.Open(dir)
+	f, err := os.Open(dir) //nolint:gosec // dir is a caller-controlled session store directory
 	if err != nil {
 		return
 	}
@@ -856,25 +856,28 @@ func shardFilePaths(base string, sms []shardMeta) []string {
 func writeIndexFile(base string, idx sessionIndex) error {
 	data, err := json.MarshalIndent(idx, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("marshal index: %w", err)
 	}
 	path := indexFilePath(base)
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("write index file: %w", err)
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("rename index file: %w", err)
+	}
+	return nil
 }
 
 // loadIndexFile reads and decodes a session index.
 func loadIndexFile(base string) (sessionIndex, error) {
 	data, err := os.ReadFile(indexFilePath(base))
 	if err != nil {
-		return sessionIndex{}, err
+		return sessionIndex{}, fmt.Errorf("read index file: %w", err)
 	}
 	var idx sessionIndex
 	if err := json.Unmarshal(data, &idx); err != nil {
-		return sessionIndex{}, err
+		return sessionIndex{}, fmt.Errorf("unmarshal index: %w", err)
 	}
 	return idx, nil
 }

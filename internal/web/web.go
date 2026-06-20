@@ -112,7 +112,7 @@ func (f *Fetcher) Fetch(rawURL string) (Result, error) {
 
 	req, err := http.NewRequest(http.MethodGet, key, nil)
 	if err != nil {
-		return Result{}, err
+		return Result{}, fmt.Errorf("building request: %w", err)
 	}
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,text/plain,*/*")
@@ -121,7 +121,7 @@ func (f *Fetcher) Fetch(rawURL string) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return Result{}, fmt.Errorf("HTTP %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))

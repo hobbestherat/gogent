@@ -55,7 +55,7 @@ func TestNormalizeSchema(t *testing.T) {
 				"properties": map[string]interface{}{
 					"path": map[string]interface{}{
 						"type":    "string",
-						"default": "/tmp", // stripped
+						"default": "/tmp",            // stripped
 						"$ref":    "#/definitions/X", // stripped
 					},
 				},

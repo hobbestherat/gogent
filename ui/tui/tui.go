@@ -1439,7 +1439,10 @@ func (w *Workbench) Run() error {
 	w.refreshOverall()
 	err := w.desktop.Run(w.shutdown)
 	w.app.Close()
-	return err
+	if err != nil {
+		return fmt.Errorf("run desktop: %w", err)
+	}
+	return nil
 }
 
 // overallRefreshCoalesce bounds how often the Overall panel recomputes its
