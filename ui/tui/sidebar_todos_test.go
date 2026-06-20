@@ -477,7 +477,7 @@ func TestSidebarDrawsTodosInMiddleRegion(t *testing.T) {
 	}
 
 	// Region order top -> bottom.
-	if !(treeIdx < todosIdx && todosIdx < overallIdx) {
+	if treeIdx >= todosIdx || todosIdx >= overallIdx {
 		t.Fatalf("region order wrong: tree=%d todos=%d overall=%d", treeIdx, todosIdx, overallIdx)
 	}
 	// A checklist row lands in the middle region (between the header and the band).
