@@ -69,6 +69,23 @@ type SessionWindow struct {
 	// enabling the /act (approve) command (issue #43).
 	planMode    bool
 	planPending bool
+	// pending holds a message typed while the agent was busy (issue #170). Rather
+	// than dropping input mid-turn, the submit handler stows the latest text here
+	// (a single editable, latest-wins slot — simplest UX, matching the backend's
+	// pendingNote) and surfaces it as a "queued:" hint in the status line. When the
+	// agent returns to idle it auto-fires as the next turn (drain-on-idle, phase
+	// 1); when the user stops the agent it is discarded with a note rather than
+	// auto-firing. With the experimental inject flag on (phase 2) the text is sent
+	// to the backend for mid-turn injection instead and the slot is cleared so it
+	// does not double-fire on idle. draining guards the auto-submit re-entry so a
+	// queued message cannot itself be re-queued. Touched only on the UI thread.
+	pending  string
+	draining bool
+	// submitFn re-enters the input submit path (issue #170): the drain-on-idle
+	// logic uses it to auto-fire a queued message as the next user turn, reusing
+	// the exact same send path (mention expansion, busy/transcript handling) as a
+	// hand-typed message rather than duplicating it.
+	submitFn func()
 }
 
 // newSessionWindow builds the window, its widgets and their layout/handlers. A
@@ -197,7 +214,21 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 	}
 	submit := func() {
 		text := strings.TrimSpace(input.GetText())
-		if text == "" || sw.busy {
+		if text == "" {
+			return
+		}
+		// Busy: don't drop the input (issue #170). Queue it as the next turn instead
+		// — the drain-on-idle path re-submits it when the agent finishes, and (with
+		// the experimental flag on) it is injected mid-turn. A leading-slash command
+		// is still handled locally even while busy so /stop and the queue controls
+		// stay responsive during a turn.
+		if sw.busy {
+			if sw.handleSlashCommand(text) {
+				input.Clear()
+				return
+			}
+			input.Clear()
+			sw.enqueue(text)
 			return
 		}
 		// Dismiss the mention popup if a click on Send submitted while it was open.
@@ -227,6 +258,7 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 	}
 	sendButton.OnPress = submit
 	input.OnSubmit = submit
+	sw.submitFn = submit
 	sw.layer = tv.NewWindowLayer("layer-"+id, window)
 	return sw
 }
@@ -459,10 +491,80 @@ func (sw *SessionWindow) selectedModelConfig() *config.ModelConfig {
 	return sw.wb.modelByDisplayName(sw.modelSelect.Value())
 }
 
+// enqueue stows a message typed while the agent is busy as the session's single
+// pending slot (issue #170, phase 1). It is latest-wins: a new entry replaces an
+// undrained one (edit-in-place), so the user can correct a queued message before
+// it fires. When mid-turn injection is enabled (phase 2) the text is handed to
+// the backend to splice in at the next turn boundary and the local slot is left
+// empty so it does not also auto-fire on idle; otherwise it waits in pending for
+// the drain-on-idle path. Either way the queued text is echoed as a note and
+// surfaced in the status line so it is visible and editable before it fires.
+func (sw *SessionWindow) enqueue(text string) {
+	if sw.injectEnabled() && sw.wb.handlers.OnInject != nil {
+		sw.pending = ""
+		sw.addNote("queued for injection: " + text)
+		go sw.wb.handlers.OnInject(sw.id, text)
+		sw.refreshStatus()
+		return
+	}
+	replaced := sw.pending != ""
+	sw.pending = text
+	if replaced {
+		sw.addNote("queued message replaced: " + text)
+	} else {
+		sw.addNote("queued (will send when the agent finishes): " + text)
+	}
+	sw.refreshStatus()
+}
+
+// injectEnabled reports whether mid-turn injection (issue #170, phase 2) is on,
+// defaulting to false when the handler is not wired (drain-on-idle only).
+func (sw *SessionWindow) injectEnabled() bool {
+	if sw.wb.handlers.InjectQueuedInputEnabled == nil {
+		return false
+	}
+	return sw.wb.handlers.InjectQueuedInputEnabled()
+}
+
+// clearQueue discards any pending queued message, optionally noting why. It is
+// used both by the /clearqueue command and when the user stops the agent, so a
+// stop never silently auto-fires a queued message (issue #170).
+func (sw *SessionWindow) clearQueue(note string) {
+	if sw.pending == "" {
+		return
+	}
+	sw.pending = ""
+	if note != "" {
+		sw.addNote(note)
+	}
+	sw.refreshStatus()
+}
+
+// drainQueue fires the pending queued message as the next user turn once the
+// agent has returned to idle (issue #170, phase 1). It re-enters the normal
+// submit path so the queued text gets the same treatment (mention expansion,
+// transcript echo, busy handling) as a hand-typed message. draining guards the
+// re-entry so the auto-submitted message cannot itself be re-queued.
+func (sw *SessionWindow) drainQueue() {
+	if sw.pending == "" || sw.busy || sw.draining || sw.submitFn == nil {
+		return
+	}
+	text := sw.pending
+	sw.pending = ""
+	sw.draining = true
+	sw.input.SetText(text)
+	sw.submitFn()
+	sw.input.Clear()
+	sw.draining = false
+}
+
 // setBusy updates the status line and busy flag, anchoring the live elapsed
 // timer to the turn's start (and clearing it when the turn ends). The status
 // colour is left to refreshStatus, which folds in the context/budget severity.
+// On the busy→idle edge it drains any message queued during the turn as the next
+// user turn (issue #170, phase 1).
 func (sw *SessionWindow) setBusy(busy bool) {
+	wasBusy := sw.busy
 	sw.busy = busy
 	if busy {
 		sw.statusState = "working..."
@@ -476,6 +578,12 @@ func (sw *SessionWindow) setBusy(busy bool) {
 		sw.turnStartOut = 0
 	}
 	sw.refreshStatus()
+	// Auto-submit a queued message on the busy→idle transition. Guarded by the
+	// edge (wasBusy && !busy) so it fires once per turn, and skipped while
+	// draining so a drained message is not itself re-queued.
+	if wasBusy && !busy && !sw.draining {
+		sw.drainQueue()
+	}
 }
 
 // refreshStatus rebuilds the bottom status line from the current state text,
@@ -492,6 +600,12 @@ func (sw *SessionWindow) refreshStatus() {
 		// Surface plan mode at the left of the status line so the read-only turn
 		// is unmistakable (issue #43).
 		state = "PLAN · " + state
+	}
+	if sw.pending != "" {
+		// Show the queued message distinctly so it is visible (and known to be
+		// editable/cancellable) before it fires (issue #170). Trim long entries so
+		// the chip never crowds out the rest of the status line.
+		state += " · queued: " + queuedPreview(sw.pending)
 	}
 	sw.status.SetText(formatStatusLine(state, sw.statusStats, live, budget, sw.status.Component.Bounds.W))
 	sw.alertBudgetIfNewlyExceeded(budget)
@@ -574,6 +688,19 @@ func (sw *SessionWindow) apply(ev agent.SessionEvent) {
 	}
 }
 
+// queuedPreview renders a compact, single-line preview of a queued message for
+// the status line (issue #170): newlines become spaces and an over-long entry is
+// truncated with an ellipsis so the chip stays short.
+func queuedPreview(text string) string {
+	const max = 40
+	preview := strings.ReplaceAll(strings.TrimSpace(text), "\n", " ")
+	if utf8.RuneCountInString(preview) > max {
+		runes := []rune(preview)
+		preview = string(runes[:max]) + "…"
+	}
+	return preview
+}
+
 // styledChildLines splits text into foldable child lines sharing one colour.
 func styledChildLines(text string, color tui.Color) []styledLine {
 	lines := childLines(text)
@@ -636,8 +763,39 @@ func (sw *SessionWindow) handleSlashCommand(text string) bool {
 	case "/act":
 		sw.approvePlan()
 		return true
+	case "/stop":
+		sw.stopTurn()
+		return true
+	case "/clearqueue":
+		if sw.pending == "" {
+			sw.addNote("no queued message to clear")
+		} else {
+			sw.clearQueue("queued message cleared")
+		}
+		return true
 	}
 	return false
+}
+
+// stopTurn cancels the session's in-flight turn (issue #170) and discards any
+// queued message, so a manual stop never silently auto-fires the queue. It is a
+// no-op (with a note) when nothing is running and nothing is queued.
+func (sw *SessionWindow) stopTurn() {
+	if !sw.busy && sw.pending == "" {
+		sw.addNote("nothing to stop")
+		return
+	}
+	// Discard the queue first so the busy→idle transition the cancel triggers does
+	// not drain it; surface the discard distinctly from an ordinary clear.
+	sw.clearQueue("queued message cleared (agent stopped)")
+	if sw.busy {
+		if sw.wb.handlers.OnStop != nil {
+			sw.addNote("stopping…")
+			go sw.wb.handlers.OnStop(sw.id)
+		} else {
+			sw.addNote("stop unavailable")
+		}
+	}
 }
 
 // togglePlanMode flips the session's plan mode (issue #43). In plan mode the

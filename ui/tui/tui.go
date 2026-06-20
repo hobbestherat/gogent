@@ -145,6 +145,22 @@ type Handlers struct {
 	// (issue #43). It runs on a background goroutine; progress flows back as
 	// session events. May be nil.
 	OnApprovePlan func(sessionID string)
+	// OnStop cancels a session's in-flight turn (issue #170). It drives the same
+	// cancellation the loop already supports (agent.Cancel); the window discards
+	// any queued message when the user stops, rather than auto-firing it. May be
+	// nil, in which case the /stop command reports the feature as unavailable.
+	OnStop func(sessionID string)
+	// OnInject hands a queued message to a running session for mid-turn injection
+	// at the next turn boundary (issue #170, phase 2). It is only acted on when the
+	// experimental "inject_queued_input" flag is enabled (the backend checks);
+	// otherwise it is a no-op and the window's drain-on-idle path delivers the
+	// message instead. May be nil.
+	OnInject func(sessionID, message string)
+	// InjectQueuedInputEnabled reports whether mid-turn injection (issue #170,
+	// phase 2) is enabled, so the window knows whether a queued message will be
+	// injected mid-turn (and must not also auto-fire on idle) or should wait to
+	// drain on idle. May be nil, treated as false (drain-on-idle only).
+	InjectQueuedInputEnabled func() bool
 }
 
 // RestoredSession describes a session to be re-opened from persisted state.

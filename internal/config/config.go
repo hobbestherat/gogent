@@ -455,6 +455,24 @@ type Config struct {
 	// value is the coloured "default" palette, so an older config.json without the
 	// key is unaffected.
 	Theme ThemeConfig `json:"theme,omitempty"`
+	// Experimental gates opt-in, not-yet-default behaviours (issue #170). The zero
+	// value leaves every experimental feature off, so an older config.json without
+	// the key behaves exactly as before.
+	Experimental ExperimentalConfig `json:"experimental,omitempty"`
+}
+
+// ExperimentalConfig collects opt-in features that are off by default (issue
+// #170). Keeping them under one block makes the experimental surface explicit
+// and easy to find; a missing "experimental" key resolves to the zero value
+// (everything off).
+type ExperimentalConfig struct {
+	// InjectQueuedInput, when true, splices a queued user message into a running
+	// turn at the next turn boundary (between a tool round and the next model
+	// call) as a clarification note, instead of waiting for the agent to go fully
+	// idle before sending it (issue #170, phase 2). The drain-on-idle queue
+	// (phase 1) is always on regardless of this flag; this only changes when a
+	// queued message fires for a turn that is still in flight.
+	InjectQueuedInput bool `json:"inject_queued_input,omitempty"`
 }
 
 // NotifyConfig returns the effective notification configuration, substituting
