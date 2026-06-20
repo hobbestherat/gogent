@@ -606,7 +606,8 @@ func GetDefaultConfig() *Config {
 				Model:       "llama-3.3-70b-versatile",
 				APIKey:      "",
 				Temperature: 0.7,
-				MaxTokens:   262144,
+				// models.dev: Groq caps llama-3.3-70b output at 32K.
+				MaxTokens: 32768,
 				// Llama 3.3 70B serves a 128K input context window.
 				ContextWindow: 131072,
 				Free:          false,
@@ -618,7 +619,8 @@ func GetDefaultConfig() *Config {
 				Model:       "meta-llama/Llama-3.3-70B-Instruct-Turbo",
 				APIKey:      "",
 				Temperature: 0.7,
-				MaxTokens:   262144,
+				// models.dev: Together serves llama-3.3-70b with a 128K output cap.
+				MaxTokens: 131072,
 				// Llama 3.3 70B serves a 128K input context window.
 				ContextWindow: 131072,
 				Free:          false,
@@ -634,7 +636,8 @@ func GetDefaultConfig() *Config {
 				Model:       "google/gemma-3-27b-it:free",
 				APIKey:      "",
 				Temperature: 0.7,
-				MaxTokens:   262144,
+				// models.dev: gemma-3-27b-it caps output at 16K.
+				MaxTokens: 16384,
 				// Gemma 3 serves a 128K input context window.
 				ContextWindow: 131072,
 				Free:          false,
@@ -650,9 +653,32 @@ func GetDefaultConfig() *Config {
 				APIKey:      "",
 				Temperature: 0.7,
 				MaxTokens:   131072,
-				// GLM-4.6 serves a 128K input context window.
-				ContextWindow: 131072,
+				// models.dev: GLM-4.6 serves a 200K input context window.
+				ContextWindow: 204800,
 				Free:          false,
+			},
+			{
+				// Z.AI GLM-5.2 (coding plan). api_type "zai" supplies the auth,
+				// max_tokens clamp and reasoning behaviour; the coding-plan models
+				// live under a DIFFERENT base URL (…/api/coding/paas/v4) than the
+				// general PaaS default, so set Endpoint explicitly. Only an API key
+				// is then needed. See https://docs.z.ai/devpack.
+				Name:        "zai-glm-5.2",
+				DisplayName: "Z.AI GLM-5.2 (Coding Plan, API Key Required)",
+				APIType:     "zai",
+				Endpoint:    "https://api.z.ai/api/coding/paas/v4",
+				Model:       "glm-5.2",
+				APIKey:      "",
+				Temperature: 0.7,
+				// models.dev: glm-5.2 output cap (also Z.AI's clamp ceiling).
+				MaxTokens: 131072,
+				// GLM-5.2 serves a 1M input context window.
+				ContextWindow: 1000000,
+				// GLM-5.2 is a reasoning model; models.dev lists effort values
+				// [high, max]. "high" gives strong coding reasoning without the
+				// latency/cost of max. Safe on zai (keeps max_tokens/temperature).
+				ReasoningEffort: "high",
+				Free:            false,
 			},
 		},
 	}
