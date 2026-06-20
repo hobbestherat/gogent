@@ -118,7 +118,9 @@ func (mc *mentionCompleter) render(matches []string) {
 		nodes[i] = tv.NewTreeNode(p)
 	}
 	list.Roots = nodes
-	mc.container.Children = nil
+	for _, child := range mc.container.Children() {
+		mc.container.RemoveChild(child)
+	}
 	mc.container.AddChild(list)
 	mc.list = list
 
