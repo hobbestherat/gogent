@@ -361,7 +361,7 @@ func (tr *ToolRegistry) ExecuteToolCall(toolCall *ToolCall, ctx ToolContext) (re
 	}
 	// Track tool call
 	if ctx.ToolCallback != nil {
-		ctx.ToolCallback(toolCall.Tool, toolCall.Args)
+		_ = ctx.ToolCallback(toolCall.Tool, toolCall.Args)
 	}
 
 	start := time.Now()
@@ -443,11 +443,11 @@ func (tr *ToolRegistry) RegisterShellTool() {
 			if tr.Permission != nil {
 				rc := permission.RequestContext{SessionID: ctx.SessionID, Agent: ctx.AgentID}
 				if err := tr.Permission.CheckWithContext(rc, permission.ActionShell, "", command); err != nil {
-					return nil, err
+					return nil, fmt.Errorf("permission check: %w", err)
 				}
 				for _, root := range shell.ExternalRoots(command, tr.WorkspaceRoot) {
 					if err := tr.Permission.CheckWithContext(rc, permission.ActionExternal, root, command); err != nil {
-						return nil, err
+						return nil, fmt.Errorf("permission check: %w", err)
 					}
 				}
 			}
@@ -524,7 +524,7 @@ func (tr *ToolRegistry) RegisterWebFetchTool() {
 			if perm != nil {
 				rc := permission.RequestContext{SessionID: ctx.SessionID, Agent: ctx.AgentID}
 				if err := perm.CheckWithContext(rc, permission.ActionNetwork, u.Host, rawURL); err != nil {
-					return nil, err
+					return nil, fmt.Errorf("permission check: %w", err)
 				}
 			}
 
@@ -652,5 +652,8 @@ func ExtractJSONObjects(text string) []string {
 
 // UnmarshalJSON is a helper to unmarshal JSON
 func UnmarshalJSON(data []byte, v interface{}) error {
-	return json.Unmarshal(data, v)
+	if err := json.Unmarshal(data, v); err != nil {
+		return fmt.Errorf("unmarshal json: %w", err)
+	}
+	return nil
 }

@@ -72,17 +72,20 @@ func (g *Gogent) SaveLayout(layout Layout) error {
 		return nil
 	}
 	dir := filepath.Join(g.homeDir, ".gogent")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return fmt.Errorf("create gogent dir: %w", err)
 	}
 	data, err := json.MarshalIndent(layout, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("marshal layout: %w", err)
 	}
 	path := filepath.Join(dir, layoutFileName)
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("write layout file: %w", err)
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("rename layout file: %w", err)
+	}
+	return nil
 }

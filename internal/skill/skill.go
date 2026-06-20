@@ -149,7 +149,7 @@ func (r *SkillRegistry) loadSkillFile(path, root, name string) error {
 		return fmt.Errorf("skill file %s exceeds %d byte limit", path, maxSkillFileSize)
 	}
 
-	content, err := os.ReadFile(path)
+	content, err := os.ReadFile(path) //nolint:gosec // reads caller-controlled skill file path
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}

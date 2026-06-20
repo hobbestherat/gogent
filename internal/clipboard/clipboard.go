@@ -12,6 +12,7 @@ package clipboard
 
 import (
 	"encoding/base64"
+	"fmt"
 	"io"
 	"os/exec"
 	"runtime"
@@ -84,11 +85,14 @@ func defaultNative(text string) error {
 	if name == "" {
 		return nil
 	}
-	cmd := exec.Command(name, args...)
+	cmd := exec.Command(name, args...) //nolint:gosec // launches configured/trusted local clipboard utility
 	cmd.Stdin = strings.NewReader(text)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("run clipboard utility: %w", err)
+	}
+	return nil
 }
 
 // Board copies text to the system clipboard. It is safe for concurrent use:

@@ -300,7 +300,7 @@ func (g *Gogent) initializeToolRegistry() {
 			auth, err := fileops.CheckFileAccess(g.permissions, g.locationMutation, false, path,
 				permission.RequestContext{SessionID: ctx.SessionID, Agent: ctx.AgentID})
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("check file access: %w", err)
 			}
 
 			content, err := g.fileSystem.ReadFile(path, auth)
@@ -337,7 +337,7 @@ func (g *Gogent) initializeToolRegistry() {
 			auth, err := fileops.CheckFileAccess(g.permissions, g.locationMutation, true, path,
 				permission.RequestContext{SessionID: ctx.SessionID, Agent: ctx.AgentID})
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("check file access: %w", err)
 			}
 
 			// Diff-review gate (issue #64): when enabled, surface the change as a
@@ -399,7 +399,7 @@ func (g *Gogent) initializeToolRegistry() {
 			auth, err := fileops.CheckFileAccess(g.permissions, g.locationMutation, true, path,
 				permission.RequestContext{SessionID: ctx.SessionID, Agent: ctx.AgentID})
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("check file access: %w", err)
 			}
 
 			// Diff-review gate (issue #64): when enabled, surface the change as a
@@ -470,7 +470,7 @@ func (g *Gogent) initializeToolRegistry() {
 			auth, err := fileops.CheckFileAccess(g.permissions, g.locationMutation, true, path,
 				permission.RequestContext{SessionID: ctx.SessionID, Agent: ctx.AgentID})
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("check file access: %w", err)
 			}
 
 			// Diff-review gate (issue #64): preview the whole batch as one diff and
@@ -748,7 +748,7 @@ func (g *Gogent) initializeToolRegistry() {
 			}
 			result, err := session.SpawnSubAgent(loopCtx, ctx.AgentID, name, task, g.SubAgentOneShot())
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("spawn sub-agent: %w", err)
 			}
 			return map[string]interface{}{
 				"success": true,
@@ -787,7 +787,7 @@ func (g *Gogent) initializeToolRegistry() {
 			}
 			id, err := session.LaunchInteractiveAgent(ctx.AgentID, name, task)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("launch interactive agent: %w", err)
 			}
 			return map[string]interface{}{"success": true, "agent_id": id}, nil
 		},
@@ -809,7 +809,7 @@ func (g *Gogent) initializeToolRegistry() {
 			id, _ := args["agent_id"].(string)
 			status, result, err := session.InteractiveAgentStatus(id)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("query interactive agent status: %w", err)
 			}
 			return map[string]interface{}{"success": true, "agent_id": id, "status": string(status), "result": result}, nil
 		},
@@ -834,7 +834,7 @@ func (g *Gogent) initializeToolRegistry() {
 			id, _ := args["agent_id"].(string)
 			message, _ := args["message"].(string)
 			if err := session.SendToInteractiveAgent(id, message); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("send to interactive agent: %w", err)
 			}
 			return map[string]interface{}{"success": true, "agent_id": id}, nil
 		},
@@ -855,7 +855,7 @@ func (g *Gogent) initializeToolRegistry() {
 			}
 			id, _ := args["agent_id"].(string)
 			if err := session.TerminateInteractiveAgent(id); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("terminate interactive agent: %w", err)
 			}
 			return map[string]interface{}{"success": true, "agent_id": id}, nil
 		},
@@ -1332,7 +1332,7 @@ func (g *Gogent) UndoLastTurn(sessionID string) (string, error) {
 	}
 	n, err := g.checkpoints.UndoLastTurn(sessionID)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("undo last turn: %w", err)
 	}
 	return fmt.Sprintf("reverted last turn (%d file(s) restored)", n), nil
 }
@@ -1346,7 +1346,7 @@ func (g *Gogent) Rewind(sessionID string, turns int) (string, error) {
 	}
 	files, reverted, err := g.checkpoints.Rewind(sessionID, turns)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("rewind: %w", err)
 	}
 	return fmt.Sprintf("reverted %d turn(s) (%d file(s) restored)", reverted, files), nil
 }
@@ -1508,12 +1508,12 @@ func (g *Gogent) applyPatch(patch string, ctx tool.ToolContext) (interface{}, er
 		auth, err := fileops.CheckFileAccess(g.permissions, g.locationMutation, true, op.Path,
 			permission.RequestContext{SessionID: ctx.SessionID, Agent: ctx.AgentID})
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("check file access: %w", err)
 		}
 
 		exists, err := g.fileSystem.Exists(op.Path)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("check file existence: %w", err)
 		}
 		switch op.Type {
 		case fileops.PatchAdd:
@@ -1741,7 +1741,11 @@ func (g *Gogent) ListBackendModels(modelName string) ([]model.ModelInfo, error) 
 	if !ok {
 		return nil, fmt.Errorf("backend %q does not support model listing", selected.Name)
 	}
-	return lister.ListModels()
+	models, err := lister.ListModels()
+	if err != nil {
+		return nil, fmt.Errorf("list models: %w", err)
+	}
+	return models, nil
 }
 
 // AggregateStats sums token and tool-call counters across every active session.
@@ -1991,7 +1995,7 @@ func (g *Gogent) SendMessageToSessionWithModel(ctx context.Context, sessionID, a
 			AgentID:   agentID,
 			Error:     &model.ModelError{Message: err.Error()},
 		})
-		return nil, err
+		return nil, fmt.Errorf("process message: %w", err)
 	}
 
 	// Persist the updated transcript (best-effort) for crash recovery.
@@ -2160,7 +2164,7 @@ func (g *Gogent) RegisterFileTools(cmdRegistry *command.CommandRegistry) {
 			}
 			result, err := readTool.Execute(map[string]interface{}{"path": args[0]})
 			if err != nil {
-				return &command.CommandResult{Success: false, Stderr: err.Error(), ExitCode: 1}, err
+				return &command.CommandResult{Success: false, Stderr: err.Error(), ExitCode: 1}, fmt.Errorf("read file: %w", err)
 			}
 			return &command.CommandResult{Success: true, Stdout: result.(string), ExitCode: 0}, nil
 		},
@@ -2178,7 +2182,7 @@ func (g *Gogent) RegisterFileTools(cmdRegistry *command.CommandRegistry) {
 				"content": args[1],
 			})
 			if err != nil {
-				return &command.CommandResult{Success: false, Stderr: err.Error(), ExitCode: 1}, err
+				return &command.CommandResult{Success: false, Stderr: err.Error(), ExitCode: 1}, fmt.Errorf("write file: %w", err)
 			}
 			return &command.CommandResult{Success: true, Stdout: fmt.Sprintf("%v", result), ExitCode: 0}, nil
 		},
@@ -2197,7 +2201,7 @@ func (g *Gogent) RegisterFileTools(cmdRegistry *command.CommandRegistry) {
 				"replace": args[2],
 			})
 			if err != nil {
-				return &command.CommandResult{Success: false, Stderr: err.Error(), ExitCode: 1}, err
+				return &command.CommandResult{Success: false, Stderr: err.Error(), ExitCode: 1}, fmt.Errorf("edit file: %w", err)
 			}
 			return &command.CommandResult{Success: true, Stdout: fmt.Sprintf("%v", result), ExitCode: 0}, nil
 		},
@@ -2252,7 +2256,10 @@ func (g *Gogent) ExecuteToolCall(toolCall *tool.ToolCall, sessionID, agentID, me
 		})
 	}
 
-	return result, err
+	if err != nil {
+		return result, fmt.Errorf("execute tool call: %w", err)
+	}
+	return result, nil
 }
 
 // oneShotOnlyTools are coordination tools that only make sense in one-shot mode.
@@ -2316,7 +2323,10 @@ func (g *Gogent) SaveConfig() error {
 	if home == "" || cfg == nil {
 		return nil
 	}
-	return config.SaveConfig(home, cfg)
+	if err := config.SaveConfig(home, cfg); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+	return nil
 }
 
 // Timeouts returns the current timeout configuration.
@@ -2470,7 +2480,7 @@ func (g *Gogent) ScanModels(cfg config.ModelConfig) ([]string, error) {
 	conn := model.NewModelConnectionFromConfig(&cfg)
 	infos, err := conn.ListModels()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list models: %w", err)
 	}
 	ids := make([]string, 0, len(infos))
 	for _, info := range infos {

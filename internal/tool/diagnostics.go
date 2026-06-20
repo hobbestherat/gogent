@@ -53,7 +53,7 @@ func (tr *ToolRegistry) RegisterDiagnosticsTool(cmd []string, warningPattern str
 				rc := permission.RequestContext{SessionID: ctx.SessionID, Agent: ctx.AgentID}
 				detail := "diagnostics: " + strings.Join(resolved, " ")
 				if err := perm.CheckWithContext(rc, permission.ActionDiagnostics, "", detail); err != nil {
-					return nil, err
+					return nil, fmt.Errorf("permission check: %w", err)
 				}
 			}
 

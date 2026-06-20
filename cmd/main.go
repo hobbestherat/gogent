@@ -31,7 +31,6 @@ import (
 
 var (
 	verbose    = flag.Bool("verbose", false, "Enable verbose output")
-	httpServer = flag.Bool("http", false, "Enable HTTP server mode (always on by default)")
 	httpHost   = flag.String("http-host", "127.0.0.1", "HTTP server host")
 	httpPort   = flag.Int("http-port", 8080, "HTTP server port")
 	disableTUI = flag.Bool("no-tui", false, "Disable TUI (for API testing)")
@@ -537,7 +536,11 @@ func newGogentBackend(g *gogent.Gogent) gogentBackend {
 
 func (b gogentBackend) SendMessage(ctx context.Context, sessionID, message, modelName string) (*model.CompletionResponse, error) {
 	b.sessions.touch(sessionID)
-	return b.g.SendMessageToSessionWithModel(ctx, sessionID, "root", message, modelName)
+	resp, err := b.g.SendMessageToSessionWithModel(ctx, sessionID, "root", message, modelName)
+	if err != nil {
+		return nil, fmt.Errorf("send message to session: %w", err)
+	}
+	return resp, nil
 }
 
 func (b gogentBackend) Stats(sessionID string) map[string]interface{} {
@@ -778,7 +781,7 @@ func newHTTPHandler(backend httpBackend, exitToken string, shutdown func()) http
 
 func startHTTPServer(host string, port int, g *gogent.Gogent) {
 	handler := newHTTPHandler(newGogentBackend(g), os.Getenv("GOGENT_HTTP_TOKEN"), func() {
-		syscall.Kill(syscall.Getpid(), syscall.SIGINT)
+		_ = syscall.Kill(syscall.Getpid(), syscall.SIGINT) // best-effort self-signal to trigger shutdown
 	})
 
 	server := &http.Server{

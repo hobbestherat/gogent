@@ -109,7 +109,7 @@ func (g *Gogent) buildSystemContext() string {
 			b.WriteString("## Available skills\n")
 			b.WriteString("You have access to these skills. Call the `skill` tool with the skill's `name` to load its full instructions before performing a task it covers.\n")
 			for _, sk := range active {
-				b.WriteString(fmt.Sprintf("- %s: %s\n", sk.Name, sk.Description))
+				fmt.Fprintf(&b, "- %s: %s\n", sk.Name, sk.Description)
 			}
 		}
 	}

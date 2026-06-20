@@ -54,7 +54,7 @@ func (ca *CompressionAgent) Summarize(older []model.Message) (string, error) {
 	prompt := ca.buildCompressionPrompt(older)
 	resp, err := ca.completer.Complete([]model.Message{{Role: model.RoleUser, Content: prompt}})
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("compression completion: %w", err)
 	}
 	return strings.TrimSpace(resp.Content), nil
 }

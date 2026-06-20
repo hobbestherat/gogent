@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -135,7 +136,7 @@ func (w *Workbench) showStatisticsDialog() {
 // statsExporter decouples the dialog from the filesystem so the export path can
 // be unit tested with an in-memory writer. It defaults to writing a real file.
 var statsExporter = func(path, data string) error {
-	return os.WriteFile(path, []byte(data), 0o644)
+	return os.WriteFile(path, []byte(data), 0o600)
 }
 
 // writeStatisticsExport renders the report in the given format ("csv" or "json")
@@ -143,11 +144,11 @@ var statsExporter = func(path, data string) error {
 func writeStatisticsExport(report stats.Report, format string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("resolve home dir: %w", err)
 	}
 	dir := filepath.Join(home, ".gogent")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return "", fmt.Errorf("create export dir: %w", err)
 	}
 
 	var data string
@@ -155,13 +156,13 @@ func writeStatisticsExport(report stats.Report, format string) (string, error) {
 	case "csv":
 		s, err := report.CSV()
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("render stats csv: %w", err)
 		}
 		data = s
 	default: // "json"
 		s, err := report.JSON()
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("render stats json: %w", err)
 		}
 		data = s
 		format = "json"

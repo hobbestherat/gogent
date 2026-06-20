@@ -8,8 +8,8 @@ import (
 
 	"gogent/internal/agent"
 	"gogent/internal/config"
-	"gogent/internal/permission"
 	"gogent/internal/model"
+	"gogent/internal/permission"
 	"gogent/internal/tool"
 )
 

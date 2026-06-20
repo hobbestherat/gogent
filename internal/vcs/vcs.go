@@ -9,6 +9,7 @@ package vcs
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -46,7 +47,7 @@ func Run(dir string, timeout time.Duration, args ...string) (*Result, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // launches the trusted local git binary with an explicit argument vector
 	if dir != "" {
 		cmd.Dir = dir
 	}
@@ -75,7 +76,7 @@ func Run(dir string, timeout time.Duration, args ...string) (*Result, error) {
 			return res, nil
 		}
 		// git could not be launched (not installed, not executable, ...).
-		return res, err
+		return res, fmt.Errorf("run git: %w", err)
 	}
 	return res, nil
 }

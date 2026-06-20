@@ -488,7 +488,7 @@ func LoadConfig(homeDir string) (*Config, error) {
 	}
 
 	// Load config from file
-	data, err := os.ReadFile(configPath)
+	data, err := os.ReadFile(configPath) //nolint:gosec // reads caller-controlled config file path
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %v", err)
 	}
@@ -504,7 +504,7 @@ func LoadConfig(homeDir string) (*Config, error) {
 // SaveConfig saves configuration to the default location
 func SaveConfig(homeDir string, config *Config) error {
 	configDir := filepath.Join(homeDir, ".gogent")
-	if err := os.MkdirAll(configDir, 0755); err != nil {
+	if err := os.MkdirAll(configDir, 0750); err != nil {
 		return fmt.Errorf("failed to create config directory: %v", err)
 	}
 
@@ -514,7 +514,7 @@ func SaveConfig(homeDir string, config *Config) error {
 		return fmt.Errorf("failed to marshal config: %v", err)
 	}
 
-	if err := os.WriteFile(configPath, data, 0644); err != nil {
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write config file: %v", err)
 	}
 

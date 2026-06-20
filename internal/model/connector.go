@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 )
 
 // This file defines the clean, reusable interface surface for "something that
@@ -83,7 +84,7 @@ func (m *ModelInfo) UnmarshalJSON(data []byte) error {
 		Name string `json:"name"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
+		return fmt.Errorf("unmarshal model info: %w", err)
 	}
 	*m = ModelInfo(raw.alias)
 	if m.ID == "" {

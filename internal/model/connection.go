@@ -101,7 +101,11 @@ func (m Message) MarshalJSON() ([]byte, error) {
 		}
 		wire.Content = parts
 	}
-	return json.Marshal(wire)
+	b, err := json.Marshal(wire)
+	if err != nil {
+		return nil, fmt.Errorf("marshal message: %w", err)
+	}
+	return b, nil
 }
 
 // UnmarshalJSON decodes a message whose content may be either a scalar string
@@ -118,7 +122,7 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 		ToolCallID string          `json:"tool_call_id,omitempty"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
+		return fmt.Errorf("unmarshal message: %w", err)
 	}
 	*m = Message{Role: raw.Role, Name: raw.Name, ToolCalls: raw.ToolCalls, ToolCallID: raw.ToolCallID}
 
@@ -128,11 +132,14 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 	}
 	if trimmed[0] != '[' {
 		// Scalar string content (or a malformed scalar, surfaced as an error).
-		return json.Unmarshal(trimmed, &m.Content)
+		if err := json.Unmarshal(trimmed, &m.Content); err != nil {
+			return fmt.Errorf("unmarshal content: %w", err)
+		}
+		return nil
 	}
 	var parts []contentPart
 	if err := json.Unmarshal(trimmed, &parts); err != nil {
-		return err
+		return fmt.Errorf("unmarshal content parts: %w", err)
 	}
 	var text strings.Builder
 	for _, p := range parts {
@@ -293,10 +300,14 @@ func (tc ToolChoice) MarshalJSON() ([]byte, error) {
 	case ToolChoiceRequired:
 		return []byte(`"required"`), nil
 	case ToolChoiceTool:
-		return json.Marshal(map[string]interface{}{
+		b, err := json.Marshal(map[string]interface{}{
 			"type":     "function",
 			"function": map[string]string{"name": tc.Name},
 		})
+		if err != nil {
+			return nil, fmt.Errorf("marshal tool choice: %w", err)
+		}
+		return b, nil
 	default:
 		return []byte(`"auto"`), nil
 	}
@@ -369,7 +380,7 @@ func (u *TokenUsage) UnmarshalJSON(data []byte) error {
 		} `json:"completion_tokens_details"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
+		return fmt.Errorf("unmarshal token usage: %w", err)
 	}
 	*u = TokenUsage(raw.alias)
 	switch {
@@ -651,7 +662,11 @@ func (rt *APIKeyRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 		q.Set(rt.queryParam, rt.apiKey)
 		req.URL.RawQuery = q.Encode()
 	}
-	return rt.transport.RoundTrip(req)
+	resp, err := rt.transport.RoundTrip(req)
+	if err != nil {
+		return nil, fmt.Errorf("round trip: %w", err)
+	}
+	return resp, nil
 }
 
 // wireAdapter returns the connection's wire-format adapter, defaulting to the
@@ -780,7 +795,7 @@ func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []
 	// Sampling params. Omit them for reasoning models on providers that reject a
 	// custom temperature (OpenAI reasoning tiers); otherwise send temperature
 	// (pointer, so a deliberate 0 survives) and top_p when configured.
-	if !(reasoning && c.spec.reasoningRejectsTemperature) {
+	if !reasoning || !c.spec.reasoningRejectsTemperature {
 		t := temperature
 		reqBody.Temperature = &t
 		if topP > 0 {
@@ -901,7 +916,7 @@ func (c *ModelConnection) complete(ctx context.Context, messages []Message, stre
 
 		bodyBytes, err = io.ReadAll(resp.Body)
 		retryAfter, _ := parseRetryAfter(resp.Header.Get("Retry-After"), startTime)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
 			return nil, &ModelError{
 				Type:    ErrorGeneric,
@@ -985,7 +1000,7 @@ func (c *ModelConnection) completeStream(ctx context.Context, messages []Message
 			Message: fmt.Sprintf("failed to connect to model: %v", err),
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	c.Stats.Mutex.Lock()
 	c.Stats.RequestCount++
@@ -1249,7 +1264,7 @@ func (c *ModelConnection) backoff(attempt int, retryAfter time.Duration) time.Du
 	if d <= 0 {
 		return 0
 	}
-	return time.Duration(rand.Int64N(int64(d) + 1))
+	return time.Duration(rand.Int64N(int64(d) + 1)) //nolint:gosec // jitter only, not security-sensitive
 }
 
 // sleepCtx waits for d, or until ctx is cancelled, whichever comes first. It
@@ -1312,7 +1327,7 @@ func (c *ModelConnection) ListModels() ([]ModelInfo, error) {
 	if err != nil {
 		return nil, &ModelError{Type: ErrorConnection, Message: fmt.Sprintf("failed to list models: %v", err)}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

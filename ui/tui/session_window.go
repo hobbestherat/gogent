@@ -28,7 +28,6 @@ type SessionWindow struct {
 	modelLabel  *tv.Label
 	modelSelect *tv.Select
 	status      *tv.Label
-	systemInstr string
 	// readOnly marks a static analysis window opened from the Sessions browser
 	// (issue #58): it renders a saved transcript with the full search/filter/
 	// fold/yank toolkit but has no input, model selector or live backend session,

@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -42,17 +43,21 @@ func (c *Client) Post(endpoint string, body interface{}) (*http.Response, error)
 	if body != nil {
 		jsonData, err := json.Marshal(body)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("marshal request body: %w", err)
 		}
 		reqBody = bytes.NewReader(jsonData)
 	}
 
 	req, err := http.NewRequest("POST", c.baseURL+endpoint, reqBody)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 
-	return c.client.Do(req)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("do request: %w", err)
+	}
+	return resp, nil
 }

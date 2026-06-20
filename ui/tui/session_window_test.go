@@ -93,20 +93,20 @@ func TestFormatStatusLine(t *testing.T) {
 		{
 			name:  "live elapsed and throughput shown during generation",
 			state: "working...", stats: agent.SessionStats{TokensIn: 400, TokensOut: 120},
-			live:  liveStats{elapsed: 12 * time.Second, tokensPerSec: 10}, width: 80,
+			live: liveStats{elapsed: 12 * time.Second, tokensPerSec: 10}, width: 80,
 			want: "working... · 12s · 10 t/s · 400/120 tok",
 		},
 		{
 			name:  "sub-one throughput renders as <1 t/s",
 			state: "working...", stats: agent.SessionStats{TokensOut: 3},
-			live:  liveStats{elapsed: 10 * time.Second, tokensPerSec: 0.3}, width: 80,
+			live: liveStats{elapsed: 10 * time.Second, tokensPerSec: 0.3}, width: 80,
 			want: "working... · 10s · <1 t/s · 0/3 tok",
 		},
 		{
-			name:   "budget exceeded marker leads the stats",
-			state:  "working...", stats: agent.SessionStats{TokensIn: 600, TokensOut: 400},
+			name:  "budget exceeded marker leads the stats",
+			state: "working...", stats: agent.SessionStats{TokensIn: 600, TokensOut: 400},
 			budget: config.BudgetConfig{TokenBudget: 1000}, width: 80,
-			want:   "working... · budget! · 600/400 tok",
+			want: "working... · budget! · 600/400 tok",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -124,9 +124,9 @@ func TestFormatStatusLine(t *testing.T) {
 // at/over the window fills every cell.
 func TestContextGauge(t *testing.T) {
 	for _, tc := range []struct {
-		name         string
-		tokens, win  int
-		want         string
+		name        string
+		tokens, win int
+		want        string
 	}{
 		{"unknown window", 100, 0, "▱▱▱▱▱▱"},
 		{"zero usage", 0, 1000, "▱▱▱▱▱▱"},

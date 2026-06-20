@@ -155,7 +155,7 @@ func TestPromptShutdownWhileWaiting(t *testing.T) {
 func TestPromptSerialized(t *testing.T) {
 	w := newPromptWorkbench()
 
-	entered := make(chan int, 2)   // call index of each presented request
+	entered := make(chan int, 2) // call index of each presented request
 	resolvers := make(chan func(permission.Decision), 2)
 	present := func(_ permission.Request, resolve func(permission.Decision)) {
 		resolvers <- resolve

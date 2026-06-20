@@ -414,7 +414,7 @@ func grepFile(path string, re *regexp.Regexp, collectLines, stopAfterFirst bool)
 	if err != nil {
 		return nil, 0, false
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	scanner := bufio.NewScanner(f)
 	// Raise the per-line token cap so long (but legitimate) lines are still

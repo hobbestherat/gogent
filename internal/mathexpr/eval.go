@@ -10,6 +10,7 @@ package mathexpr
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -101,7 +102,11 @@ func evalExpr(expr string, depth int) (float64, error) {
 	}
 
 	// Atom: a single number.
-	return strconv.ParseFloat(expr, 64)
+	v, err := strconv.ParseFloat(expr, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse number: %w", err)
+	}
+	return v, nil
 }
 
 // wrapped reports whether expr is fully enclosed in a single balanced pair of

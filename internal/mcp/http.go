@@ -38,7 +38,7 @@ func newHTTPTransport(url string, headers map[string]string) *httpTransport {
 func (t *httpTransport) post(body []byte) (*http.Response, error) {
 	req, err := http.NewRequest(http.MethodPost, t.url, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("mcp http: new request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
@@ -51,7 +51,11 @@ func (t *httpTransport) post(body []byte) (*http.Response, error) {
 	for k, v := range t.headers {
 		req.Header.Set(k, v)
 	}
-	return t.client.Do(req)
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("mcp http: do request: %w", err)
+	}
+	return resp, nil
 }
 
 func (t *httpTransport) call(method string, params interface{}) (json.RawMessage, error) {
@@ -62,13 +66,13 @@ func (t *httpTransport) call(method string, params interface{}) (json.RawMessage
 
 	body, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("mcp http: marshal request: %w", err)
 	}
 	resp, err := t.post(body)
 	if err != nil {
 		return nil, fmt.Errorf("mcp http: %s: %w", method, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Capture the session id assigned by initialize so later calls present it.
 	if s := resp.Header.Get("Mcp-Session-Id"); s != "" {
@@ -91,7 +95,7 @@ func (t *httpTransport) call(method string, params interface{}) (json.RawMessage
 func (t *httpTransport) notify(method string, params interface{}) error {
 	body, err := json.Marshal(rpcRequest{JSONRPC: "2.0", Method: method, Params: params})
 	if err != nil {
-		return err
+		return fmt.Errorf("mcp http: marshal request: %w", err)
 	}
 	resp, err := t.post(body)
 	if err != nil {
@@ -100,7 +104,7 @@ func (t *httpTransport) notify(method string, params interface{}) error {
 	// A notification has no response body to consume; drain and close so the
 	// connection can be reused.
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return nil
 }
 

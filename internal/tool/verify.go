@@ -56,7 +56,7 @@ func (tr *ToolRegistry) RegisterVerifyTool(cmd []string) {
 				rc := permission.RequestContext{SessionID: ctx.SessionID, Agent: ctx.AgentID}
 				detail := "verify: " + strings.Join(resolved, " ")
 				if err := perm.CheckWithContext(rc, permission.ActionVerify, "", detail); err != nil {
-					return nil, err
+					return nil, fmt.Errorf("permission check: %w", err)
 				}
 			}
 

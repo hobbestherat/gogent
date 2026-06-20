@@ -129,7 +129,7 @@ func fuzzyScore(pattern, text string) (int, bool) {
 	if strings.TrimSpace(pattern) == "" {
 		return 0, true
 	}
-	p := []rune(strings.ToLower(strings.TrimSpace(pattern)))
+	p := strings.ToLower(strings.TrimSpace(pattern))
 	t := []rune(strings.ToLower(text))
 	score, ti, prev := 0, 0, -1
 	for _, pr := range p {

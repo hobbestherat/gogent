@@ -62,7 +62,7 @@ func adapterFor(t APIType) adapter {
 func encodeJSON(buf *bytes.Buffer, v any) error {
 	buf.Reset()
 	if err := json.NewEncoder(buf).Encode(v); err != nil {
-		return err
+		return fmt.Errorf("encode json: %w", err)
 	}
 	if b := buf.Bytes(); len(b) > 0 && b[len(b)-1] == '\n' {
 		buf.Truncate(buf.Len() - 1)
@@ -83,7 +83,7 @@ func (openAIAdapter) buildBody(req CompletionRequest, buf *bytes.Buffer) error {
 func (openAIAdapter) parseResponse(body []byte) (*CompletionResponse, error) {
 	var resp CompletionResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unmarshal response: %w", err)
 	}
 	// The blocking OpenAI response nests the message under choices[0]; flatten the
 	// first choice onto the top-level fields gogent reads.
@@ -371,7 +371,7 @@ type anthropicResponse struct {
 func (anthropicAdapter) parseResponse(body []byte) (*CompletionResponse, error) {
 	var ar anthropicResponse
 	if err := json.Unmarshal(body, &ar); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unmarshal response: %w", err)
 	}
 	resp := &CompletionResponse{Role: RoleAssistant}
 	var text strings.Builder

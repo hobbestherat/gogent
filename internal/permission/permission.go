@@ -9,6 +9,7 @@ package permission
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -240,7 +241,7 @@ func (s *Service) persist(a Action, resource string, d Decision) {
 	if err != nil {
 		return
 	}
-	s.write(data)
+	_ = s.write(data)
 }
 
 func (s *Service) configPath() string {
@@ -259,7 +260,7 @@ func (s *Service) load() {
 	if path == "" {
 		return
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // reads caller-controlled permission store path
 	if err != nil {
 		return
 	}
@@ -281,9 +282,12 @@ func (s *Service) write(data []byte) error {
 		return nil
 	}
 	if err := os.MkdirAll(s.configDir, 0700); err != nil {
-		return err
+		return fmt.Errorf("create permission dir: %w", err)
 	}
-	return os.WriteFile(path, data, 0600)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return fmt.Errorf("write permission file: %w", err)
+	}
+	return nil
 }
 
 func splitKey(k string) (Action, string) {

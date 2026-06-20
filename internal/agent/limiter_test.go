@@ -13,7 +13,9 @@ import (
 func TestSubAgentLimiterAcquireRelease(t *testing.T) {
 	l := NewSubAgentLimiter(2)
 
-	if !l.tryAcquire() || !l.tryAcquire() {
+	first := l.tryAcquire()
+	second := l.tryAcquire()
+	if !first || !second {
 		t.Fatal("expected the first two acquisitions to succeed")
 	}
 	if l.InFlight() != 2 {
