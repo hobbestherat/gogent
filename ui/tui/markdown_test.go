@@ -792,6 +792,49 @@ func TestRenderMarkdownLiteralAmpersand(t *testing.T) {
 	}
 }
 
+// Named entities WITHOUT a trailing semicolon stay literal: CommonMark only
+// recognises the terminated form, so "&copyX" / "&regZ" must not decode. (Guards
+// the round-2 decodeEntities fix against html.UnescapeString's greedy legacy
+// decoding.)
+func TestRenderMarkdownEntityWithoutSemicolonLiteral(t *testing.T) {
+	withTestPalette(t)
+	for _, src := range []string{"costs 5&copyX", "v2 &regZ end", "see &ampb now"} {
+		all := mdAllText(renderMarkdown(src))
+		if all != src {
+			t.Errorf("non-terminated entity should stay literal: input %q -> %q", src, all)
+		}
+	}
+	// Valid terminated entities still decode.
+	for _, tc := range []struct{ in, want string }{
+		{"a &amp; b", "a & b"},
+		{"x &copy; y", "x © y"},
+		{"&#39;", "'"},
+		{"&#x2F;", "/"},
+	} {
+		if got := mdAllText(renderMarkdown(tc.in)); got != tc.want {
+			t.Errorf("entity decode %q = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// DEFECT (LOW): a semicolon-terminated token that is NOT a valid entity, but
+// whose name begins with a legacy no-semicolon entity prefix, gets the prefix
+// greedily decoded by html.UnescapeString — deviating from CommonMark, which
+// leaves the whole token literal. Verified: "&notreal;" -> "¬real;",
+// "&regional;" -> "®ional;", "&ampere;" -> "&ere;", "&gtfoo;" -> ">foo;".
+// Models rarely emit such tokens, hence low severity, but decodeEntities is not
+// yet spec-accurate. Root cause: the matched "&WORD;" run is handed whole to
+// html.UnescapeString, which decodes any legacy prefix it contains.
+func TestRenderMarkdownUnknownEntityWithSemicolonLiteral(t *testing.T) {
+	withTestPalette(t)
+	for _, src := range []string{"&notreal;", "&regional;", "&ampere;", "&gtfoo;"} {
+		all := mdAllText(renderMarkdown(src))
+		if all != src {
+			t.Errorf("non-entity %q should stay literal, got %q", src, all)
+		}
+	}
+}
+
 // A GFM table renders as: a bold header row, a dashed rule, then data rows,
 // with cells separated by a dim "│". It must NOT collapse to a run-on token.
 func TestRenderMarkdownTable(t *testing.T) {
