@@ -674,6 +674,12 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 	responses = append(responses, resp)
 	s.emitUsage(emit)
 
+	// lastAssistant retains the most recent non-empty assistant text so a final
+	// turn that lands with empty content (e.g. a model that closes with
+	// structured_output{final:true} carrying an empty/absent "response", or an
+	// empty terminal message) can still surface an answer instead of silently
+	// dropping it (#171).
+	var lastAssistant string
 	const maxSteps = 25
 	for step := 0; step < maxSteps; step++ {
 		// Bail out promptly if the loop was stopped or the session closed; the
@@ -701,6 +707,7 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 		// Surface any intermediate reasoning the model emitted alongside its
 		// tool calls so the UI can show (foldable) thoughts.
 		if thought := strings.TrimSpace(resp.Content); thought != "" {
+			lastAssistant = thought
 			emit(SessionEvent{Type: SessionEventAssistantStep, Step: step, Text: thought})
 		}
 
@@ -747,7 +754,15 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 	}
 
 	if resp != nil {
-		emit(SessionEvent{Type: SessionEventFinal, Text: strings.TrimSpace(resp.Content)})
+		finalText := strings.TrimSpace(resp.Content)
+		if finalText == "" {
+			// The terminal turn carried no text — recover the most recent
+			// assistant content so the answer isn't dropped. The TUI renders
+			// nothing for an empty final, which presented as the session jumping
+			// tool->idle with the last turn missing (#171).
+			finalText = lastAssistant
+		}
+		emit(SessionEvent{Type: SessionEventFinal, Text: finalText})
 	}
 
 	return responses, nil

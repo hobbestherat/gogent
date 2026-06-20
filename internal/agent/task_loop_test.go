@@ -143,6 +143,62 @@ func TestExecuteTaskLoopNativeToolCall(t *testing.T) {
 	}
 }
 
+// TestFinalRecoversAnswerWhenTerminalTurnEmpty reproduces #171: the model states
+// its answer as assistant content alongside a tool call, then returns an empty
+// terminal turn. The final event must still carry the answer rather than an empty
+// string (which the TUI renders as nothing, presenting as tool->idle with the
+// last turn missing).
+func TestFinalRecoversAnswerWhenTerminalTurnEmpty(t *testing.T) {
+	contentAndCall := map[string]interface{}{
+		"choices": []map[string]interface{}{{
+			"index": 0,
+			"message": map[string]interface{}{
+				"role":    "assistant",
+				"content": "Here is the result: 4.",
+				"tool_calls": []map[string]interface{}{{
+					"id":   "c1",
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":      "calc",
+						"arguments": `{"expression":"2+2"}`,
+					},
+				}},
+			},
+			"finish_reason": "tool_calls",
+		}},
+		"usage": map[string]interface{}{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+	}
+	fs := &fakeServer{responses: []map[string]interface{}{
+		contentAndCall,
+		finalResponse(""), // empty terminal turn — no content, no calls
+	}}
+	server := httptest.NewServer(http.HandlerFunc(fs.handler))
+	defer server.Close()
+
+	us, _ := newLoopSession(t, server.URL)
+	var finalText string
+	var sawFinal bool
+	us.SetObserver(func(ev SessionEvent) {
+		if ev.Type == SessionEventFinal {
+			sawFinal = true
+			finalText = ev.Text
+		}
+	})
+
+	if _, err := us.ExecuteTaskLoop(context.Background(), "root", "what is 2+2?"); err != nil {
+		t.Fatalf("loop error: %v", err)
+	}
+	if !sawFinal {
+		t.Fatal("no SessionEventFinal emitted")
+	}
+	if strings.TrimSpace(finalText) == "" {
+		t.Fatal("final event text is empty; the last answer was dropped (#171)")
+	}
+	if !strings.Contains(finalText, "4") {
+		t.Errorf("final text should recover the answer, got %q", finalText)
+	}
+}
+
 // TestExecuteTaskLoopJSONFallback verifies the fallback path for models that
 // emit a JSON tool call as text instead of native tool_calls.
 func TestExecuteTaskLoopJSONFallback(t *testing.T) {
