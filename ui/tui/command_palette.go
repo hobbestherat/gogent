@@ -223,12 +223,24 @@ func helpText(cmds []command) string {
 // list of every available action. Typing filters live; ↑/↓ move the selection
 // and Enter runs it (closing the palette first so the action's own dialog is not
 // buried under this modal). Esc dismisses.
+// newCloseableDialog builds a modal dialog that carries a visible close
+// affordance: the title-bar [x] button (ShowClose) is wired to closeFn so users
+// are not left to guess that Esc dismisses it (issue #173). Callers still wire
+// Esc through the dialog root for keyboard parity.
+func newCloseableDialog(title string, x, y, width, height int, closeFn func()) *tv.Dialog {
+	dialog := tv.NewDialog(title, x, y, width, height)
+	dialog.Window.ShowClose = true
+	dialog.Window.OnClose = func(*tv.Window) { closeFn() }
+	return dialog
+}
+
 func (w *Workbench) showCommandPalette() {
 	width, height := paletteSize(w.app.Width(), w.app.Height())
 	x, y := centeredDialog(w, width, height)
 
-	dialog := tv.NewDialog("Command Palette", x, y, width, height)
-	dialog.Window.ShowClose = false
+	var layer *tv.Layer
+	closeFn := func() { w.desktop.RemoveLayer(layer) }
+	dialog := newCloseableDialog("Command Palette", x, y, width, height, closeFn)
 
 	dialog.Window.AddContent(dialogLabel("Run:", tv.Rect{X: 2, Y: 1, W: 4, H: 1}))
 	searchBox := tv.NewTextBox("", tv.Rect{X: 6, Y: 1, W: width - 8, H: 1})
@@ -249,9 +261,6 @@ func (w *Workbench) showCommandPalette() {
 
 	dialog.Window.AddContent(dialogLabel("Type to filter · ↑↓ move · Enter run · Esc close",
 		tv.Rect{X: 2, Y: height - 2, W: width - 4, H: 1}))
-
-	var layer *tv.Layer
-	closeFn := func() { w.desktop.RemoveLayer(layer) }
 
 	all := w.commands()
 	render := func() {
@@ -323,8 +332,9 @@ func (w *Workbench) showHelpOverlay() {
 	width, height := helpSize(w.app.Width(), w.app.Height())
 	x, y := centeredDialog(w, width, height)
 
-	dialog := tv.NewDialog("Keybindings", x, y, width, height)
-	dialog.Window.ShowClose = false
+	var layer *tv.Layer
+	closeFn := func() { w.desktop.RemoveLayer(layer) }
+	dialog := newCloseableDialog("Keybindings", x, y, width, height, closeFn)
 
 	bodyH := height - 5 // title border + hint/button row + bottom margin
 	if bodyH < 3 {
@@ -338,8 +348,6 @@ func (w *Workbench) showHelpOverlay() {
 	dialog.Window.AddContent(dialogLabel("↑↓/PgUp/PgDn scroll · Ctrl+K palette · Esc close",
 		tv.Rect{X: 2, Y: height - 2, W: width - 16, H: 1}))
 
-	var layer *tv.Layer
-	closeFn := func() { w.desktop.RemoveLayer(layer) }
 	dialog.Window.AddContent(tv.NewButton("Close",
 		tv.Rect{X: width - 11, Y: height - 2, W: 9, H: 1}, closeFn))
 
