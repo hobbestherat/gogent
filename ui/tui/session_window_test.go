@@ -176,8 +176,8 @@ func TestStatusColor(t *testing.T) {
 		want   tui.Color
 	}{
 		{"idle no stats", true, agent.SessionStats{}, config.BudgetConfig{}, colorNote},
-		{"working no stats", false, agent.SessionStats{}, config.BudgetConfig{}, colorInfo},
-		{"context below warn stays state colour", false, agent.SessionStats{ContextTokens: 50000, ContextWindow: 100000}, config.BudgetConfig{}, colorInfo},
+		{"working no stats", false, agent.SessionStats{}, config.BudgetConfig{}, colorAgent},
+		{"context below warn stays state colour", false, agent.SessionStats{ContextTokens: 50000, ContextWindow: 100000}, config.BudgetConfig{}, colorAgent},
 		{"context at warn turns amber", false, agent.SessionStats{ContextTokens: 60000, ContextWindow: 100000}, config.BudgetConfig{}, colorTool},
 		{"context near threshold amber", false, agent.SessionStats{ContextTokens: 79000, ContextWindow: 100000}, config.BudgetConfig{}, colorTool},
 		{"context at threshold turns red", false, agent.SessionStats{ContextTokens: 80000, ContextWindow: 100000}, config.BudgetConfig{}, colorError},
