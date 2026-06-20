@@ -255,6 +255,9 @@ func showPermissionDialog(desktop *tv.Desktop, req permission.Request, requester
 	for _, line := range bodyLines {
 		body.AddColored(line.text, line.color)
 	}
+	// The approval text is read from the top (the question precedes the command),
+	// so open anchored at the first line (issue #174).
+	body.ScrollToTop()
 	dialog.Window.AddContent(body)
 
 	var layer *tv.Layer

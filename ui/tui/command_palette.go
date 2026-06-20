@@ -343,6 +343,8 @@ func (w *Workbench) showHelpOverlay() {
 	body := tv.NewTextView(helpText(w.commands()), tv.Rect{X: 2, Y: 1, W: width - 4, H: bodyH})
 	body.FG = tv.DefaultTheme.DialogFG
 	body.BG = tv.DefaultTheme.DialogBG
+	// Help is read top-down, so open anchored at the first binding (issue #174).
+	body.ScrollToTop()
 	dialog.Window.AddContent(body)
 
 	dialog.Window.AddContent(dialogLabel("↑↓/PgUp/PgDn scroll · Ctrl+K palette · Esc close",

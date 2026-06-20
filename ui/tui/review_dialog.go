@@ -94,6 +94,8 @@ func showReviewDialog(desktop *tv.Desktop, req gogent.EditReviewRequest, request
 
 	diffView := tv.NewTextView("", tv.Rect{X: 1, Y: headerY, W: width - 2, H: height - headerY - 4})
 	renderDiff(diffView, req.Diff)
+	// A diff is read top-down, so open anchored at the first line (issue #174).
+	diffView.ScrollToTop()
 	dialog.Window.AddContent(diffView)
 
 	var layer *tv.Layer

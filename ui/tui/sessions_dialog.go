@@ -110,6 +110,9 @@ func (w *Workbench) showSessionsDialog() {
 		} else {
 			detail.SetText(emptySessionsDetail(len(items), strings.TrimSpace(searchBox.GetText())))
 		}
+		// Re-anchor at the top whenever the detail pane is repopulated so a
+		// re-selection always shows the start (issue #174).
+		detail.ScrollToTop()
 		w.desktop.Redraw()
 	}
 
@@ -119,6 +122,7 @@ func (w *Workbench) showSessionsDialog() {
 		}
 		if m, ok := n.Data.(SessionMeta); ok {
 			detail.SetText(formatSessionDetail(m))
+			detail.ScrollToTop()
 			w.desktop.Redraw()
 		}
 	}
