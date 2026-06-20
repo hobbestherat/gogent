@@ -2,6 +2,7 @@ package ui
 
 import (
 	"html"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -253,12 +254,12 @@ func (r *markdownRenderer) inlineLines(n ast.Node, base mdStyle) [][]tv.StyledSp
 			case *ast.Text:
 				// Decode HTML entities (&amp; → &) for display only; the raw Markdown
 				// is preserved separately for copy/export.
-				add(st, html.UnescapeString(string(child.Segment.Value(r.src))))
+				add(st, decodeEntities(string(child.Segment.Value(r.src))))
 				if child.HardLineBreak() || child.SoftLineBreak() {
 					flush()
 				}
 			case *ast.String:
-				add(st, html.UnescapeString(string(child.Value)))
+				add(st, decodeEntities(string(child.Value)))
 			case *ast.CodeSpan:
 				// Inline code keeps the code colour but inherits the surrounding
 				// emphasis (bold/italic) so `code` inside **bold** stays bold.
@@ -597,4 +598,22 @@ func (r *markdownRenderer) collectText(n ast.Node) string {
 	}
 	walk(n)
 	return b.String()
+}
+
+// entityRef matches a well-formed HTML entity reference: a named (&amp;), decimal
+// (&#39;) or hex (&#x2F;) reference that ends with a semicolon. CommonMark only
+// recognises entities in this terminated form.
+var entityRef = regexp.MustCompile(`&(?:#[0-9]+|#[xX][0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);`)
+
+// decodeEntities decodes HTML entity references in prose text for display, while
+// matching CommonMark's rule that a reference must end with a semicolon. It only
+// hands the matched "&…;" runs to html.UnescapeString, so a bare legacy entity
+// such as "&copyX" or "&ampb" stays literal (Go's html.UnescapeString would
+// otherwise decode those, deviating from CommonMark). Unknown references like
+// "&notreal;" are left unchanged by html.UnescapeString.
+func decodeEntities(s string) string {
+	if !strings.Contains(s, "&") {
+		return s
+	}
+	return entityRef.ReplaceAllStringFunc(s, html.UnescapeString)
 }

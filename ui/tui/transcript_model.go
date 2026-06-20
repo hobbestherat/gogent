@@ -77,6 +77,11 @@ type transcriptRecord struct {
 	// (search-as-you-type, filter toggles, trims) do not re-parse and re-tokenise.
 	// styledGen records the palette generation it was built with; a theme change
 	// bumps mdPaletteGen and invalidates the cache.
+	//
+	// Cache invariant: styled is derived from lines (via body()), so any code that
+	// mutates lines MUST reset styled to nil. appendLine — the only mutator today —
+	// does this; a future streaming/append path must too, or it will serve stale
+	// spans.
 	styled    [][]tv.StyledSpan
 	styledGen uint64
 }
