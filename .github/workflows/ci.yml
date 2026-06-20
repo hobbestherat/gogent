@@ -53,6 +53,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - uses: golangci/golangci-lint-action@v6
+      # The repo's .golangci.yml is a v2 config, so use action v8 (which installs
+      # golangci-lint v2). The v6 action installs v1.64.x, built with go1.24,
+      # which refuses to target this module's go1.25 and never actually lints.
+      - uses: golangci/golangci-lint-action@v8
         with:
           version: latest
