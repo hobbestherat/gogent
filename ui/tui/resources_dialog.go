@@ -157,6 +157,9 @@ func (w *Workbench) showResourcesDialog() {
 		} else {
 			detail.SetText(emptyDetail(curKind, len(items), strings.TrimSpace(searchBox.GetText())))
 		}
+		// Re-anchor at the top whenever the detail pane is repopulated so a
+		// re-selection always shows the start (issue #174).
+		detail.ScrollToTop()
 		w.desktop.Redraw()
 	}
 
@@ -166,6 +169,7 @@ func (w *Workbench) showResourcesDialog() {
 		}
 		if it, ok := n.Data.(resourceItem); ok {
 			detail.SetText(it.detail)
+			detail.ScrollToTop()
 			w.desktop.Redraw()
 		}
 	}

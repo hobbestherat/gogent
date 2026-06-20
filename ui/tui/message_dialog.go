@@ -98,6 +98,8 @@ func (w *Workbench) showConfirm(title, message string, onResult func(bool)) {
 	for _, line := range strings.Split(message, "\n") {
 		body.AddLine(line)
 	}
+	// An informational message reads top-down, so open at the first line (issue #174).
+	body.ScrollToTop()
 	dialog.Window.AddContent(body)
 
 	var layer *tv.Layer

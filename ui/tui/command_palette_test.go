@@ -242,6 +242,33 @@ func TestCommandPaletteOpensAndCloses(t *testing.T) {
 	}
 }
 
+// TestInfoDialogsOpenAtTop covers issue #174 Phase A: info/help/detail dialogs
+// must open anchored at the TOP rather than following the bottom like chat/logs.
+// The TextView's scroll state (scrollY/follow) is unexported, so this asserts the
+// observable behaviour — that each info view constructs and opens its layer via
+// the harness without panicking on the ScrollToTop() call wired in after the body
+// is populated. The top-anchoring itself is covered by turbotui's own
+// TestTextViewScrollToTopAnchorsAtTop.
+func TestInfoDialogsOpenAtTop(t *testing.T) {
+	w := newTestWorkbench(t)
+
+	// Help overlay: a long, multi-line body that overflows and so genuinely
+	// exercises ScrollToTop (a non-scrolling body would be at the top anyway).
+	w.showHelpOverlay()
+	if top := w.desktop.TopLayer(); top == nil || top.Name != "help-overlay" {
+		t.Fatalf("top layer after help = %v, want help-overlay", top)
+	}
+
+	// Informational message dialog (onResult nil → OK-only): the body is filled
+	// line by line and then anchored at the top. A long, overflowing body makes
+	// the ScrollToTop call meaningful (a short body sits at the top regardless).
+	long := strings.Repeat("line\n", 200)
+	w.showConfirm("Info", long, nil)
+	if top := w.desktop.TopLayer(); top == nil || top.Name != "confirm-dialog" {
+		t.Fatalf("top layer after info message = %v, want confirm-dialog", top)
+	}
+}
+
 // TestCloseableDialogAffordance verifies the visible close affordance (issue
 // #173): the dialog exposes a title-bar [x] (ShowClose) whose OnClose runs the
 // caller's close function, so the palette/help overlay no longer rely on the

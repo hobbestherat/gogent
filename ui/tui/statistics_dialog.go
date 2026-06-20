@@ -87,6 +87,9 @@ func (w *Workbench) showStatisticsDialog() {
 	// render refreshes the detail pane for the selected section.
 	render := func(section statisticsSection) {
 		detail.SetText(renderStatistics(section, report))
+		// Re-anchor at the top on every section change so a re-selection always
+		// shows the start of the report (issue #174).
+		detail.ScrollToTop()
 		w.desktop.Redraw()
 	}
 
