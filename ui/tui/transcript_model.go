@@ -68,6 +68,11 @@ type transcriptRecord struct {
 	lines     []styledLine
 	collapsed bool
 	entry     *tv.TextEntry
+	// rich marks a record whose body should be rendered as formatted Markdown
+	// (issue #184) when rich rendering is enabled. lines still holds the raw text
+	// so copy/export/search are unchanged; the styled rendering is derived from it
+	// at render time. Set for assistant answers.
+	rich bool
 }
 
 // matches reports whether the record's header or any child line contains query
@@ -198,10 +203,22 @@ func (m *transcriptModel) trim() {
 
 // renderOne appends a single record's entry (and its children) to the view,
 // recording the live entry on the record.
+//
+// A rich record (an assistant answer, when rich Markdown is enabled) renders its
+// header as a plain entry and its body as top-level styled lines derived from the
+// raw text — turbotui styles only top-level entries, so a rich body is not a
+// foldable child of its header. Every other record uses the flat children path,
+// which keeps folding and is the fallback in plain/no-colour mode.
 func (m *transcriptModel) renderOne(r *transcriptRecord) {
 	entry := m.view.AddColored(r.header, r.color)
-	for _, ln := range r.lines {
-		entry.AddColored(ln.text, ln.color)
+	if r.rich && richMarkdownEnabled() {
+		for _, spans := range renderMarkdown(r.body()) {
+			m.view.AddStyled(spans)
+		}
+	} else {
+		for _, ln := range r.lines {
+			entry.AddColored(ln.text, ln.color)
+		}
 	}
 	entry.SetCollapsed(r.collapsed)
 	r.entry = entry

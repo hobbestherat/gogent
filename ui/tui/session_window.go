@@ -1016,8 +1016,41 @@ func (sw *SessionWindow) handleSlashCommand(text string) bool {
 	case "/goal":
 		sw.handleGoalCommand(strings.TrimSpace(strings.TrimPrefix(text, fields[0])))
 		return true
+	case "/markdown":
+		sw.handleMarkdownCommand(fields[1:])
+		return true
 	}
 	return false
+}
+
+// handleMarkdownCommand implements /markdown (issue #184): it toggles rich
+// Markdown rendering of assistant answers, or sets it explicitly with on/off. The
+// transcript is re-rendered so the change applies to existing answers too. When
+// the terminal cannot show colour the feature is forced off regardless, which the
+// note makes clear.
+func (sw *SessionWindow) handleMarkdownCommand(args []string) {
+	if len(args) > 0 {
+		switch strings.ToLower(args[0]) {
+		case "on", "true", "1":
+			richMarkdown = true
+		case "off", "false", "0":
+			richMarkdown = false
+		default:
+			sw.addNote("usage: /markdown [on|off]")
+			return
+		}
+	} else {
+		richMarkdown = !richMarkdown
+	}
+	sw.transcript.render()
+	switch {
+	case !richMarkdownColorOK:
+		sw.addNote("rich markdown unavailable (no colour); showing plain text")
+	case richMarkdown:
+		sw.addNote("rich markdown on")
+	default:
+		sw.addNote("rich markdown off (plain text)")
+	}
 }
 
 // handleGoalCommand implements the /goal command (issue #172): the harness-level
@@ -1280,6 +1313,7 @@ func (sw *SessionWindow) addAssistant(text string) {
 	sw.transcript.add(&transcriptRecord{
 		kind: kindAssistant, header: "Gogent:", color: colorAgent,
 		lines: styledChildLines(text, colorAgent),
+		rich:  true,
 	})
 }
 

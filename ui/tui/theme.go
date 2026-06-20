@@ -421,6 +421,10 @@ func ApplyTheme(t Theme) {
 	colorUser, colorAgent, colorNote = t.User, t.Agent, t.Note
 	colorTool, colorResult, colorInfo, colorError = t.Tool, t.Result, t.Info, t.Error
 
+	// Rich-Markdown rendering tracks the active palette and the terminal's colour
+	// capability (issue #184); under NO_COLOR this also auto-disables it.
+	applyMarkdownPalette(t)
+
 	chromeDesktopFG, chromeDesktopBG = t.DesktopFG, t.DesktopBG
 	chromePanelFG, chromePanelBG = t.PanelFG, t.PanelBG
 	chromeTitle, chromeDivider, chromeAccent = t.Title, t.Divider, t.Accent
