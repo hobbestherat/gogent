@@ -394,6 +394,24 @@ func main() {
 			InjectQueuedInputEnabled: func() bool {
 				return g.GetConfig().Experimental.InjectQueuedInput
 			},
+			// Harness-level supervisor (issue #172): the idle watchdog re-checks a
+			// session's /goal on each busy→idle edge and nudges it to continue while
+			// the goal is unmet, bounded by max_nudges. Off by default; the completion
+			// check runs the cheap todo short-circuit and, when needed, one lightweight
+			// model judge on the backend.
+			SupervisorEnabled: func() bool {
+				return g.GetConfig().Experimental.Supervisor
+			},
+			SupervisorMaxNudges: func() int {
+				return g.GetConfig().Supervisor.MaxNudgesOrDefault()
+			},
+			OnSupervisorCheck: func(sessionID, goal string) (bool, error) {
+				s := g.GetUserSession(sessionID)
+				if s == nil {
+					return false, nil
+				}
+				return s.GoalSatisfied(goal)
+			},
 			// @-file mention bridge (issue #46): the completer lists workspace files
 			// and expansion reads the chosen ones, both confined to the workspace via
 			// the existing FileSystem service.

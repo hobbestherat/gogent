@@ -100,6 +100,32 @@ type SessionWindow struct {
 	// the exact same send path (mention expansion, busy/transcript handling) as a
 	// hand-typed message rather than duplicating it.
 	submitFn func()
+	// goal is the session's supervisor objective set via /goal (issue #172) — the
+	// definition of "done" the idle watchdog re-checks on each busy→idle edge.
+	// Empty means no goal. nudgeCount is how many consecutive supervisor nudges
+	// have fired since the last real (non-supervisor) user message; it is reset to
+	// 0 when the user intervenes and bounded by the configured max-nudges budget.
+	// supervisorBusy guards a single in-flight async completion check so an idle
+	// edge cannot launch overlapping checks. nudgingSend marks the in-flight
+	// submit as a supervisor-originated nudge so it does not reset the budget.
+	// All four are touched only on the UI thread (the async check posts its result
+	// back via the workbench's UI queue), so they need no extra locking — matching
+	// the pending/draining fields above.
+	goal           string
+	nudgeCount     int
+	supervisorBusy bool
+	nudgingSend    bool
+	// nudgeGaveUp latches the one-time "goal still unmet after N nudges" note so
+	// the supervisor surfaces its give-up exactly once per budget, not on every
+	// subsequent idle edge. Reset together with nudgeCount when the user intervenes.
+	nudgeGaveUp bool
+	// runSupervisorCheck dispatches the completion check and applies its verdict.
+	// Production wiring (set in newSessionWindow) runs the check on a background
+	// goroutine and posts applySupervisorVerdict back onto the UI thread so a model
+	// judge never blocks the loop. Tests override it to run synchronously, since
+	// the event-loop post queue is not pumped under test. Nil disables the
+	// watchdog. Touched only on the UI thread.
+	runSupervisorCheck func(goal string)
 }
 
 // newSessionWindow builds the window, its widgets and their layout/handlers. A
@@ -273,6 +299,15 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 			return
 		}
 		input.Clear()
+		// A real (non-supervisor) user message is the user intervening, which resets
+		// the supervisor's nudge budget (issue #172): the next idle edge gets a fresh
+		// allowance of nudges. A supervisor nudge re-enters this path with nudgingSend
+		// set, so it does not reset its own budget. A drained queued message is a real
+		// user message and so does reset it.
+		if !sw.nudgingSend {
+			sw.nudgeCount = 0
+			sw.nudgeGaveUp = false
+		}
 		sw.addUser(text)
 		sw.setBusy(true)
 		sw.planPending = false // sending supersedes any plan awaiting approval
@@ -293,6 +328,10 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 	sendButton.OnPress = submit
 	input.OnSubmit = submit
 	sw.submitFn = submit
+	// Wire the supervisor's completion-check dispatcher (issue #172). The watchdog
+	// (maybeSupervise) calls it on the busy→idle edge; it runs the check off the UI
+	// thread and posts the verdict back. Tests override it to run synchronously.
+	sw.runSupervisorCheck = sw.defaultSupervisorCheck
 	sw.layer = tv.NewWindowLayer("layer-"+id, window)
 	return sw
 }
@@ -778,6 +817,12 @@ func (sw *SessionWindow) setBusy(busy bool) {
 	// draining so a drained message is not itself re-queued.
 	if wasBusy && !busy && !sw.draining {
 		sw.drainQueue()
+		// Run the supervisor's idle watchdog on the same busy→idle edge, after the
+		// queue has had its chance to drain (issue #172). drainQueue re-enters the
+		// submit path synchronously, so by here sw.busy reflects whether a queued
+		// message fired; maybeSupervise no-ops while busy/pending so a drained real
+		// message always takes precedence over a nudge.
+		sw.maybeSupervise()
 	}
 }
 
@@ -968,8 +1013,172 @@ func (sw *SessionWindow) handleSlashCommand(text string) bool {
 			sw.clearQueue("queued message cleared")
 		}
 		return true
+	case "/goal":
+		sw.handleGoalCommand(strings.TrimSpace(strings.TrimPrefix(text, fields[0])))
+		return true
 	}
 	return false
+}
+
+// handleGoalCommand implements the /goal command (issue #172): the harness-level
+// supervisor's per-session objective. With no argument it shows the current goal;
+// "/goal clear" removes it; otherwise the argument becomes the new goal. Setting
+// or clearing the goal resets the nudge budget and persists the layout so the
+// objective survives a restart. The goal is purely informational unless the
+// experimental supervisor is enabled — the note says so to keep it discoverable.
+func (sw *SessionWindow) handleGoalCommand(arg string) {
+	switch {
+	case arg == "":
+		if sw.goal == "" {
+			sw.addNote("no goal set — use /goal <text> to set one for the supervisor")
+		} else {
+			sw.addNote("goal: " + sw.goal)
+		}
+		return
+	case strings.EqualFold(arg, "clear"):
+		if sw.goal == "" {
+			sw.addNote("no goal to clear")
+			return
+		}
+		sw.goal = ""
+		sw.nudgeCount = 0
+		sw.nudgeGaveUp = false
+		sw.addNote("goal cleared")
+	default:
+		sw.goal = arg
+		sw.nudgeCount = 0
+		sw.nudgeGaveUp = false
+		if sw.supervisorEnabled() {
+			sw.addNote("goal set — the supervisor will nudge this session toward it when it goes idle: " + arg)
+		} else {
+			sw.addNote("goal set (supervisor disabled; enable experimental.supervisor to act on it): " + arg)
+		}
+	}
+	sw.wb.persistLayout()
+}
+
+// supervisorEnabled reports whether the harness-level supervisor (issue #172) is
+// enabled, defaulting to false when the handler is not wired.
+func (sw *SessionWindow) supervisorEnabled() bool {
+	if sw.wb.handlers.SupervisorEnabled == nil {
+		return false
+	}
+	return sw.wb.handlers.SupervisorEnabled()
+}
+
+// supervisorMaxNudges returns the configured consecutive-nudge budget, falling
+// back to defaultSupervisorMaxNudges when unwired or non-positive (issue #172).
+func (sw *SessionWindow) supervisorMaxNudges() int {
+	if sw.wb.handlers.SupervisorMaxNudges == nil {
+		return defaultSupervisorMaxNudges
+	}
+	if n := sw.wb.handlers.SupervisorMaxNudges(); n > 0 {
+		return n
+	}
+	return defaultSupervisorMaxNudges
+}
+
+// defaultSupervisorMaxNudges is the window-side fallback nudge budget used when
+// the SupervisorMaxNudges handler is unwired or returns a non-positive value
+// (issue #172). It mirrors config's defaultSupervisorMaxNudges.
+const defaultSupervisorMaxNudges = 3
+
+// maybeSupervise is the idle watchdog (issue #172), run on the busy→idle edge
+// after the queue has drained. It is a no-op unless the supervisor is enabled,
+// a goal is set, no message is queued/draining, and a nudge check is not already
+// in flight. With budget remaining it launches the completion check on a
+// background goroutine (a model judge must not block the UI thread) and applies
+// the verdict back on the UI thread: a met goal stops nudging, an unmet goal
+// fires a nudge turn (when budget remains) or surfaces a give-up note.
+func (sw *SessionWindow) maybeSupervise() {
+	if !sw.supervisorEnabled() || sw.goal == "" {
+		return
+	}
+	// Don't fight a draining queue, a still-busy turn, or another in-flight check;
+	// a queued real message also takes precedence over a nudge.
+	if sw.busy || sw.draining || sw.supervisorBusy || sw.pending != "" {
+		return
+	}
+	if sw.wb.handlers.OnSupervisorCheck == nil {
+		return
+	}
+	if sw.nudgeCount >= sw.supervisorMaxNudges() {
+		// Budget exhausted: stop nudging until a real user message resets it. Surface
+		// the give-up note exactly once (the latch), not on every later idle edge.
+		if !sw.nudgeGaveUp {
+			sw.nudgeGaveUp = true
+			sw.addNote(fmt.Sprintf("supervisor: goal still unmet after %d nudges — stopping", sw.supervisorMaxNudges()))
+		}
+		return
+	}
+	if sw.runSupervisorCheck == nil {
+		return
+	}
+	sw.supervisorBusy = true
+	sw.runSupervisorCheck(sw.goal)
+}
+
+// defaultSupervisorCheck is the production completion-check dispatcher (issue
+// #172): it runs OnSupervisorCheck on a background goroutine — a model judge must
+// not block the UI thread — and posts the verdict back onto the event loop so
+// applySupervisorVerdict mutates window state on the UI thread, like every other
+// session update. It is the default sw.runSupervisorCheck; tests substitute a
+// synchronous variant because the post queue is not pumped under test.
+func (sw *SessionWindow) defaultSupervisorCheck(goal string) {
+	go func() {
+		done, err := sw.wb.handlers.OnSupervisorCheck(sw.id, goal)
+		sw.wb.desktop.Post(func() {
+			sw.applySupervisorVerdict(goal, done, err)
+		})
+	}()
+}
+
+// applySupervisorVerdict consumes the completion check's result on the UI thread
+// (issue #172). It clears the in-flight guard and, when the goal is still unmet,
+// nudges or gives up against the budget. It re-validates state (the user may have
+// sent, cleared the goal, or changed it while the async check ran) so a stale
+// verdict cannot nudge a session the user has since taken over. An errored check
+// is treated as "not done" but still consumes a nudge so a persistently failing
+// check cannot loop unboundedly.
+func (sw *SessionWindow) applySupervisorVerdict(goal string, done bool, err error) {
+	sw.supervisorBusy = false
+	// The world may have moved while the check ran: the goal was cleared/changed,
+	// the user sent a new turn (busy), or a message was queued. Any of these means
+	// this verdict is stale — drop it.
+	if sw.goal != goal || sw.busy || sw.pending != "" {
+		return
+	}
+	if done && err == nil {
+		sw.addNote("supervisor: goal satisfied")
+		sw.nudgeCount = 0
+		return
+	}
+	// maybeSupervise gates the budget before dispatching the check, so a remaining
+	// allowance is the normal case here; re-guard defensively in case the budget
+	// shrank (config change) between dispatch and verdict.
+	if sw.nudgeCount >= sw.supervisorMaxNudges() {
+		return
+	}
+	sw.nudgeCount++
+	sw.nudgeSession(goal)
+}
+
+// nudgeSession submits a supervisor nudge as a new user turn (issue #172). It
+// reuses the exact send path queued input drains through (submitFn → the input
+// submit handler), so the nudge gets the same treatment as any user message and
+// starts a fresh agent loop — the watchdog fires on the busy→idle edge, after the
+// previous loop has already ended, so a new turn (not a mid-loop injection) is the
+// correct mechanism. nudgingSend marks the send so it does not reset the budget.
+func (sw *SessionWindow) nudgeSession(goal string) {
+	if sw.submitFn == nil || sw.busy {
+		return
+	}
+	text := agent.SupervisorNudge(goal)
+	sw.nudgingSend = true
+	sw.input.SetText(text)
+	sw.submitFn()
+	sw.input.Clear()
+	sw.nudgingSend = false
 }
 
 // stopTurn cancels the session's in-flight turn (issue #170) and discards any

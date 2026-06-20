@@ -22,10 +22,16 @@ type LayoutEntry struct {
 	// override — use the model config's reasoning_effort", so a layout file
 	// written before the field existed still loads cleanly.
 	Effort string `json:"effort,omitempty"`
-	X      int    `json:"x"`
-	Y      int    `json:"y"`
-	W      int    `json:"w"`
-	H      int    `json:"h"`
+	// Goal is the per-session supervisor goal set via /goal (issue #172). It
+	// persists the session's definition of "done" across restarts so the idle
+	// watchdog (when enabled) resumes supervising the same objective. Empty (the
+	// default) means no goal is set, so a layout file written before the field
+	// existed still loads cleanly.
+	Goal string `json:"goal,omitempty"`
+	X    int    `json:"x"`
+	Y    int    `json:"y"`
+	W    int    `json:"w"`
+	H    int    `json:"h"`
 }
 
 // Layout is the persisted workbench layout. The Entries slice order is the
