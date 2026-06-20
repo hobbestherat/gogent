@@ -235,6 +235,165 @@ func TestSidebarOverallBandReservation(t *testing.T) {
 	}
 }
 
+// TestSidebarTodosRegionReservation covers the issue #190 third region in
+// LayoutFn: with a focused session holding a checklist, the middle TODO region is
+// reserved above the Overall band and the tree shrinks by exactly that much. It
+// also pins the drop precedence — the TODO region drops before the band as the
+// sidebar shrinks (tree wins) — and the maxTodoRegionItems cap. With an empty
+// checklist this is all a no-op (todosBandH == 0), which the existing
+// TestSidebarOverallBandReservation already pins byte-for-byte.
+func TestSidebarTodosRegionReservation(t *testing.T) {
+	// 3 checklist items -> todoLineCount 3 -> region height 1 (title) + 3.
+	const todosH = todoRegionTitleLines + 3
+	for _, tc := range []struct {
+		name      string
+		h         int
+		wantBand  int
+		wantTodos int
+		wantTreeH int
+	}{
+		{"tall keeps band and todos", 30, overallBandHeight, todosH, 30 - 1 - overallBandHeight - todosH},
+		{"just enough for both regions + min tree", 20, overallBandHeight, todosH, minSidebarTreeHeight},
+		{"one short drops todos, keeps band", 19, overallBandHeight, 0, 19 - 1 - overallBandHeight},
+		{"very short drops both regions", 8, 0, 0, 8 - 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestSidebar()
+			s.addSession("s1", "Session 1", false)
+			s.applyTodo("s1", threeTodos())
+			s.focusSession("s1")
+			s.panel.SetBounds(tv.Rect{X: 0, Y: 0, W: defaultSidebarWidth, H: tc.h})
+
+			if s.overallBandH != tc.wantBand {
+				t.Errorf("overallBandH = %d, want %d", s.overallBandH, tc.wantBand)
+			}
+			if s.todosBandH != tc.wantTodos {
+				t.Errorf("todosBandH = %d, want %d", s.todosBandH, tc.wantTodos)
+			}
+			got := s.tree.Root().Bounds
+			if got.H != tc.wantTreeH {
+				t.Errorf("tree height = %d, want %d", got.H, tc.wantTreeH)
+			}
+		})
+	}
+}
+
+// TestSidebarTodosRegionCap pins that a checklist longer than maxTodoRegionItems
+// reserves only the capped height, so a long list cannot crowd out the tree.
+func TestSidebarTodosRegionCap(t *testing.T) {
+	s := newTestSidebar()
+	s.addSession("s1", "Session 1", false)
+	many := make([]agent.TodoItem, maxTodoRegionItems+4)
+	for i := range many {
+		many[i] = agent.TodoItem{Content: "item", Status: agent.TodoPending}
+	}
+	s.applyTodo("s1", many)
+	s.focusSession("s1")
+	s.panel.SetBounds(tv.Rect{X: 0, Y: 0, W: defaultSidebarWidth, H: 40})
+
+	want := todoRegionTitleLines + maxTodoRegionItems
+	if s.todosBandH != want {
+		t.Errorf("todosBandH = %d, want capped %d", s.todosBandH, want)
+	}
+}
+
+// TestSidebarRegionDropKeepsTreeMinimum is the "tree wins" invariant: no matter
+// the sidebar height or checklist size, a shown region (Overall band or TODOs)
+// never pushes the session tree below minSidebarTreeHeight — the region is
+// dropped first. This is the acceptance criterion "a very short sidebar drops the
+// TODO region (and/or the Overall band) before shrinking the session tree".
+func TestSidebarRegionDropKeepsTreeMinimum(t *testing.T) {
+	s := newTestSidebar()
+	s.addSession("s1", "Session 1", false)
+	s.applyTodo("s1", threeTodos())
+	s.focusSession("s1")
+	for h := 2; h <= 40; h++ {
+		s.panel.SetBounds(tv.Rect{X: 0, Y: 0, W: defaultSidebarWidth, H: h})
+		treeH := s.tree.Root().Bounds.H
+		if s.todosBandH > 0 && treeH < minSidebarTreeHeight {
+			t.Errorf("h=%d: TODO region shown (todosBandH=%d) but tree %d < min %d",
+				h, s.todosBandH, treeH, minSidebarTreeHeight)
+		}
+		if s.overallBandH > 0 && treeH < minSidebarTreeHeight {
+			t.Errorf("h=%d: Overall band shown (overallBandH=%d) but tree %d < min %d",
+				h, s.overallBandH, treeH, minSidebarTreeHeight)
+		}
+	}
+}
+
+// TestSidebarShortHeightCharacterization documents the actual drop sequence as
+// the sidebar shrinks with a 3-item checklist. It is a characterization (not a
+// spec assertion): once the panel is too short for the 11-row Overall band, the
+// band is dropped while the shorter 4-row TODO region is STILL shown, then both
+// are dropped. That middle step (band gone, todos kept) is a non-monotonic
+// priority inversion worth a future look — the Overall band is the persistent
+// global summary — but the issue's "(and/or)" acceptance permits it and the
+// plan's specified algorithm produces it. Pinned here so any change is a
+// deliberate decision.
+func TestSidebarShortHeightCharacterization(t *testing.T) {
+	for _, tc := range []struct {
+		h         int
+		wantBand  int
+		wantTodos int
+		note      string
+	}{
+		{20, overallBandHeight, todoRegionTitleLines + 3, "both regions shown"},
+		{19, overallBandHeight, 0, "todos dropped, band kept"},
+		{12, 0, todoRegionTitleLines + 3, "band dropped, todos kept (priority inversion)"},
+		{8, 0, 0, "both regions dropped"},
+	} {
+		s := newTestSidebar()
+		s.addSession("s1", "Session 1", false)
+		s.applyTodo("s1", threeTodos())
+		s.focusSession("s1")
+		s.panel.SetBounds(tv.Rect{X: 0, Y: 0, W: defaultSidebarWidth, H: tc.h})
+		if s.overallBandH != tc.wantBand || s.todosBandH != tc.wantTodos {
+			t.Errorf("h=%d (%s): overallBandH=%d todosBandH=%d, want band=%d todos=%d",
+				tc.h, tc.note, s.overallBandH, s.todosBandH, tc.wantBand, tc.wantTodos)
+		}
+	}
+}
+
+// TestSidebarOverallCountExcludesTodos is the regression guard from the issue:
+// the Overall band's session / sub-agent counts are drawn from len(s.sessions)
+// and len(s.agents), so adding a checklist never inflates the sub-agent count.
+// (Before #190, todos shared the tree but were never counted here either; this
+// pins that nothing regressed when todos moved out of the tree.)
+func TestSidebarOverallCountExcludesTodos(t *testing.T) {
+	s := newTestSidebar()
+	s.addSession("s1", "Session 1", false)
+	s.applySubAgent("s1", agent.SessionEvent{
+		Type: agent.SessionEventSubAgent, AgentID: "a1", Name: "worker", Status: agent.StatusRunning,
+	})
+	s.applyTodo("s1", threeTodos())
+
+	s.refreshOverallStats(stats.Report{}, nil)
+
+	if s.overall.Sessions != 1 {
+		t.Errorf("Sessions = %d, want 1", s.overall.Sessions)
+	}
+	if s.overall.SubAgents != 1 {
+		t.Errorf("SubAgents = %d, want 1 (todos must not be counted as sub-agents)", s.overall.SubAgents)
+	}
+	// Direct source checks: todos live in s.todos, never in s.agents.
+	if len(s.agents) != 1 {
+		t.Errorf("len(s.agents) = %d, want 1", len(s.agents))
+	}
+	if len(s.todos) != 1 {
+		t.Errorf("len(s.todos) = %d, want 1 (one session's checklist)", len(s.todos))
+	}
+	// A second session with its own todos must not move the sub-agent count.
+	s.addSession("s2", "Session 2", false)
+	s.applyTodo("s2", threeTodos())
+	s.refreshOverallStats(stats.Report{}, nil)
+	if s.overall.Sessions != 2 {
+		t.Errorf("Sessions = %d, want 2", s.overall.Sessions)
+	}
+	if s.overall.SubAgents != 1 {
+		t.Errorf("SubAgents = %d, want 1 (still only the one sub-agent)", s.overall.SubAgents)
+	}
+}
+
 // TestScheduleOverallRefreshSkipsWithoutHandler ensures the coalesced refresh is
 // a no-op when the statistics handler is absent (e.g. the workbench used without
 // a backend, or in tests), so it never arms a timer that would fire a Post onto
