@@ -17,10 +17,15 @@ type LayoutEntry struct {
 	Title     string `json:"title,omitempty"`
 	Pinned    bool   `json:"pinned,omitempty"`
 	Minimized bool   `json:"minimized,omitempty"`
-	X         int    `json:"x"`
-	Y         int    `json:"y"`
-	W         int    `json:"w"`
-	H         int    `json:"h"`
+	// Effort is the per-session reasoning-effort override chosen in the window's
+	// header selector (issue #177). Empty (the default, "(default)") means "no
+	// override — use the model config's reasoning_effort", so a layout file
+	// written before the field existed still loads cleanly.
+	Effort string `json:"effort,omitempty"`
+	X      int    `json:"x"`
+	Y      int    `json:"y"`
+	W      int    `json:"w"`
+	H      int    `json:"h"`
 }
 
 // Layout is the persisted workbench layout. The Entries slice order is the

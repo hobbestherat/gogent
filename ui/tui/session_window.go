@@ -27,7 +27,21 @@ type SessionWindow struct {
 	sendButton  *tv.Button
 	modelLabel  *tv.Label
 	modelSelect *tv.Select
-	status      *tv.Label
+	// effortLabel / effortSelect are the per-session reasoning-effort control
+	// (issue #177), right-aligned on the model header row. The selector's options
+	// are ["(default)"] + the selected model's EffortOptions; "(default)" means
+	// "no override — use the model config's reasoning_effort". effortEnabled is
+	// false for a model with no effort options (greyed out, click/keys ignored).
+	// effortHidden is true on windows too narrow to show the control without
+	// overlapping the model selector.
+	effortLabel   *tv.Label
+	effortSelect  *tv.Select
+	effortEnabled bool
+	effortHidden  bool
+	// effortLabelEnabledFG remembers the themed label colour so the greyed-out
+	// state (a model with no effort options) can be restored to it.
+	effortLabelEnabledFG tui.Color
+	status               *tv.Label
 	// readOnly marks a static analysis window opened from the Sessions browser
 	// (issue #58): it renders a saved transcript with the full search/filter/
 	// fold/yank toolkit but has no input, model selector or live backend session,
@@ -161,15 +175,31 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 	modelLabel := tv.NewLabel("Model", tv.Rect{})
 	modelSelect := tv.NewSelect(wb.desktop, wb.modelNames, tv.Rect{})
 	modelLabel.SetTarget(modelSelect)
+	effortLabel := tv.NewLabel("Effort", tv.Rect{})
+	effortSelect := tv.NewSelect(wb.desktop, []string{effortDefaultOption}, tv.Rect{})
+	effortLabel.SetTarget(effortSelect)
 	status := tv.NewLabel("idle", tv.Rect{})
 	status.FG = colorNote
 	sw.input = input
 	sw.sendButton = sendButton
 	sw.modelLabel = modelLabel
 	sw.modelSelect = modelSelect
+	sw.effortLabel = effortLabel
+	sw.effortSelect = effortSelect
+	sw.effortLabelEnabledFG = effortLabel.FG
+	// The effort selector only opens while enabled (a model with effort options):
+	// wrap its click/key handlers so a greyed-out control is inert (issue #177).
+	sw.guardEffortSelect()
 	// A model change in the focused session moves the Overall panel's "model"/"api"
-	// rows (issue #107); coalesce the refresh rather than paying for one per pick.
-	modelSelect.OnChange = func(int) { wb.scheduleOverallRefresh() }
+	// rows (issue #107) and rebuilds the per-session effort options + enabled state
+	// for the newly selected model (issue #177); coalesce the Overall refresh rather
+	// than paying for one per pick.
+	modelSelect.OnChange = func(int) {
+		sw.rebuildEffortOptions()
+		wb.scheduleOverallRefresh()
+	}
+	// Seed the effort options from the initially selected model.
+	sw.rebuildEffortOptions()
 	sw.status = status
 	sw.statusState = "idle"
 	window.AddContent(history)
@@ -177,6 +207,8 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 	window.AddContent(sendButton)
 	window.AddContent(modelLabel)
 	window.AddContent(modelSelect)
+	window.AddContent(effortLabel)
+	window.AddContent(effortSelect)
 	window.AddContent(status)
 	window.Content.LayoutFn = func(c *tv.VisualComponent) {
 		wd := c.Bounds.W
@@ -188,6 +220,7 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 		selW := headerSelectWidth(sw.wb.longestModelNameWidth(), wd)
 		modelLabel.Component.SetBounds(tv.Rect{X: 0, Y: 0, W: 6, H: 1})
 		modelSelect.Component.SetBounds(tv.Rect{X: 7, Y: 0, W: selW, H: 1})
+		sw.layoutEffortControl(wd, 7+selW)
 		history.Component.SetBounds(tv.Rect{X: 0, Y: 1, W: wd, H: ht - inputH - 2})
 		status.Component.SetBounds(tv.Rect{X: 0, Y: ht - inputH - 1, W: wd, H: 1})
 		input.Component.SetBounds(tv.Rect{X: 0, Y: ht - inputH, W: wd - 10, H: inputH})
@@ -244,6 +277,7 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 		sw.setBusy(true)
 		sw.planPending = false // sending supersedes any plan awaiting approval
 		modelName := sw.selectedModelName()
+		effort := sw.selectedEffort()
 		// Expand any @-file mentions into attached file content so the model
 		// receives the referenced files directly (issue #46). The transcript keeps
 		// the message as typed; a note records what was attached.
@@ -253,7 +287,7 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 			sw.addNote("attached " + strings.Join(attached, ", "))
 		}
 		if wb.handlers.OnSend != nil {
-			go wb.handlers.OnSend(sw.id, message, modelName)
+			go wb.handlers.OnSend(sw.id, message, modelName, effort)
 		}
 	}
 	sendButton.OnPress = submit
@@ -489,6 +523,167 @@ func (sw *SessionWindow) selectedModelName() string {
 }
 func (sw *SessionWindow) selectedModelConfig() *config.ModelConfig {
 	return sw.wb.modelByDisplayName(sw.modelSelect.Value())
+}
+
+// effortDefaultOption is the always-present first option of the effort selector
+// (issue #177). It means "no override — use the model config's reasoning_effort";
+// selectedEffort maps it to the empty string.
+const effortDefaultOption = "(default)"
+
+// effortLabelWidth is the width reserved for the "Effort" label to the left of the
+// effort selector on the header row.
+const effortLabelWidth = 7
+
+// selectedEffort returns the per-session reasoning-effort override for the current
+// selection (issue #177): the picked effort value, or "" for the "(default)"
+// option (and for a disabled/empty selector), meaning "use the model config's
+// reasoning_effort".
+func (sw *SessionWindow) selectedEffort() string {
+	if sw == nil || sw.effortSelect == nil || !sw.effortEnabled {
+		return ""
+	}
+	v := sw.effortSelect.Value()
+	if v == effortDefaultOption {
+		return ""
+	}
+	return v
+}
+
+// rebuildEffortOptions repopulates the effort selector from the currently selected
+// model's EffortOptions (issue #177): the options become ["(default)"] + those
+// values, and the control is enabled only when the model offers any. It is called
+// when the window is built and whenever the model selector changes, so the effort
+// choices always match the active model. A selector with no model options is left
+// showing just "(default)" and greyed out — its effort is then a no-op the request
+// gate would drop anyway. The previously selected value is preserved when it is
+// still offered, otherwise the selection resets to "(default)".
+func (sw *SessionWindow) rebuildEffortOptions() {
+	if sw.effortSelect == nil {
+		return
+	}
+	prev := sw.effortSelect.Value()
+	options := []string{effortDefaultOption}
+	if cfg := sw.selectedModelConfig(); cfg != nil {
+		options = append(options, cfg.EffortOptions...)
+	}
+	sw.effortSelect.Options = options
+	sw.effortEnabled = len(options) > 1
+	// Grey the label alongside the selector when there is no effort to choose.
+	if sw.effortLabel != nil {
+		if sw.effortEnabled {
+			sw.effortLabel.FG = sw.effortLabelEnabledFG
+		} else {
+			sw.effortLabel.FG = colorNote
+		}
+	}
+	// Preserve the prior pick when the new model still offers it; otherwise fall
+	// back to "(default)" (index 0).
+	sw.effortSelect.Selected = 0
+	for i, opt := range options {
+		if opt == prev {
+			sw.effortSelect.Selected = i
+			break
+		}
+	}
+}
+
+// applyEffort selects a persisted effort value if the current model offers it
+// (issue #177). An empty value (or one no longer offered, e.g. after the model's
+// effort set changed) leaves the selector on "(default)". It assumes the options
+// are already built for the current model (rebuildEffortOptions ran first).
+func (sw *SessionWindow) applyEffort(effort string) {
+	if sw.effortSelect == nil || effort == "" || !sw.effortEnabled {
+		return
+	}
+	for i, opt := range sw.effortSelect.Options {
+		if opt == effort {
+			sw.effortSelect.Selected = i
+			return
+		}
+	}
+}
+
+// guardEffortSelect wraps the effort selector's click and key handlers so a
+// disabled (greyed-out) control is inert: it cannot be opened, so a model with no
+// effort options offers no misleading interaction (issue #177). The wrapped
+// handlers fall through to the base behaviour while the control is enabled.
+func (sw *SessionWindow) guardEffortSelect() {
+	c := sw.effortSelect.Component
+	// Remember the themed enabled colour so the disabled-grey draw can restore it.
+	enabledFG := sw.effortSelect.FG
+	baseClick := c.OnClickFn
+	c.OnClickFn = func(vc *tv.VisualComponent, event tui.ClickEvent) bool {
+		if !sw.effortEnabled {
+			return true // swallow the click; a disabled control does nothing
+		}
+		if baseClick != nil {
+			return baseClick(vc, event)
+		}
+		return false
+	}
+	baseType := c.OnTypeFn
+	c.OnTypeFn = func(vc *tv.VisualComponent, event tui.TypeEvent) bool {
+		if !sw.effortEnabled {
+			return false
+		}
+		if baseType != nil {
+			return baseType(vc, event)
+		}
+		return false
+	}
+	// Grey out the value text when disabled by wrapping the draw.
+	baseDraw := c.DrawFn
+	c.DrawFn = func(vc *tv.VisualComponent, surface tv.Surface) {
+		if !sw.effortEnabled {
+			sw.effortSelect.FG = colorNote
+		} else {
+			sw.effortSelect.FG = enabledFG
+		}
+		if baseDraw != nil {
+			baseDraw(vc, surface)
+		}
+	}
+}
+
+// layoutEffortControl positions the right-aligned effort label + selector on the
+// header row (issue #177). It pins the selector to the window's right edge and the
+// label just to its left, mirroring the proposed geometry in the issue. On a
+// window too narrow to show the control without overlapping the model selector
+// (whose right edge is modelRight) it hides the control entirely (zero-width
+// bounds) so the two never collide.
+func (sw *SessionWindow) layoutEffortControl(wd, modelRight int) {
+	if sw.effortSelect == nil || sw.effortLabel == nil {
+		return
+	}
+	effW := effortSelectWidth(wd)
+	selX := wd - effW - 1
+	labelX := selX - effortLabelWidth
+	// Hide when the label would overlap (or touch) the model selector's right edge,
+	// leaving a one-cell gap between them.
+	if labelX <= modelRight {
+		sw.effortHidden = true
+		sw.effortSelect.Component.SetBounds(tv.Rect{})
+		sw.effortLabel.Component.SetBounds(tv.Rect{})
+		return
+	}
+	sw.effortHidden = false
+	sw.effortSelect.Component.SetBounds(tv.Rect{X: selX, Y: 0, W: effW, H: 1})
+	sw.effortLabel.Component.SetBounds(tv.Rect{X: labelX, Y: 0, W: effortLabelWidth, H: 1})
+}
+
+// effortSelectWidth sizes the header effort dropdown (issue #177). It is a small
+// fixed width sufficient for the values it shows ("(default)", "high", "max", and
+// the longer OpenAI sets like "minimal"/"medium"), clamped to the room available
+// in the window so it never runs off a narrow window.
+func effortSelectWidth(windowWidth int) int {
+	const w = 11 // fits "(default)" (9) + value pad + ▼ glyph
+	if max := windowWidth - 1; w > max {
+		if max < 1 {
+			return 1
+		}
+		return max
+	}
+	return w
 }
 
 // enqueue stows a message typed while the agent is busy as the session's single

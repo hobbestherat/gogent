@@ -1903,6 +1903,17 @@ func (g *Gogent) SendMessageToSession(ctx context.Context, sessionID, agentID, m
 // bounds the (potentially long) task loop: cancelling it — e.g. when an HTTP
 // client disconnects — aborts the in-flight model work (issue #24).
 func (g *Gogent) SendMessageToSessionWithModel(ctx context.Context, sessionID, agentID, message, modelName string) (*model.CompletionResponse, error) {
+	return g.SendMessageToSessionWithModelAndEffort(ctx, sessionID, agentID, message, modelName, "")
+}
+
+// SendMessageToSessionWithModelAndEffort is SendMessageToSessionWithModel plus a
+// per-request reasoning-effort override (issue #177). A non-empty effort takes
+// precedence over the selected model config's ReasoningEffort for this turn only;
+// an empty effort falls back to the model config default. The override is applied
+// to a shallow copy of the model config (never the shared g.config), and the
+// existing provider gate still drops the parameter where unsupported — so an
+// effort sent to a model without supportsReasoningEffort is silently ignored.
+func (g *Gogent) SendMessageToSessionWithModelAndEffort(ctx context.Context, sessionID, agentID, message, modelName, effort string) (*model.CompletionResponse, error) {
 	g.mu.RLock()
 	userSession, exists := g.userSessions[sessionID]
 	cfg := g.config
@@ -1947,6 +1958,16 @@ func (g *Gogent) SendMessageToSessionWithModel(ctx context.Context, sessionID, a
 				break
 			}
 		}
+	}
+
+	// Apply the per-session reasoning-effort override (issue #177) onto a shallow
+	// copy of the model config so the shared g.config is never mutated. The
+	// provider gate in buildRequest still drops reasoning_effort where unsupported,
+	// so overriding a model without supportsReasoningEffort is a safe no-op.
+	if effort != "" && selectedConfig != nil {
+		override := *selectedConfig
+		override.ReasoningEffort = effort
+		selectedConfig = &override
 	}
 
 	// Point the agent's existing session at the selected model, preserving the

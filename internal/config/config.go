@@ -38,6 +38,14 @@ type ModelConfig struct {
 	// parameter to max_completion_tokens and drops the (rejected) temperature on
 	// OpenAI reasoning tiers. Empty omits the parameter.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// EffortOptions lists the reasoning_effort values this model accepts, taken
+	// from models.dev reasoning_options (type "effort"). It drives the
+	// per-session effort selector (issue #177): its options are
+	// ["(default)"] + EffortOptions, where "(default)" means "no override — use
+	// this model's ReasoningEffort". Empty => no effort control: the selector is
+	// greyed out for this model (a toggle-type reasoning, reasoning:false, or a
+	// provider without supportsReasoningEffort).
+	EffortOptions []string `json:"effort_options,omitempty"`
 	// Thinking toggles chain-of-thought reasoning on providers that expose an
 	// explicit switch (Z.AI GLM-4.5+, sent as thinking:{type:enabled|disabled}).
 	// nil leaves the parameter unset (provider default); a non-nil value forces
@@ -696,7 +704,9 @@ func GetDefaultConfig() *Config {
 				// [high, max]. "high" gives strong coding reasoning without the
 				// latency/cost of max. Safe on zai (keeps max_tokens/temperature).
 				ReasoningEffort: "high",
-				Free:            false,
+				// models.dev reasoning_options for glm-5.2 (type "effort").
+				EffortOptions: []string{"high", "max"},
+				Free:          false,
 			},
 		},
 	}
