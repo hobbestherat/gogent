@@ -73,6 +73,22 @@ type transcriptRecord struct {
 	// so copy/export/search are unchanged; the styled rendering is derived from it
 	// at render time. Set for assistant answers.
 	rich bool
+	// styled caches the rendered Markdown spans for a rich record so re-renders
+	// (search-as-you-type, filter toggles, trims) do not re-parse and re-tokenise.
+	// styledGen records the palette generation it was built with; a theme change
+	// bumps mdPaletteGen and invalidates the cache.
+	styled    [][]tv.StyledSpan
+	styledGen uint64
+}
+
+// markdownSpans returns the record's rendered Markdown lines, computing and
+// caching them on first use and recomputing them after a theme change.
+func (r *transcriptRecord) markdownSpans() [][]tv.StyledSpan {
+	if r.styled == nil || r.styledGen != mdPaletteGen {
+		r.styled = renderMarkdown(r.body())
+		r.styledGen = mdPaletteGen
+	}
+	return r.styled
 }
 
 // matches reports whether the record's header or any child line contains query
@@ -204,15 +220,18 @@ func (m *transcriptModel) trim() {
 // renderOne appends a single record's entry (and its children) to the view,
 // recording the live entry on the record.
 //
-// A rich record (an assistant answer, when rich Markdown is enabled) renders its
-// header as a plain entry and its body as top-level styled lines derived from the
-// raw text — turbotui styles only top-level entries, so a rich body is not a
-// foldable child of its header. Every other record uses the flat children path,
-// which keeps folding and is the fallback in plain/no-colour mode.
+// An expanded rich record (an assistant answer, when rich Markdown is enabled)
+// renders its header as a plain entry and its body as top-level styled lines
+// derived from the raw text — turbotui styles only top-level entries, so a styled
+// body cannot be a foldable child of its header. A collapsed rich record instead
+// uses the flat children path so it can actually fold (fold-all re-renders, see
+// setFold); since the body is hidden when collapsed, losing the styling there is
+// invisible. Every other record always uses the flat children path, which keeps
+// folding and is the fallback in plain/no-colour mode.
 func (m *transcriptModel) renderOne(r *transcriptRecord) {
 	entry := m.view.AddColored(r.header, r.color)
-	if r.rich && richMarkdownEnabled() {
-		for _, spans := range renderMarkdown(r.body()) {
+	if r.rich && richMarkdownEnabled() && !r.collapsed {
+		for _, spans := range r.markdownSpans() {
 			m.view.AddStyled(spans)
 		}
 	} else {
@@ -243,9 +262,20 @@ func (m *transcriptModel) render() {
 }
 
 // appendLine grows a record's children, mirroring the change into the live entry
-// when it is currently rendered.
+// when it is currently rendered. A rich record's body is not made of children of
+// r.entry (it renders as styled top-level entries), so appending live would
+// attach an orphan child under the header; rich records are added whole and never
+// streamed, but invalidate the styled cache and re-render defensively to stay
+// correct if that ever changes.
 func (m *transcriptModel) appendLine(r *transcriptRecord, ln styledLine) {
 	r.lines = append(r.lines, ln)
+	if r.rich {
+		r.styled = nil
+		if r.entry != nil {
+			m.render()
+		}
+		return
+	}
 	if r.entry != nil {
 		r.entry.AddColored(ln.text, ln.color)
 	}
@@ -286,8 +316,28 @@ func (m *transcriptModel) showAll() {
 	m.render()
 }
 
-// setFold collapses or expands every record (fold/unfold all).
+// setFold collapses or expands every record (fold/unfold all). A rich record
+// renders its body as styled top-level entries when expanded but as foldable
+// children when collapsed (see renderOne), so toggling one needs a full re-render
+// to switch forms; the cheap in-place path is kept when no rich record is
+// affected (plain mode, or no assistant answers).
 func (m *transcriptModel) setFold(collapsed bool) {
+	needRender := false
+	if richMarkdownEnabled() {
+		for _, r := range m.records {
+			if r.rich && r.collapsed != collapsed {
+				needRender = true
+				break
+			}
+		}
+	}
+	if needRender {
+		for _, r := range m.records {
+			r.collapsed = collapsed
+		}
+		m.render()
+		return
+	}
 	for _, r := range m.records {
 		m.setCollapsed(r, collapsed)
 	}

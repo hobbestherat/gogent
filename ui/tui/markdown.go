@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"html"
 	"strconv"
 	"strings"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
+	extast "github.com/yuin/goldmark/extension/ast"
 	"github.com/yuin/goldmark/text"
 )
 
@@ -77,9 +79,16 @@ var mdPalette = markdownPalette{
 // auto-disables there. It defaults true to match the coloured default palette.
 var richMarkdownColorOK = true
 
+// mdPaletteGen is bumped whenever the rich-Markdown palette changes (a theme is
+// applied). Cached per-record styled spans record the generation they were
+// rendered with and are recomputed when it no longer matches, so a theme switch
+// recolours existing answers.
+var mdPaletteGen uint64
+
 // applyMarkdownPalette derives the rich-Markdown palette from a resolved Theme
 // and records whether colour is available. Called from ApplyTheme.
 func applyMarkdownPalette(t Theme) {
+	mdPaletteGen++
 	mdPalette = markdownPalette{
 		text:       t.Agent,
 		heading:    t.Info,
@@ -144,6 +153,12 @@ func (s mdStyle) withFG(c tui.Color) mdStyle {
 // The concatenation of a line's span texts is NOT guaranteed to equal the source
 // line — inline markers are stripped and fenced code is re-tokenised — so callers
 // must keep the original Markdown as the source of truth for copy and export.
+//
+// The supported subset is headings, emphasis, inline code, blockquotes, lists,
+// fenced/indented code (chroma-highlighted), tables and thematic breaks. GFM
+// strikethrough and task-list checkboxes are parsed but intentionally flattened
+// to plain text — turbotui has no strikethrough attribute and they are outside
+// this issue's subset.
 func renderMarkdown(src string) [][]tv.StyledSpan {
 	md := goldmark.New(goldmark.WithExtensions(extension.GFM))
 	source := []byte(src)
@@ -204,10 +219,13 @@ func (r *markdownRenderer) blockLines(n ast.Node) [][]tv.StyledSpan {
 		return r.quoteLines(node)
 	case *ast.List:
 		return r.listLines(node, 0)
+	case *extast.Table:
+		return r.tableLines(node)
 	case *ast.ThematicBreak:
 		return [][]tv.StyledSpan{{r.base().withFG(r.pal.rule).span(strings.Repeat("─", 24))}}
 	default:
-		// Unknown / HTML block: fall back to its raw text, one span per line.
+		// Unknown / HTML block: fall back to its raw source lines (preserving line
+		// structure and any literal markup) rather than garbling it.
 		return r.rawLines(n)
 	}
 }
@@ -233,14 +251,20 @@ func (r *markdownRenderer) inlineLines(n ast.Node, base mdStyle) [][]tv.StyledSp
 		for c := node.FirstChild(); c != nil; c = c.NextSibling() {
 			switch child := c.(type) {
 			case *ast.Text:
-				add(st, string(child.Segment.Value(r.src)))
+				// Decode HTML entities (&amp; → &) for display only; the raw Markdown
+				// is preserved separately for copy/export.
+				add(st, html.UnescapeString(string(child.Segment.Value(r.src))))
 				if child.HardLineBreak() || child.SoftLineBreak() {
 					flush()
 				}
 			case *ast.String:
-				add(st, string(child.Value))
+				add(st, html.UnescapeString(string(child.Value)))
 			case *ast.CodeSpan:
-				add(r.base().withFG(r.pal.code), r.collectText(child))
+				// Inline code keeps the code colour but inherits the surrounding
+				// emphasis (bold/italic) so `code` inside **bold** stays bold.
+				cs := st
+				cs.fg, cs.hasFG = r.pal.code, true
+				add(cs, r.collectText(child))
 			case *ast.Emphasis:
 				es := st
 				if child.Level >= 2 {
@@ -313,7 +337,9 @@ func (r *markdownRenderer) listLines(list *ast.List, depth int) [][]tv.StyledSpa
 			glyph = "• "
 		}
 		lead := indent + glyph
-		cont := indent + strings.Repeat(" ", len([]rune(glyph)))
+		// Size the continuation indent by the marker's terminal width, not its rune
+		// count, so a wide bullet glyph still aligns wrapped/continued lines.
+		cont := indent + strings.Repeat(" ", tui.StringWidth(glyph))
 
 		lines := r.itemLines(item, depth)
 		for i, line := range lines {
@@ -337,6 +363,61 @@ func (r *markdownRenderer) itemLines(item ast.Node, depth int) [][]tv.StyledSpan
 			continue
 		}
 		out = append(out, r.blockLines(c)...)
+	}
+	return out
+}
+
+// tableLines renders a GFM table: the header row (bold), a dashed rule, then the
+// data rows. Cells are separated by a dim " │ " so the column structure stays
+// legible; cell inline content (emphasis, code) is rendered normally. Cells are
+// not column-aligned — the transcript soft-wraps — but the pipes and per-row
+// layout are preserved so the table reads as a table rather than a run-on.
+func (r *markdownRenderer) tableLines(tbl ast.Node) [][]tv.StyledSpan {
+	sep := r.base().withFG(r.pal.rule)
+	var out [][]tv.StyledSpan
+	row := func(cells ast.Node, header bool) {
+		var line []tv.StyledSpan
+		i := 0
+		for cell := cells.FirstChild(); cell != nil; cell = cell.NextSibling() {
+			if i > 0 {
+				line = append(line, sep.span(" │ "))
+			}
+			st := r.base()
+			st.bold = header
+			line = append(line, r.inlineSpans(cell, st)...)
+			i++
+		}
+		out = append(out, line)
+	}
+	for child := tbl.FirstChild(); child != nil; child = child.NextSibling() {
+		switch node := child.(type) {
+		case *extast.TableHeader:
+			row(node, true)
+			width := 0
+			for _, span := range out[len(out)-1] {
+				width += tui.StringWidth(span.Text)
+			}
+			if width < 3 {
+				width = 3
+			}
+			out = append(out, []tv.StyledSpan{sep.span(strings.Repeat("─", width))})
+		case *extast.TableRow:
+			row(node, false)
+		}
+	}
+	return out
+}
+
+// inlineSpans renders a node's inline content into a single styled line, joining
+// any soft-wrapped sub-lines with a space. Used for table cells, which must stay
+// on one logical line.
+func (r *markdownRenderer) inlineSpans(n ast.Node, base mdStyle) []tv.StyledSpan {
+	var out []tv.StyledSpan
+	for i, line := range r.inlineLines(n, base) {
+		if i > 0 {
+			out = append(out, base.span(" "))
+		}
+		out = append(out, line...)
 	}
 	return out
 }
@@ -392,6 +473,23 @@ func (r *markdownRenderer) highlight(code, lang string) [][]tv.StyledSpan {
 	if n := len(lines); n > 0 && len(lines[n-1]) == 0 {
 		lines = lines[:n-1]
 	}
+	return r.fillBlankCodeLines(lines)
+}
+
+// fillBlankCodeLines gives interior blank lines of a code block a single
+// background-painted space so the block reads as one continuous panel rather than
+// being split by background-less gaps. Only applied when a code background is in
+// effect.
+func (r *markdownRenderer) fillBlankCodeLines(lines [][]tv.StyledSpan) [][]tv.StyledSpan {
+	if !r.pal.hasCodeBG {
+		return lines
+	}
+	blank := r.codeStyle().span(" ")
+	for i := range lines {
+		if len(lines[i]) == 0 {
+			lines[i] = []tv.StyledSpan{blank}
+		}
+	}
 	return lines
 }
 
@@ -407,7 +505,7 @@ func (r *markdownRenderer) plainCode(code string) [][]tv.StyledSpan {
 		}
 		out = append(out, []tv.StyledSpan{st.span(line)})
 	}
-	return out
+	return r.fillBlankCodeLines(out)
 }
 
 // codeStyle is the base style for code: code foreground on the code background.
@@ -448,14 +546,29 @@ func (r *markdownRenderer) tokenStyle(tt chroma.TokenType) mdStyle {
 	return st
 }
 
-// rawLines renders an unrecognised block as plain text, one span per line, in the
-// body colour. Used for HTML blocks and any node type not explicitly handled.
+// rawLines renders an unrecognised block as plain text in the body colour. It
+// prefers the node's raw source lines (preserving line structure and any literal
+// markup, e.g. an HTML block) and falls back to concatenated descendant text when
+// the node exposes no source lines. Used for HTML blocks and any node type not
+// explicitly handled.
 func (r *markdownRenderer) rawLines(n ast.Node) [][]tv.StyledSpan {
+	st := r.base()
+	if src := n.Lines(); src != nil && src.Len() > 0 {
+		var b strings.Builder
+		for i := 0; i < src.Len(); i++ {
+			seg := src.At(i)
+			b.Write(seg.Value(r.src))
+		}
+		var out [][]tv.StyledSpan
+		for _, line := range strings.Split(strings.TrimRight(b.String(), "\n"), "\n") {
+			out = append(out, []tv.StyledSpan{st.span(line)})
+		}
+		return out
+	}
 	txt := r.collectText(n)
 	if txt == "" {
 		return nil
 	}
-	st := r.base()
 	var out [][]tv.StyledSpan
 	for _, line := range strings.Split(txt, "\n") {
 		out = append(out, []tv.StyledSpan{st.span(line)})
