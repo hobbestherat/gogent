@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -337,8 +338,11 @@ func TestExitGuardRemote(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var fired bool
-			h := newHTTPHandler(&fakeBackend{}, tc.token, func() { fired = true })
+			// shutdown runs in a goroutine (go shutdown() in the /exit handler),
+			// so the flag it sets is read concurrently with this test goroutine;
+			// use an atomic to keep that access race-free.
+			var fired atomic.Bool
+			h := newHTTPHandler(&fakeBackend{}, tc.token, func() { fired.Store(true) })
 
 			req := httptest.NewRequest(http.MethodPost, "/exit", nil)
 			req.RemoteAddr = "203.0.113.7:54321" // non-loopback
@@ -354,7 +358,7 @@ func TestExitGuardRemote(t *testing.T) {
 			// shutdown runs in a goroutine; give it a moment when expected.
 			if tc.wantFired {
 				deadline := time.After(time.Second)
-				for !fired {
+				for !fired.Load() {
 					select {
 					case <-deadline:
 						t.Fatal("shutdown not invoked")
@@ -362,7 +366,7 @@ func TestExitGuardRemote(t *testing.T) {
 						time.Sleep(time.Millisecond)
 					}
 				}
-			} else if fired {
+			} else if fired.Load() {
 				t.Fatal("shutdown fired when it should not have")
 			}
 		})
@@ -517,7 +521,7 @@ func TestHTTPSessionRegistryEvicts(t *testing.T) {
 	// Refresh "b" so it is much newer than "c", then advance the clock to a point
 	// where "c" is idle past the TTL but "b" is not: only "c" should be reclaimed.
 	now = time.Unix(1050, 0)
-	reg.touch("b")            // b:1050, c:1002
+	reg.touch("b")           // b:1050, c:1002
 	now = time.Unix(1070, 0) // c idle 68s (>60s), b idle 20s (<=60s)
 	reg.touch("d")
 
