@@ -34,8 +34,8 @@ wired through the agent via progressive disclosure:
       system prompt through a system-context provider.
 - [x] A `skill` tool lets the model load a skill's full `SKILL.md` on demand; usage
       (success/failure) is recorded per skill.
-- [x] `activate`/`deactivate` and usage stats are surfaced in the TUI (Config →
-      Skills…).
+- [x] `activate`/`deactivate` and usage stats are surfaced in the TUI's Resources
+      browser (Config → Resources…), alongside the registered tools.
 - [x] Invocation model decided: progressive disclosure (index in prompt + `skill`
       tool), the standard for agent skills.
 
@@ -63,29 +63,35 @@ Current compression is rudimentary and needs a proper rewrite:
 - [ ] Trigger on token-budget thresholds, preserve recent turns + tool results,
       and keep the summary in-context across model switches.
 
-## 6. Provider-specific request parameters (thinking, reasoning effort, …) (MEDIUM)
+## 6. Provider-specific request parameters (thinking, reasoning effort, …) — DONE (issue #31)
 
-The connector currently sends a fixed OpenAI-style request (messages, temperature,
-max_tokens, tools). Some providers expose extra controls we should surface in the
-model config + editor, gated by `api_type` so they only appear where supported:
+The connector previously sent a fixed OpenAI-style request (messages, temperature,
+max_tokens, tools), which 400s on current-gen reasoning models. Now resolved:
 
-- [ ] **Z.AI** (`api_type: "zai"`, see https://docs.z.ai/api-reference/llm/chat-completion):
-  - `thinking` — `{ "type": "enabled" | "disabled" }` to toggle chain-of-thought
-    (GLM-4.5+); plus `clear_thinking` for cross-turn reasoning retention.
-  - `reasoning_effort` — `max | xhigh | high | medium | low | minimal | none`
-    (GLM-5.2), takes effect when thinking is enabled.
-  - `do_sample`, `top_p` (already in config but not always sent).
-- [ ] Add the corresponding fields to `config.ModelConfig` (e.g. a small,
-      provider-namespaced `params`/`extra` map, or typed `thinking`/`reasoning_effort`
-      fields) and thread them into `CompletionRequest` only for matching providers.
-- [ ] Editor UI: show "Thinking" (on/off) and "Reasoning effort" (dropdown) when
-      `api_type` supports them; hide otherwise.
+- [x] Per-provider request capabilities live on `providerSpec` (`internal/model/provider.go`):
+      reasoning models use `max_completion_tokens` (OpenAI o-series / GPT-5) and drop the
+      rejected `temperature`; `reasoning_effort`/`thinking` are emitted only where supported.
+- [x] Typed `reasoning_effort` and `thinking` fields on `config.ModelConfig`, threaded into
+      `CompletionRequest` (`buildRequest`) and gated by `api_type`. Z.AI sends
+      `thinking: {type: enabled|disabled}` + `reasoning_effort`; `top_p` is now sent when set.
+- [x] Numeric request params (`temperature`/`top_p`/`max_tokens`/`max_completion_tokens`) are
+      pointers so a deliberate `0` is expressible and "unset" omits the field.
+- [x] `completion_tokens_details.reasoning_tokens` is parsed into `TokenUsage.ReasoningTokens`.
+- [x] Editor UI exposes "Reasoning:" (effort) and "Thinking:" (default/on/off).
+
+Remaining / future:
+- [ ] Z.AI `clear_thinking` (cross-turn reasoning retention) and `do_sample`.
+- [ ] Hide the reasoning fields in the editor for providers that don't support them
+      (currently always shown — harmless, but could be gated on `api_type`).
 
 ## 7. Smaller items
 
 - [ ] Reconcile docs/README: confirm shell/file safety story everywhere.
-- [ ] Hook event types (`HookResponseComplete`, `HookError`, `HookStateChange`,
-      `HookCompression`) are defined but unused — wire them or trim them.
+- [x] Hook event types (`HookResponseComplete`, `HookError`, `HookStateChange`,
+      `HookCompression`) are now wired (issue #47): a turn fires
+      `HookStateChange` (thinking→idle on the root agent), `HookResponseComplete`
+      / `HookError` at the turn boundary, and `HookCompression` is bridged off the
+      model session's existing compaction callback.
 - [ ] Tests that hit a live endpoint (e.g. `TestUserSessionSendMessage`) should
       be skipped/mocked when no model server is available.
 - [ ] HTTP server mode: document and test the API surface (`/health`, `/message`,
@@ -95,6 +101,7 @@ model config + editor, gated by `api_type` so they only appear where supported:
 
 - [x] Enable `Resizable` on session windows using turbotv's built-in support
 - [x] Enable `Minimizable` on session windows for collapse/expand functionality
+- [x] Enable `Maximizable` on session windows (maximize/restore button; fills desktop minus the sidebar)
 - [x] Add `WindowConfig` to config package with configurable `MinWidth`/`MinHeight`
 - [x] Document window scaling features in README
 

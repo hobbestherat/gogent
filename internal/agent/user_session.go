@@ -1,8 +1,10 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -35,7 +37,38 @@ const (
 	// SessionEventCompaction reports that the context was compressed; Text holds
 	// the structured summary and Step carries the post-compaction token estimate.
 	SessionEventCompaction SessionEventType = "compaction"
+	// SessionEventUsage carries a fresh SessionStats snapshot, emitted after each
+	// model round-trip so UIs can render live per-session token/turn/context usage
+	// (e.g. a status bar) without polling the session.
+	SessionEventUsage SessionEventType = "usage"
+	// SessionEventTodo carries an updated task checklist (issue #43). The list is
+	// the session's current todo state, rendered in the sidebar.
+	SessionEventTodo SessionEventType = "todo"
+	// SessionEventPlan carries a proposed plan produced in plan mode, awaiting the
+	// user's approval before the agent executes it (issue #43).
+	SessionEventPlan SessionEventType = "plan"
 )
+
+// SessionStats is a point-in-time, mutex-free snapshot of a session's per-session
+// statistics. It is what UIs render as a compact status line (tokens, turns,
+// context usage) and is carried by SessionEventUsage.
+type SessionStats struct {
+	// Turns is the number of completed user turns (top-level task loops).
+	Turns int
+	// TokensIn / TokensOut are the cumulative prompt/completion token totals for
+	// the session's primary model, including tokens spent by its sub-agents.
+	TokensIn  int
+	TokensOut int
+	// ToolCalls is the total number of tool executions in the session.
+	ToolCalls int
+	// ContextTokens is the root agent's current context size in tokens; the
+	// figure a status bar shows as a percentage of ContextWindow and the
+	// early-warning before context compaction (see issue #4).
+	ContextTokens int
+	// ContextWindow is the root agent's configured context budget in tokens. Zero
+	// means unknown, in which case ContextTokens carries no percentage.
+	ContextWindow int
+}
 
 // SessionEvent is a single observable update from a running task loop. UIs use
 // these to render live, foldable detail (thoughts, tool calls, results).
@@ -54,6 +87,14 @@ type SessionEvent struct {
 	Name    string
 	Status  AgentStatus
 	Kind    SubAgentKind
+
+	// Stats carries a fresh SessionStats snapshot on SessionEventUsage.
+	Stats SessionStats
+
+	// Todos carries the session's current task checklist on SessionEventTodo.
+	Todos []TodoItem
+	// Plan carries the proposed plan on SessionEventPlan (plan mode).
+	Plan string
 }
 
 // SessionObserver receives SessionEvents as a task loop progresses. It is always
@@ -75,6 +116,17 @@ type UserSession struct {
 	// subAgentTimeoutMs bounds how long a spawned sub-agent may run. Zero leaves
 	// the agent's built-in default in place.
 	subAgentTimeoutMs int64
+	// subAgentLimiter bounds how many sub-agent loops run concurrently. It is
+	// typically a process-wide limiter shared across every session (see
+	// SetSubAgentLimiter), so a deep fan-out cannot spawn an unbounded number of
+	// goroutines (issue #23). Nil means unbounded.
+	subAgentLimiter *SubAgentLimiter
+	// rateLimiter paces this session's model round-trips against the provider's
+	// request-rate ceiling. Like subAgentLimiter it is typically a process-wide
+	// limiter shared across every session, so the global request rate is governed
+	// regardless of how many sessions or cluster nodes fan out at once (issue #28).
+	// Nil means unthrottled.
+	rateLimiter *RateLimiter
 
 	// systemContextFn, when set, returns extra system-prompt context (project
 	// AGENTS.md instructions and the available-skills index) appended to every
@@ -85,30 +137,76 @@ type UserSession struct {
 	// Interactive (experimental) sub-agent bookkeeping.
 	interactive map[string]*InteractiveAgent
 	agentEvents chan AgentEvent
+	// pendingTerminal holds terminal (completed/failed) events that did not fit
+	// in agentEvents when it was full. Terminal events must never be dropped, or
+	// a coordinator's wait_agent_event blocks forever on an event that was
+	// discarded (issue #27). Guarded by mu; drained by NextAgentEvent.
+	pendingTerminal []AgentEvent
 
 	// Task tracking for multi-turn tool calling
 	currentTask *tool.Task
+
+	// todos is the session's current task checklist, maintained by the todo tool
+	// and rendered in the sidebar (issue #43). Guarded by mu.
+	todos []TodoItem
+	// planMode, when true, runs the next root-agent turn against a write-free tool
+	// set with a planning prompt, so the agent investigates and proposes a plan
+	// instead of making changes (issue #43). pendingPlan holds the plan awaiting
+	// the user's approval; approving it re-runs the turn with the full tool set.
+	// Both are guarded by mu.
+	planMode    bool
+	pendingPlan string
+
+	// compressionCompleter, when set, runs context compression on a separate
+	// (typically smaller/faster) model backend instead of the session's primary
+	// model. When it also reports connector stats, its usage is tracked apart
+	// from the primary model (see FastConnectorStats).
+	compressionCompleter model.Completer
 
 	// Stats
 	tokenCountIn  int
 	tokenCountOut int
 	toolCallCount int
+	// turnCount is the number of completed top-level task loops (one per user
+	// turn). It backs the SessionStats.Turns figure shown in the status bar.
+	turnCount int
+	// compactionCount is how many context-compression passes have run in this
+	// session (see compactIfNeeded). It feeds the Statistics view's compaction
+	// breakdown (issue #57).
+	compactionCount int
+	// primaryModel is the name of the model the session currently routes its
+	// primary turns through. It attributes token usage to a model (see
+	// perModelTokens) for the per-model breakdown in the Statistics view. Empty
+	// means unknown / not yet set, in which case tokens are counted only in the
+	// session totals.
+	primaryModel string
+	// perModelTokens attributes prompt/completion tokens to each model the
+	// session has used. Keyed by model config name.
+	perModelTokens map[string]modelTokens
+}
+
+// modelTokens is the per-model token accumulator (prompt/completion totals).
+type modelTokens struct {
+	In  int
+	Out int
 }
 
 // NewUserSession creates a new user session
 func NewUserSession(id string, agent *Agent) *UserSession {
 	return &UserSession{
-		ID:            id,
-		RootAgent:     agent,
-		CreatedAt:     time.Now().Unix(),
-		ToolCallback:  nil,
-		subAgentCfg:   config.DefaultSubAgentConfig(),
-		interactive:   make(map[string]*InteractiveAgent),
-		agentEvents:   make(chan AgentEvent, 64),
-		currentTask:   nil,
-		tokenCountIn:  0,
-		tokenCountOut: 0,
-		toolCallCount: 0,
+		ID:             id,
+		RootAgent:      agent,
+		CreatedAt:      time.Now().Unix(),
+		ToolCallback:   nil,
+		subAgentCfg:    config.DefaultSubAgentConfig(),
+		interactive:    make(map[string]*InteractiveAgent),
+		agentEvents:    make(chan AgentEvent, 64),
+		currentTask:    nil,
+		tokenCountIn:   0,
+		tokenCountOut:  0,
+		toolCallCount:  0,
+		turnCount:      0,
+		perModelTokens: make(map[string]modelTokens),
 	}
 }
 
@@ -125,6 +223,24 @@ func (s *UserSession) SubAgentConfig() config.SubAgentConfig {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.subAgentCfg
+}
+
+// SetCompressionCompleter routes context-compression summaries to a dedicated
+// completer (typically a small/fast model). When unset, compaction uses the
+// session's own primary model, preserving prior behavior.
+func (s *UserSession) SetCompressionCompleter(c model.Completer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.compressionCompleter = c
+}
+
+// UsesFastCompression reports whether context compression runs on a dedicated
+// (typically smaller/faster) model backend rather than the session's primary
+// model. UIs can use this to indicate that a fast model is active.
+func (s *UserSession) UsesFastCompression() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.compressionCompleter != nil
 }
 
 // SetSystemContextProvider registers a function returning extra system-prompt
@@ -145,6 +261,24 @@ func (s *UserSession) systemContext() string {
 		return ""
 	}
 	return fn()
+}
+
+// SetSubAgentLimiter installs the (typically process-wide) limiter that bounds
+// how many sub-agent loops this session may run concurrently. Passing nil
+// restores unbounded behavior.
+func (s *UserSession) SetSubAgentLimiter(l *SubAgentLimiter) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.subAgentLimiter = l
+}
+
+// SetRateLimiter installs the (typically process-wide) limiter that paces this
+// session's model round-trips against the provider's request-rate ceiling.
+// Passing nil restores unthrottled behavior.
+func (s *UserSession) SetRateLimiter(l *RateLimiter) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rateLimiter = l
 }
 
 // SetSubAgentTimeout sets the timeout applied to newly spawned sub-agents. A
@@ -297,8 +431,16 @@ write:
   input: {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}}
 
 edit:
-  description: Edit a file by replacing exact text. Use this for precise edits.
-  input: {"type": "object", "properties": {"path": {"type": "string"}, "find": {"type": "string"}, "replace": {"type": "string"}}}
+  description: Edit a file by replacing exact text. Use this for precise edits. The find text must match exactly once; set replace_all to true to replace every occurrence.
+  input: {"type": "object", "properties": {"path": {"type": "string"}, "find": {"type": "string"}, "replace": {"type": "string"}, "replace_all": {"type": "boolean"}}}
+
+multi_edit:
+  description: Apply several exact text replacements to one file in one call. Edits run in order; each find must match exactly once unless its replace_all is set. All-or-nothing: if any edit fails, the file is left untouched.
+  input: {"type": "object", "properties": {"path": {"type": "string"}, "edits": {"type": "array", "items": {"type": "object", "properties": {"find": {"type": "string"}, "replace": {"type": "string"}, "replace_all": {"type": "boolean"}}}}}}
+
+apply_patch:
+  description: Apply a unified-diff patch in the "*** Begin Patch" / "*** End Patch" envelope to add, update and delete files in one call. Update hunks are located by their context lines.
+  input: {"type": "object", "properties": {"patch": {"type": "string"}}}
 
 calc:
   	description: Calculate mathematical expressions like 5+5 or 10*20/5
@@ -337,7 +479,7 @@ For final responses, use:
 // JSON tool call out of the assistant's text when no native tool_calls are
 // returned. Tool results are fed back as proper role:"tool" messages so the
 // model keeps full context across turns.
-func (s *UserSession) ExecuteTaskLoop(agentID string, initialMessage string) ([]*model.CompletionResponse, error) {
+func (s *UserSession) ExecuteTaskLoop(ctx context.Context, agentID string, initialMessage string) ([]*model.CompletionResponse, error) {
 	s.mu.Lock()
 	agent := s.RootAgent.GetAgentByID(agentID)
 	s.mu.Unlock()
@@ -349,17 +491,144 @@ func (s *UserSession) ExecuteTaskLoop(agentID string, initialMessage string) ([]
 		return nil, fmt.Errorf("agent %s has no model session", agentID)
 	}
 
+	// One user turn == one top-level task loop.
+	s.mu.Lock()
+	s.turnCount++
+	s.mu.Unlock()
+
+	// Plan mode (issue #43): run the root agent against a write-free tool set with
+	// a planning prompt for this turn, then surface its answer as an approval-
+	// gated plan. The swap is scoped to this turn and restored on exit so later
+	// turns (and sub-agents, which bypass ExecuteTaskLoop) keep the full tool set.
+	planMode := s.PlanMode() && agent.Kind == KindRoot
+	if planMode {
+		full := agent.ToolRegistry
+		agent.SetToolRegistry(full.CloneForPlanMode(planKeptTools...))
+		defer agent.SetToolRegistry(full)
+	}
+
 	tools := toolDefsFromRegistry(agent.ToolRegistry)
-	return s.runLoop(agent, agentID, initialMessage, buildAgentSystemPrompt(len(tools) > 0, s.SubAgentConfig()))
+	systemPrompt := buildAgentSystemPrompt(len(tools) > 0, s.SubAgentConfig())
+	if planMode {
+		systemPrompt = planModeSystemPrompt(systemPrompt)
+	}
+
+	responses, err := s.runLoop(ctx, agent, agentID, initialMessage, systemPrompt)
+	if err != nil {
+		return responses, err
+	}
+	if planMode {
+		s.recordPlan(responses)
+	}
+	return responses, nil
+}
+
+// planKeptTools are the non-read-only tools retained in plan mode alongside the
+// read-only investigation tools: todo (to lay out the plan's steps) and
+// structured_output (to finalize the plan). Everything side-effecting is
+// stripped by CloneForPlanMode (issue #43).
+var planKeptTools = []string{"todo", "structured_output"}
+
+// recordPlan captures the final answer of a plan-mode turn as the plan awaiting
+// approval and emits SessionEventPlan so the UI can offer to approve it. An
+// empty plan is ignored rather than surfaced as an approval gate (issue #43).
+func (s *UserSession) recordPlan(responses []*model.CompletionResponse) {
+	plan := ""
+	if len(responses) > 0 {
+		plan = responses[len(responses)-1].Content
+	}
+	if !s.setPendingPlan(plan) {
+		return
+	}
+	s.emit(SessionEvent{Type: SessionEventPlan, Plan: strings.TrimSpace(plan)})
+}
+
+// planModeSystemPrompt layers planning instructions on top of the base agent
+// prompt. It tells the model the workspace is read-only this turn and that its
+// answer is a plan for the user to approve, not something to carry out (issue
+// #43).
+func planModeSystemPrompt(base string) string {
+	return base + `
+
+## PLAN MODE (read-only)
+You are in PLAN MODE. The tools that modify the workspace (write, edit,
+multi_edit, apply_patch, shell) and the sub-agent tools are unavailable this
+turn. Use only the read-only tools to investigate, then reply with a concrete,
+step-by-step plan the user will approve before you execute it. Lay the plan's
+steps out with the todo tool. Do NOT attempt to carry the plan out — present it
+as your final answer.`
+}
+
+// budgetExceededMarker prefixes an agent's final result when it stopped because
+// its token budget was reached. It doubles as the signal subAgentOutcome uses to
+// classify the run as failed (the task did not finish) (issue #28).
+const budgetExceededMarker = "BUDGET_EXCEEDED"
+
+// waitRateLimit blocks until the session's rate limiter grants a permit (or ctx
+// is cancelled). It is a no-op when no limiter is installed.
+func (s *UserSession) waitRateLimit(ctx context.Context) error {
+	s.mu.RLock()
+	rl := s.rateLimiter
+	s.mu.RUnlock()
+	return rl.Wait(ctx)
+}
+
+// modelRoundTrip performs one paced, accounted model request: it waits on the
+// rate limiter, sends, and folds the reported usage into the agent's per-agent
+// token total so the loop can enforce its budget. It centralizes the three call
+// sites in runLoop so rate limiting and token accounting cannot drift apart.
+func (s *UserSession) modelRoundTrip(ctx context.Context, sess *model.ModelSession, agent *Agent, messages []model.Message, tools []model.ToolDef) (*model.CompletionResponse, error) {
+	if err := s.waitRateLimit(ctx); err != nil {
+		return nil, err
+	}
+	resp, err := sess.SendWithToolsCtx(ctx, messages, tools)
+	if err != nil {
+		return nil, err
+	}
+	if resp != nil && resp.Usage != nil {
+		agent.AddTokensUsed(resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+	}
+	return resp, nil
+}
+
+// stopForBudget folds a graceful BUDGET_EXCEEDED notice into the agent's last
+// response so the loop can break with a final answer that records the stop (and,
+// for sub-agents, is classified as a failed/incomplete run). Any partial progress
+// the model had produced is preserved beneath the notice.
+func stopForBudget(agent *Agent, resp *model.CompletionResponse) *model.CompletionResponse {
+	if resp == nil {
+		resp = &model.CompletionResponse{}
+	}
+	note := fmt.Sprintf("%s: token budget reached (%d/%d tokens); stopping early.",
+		budgetExceededMarker, agent.GetTokensUsed(), agent.TokenBudget)
+	if partial := strings.TrimSpace(resp.Content); partial != "" {
+		note += "\n\nPartial progress before stopping:\n" + partial
+	}
+	resp.Content = note
+	return resp
 }
 
 // runLoop is the shared multi-turn tool-calling loop used by both the top-level
 // task loop and sub-agents (sub-agents pass a different system prompt).
-func (s *UserSession) runLoop(agent *Agent, agentID, initialMessage, systemPrompt string) ([]*model.CompletionResponse, error) {
+func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initialMessage, systemPrompt string) (responses []*model.CompletionResponse, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Scope a cancellable context to this loop and publish its cancel func on the
+	// agent so StopAgent / session close can abort the in-flight model work. The
+	// child context inherits the caller's, so cancelling a parent loop (or the
+	// whole session) propagates into sub-agent loops spawned from here (issue #24).
+	ctx, cancel := context.WithCancel(ctx)
+	agent.setCancel(cancel)
+	defer func() {
+		cancel()
+		agent.setCancel(nil)
+	}()
+
 	sess := agent.ThoughtTrain
 	tools := toolDefsFromRegistry(agent.ToolRegistry)
-	if ctx := s.systemContext(); ctx != "" {
-		systemPrompt += "\n\n" + ctx
+	if sc := s.systemContext(); sc != "" {
+		systemPrompt += "\n\n" + sc
 	}
 	sess.SetSystemPrompt(systemPrompt)
 
@@ -374,13 +643,27 @@ func (s *UserSession) runLoop(agent *Agent, agentID, initialMessage, systemPromp
 		emit = func(SessionEvent) {}
 	}
 
-	responses := make([]*model.CompletionResponse, 0)
+	// Contain a panic anywhere in the model/tool loop (tool-call parsing, a
+	// slice index, a type assertion) so it fails this one agent instead of
+	// crashing the whole multi-session process. Every loop-driven goroutine —
+	// the root task loop, parallel sub-agent spawns, and interactive workers —
+	// funnels through here, so this is the single guard for all of them (issue
+	// #8). The defer is registered after emit is set so the panic can be
+	// reported to the (root) session window like any other loop error.
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("agent loop panicked: %v", r)
+			emit(SessionEvent{Type: SessionEventError, Err: err})
+		}
+	}()
+
+	responses = make([]*model.CompletionResponse, 0)
 
 	emit(SessionEvent{Type: SessionEventThinking, Step: 0})
 
 	// First request carries the user message.
 	s.compactIfNeeded(sess, emit)
-	resp, err := sess.SendWithTools(
+	resp, err := s.modelRoundTrip(ctx, sess, agent,
 		[]model.Message{{Role: model.RoleUser, Content: initialMessage}},
 		tools,
 	)
@@ -389,9 +672,26 @@ func (s *UserSession) runLoop(agent *Agent, agentID, initialMessage, systemPromp
 		return responses, err
 	}
 	responses = append(responses, resp)
+	s.emitUsage(emit)
 
 	const maxSteps = 25
 	for step := 0; step < maxSteps; step++ {
+		// Bail out promptly if the loop was stopped or the session closed; the
+		// in-flight request (if any) has already been cancelled via ctx.
+		if err := ctx.Err(); err != nil {
+			emit(SessionEvent{Type: SessionEventError, Err: err})
+			return responses, err
+		}
+
+		// Stop gracefully before spending another round-trip once the agent has
+		// reached its token budget. The most recent response is finalized with a
+		// BUDGET_EXCEEDED notice so cost is bounded without crashing the loop or
+		// dropping the work done so far (issue #28).
+		if agent.BudgetExceeded() {
+			resp = stopForBudget(agent, resp)
+			break
+		}
+
 		calls := s.collectToolCalls(resp)
 		if len(calls) == 0 {
 			// No tool calls -> the assistant produced its final answer.
@@ -404,57 +704,30 @@ func (s *UserSession) runLoop(agent *Agent, agentID, initialMessage, systemPromp
 			emit(SessionEvent{Type: SessionEventAssistantStep, Step: step, Text: thought})
 		}
 
-		// Execute each requested tool and gather result messages.
-		toolMsgs := make([]model.Message, len(calls))
-
-		// Parallel fast-path: when a single turn asks for several sub-agent
-		// spawns, run them concurrently. Sub-agents are independent and the
-		// agent tree they mutate is mutex-guarded, so this is safe and is what
-		// lets "delegate A, B and C at once" actually run in parallel.
-		if allSpawnSubAgent(calls) {
-			var wg sync.WaitGroup
-			for i, call := range calls {
-				i, call := i, call
-				emit(SessionEvent{Type: SessionEventToolCall, Step: step, Tool: call.Tool, Args: call.Args})
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					resultStr := s.runToolCall(agent, agentID, call)
-					emit(SessionEvent{Type: SessionEventToolResult, Step: step, Tool: call.Tool, Args: call.Args, Result: resultStr})
-					toolMsgs[i] = makeToolResultMessage(call, resultStr)
-				}()
-			}
-			wg.Wait()
-			sess.AppendToolResults(toolMsgs)
-			emit(SessionEvent{Type: SessionEventThinking, Step: step + 1})
-			s.compactIfNeeded(sess, emit)
-			resp, err = sess.SendWithTools(nil, tools)
-			if err != nil {
-				emit(SessionEvent{Type: SessionEventError, Err: err})
-				return responses, err
-			}
-			responses = append(responses, resp)
-			continue
-		}
-
-		toolMsgs = toolMsgs[:0]
+		// Execute this turn's tool calls, gathering result messages in call order.
+		// Two fast-paths run an independent batch concurrently to cut wall-clock
+		// latency; everything else runs serially so side-effecting tools (write,
+		// edit, shell, ...) keep their requested order.
+		var toolMsgs []model.Message
 		finished := false
-		for _, call := range calls {
-			if call.Tool == "structured_output" {
-				// Terminal tool: fold its response into the assistant content.
-				if final, _ := call.Args["final"].(bool); final {
-					if text, ok := call.Args["response"].(string); ok && text != "" {
-						resp.Content = text
-					}
-					finished = true
-					break
-				}
-			}
-
-			emit(SessionEvent{Type: SessionEventToolCall, Step: step, Tool: call.Tool, Args: call.Args})
-			resultStr := s.runToolCall(agent, agentID, call)
-			emit(SessionEvent{Type: SessionEventToolResult, Step: step, Tool: call.Tool, Args: call.Args, Result: resultStr})
-			toolMsgs = append(toolMsgs, makeToolResultMessage(call, resultStr))
+		switch {
+		case allSpawnSubAgent(calls):
+			// Several one-shot sub-agent spawns. Sub-agents are independent and
+			// every agent-tree read/write is mutex-guarded (children copied under
+			// lock via GetSubAgents, the parent link via GetParent), so this is what
+			// lets "delegate A, B and C at once" run in parallel. The fan-out is
+			// bounded by the shared sub-agent limiter — a spawn that can't grab a
+			// global slot runs inline as backpressure (issue #23).
+			toolMsgs = s.runToolCallsConcurrent(ctx, agent, agentID, calls, step, emit, s.RunSubAgentsBounded)
+		case allReadOnly(agent.ToolRegistry, calls):
+			// Several independent read-only/idempotent calls (read, grep, glob,
+			// list, calc, web_fetch). They don't mutate the workspace and their
+			// ordering doesn't matter, so they run concurrently — bounded by a fixed
+			// tool semaphore — and their results are reassembled in call order
+			// before being appended (issue #50).
+			toolMsgs = s.runToolCallsConcurrent(ctx, agent, agentID, calls, step, emit, runBoundedTools)
+		default:
+			toolMsgs, finished = s.runToolCallsSerial(ctx, agent, agentID, calls, step, emit, resp)
 		}
 		if finished {
 			break
@@ -464,12 +737,13 @@ func (s *UserSession) runLoop(agent *Agent, agentID, initialMessage, systemPromp
 		sess.AppendToolResults(toolMsgs)
 		emit(SessionEvent{Type: SessionEventThinking, Step: step + 1})
 		s.compactIfNeeded(sess, emit)
-		resp, err = sess.SendWithTools(nil, tools)
+		resp, err = s.modelRoundTrip(ctx, sess, agent, nil, tools)
 		if err != nil {
 			emit(SessionEvent{Type: SessionEventError, Err: err})
 			return responses, err
 		}
 		responses = append(responses, resp)
+		s.emitUsage(emit)
 	}
 
 	if resp != nil {
@@ -483,8 +757,9 @@ func (s *UserSession) runLoop(agent *Agent, agentID, initialMessage, systemPromp
 // past the model's compression threshold. It summarizes the older part of the
 // conversation (preserving the most recent turns verbatim and never splitting a
 // tool-call from its results) and splices the digest back into the transcript.
-// Summarization uses a stateless completion on the session's own backend, so it
-// never pollutes the live transcript. On any failure it leaves the transcript
+// Summarization uses a stateless completion on the configured compression
+// backend (the fast model when set, else the session's own backend), so it never
+// pollutes the live transcript. On any failure it leaves the transcript
 // untouched rather than risk losing context.
 func (s *UserSession) compactIfNeeded(sess *model.ModelSession, emit func(SessionEvent)) {
 	if sess == nil || sess.Model == nil || !sess.NeedsCompression() {
@@ -497,7 +772,16 @@ func (s *UserSession) compactIfNeeded(sess *model.ModelSession, emit func(Sessio
 		return // boundary keeps everything recent; nothing to compress yet
 	}
 
-	agent := compression.NewCompressionAgent(nil, sess.Model)
+	// Summarize on the configured fast model when one was wired in for the
+	// compression role, otherwise fall back to the session's own backend.
+	completer := model.Completer(sess.Model)
+	s.mu.RLock()
+	if s.compressionCompleter != nil {
+		completer = s.compressionCompleter
+	}
+	s.mu.RUnlock()
+
+	agent := compression.NewCompressionAgent(nil, completer)
 	digest, err := agent.Summarize(older)
 	if err != nil || strings.TrimSpace(digest) == "" {
 		return
@@ -509,6 +793,9 @@ func (s *UserSession) compactIfNeeded(sess *model.ModelSession, emit func(Sessio
 	}
 	newTranscript := append([]model.Message{digestMsg}, recent...)
 	sess.ApplyCompressedTranscript(newTranscript)
+	s.mu.Lock()
+	s.compactionCount++
+	s.mu.Unlock()
 	emit(SessionEvent{Type: SessionEventCompaction, Step: sess.GetTokenCount(), Text: digest})
 }
 
@@ -524,6 +811,79 @@ func allSpawnSubAgent(calls []tool.ToolCall) bool {
 		}
 	}
 	return true
+}
+
+// allReadOnly reports whether every call in a turn targets a registered
+// read-only tool, so the batch can be executed concurrently without racing on
+// the workspace or on tool ordering (issue #50). A single call is left to the
+// serial path; an unknown tool (e.g. an MCP tool whose effects we can't
+// classify) or any side-effecting tool makes the whole batch ineligible, so it
+// runs serially — the conservative choice.
+func allReadOnly(reg *tool.ToolRegistry, calls []tool.ToolCall) bool {
+	if reg == nil || len(calls) < 2 {
+		return false
+	}
+	for _, c := range calls {
+		t := reg.Get(c.Tool)
+		if t == nil || !t.ReadOnly {
+			return false
+		}
+	}
+	return true
+}
+
+// runToolCallsConcurrent executes every call concurrently and returns their
+// result messages in call order (so the transcript is independent of which call
+// happened to finish first). run bounds the goroutine fan-out — the shared
+// sub-agent limiter for spawn batches, a fixed tool semaphore for read-only
+// batches. A panic in any one call is contained and turned into an error result
+// for that slot, so the batch still yields a complete, ordered message set
+// (issue #8).
+func (s *UserSession) runToolCallsConcurrent(ctx context.Context, agent *Agent, agentID string, calls []tool.ToolCall, step int, emit func(SessionEvent), run func([]func())) []model.Message {
+	toolMsgs := make([]model.Message, len(calls))
+	tasks := make([]func(), len(calls))
+	for i, call := range calls {
+		i, call := i, call
+		emit(SessionEvent{Type: SessionEventToolCall, Step: step, Tool: call.Tool, Args: call.Args})
+		tasks[i] = func() {
+			defer func() {
+				if r := recover(); r != nil {
+					resultStr := fmt.Sprintf("error: tool %q panicked: %v", call.Tool, r)
+					emit(SessionEvent{Type: SessionEventToolResult, Step: step, Tool: call.Tool, Args: call.Args, Result: resultStr})
+					toolMsgs[i] = makeToolResultMessage(call, resultStr)
+				}
+			}()
+			resultStr := s.runToolCall(ctx, agent, agentID, call)
+			emit(SessionEvent{Type: SessionEventToolResult, Step: step, Tool: call.Tool, Args: call.Args, Result: resultStr})
+			toolMsgs[i] = makeToolResultMessage(call, resultStr)
+		}
+	}
+	run(tasks)
+	return toolMsgs
+}
+
+// runToolCallsSerial executes a turn's calls one at a time, in order. It is the
+// path for any batch that is not safe to parallelize (writes, shell, mixed or
+// unknown tools). A terminal structured_output{final:true} call folds its text
+// into resp and stops the loop, reported via the returned finished flag.
+func (s *UserSession) runToolCallsSerial(ctx context.Context, agent *Agent, agentID string, calls []tool.ToolCall, step int, emit func(SessionEvent), resp *model.CompletionResponse) (toolMsgs []model.Message, finished bool) {
+	for _, call := range calls {
+		if call.Tool == "structured_output" {
+			// Terminal tool: fold its response into the assistant content.
+			if final, _ := call.Args["final"].(bool); final {
+				if text, ok := call.Args["response"].(string); ok && text != "" {
+					resp.Content = text
+				}
+				return toolMsgs, true
+			}
+		}
+
+		emit(SessionEvent{Type: SessionEventToolCall, Step: step, Tool: call.Tool, Args: call.Args})
+		resultStr := s.runToolCall(ctx, agent, agentID, call)
+		emit(SessionEvent{Type: SessionEventToolResult, Step: step, Tool: call.Tool, Args: call.Args, Result: resultStr})
+		toolMsgs = append(toolMsgs, makeToolResultMessage(call, resultStr))
+	}
+	return toolMsgs, false
 }
 
 // collectToolCalls returns the tool calls for a response, preferring native
@@ -550,39 +910,44 @@ func (s *UserSession) collectToolCalls(resp *model.CompletionResponse) []tool.To
 		return calls
 	}
 
-	// Fallback: JSON object in the text.
+	// Fallback: one or more JSON objects embedded in the assistant text. Small
+	// or local models without native tool-calling emit calls as JSON, often
+	// prose-wrapped, fenced in ```json, pretty-printed, key-reordered, or several
+	// at once — so we scan for every balanced object (issue #32) rather than
+	// substring-matching a single exact shape.
 	responseText := strings.TrimSpace(resp.Content)
-
-	// A {"response": ..., "final": true} object means we're done.
-	var structuredOutput struct {
-		Response string `json:"response"`
-		Final    bool   `json:"final"`
-	}
-	if jsonStr := extractToolCallJSON(responseText); jsonStr != "" {
-		if err := json.Unmarshal([]byte(jsonStr), &structuredOutput); err == nil && structuredOutput.Final {
+	var calls []tool.ToolCall
+	for _, obj := range tool.ExtractJSONObjects(responseText) {
+		// A {"response": ..., "final": true} object is the structured final
+		// answer: stop and surface its text instead of acting on any calls.
+		var structuredOutput struct {
+			Response string `json:"response"`
+			Final    bool   `json:"final"`
+		}
+		if err := json.Unmarshal([]byte(obj), &structuredOutput); err == nil && structuredOutput.Final {
 			resp.Content = structuredOutput.Response
 			return nil
 		}
-		var parsed struct {
-			Tool string                 `json:"tool"`
-			Args map[string]interface{} `json:"args"`
-		}
-		if err := json.Unmarshal([]byte(jsonStr), &parsed); err == nil && parsed.Tool != "" {
-			return []tool.ToolCall{{Tool: parsed.Tool, Args: parsed.Args}}
+		var parsed tool.ToolCall
+		if err := json.Unmarshal([]byte(obj), &parsed); err == nil && parsed.Tool != "" {
+			calls = append(calls, parsed)
 		}
 	}
-	return nil
+	return calls
 }
 
-// runToolCall executes a single tool call and returns a textual result.
-func (s *UserSession) runToolCall(agent *Agent, agentID string, call tool.ToolCall) string {
-	ctx := tool.ToolContext{
+// runToolCall executes a single tool call and returns a textual result. ctx is
+// the cancellation scope of the running loop; it is passed to the tool so a
+// tool that itself runs a model loop (spawn_subagent) inherits cancellation.
+func (s *UserSession) runToolCall(ctx context.Context, agent *Agent, agentID string, call tool.ToolCall) string {
+	toolCtx := tool.ToolContext{
 		SessionID:    s.ID,
 		AgentID:      agentID,
 		ToolCallID:   call.CallID,
 		ToolCallback: s.ToolCallback,
+		Context:      ctx,
 	}
-	toolResp, err := agent.ToolRegistry.ExecuteToolCall(&call, ctx)
+	toolResp, err := agent.ToolRegistry.ExecuteToolCall(&call, toolCtx)
 	switch {
 	case err != nil:
 		return fmt.Sprintf("error: %v", err)
@@ -613,12 +978,14 @@ func makeToolResultMessage(call tool.ToolCall, result string) model.Message {
 	}
 }
 
-// toolDefsFromRegistry converts the agent's tool registry into native tool defs.
+// toolDefsFromRegistry converts the agent's tool registry into native tool defs,
+// advertising only the currently enabled tools (a disabled tool is hidden from
+// the model so it neither sees nor attempts to call it).
 func toolDefsFromRegistry(reg *tool.ToolRegistry) []model.ToolDef {
 	if reg == nil {
 		return nil
 	}
-	tools := reg.List()
+	tools := reg.ListEnabled()
 	defs := make([]model.ToolDef, 0, len(tools))
 	for _, t := range tools {
 		defs = append(defs, model.ToolDef{
@@ -696,9 +1063,9 @@ func recursionInstructions(cfg config.SubAgentConfig) string {
 }
 
 // ExecuteTaskLoopWithModel runs the multi-turn task loop with a specific model config
-func (s *UserSession) ExecuteTaskLoopWithModel(agentID, message string, modelConfig *config.ModelConfig) ([]*model.CompletionResponse, error) {
+func (s *UserSession) ExecuteTaskLoopWithModel(ctx context.Context, agentID, message string, modelConfig *config.ModelConfig) ([]*model.CompletionResponse, error) {
 	// Call the regular ExecuteTaskLoop
-	return s.ExecuteTaskLoop(agentID, message)
+	return s.ExecuteTaskLoop(ctx, agentID, message)
 }
 
 // subAgentToolNames lists the tools that let an agent spawn or coordinate
@@ -759,7 +1126,7 @@ func (s *UserSession) newSubAgent(parentAgentID, name, task string, kind SubAgen
 	}
 
 	depth := 0
-	for p := parent; p != nil; p = p.Parent {
+	for p := parent; p != nil; p = p.GetParent() {
 		depth++
 	}
 	if depth > cfg.MaxDepthOrDefault() {
@@ -790,6 +1157,10 @@ func (s *UserSession) newSubAgent(parentAgentID, name, task string, kind SubAgen
 	if timeoutMs > 0 {
 		child.TimeoutMs = timeoutMs
 	}
+	// Give the child a per-agent token budget so a sub-agent (or a recursive
+	// fan-out of them) cannot loop to the step cap with no token ceiling. Zero
+	// leaves it unbounded, preserving prior behavior (issue #28).
+	child.TokenBudget = cfg.TokenBudget
 
 	// Recursion control: when recursive sub-agents are disabled, hand the child a
 	// registry that omits the spawn/coordinate tools so it cannot delegate.
@@ -820,9 +1191,12 @@ func (s *UserSession) emitSubAgent(child *Agent, text string, err error) {
 }
 
 // subAgentOutcome maps a sub-agent's final text to a terminal status. A reply
-// starting with FAILURE: is a failure; anything else is treated as completed.
+// starting with FAILURE: is a failure, as is one stopped at its token budget
+// (BUDGET_EXCEEDED), since the task did not run to completion; anything else is
+// treated as completed.
 func subAgentOutcome(final string) AgentStatus {
-	if strings.HasPrefix(strings.TrimSpace(strings.ToUpper(final)), "FAILURE") {
+	up := strings.TrimSpace(strings.ToUpper(final))
+	if strings.HasPrefix(up, "FAILURE") || strings.HasPrefix(up, budgetExceededMarker) {
 		return StatusFailed
 	}
 	return StatusCompleted
@@ -836,7 +1210,7 @@ func subAgentOutcome(final string) AgentStatus {
 // The oneShot parameter selects the sub-agent's base prompt; the surrounding
 // execution is always blocking here. Asynchronous, conversational workers use
 // LaunchInteractiveAgent instead.
-func (s *UserSession) SpawnSubAgent(parentAgentID, name, task string, oneShot bool) (string, error) {
+func (s *UserSession) SpawnSubAgent(ctx context.Context, parentAgentID, name, task string, oneShot bool) (string, error) {
 	kind := KindTool
 	if !oneShot {
 		kind = KindInteractive
@@ -845,14 +1219,14 @@ func (s *UserSession) SpawnSubAgent(parentAgentID, name, task string, oneShot bo
 	if err != nil {
 		return "", err
 	}
-	parent := child.Parent
+	parent := child.GetParent()
 
 	parent.SetState(StateWaitingForSubAgent)
 	child.SetState(StateThinking)
 	child.SetStatus(StatusRunning)
 	s.emitSubAgent(child, "spawned: "+task, nil)
 
-	responses, runErr := s.runLoop(child, child.ID, task, s.subAgentPrompt(oneShot))
+	responses, runErr := s.runLoop(ctx, child, child.ID, task, s.subAgentPrompt(oneShot))
 
 	child.SetState(StateIdle)
 	parent.SetState(StateThinking)
@@ -914,7 +1288,7 @@ func (s *UserSession) LaunchInteractiveAgent(parentAgentID, name, task string) (
 	if err != nil {
 		return "", err
 	}
-	parent := child.Parent
+	parent := child.GetParent()
 
 	ia := &InteractiveAgent{
 		ID:    child.ID,
@@ -938,6 +1312,26 @@ func (s *UserSession) LaunchInteractiveAgent(parentAgentID, name, task string) (
 // runInteractive drives an interactive sub-agent across one or more rounds,
 // pausing for coordinator input whenever the model replies CLARIFY:.
 func (s *UserSession) runInteractive(ia *InteractiveAgent, task string) {
+	// This runs on its own background goroutine, so a panic here would crash the
+	// whole process. Contain it and finish the agent as failed instead (issue #8).
+	defer func() {
+		if r := recover(); r != nil {
+			s.finishInteractive(ia, StatusFailed, fmt.Sprintf("panic: %v", r), AgentEventFailed)
+		}
+	}()
+	// Interactive sub-agents are asynchronous and outlive any single turn, so
+	// their loop is scoped to the session (background) rather than a turn context.
+	// Terminating the agent cancels its in-flight model work too (issue #24).
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-ia.done:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
 	message := task
 	for {
 		select {
@@ -949,7 +1343,7 @@ func (s *UserSession) runInteractive(ia *InteractiveAgent, task string) {
 
 		ia.agent.SetState(StateThinking)
 		ia.agent.SetStatus(StatusRunning)
-		responses, err := s.runLoop(ia.agent, ia.agent.ID, message, s.subAgentPrompt(false))
+		responses, err := s.runLoop(ctx, ia.agent, ia.agent.ID, message, s.subAgentPrompt(false))
 		ia.agent.SetState(StateIdle)
 		if err != nil {
 			s.finishInteractive(ia, StatusFailed, err.Error(), AgentEventFailed)
@@ -998,25 +1392,60 @@ func (s *UserSession) finishInteractive(ia *InteractiveAgent, status AgentStatus
 	ia.agent.SetState(StateIdle)
 	ia.agent.SetStatus(status)
 	ia.agent.SetResult(result)
-	if parent := ia.agent.Parent; parent != nil {
+	if parent := ia.agent.GetParent(); parent != nil {
 		parent.SetState(StateThinking)
 	}
 	s.emitSubAgent(ia.agent, "", nil)
 	s.pushAgentEvent(AgentEvent{AgentID: ia.ID, Name: ia.Name, Type: evType, Text: result})
 }
 
-// pushAgentEvent delivers a coordinator event, dropping it if the buffer is full
-// rather than blocking the sub-agent goroutine.
+// pushAgentEvent delivers a coordinator event without blocking the sub-agent
+// goroutine. Non-terminal (clarify) events are best-effort and dropped when the
+// buffer is full, since the coordinator can still recover them via agent_status.
+// Terminal (completed/failed) events are never dropped: when the buffer is full
+// they spill into pendingTerminal, which NextAgentEvent drains (issue #27).
 func (s *UserSession) pushAgentEvent(ev AgentEvent) {
 	select {
 	case s.agentEvents <- ev:
+		return
 	default:
 	}
+	if ev.Type == AgentEventClarify {
+		return
+	}
+	s.mu.Lock()
+	s.pendingTerminal = append(s.pendingTerminal, ev)
+	s.mu.Unlock()
+}
+
+// popPendingTerminal removes and returns the oldest spilled terminal event, if
+// any.
+func (s *UserSession) popPendingTerminal() (AgentEvent, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.pendingTerminal) == 0 {
+		return AgentEvent{}, false
+	}
+	ev := s.pendingTerminal[0]
+	s.pendingTerminal = s.pendingTerminal[1:]
+	return ev, true
 }
 
 // NextAgentEvent blocks for the next interactive sub-agent event, up to timeout.
 // A non-positive timeout waits indefinitely. The boolean is false on timeout.
 func (s *UserSession) NextAgentEvent(timeout time.Duration) (AgentEvent, bool) {
+	// Drain buffered events first, then any terminal events that spilled over
+	// when the buffer was full, before blocking. This guarantees a terminal
+	// event is always observable and the coordinator never waits forever for one
+	// that was discarded (issue #27).
+	select {
+	case ev := <-s.agentEvents:
+		return ev, true
+	default:
+	}
+	if ev, ok := s.popPendingTerminal(); ok {
+		return ev, true
+	}
 	if timeout <= 0 {
 		ev := <-s.agentEvents
 		return ev, true
@@ -1082,7 +1511,9 @@ func (s *UserSession) ListInteractiveAgents() []string {
 	return ids
 }
 
-// StopAgent stops an agent
+// StopAgent stops an agent, cancelling its in-flight task loop (and, since
+// sub-agent loops inherit the parent's context, any sub-agents it spawned) so
+// the work aborts immediately instead of running to the request timeout.
 func (s *UserSession) StopAgent(agentID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1092,8 +1523,24 @@ func (s *UserSession) StopAgent(agentID string) error {
 		return &NotFoundError{ID: agentID}
 	}
 
+	agent.Cancel()
 	agent.SetState(StateIdle)
 	return nil
+}
+
+// Stop cancels every in-flight task loop in the session. It is called when the
+// session is removed/closed so detached loops do not keep mutating a session
+// that is no longer reachable (issue #24).
+func (s *UserSession) Stop() {
+	s.mu.RLock()
+	root := s.RootAgent
+	s.mu.RUnlock()
+	if root == nil {
+		return
+	}
+	for _, a := range root.ListAllAgents() {
+		a.Cancel()
+	}
 }
 
 // ResumeAgent resumes an agent
@@ -1110,7 +1557,7 @@ func (s *UserSession) ResumeAgent(agentID string) error {
 	return nil
 }
 
-// InterruptAgent interrupts an agent
+// InterruptAgent interrupts an agent, cancelling its in-flight task loop.
 func (s *UserSession) InterruptAgent(agentID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1120,6 +1567,7 @@ func (s *UserSession) InterruptAgent(agentID string) error {
 		return &NotFoundError{ID: agentID}
 	}
 
+	agent.Cancel()
 	agent.SetState(StateIdle)
 	return nil
 }
@@ -1128,7 +1576,13 @@ func (s *UserSession) InterruptAgent(agentID string) error {
 func (s *UserSession) CountMessages() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.countMessagesLocked()
+}
 
+// countMessagesLocked counts total messages in the session. Callers must hold
+// s.mu (read or write). RWMutex is not reentrant, so methods that already hold
+// the lock must use this instead of CountMessages.
+func (s *UserSession) countMessagesLocked() int {
 	count := 0
 	agents := s.RootAgent.ListAllAgents()
 	for _, agent := range agents {
@@ -1143,22 +1597,137 @@ func (s *UserSession) GetStats() map[string]interface{} {
 	defer s.mu.RUnlock()
 
 	agents := s.RootAgent.ListAllAgents()
+	fast := s.fastConnectorStatsLocked()
 	return map[string]interface{}{
-		"id":          s.ID,
-		"agent_count": len(agents),
-		"total_turns": s.CountMessages(),
-		"tokens_in":   s.tokenCountIn,
-		"tokens_out":  s.tokenCountOut,
-		"tool_calls":  s.toolCallCount,
+		"id":              s.ID,
+		"agent_count":     len(agents),
+		"total_turns":     s.countMessagesLocked(),
+		"tokens_in":       s.tokenCountIn,
+		"tokens_out":      s.tokenCountOut,
+		"tool_calls":      s.toolCallCount,
+		"fast_tokens_in":  fast.TotalTokensIn,
+		"fast_tokens_out": fast.TotalTokensOut,
 	}
 }
 
-// AddTokenUsage adds token usage to the session stats
+// FastConnectorStats returns the low-level connector statistics for this
+// session's auxiliary/fast model backend (e.g. the compression completer), or a
+// zero snapshot when no fast model is configured. This lets callers report
+// fast-model usage and cost separately from the primary model.
+func (s *UserSession) FastConnectorStats() model.StatsSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.fastConnectorStatsLocked()
+}
+
+// fastConnectorStatsLocked reads the fast-model connector stats. Callers must
+// hold s.mu (read or write).
+func (s *UserSession) fastConnectorStatsLocked() model.StatsSnapshot {
+	if r, ok := s.compressionCompleter.(model.StatsReporter); ok {
+		return r.StatsSnapshot()
+	}
+	return model.StatsSnapshot{}
+}
+
+// AddTokenUsage adds token usage to the session stats, attributing it to the
+// currently selected primary model when one is known (see SetPrimaryModel) for
+// the per-model breakdown surfaced in the Statistics view.
 func (s *UserSession) AddTokenUsage(promptTokens, completionTokens int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.tokenCountIn += promptTokens
 	s.tokenCountOut += completionTokens
+	if s.primaryModel != "" {
+		m := s.perModelTokens[s.primaryModel]
+		m.In += promptTokens
+		m.Out += completionTokens
+		s.perModelTokens[s.primaryModel] = m
+	}
+}
+
+// SetPrimaryModel records the name of the model the session routes its primary
+// turns through, so subsequent token usage is attributed to it. It is set by the
+// backend when a user picks a model for a turn.
+func (s *UserSession) SetPrimaryModel(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.primaryModel = name
+}
+
+// PrimaryModel returns the name of the currently selected primary model, or "".
+func (s *UserSession) PrimaryModel() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.primaryModel
+}
+
+// ModelTokens returns the per-model token attribution accumulated by the session
+// (keyed by model config name). The order is stable (sorted by model name) so
+// the Statistics view renders deterministically.
+func (s *UserSession) ModelTokens() []ModelTokenStat {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	names := make([]string, 0, len(s.perModelTokens))
+	for name := range s.perModelTokens {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]ModelTokenStat, 0, len(names))
+	for _, name := range names {
+		m := s.perModelTokens[name]
+		out = append(out, ModelTokenStat{Name: name, TokensIn: m.In, TokensOut: m.Out})
+	}
+	return out
+}
+
+// ModelTokenStat is a UI/report-facing view of one model's token usage within a
+// session. It mirrors stats.ModelStat but lives in the agent package so the
+// session can return it without importing the stats package (which would invert
+// the dependency direction).
+type ModelTokenStat struct {
+	Name      string
+	TokensIn  int
+	TokensOut int
+}
+
+// CompactionCount returns how many context-compression passes have run in this
+// session.
+func (s *UserSession) CompactionCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.compactionCount
+}
+
+// Snapshot returns a mutex-free, point-in-time view of the session's per-session
+// statistics (the data a UI renders as a compact status line). The scalar
+// counters are copied under the session lock; the context figures are then read
+// from the root agent's model session under its own lock. The two reads are
+// sequential rather than nested, which keeps this safe to call from the task
+// loop right after a model round-trip (no lock held there) and avoids the
+// UserSession→ModelSession vs ModelSession→UserSession ordering inversion the
+// token-callback path already lives with.
+func (s *UserSession) Snapshot() SessionStats {
+	s.mu.RLock()
+	out := SessionStats{
+		Turns:     s.turnCount,
+		TokensIn:  s.tokenCountIn,
+		TokensOut: s.tokenCountOut,
+		ToolCalls: s.toolCallCount,
+	}
+	root := s.RootAgent
+	s.mu.RUnlock()
+	if root != nil && root.ThoughtTrain != nil {
+		out.ContextTokens = root.ThoughtTrain.GetTokenCount()
+		out.ContextWindow = root.ThoughtTrain.GetMaxContextLength()
+	}
+	return out
+}
+
+// emitUsage emits a SessionEventUsage carrying a fresh stats snapshot. It is
+// called from the task loop after each model round-trip so a UI's status bar
+// updates on every usage report.
+func (s *UserSession) emitUsage(emit func(SessionEvent)) {
+	emit(SessionEvent{Type: SessionEventUsage, Stats: s.Snapshot()})
 }
 
 // ConnectorStats aggregates the low-level model-connector statistics across all
@@ -1194,37 +1763,4 @@ type NotFoundError struct {
 
 func (e *NotFoundError) Error() string {
 	return "agent not found: " + e.ID
-}
-
-// extractToolCallJSON extracts a JSON tool call from a response that may contain other text
-func extractToolCallJSON(response string) string {
-	// Find the start of a JSON object with "tool" or structured_output
-	start := strings.Index(response, `{"tool"`)
-	if start == -1 {
-		// Try with spaces or other prefixes
-		start = strings.Index(response, `{"tool":`)
-		if start == -1 {
-			// Try for structured_output: {"response": "...", "final": true}
-			start = strings.Index(response, `{"response":`)
-			if start == -1 {
-				return ""
-			}
-		}
-	}
-
-	// Find the matching closing brace
-	depth := 0
-	for i := start; i < len(response); i++ {
-		switch response[i] {
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				return response[start : i+1]
-			}
-		}
-	}
-
-	return ""
 }

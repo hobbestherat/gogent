@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"sync"
 )
 
@@ -22,6 +23,11 @@ type ModelSession struct {
 	Callbacks         []func(event CallbackEvent)
 	TokenCallbacks    []TokenCallback
 	mu                sync.Mutex
+	// compressSuppressed is the hysteresis flag for context compaction: once a
+	// compaction runs it stays set until CurrentTokenCount recedes below the
+	// low-water mark, preventing a summarization round-trip every turn. Its zero
+	// value (false) means "armed", so freshly created sessions compact normally.
+	compressSuppressed bool
 
 	// SystemPrompt is prepended (as a system message) to every request.
 	SystemPrompt string
@@ -29,6 +35,13 @@ type ModelSession struct {
 	// messages in order. Unlike History it is what actually gets re-sent to the
 	// model, so the model always sees its own prior outputs and tool results.
 	Transcript []Message
+	// transcriptEpoch increments each time the transcript is replaced wholesale
+	// (via ReplaceTranscript or ApplyCompressedTranscript) and is left untouched
+	// by append-only growth. Persistence compares it against the epoch observed
+	// at the last save to detect that a previously recorded "messages already on
+	// disk" frontier no longer lines up with the in-memory transcript, so it can
+	// rebuild the file instead of appending stale deltas (issue #21).
+	transcriptEpoch uint64
 }
 
 // CallbackEvent types
@@ -88,6 +101,25 @@ func (s *ModelSession) GetTranscript() []Message {
 	return out
 }
 
+// TranscriptLen returns the number of messages in the canonical transcript
+// without copying it. It is the cheap read side used by persistence bookkeeping
+// (issue #21) where only the length, not the contents, is needed.
+func (s *ModelSession) TranscriptLen() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.Transcript)
+}
+
+// TranscriptEpoch returns a value that changes whenever the transcript is
+// replaced wholesale (compaction or restore-seeding) and stays stable across
+// append-only growth. See the transcriptEpoch field doc for why persistence
+// tracks it (issue #21).
+func (s *ModelSession) TranscriptEpoch() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.transcriptEpoch
+}
+
 // AppendMessages adds messages to the transcript without sending a request.
 func (s *ModelSession) AppendMessages(messages ...Message) {
 	s.mu.Lock()
@@ -100,12 +132,20 @@ func (s *ModelSession) ReplaceTranscript(messages []Message) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Transcript = append([]Message(nil), messages...)
+	s.transcriptEpoch++
 }
 
-// SetMaxContextLength sets the maximum context length for this session
+// SetMaxContextLength sets the context window (input token budget) for this
+// session. When the window actually changes — e.g. switching to a model with a
+// different context size — any compaction hysteresis is cleared so the new
+// window is evaluated fresh; re-setting the same value (the common per-turn
+// case) leaves hysteresis intact.
 func (s *ModelSession) SetMaxContextLength(length int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.MaxContextLength != length {
+		s.compressSuppressed = false
+	}
 	s.MaxContextLength = length
 }
 
@@ -151,8 +191,37 @@ func (s *ModelSession) GetTokenCount() int {
 	return s.CurrentTokenCount
 }
 
+// GetMaxContextLength returns the configured context window (input token budget)
+// the conversation is calibrated against. It is the read side of
+// SetMaxContextLength, exposed so UIs can report context usage without reaching
+// into the session's fields.
+func (s *ModelSession) GetMaxContextLength() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.MaxContextLength
+}
+
+// Compression water marks, expressed as fractions of the context window.
+//
+// compaction fires once the running context reaches the high-water mark. After a
+// compaction it stays suppressed until the context recedes below the low-water
+// mark. The band between the two is the hysteresis that keeps compaction from
+// re-arming every turn (a synchronous summarization round-trip each turn) when
+// the post-compaction estimate or real usage still sits near the trigger.
+const (
+	compressionHighWater = 0.8 // trigger compaction
+	compressionLowWater  = 0.5 // re-arm / post-compaction target
+)
+
 // NeedsCompression reports whether the running context has grown past the
-// compression threshold (80% of the configured context window).
+// compression high-water mark (80% of the configured context window).
+//
+// Hysteresis: a successful compaction suppresses further compression until the
+// context drops below the low-water mark (50%). A normal session therefore
+// compacts occasionally (at 80%, settling near 50%), not every turn. If a
+// compaction cannot get the context below 50% — the verbatim recent turns alone
+// are large — compression stays suppressed rather than re-firing futilely each
+// turn; the remedy is a larger context window or fewer kept-recent turns.
 func (s *ModelSession) NeedsCompression() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -160,8 +229,17 @@ func (s *ModelSession) NeedsCompression() bool {
 	if s.MaxContextLength <= 0 {
 		return false
 	}
-	threshold := int(float64(s.MaxContextLength) * 0.8)
-	return s.CurrentTokenCount >= threshold
+	high := int(float64(s.MaxContextLength) * compressionHighWater)
+	low := int(float64(s.MaxContextLength) * compressionLowWater)
+
+	// Re-arm once the context has receded below the low-water mark.
+	if s.compressSuppressed && s.CurrentTokenCount <= low {
+		s.compressSuppressed = false
+	}
+	if s.compressSuppressed {
+		return false
+	}
+	return s.CurrentTokenCount >= high
 }
 
 // EstimateTokens is a rough char/4 heuristic used to size a transcript between a
@@ -186,11 +264,15 @@ func (s *ModelSession) ApplyCompressedTranscript(newTranscript []Message) {
 	s.mu.Lock()
 	before := s.CurrentTokenCount
 	s.Transcript = append([]Message(nil), newTranscript...)
+	s.transcriptEpoch++
 	after := EstimateTokens(newTranscript)
 	if s.SystemPrompt != "" {
 		after += len(s.SystemPrompt) / 4
 	}
 	s.CurrentTokenCount = after
+	// A compaction just ran: engage hysteresis so NeedsCompression holds off
+	// until the (real, usage-corrected) count recedes below the low-water mark.
+	s.compressSuppressed = true
 	callbacks := append([]func(event CallbackEvent){}, s.Callbacks...)
 	s.mu.Unlock()
 
@@ -203,15 +285,36 @@ func (s *ModelSession) ApplyCompressedTranscript(newTranscript []Message) {
 	}
 }
 
-// Resume resumes the session on a new model backend
+// Resume resumes the session on a new model backend. When the backend actually
+// changes, the running token count is recomputed from the recorded per-turn
+// usage so it no longer reflects the previous model's (possibly differently
+// sized) context window.
 func (s *ModelSession) Resume(newModel Connector) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	prev := s.Model
 	s.Model = newModel
 
-	// Reset token count if different model
-	if newModel != s.Model {
+	// Recompute only when the model backend changes. The comparison must be
+	// against the value captured before the assignment above; comparing against
+	// s.Model after the assignment is trivially false (the original bug).
+	if newModel != prev {
+		// Carry the outgoing backend's accumulated usage counters into the fresh
+		// connector. The new connection starts with zeroed stats, so without this
+		// the session's connector-level token / request / error totals would
+		// appear to reset to zero on every model switch — and gogent rebuilds the
+		// connection on each send, so they reset on essentially every turn (issue
+		// #146). The per-turn token count is recomputed from History below.
+		if prev != nil && newModel != nil {
+			if from, ok := prev.(StatsReporter); ok {
+				if to, ok := newModel.(StatsReporter); ok {
+					if dst := to.GetStats(); dst != nil {
+						dst.Carry(from.StatsSnapshot())
+					}
+				}
+			}
+		}
 		newCount := 0
 		for _, turn := range s.History {
 			if turn.Usage != nil {
@@ -283,11 +386,30 @@ func (s *ModelSession) Send(messages []Message) (*CompletionResponse, error) {
 
 // SendWithTools is like Send but advertises native tools to the model.
 func (s *ModelSession) SendWithTools(messages []Message, tools []ToolDef) (*CompletionResponse, error) {
+	return s.SendWithToolsCtx(context.Background(), messages, tools)
+}
+
+// SendWithToolsCtx is SendWithTools bound to a context, so the underlying model
+// request is abandoned the moment ctx is cancelled (issue #24). The transcript
+// and history are still updated for the messages we attempted to send.
+func (s *ModelSession) SendWithToolsCtx(ctx context.Context, messages []Message, tools []ToolDef) (*CompletionResponse, error) {
 	s.mu.Lock()
 	// Append the new messages to the transcript.
 	s.Transcript = append(s.Transcript, messages...)
 
 	// Build the full request: system prompt (if any) + entire transcript.
+	//
+	// The system prompt is intentionally kept out of the transcript (so
+	// compaction cannot drop or rewrite it), so it has to be prepended here.
+	// That means a fresh slice copy of the transcript each turn — O(K) over a
+	// K-message session. It is a shallow struct-header copy (the message
+	// strings/slices are not duplicated), so the per-turn cost is small relative
+	// to marshaling the body. Eliminating it entirely would mean prepending the
+	// system message at marshal time (a per-adapter "2-slice writer" or a
+	// System field threaded down to the adapter) rather than producing one
+	// combined []Message; that is a larger change tracked as a follow-up to
+	// issue #20. The expensive part — re-marshaling the body — is already
+	// addressed by marshaling once per send into a pooled buffer (connection.go).
 	fullMessages := make([]Message, 0, len(s.Transcript)+1)
 	if s.SystemPrompt != "" {
 		fullMessages = append(fullMessages, Message{Role: RoleSystem, Content: s.SystemPrompt})
@@ -298,7 +420,7 @@ func (s *ModelSession) SendWithTools(messages []Message, tools []ToolDef) (*Comp
 	s.History = append(s.History, Turn{Request: messages})
 	s.mu.Unlock()
 
-	resp, err := s.Model.CompleteWithTools(fullMessages, tools)
+	resp, err := s.Model.CompleteWithToolsCtx(ctx, fullMessages, tools)
 	if err != nil {
 		s.mu.Lock()
 		s.History[len(s.History)-1].Error = &ModelError{Message: err.Error()}

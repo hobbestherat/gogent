@@ -1,0 +1,395 @@
+package ui
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+
+	tui "github.com/hobbestherat/turbotui"
+	tv "github.com/hobbestherat/turbotui/turbotv"
+)
+
+// command is one entry in the central command/keybinding table — the single
+// source of truth shared by the command palette and the keybinding help overlay
+// (issue #60). The palette offers every entry that carries an action and passes
+// its optional availability predicate; the help overlay lists every visible
+// entry grouped by category, so the cheatsheet can never drift from the real
+// bindings.
+type command struct {
+	category string      // help-overlay grouping, e.g. "Session"
+	name     string      // human description shown in both views
+	keys     string      // key hint shown in both views ("" when unbound)
+	run      func()      // palette action; nil marks a reference-only binding
+	enabled  func() bool // availability predicate; nil means always available
+}
+
+// visible reports whether the command should appear in the help overlay: a
+// command gated behind an unwired handler is hidden so the cheatsheet only lists
+// things that actually work.
+func (c command) visible() bool {
+	return c.enabled == nil || c.enabled()
+}
+
+// available reports whether the command should be offered in the palette: it
+// must carry an action and be visible in the current configuration.
+func (c command) available() bool {
+	return c.run != nil && c.visible()
+}
+
+// commands returns the central command/keybinding table. It is rebuilt on each
+// call so the availability predicates reflect the live handler wiring and active
+// session. The entries are listed grouped by category (Session, Transcript,
+// Config, App); both the palette and the help overlay rely on that grouping.
+func (w *Workbench) commands() []command {
+	avail := func(ok bool) func() bool { return func() bool { return ok } }
+	h := w.handlers
+	toggle := func(k eventKind) func() {
+		return func() { w.transcriptDo(func(m *transcriptModel) { m.toggleKind(k) }) }
+	}
+	return []command{
+		// Session lifecycle and arrangement.
+		{category: "Session", name: "New session", keys: "Ctrl+N", run: func() { w.NewSession() }},
+		{category: "Session", name: "Next session", keys: "Ctrl+]", run: func() { w.cycle(1) }},
+		{category: "Session", name: "Previous session", run: func() { w.cycle(-1) }},
+		{category: "Session", name: "Close session", keys: "Ctrl+W", run: w.CloseActive},
+		{category: "Session", name: "Close other sessions", run: func() { w.CloseOthers(w.ActiveID()) }},
+		{category: "Session", name: "Close all sessions", run: w.CloseAll},
+		{category: "Session", name: "Rename session", run: func() { w.RenameSession(w.ActiveID()) }},
+		{category: "Session", name: "Pin / unpin session", run: func() { w.TogglePin(w.ActiveID()) }},
+		{category: "Session", name: "Move session up", run: func() { w.MoveSession(w.ActiveID(), -1) }},
+		{category: "Session", name: "Move session down", run: func() { w.MoveSession(w.ActiveID(), 1) }},
+		{category: "Session", name: "Switch model", run: w.focusActiveModel},
+		{category: "Session", name: "Export transcript (Markdown)", run: func() { w.exportActive("md") },
+			enabled: avail(h.GetTranscript != nil)},
+		{category: "Session", name: "Export transcript (JSON)", run: func() { w.exportActive("json") },
+			enabled: avail(h.GetTranscript != nil)},
+		{category: "Session", name: "Saved sessions browser", run: w.showSessionsDialog,
+			enabled: avail(h.ListSavedSessions != nil)},
+
+		// Transcript view controls. The single-letter keys only fire while a
+		// transcript is focused; listing them here is exactly the cheatsheet the
+		// help overlay exists to provide.
+		{category: "Transcript", name: "Find in transcript", keys: "Ctrl+F, /",
+			run: func() { w.withActiveTranscript((*SessionWindow).promptFind) }},
+		{category: "Transcript", name: "Show all (clear filter)", keys: "Esc",
+			run: func() { w.transcriptDo((*transcriptModel).showAll) }},
+		{category: "Transcript", name: "Toggle messages", keys: "a", run: toggle(kindAssistant)},
+		{category: "Transcript", name: "Toggle tool calls", keys: "t", run: toggle(kindTool)},
+		{category: "Transcript", name: "Toggle thinking", keys: "r", run: toggle(kindThinking)},
+		{category: "Transcript", name: "Toggle errors", keys: "e", run: toggle(kindError)},
+		{category: "Transcript", name: "Fold all", keys: "f",
+			run: func() { w.transcriptDo(func(m *transcriptModel) { m.setFold(true) }) }},
+		{category: "Transcript", name: "Unfold all", keys: "u",
+			run: func() { w.transcriptDo(func(m *transcriptModel) { m.setFold(false) }) }},
+		{category: "Transcript", name: "Copy last answer", keys: "y",
+			run: func() { w.withActiveTranscript((*SessionWindow).copyLastAnswer) }},
+		{category: "Transcript", name: "Copy last code block",
+			run: func() { w.withActiveTranscript((*SessionWindow).copyLastCode) }},
+
+		// Configuration browsers and editors.
+		{category: "Config", name: "Sub-agent settings", keys: "Ctrl+,", run: w.showSettingsDialog,
+			enabled: avail(h.GetSettings != nil && h.SetSettings != nil)},
+		{category: "Config", name: "Models", run: w.showModelEditor},
+		{category: "Config", name: "Resources (tools & skills)", run: w.showResourcesDialog},
+		{category: "Config", name: "Statistics", run: w.showStatisticsDialog,
+			enabled: avail(h.GetStatistics != nil)},
+		{category: "Config", name: "Notifications", run: w.showNotificationsDialog,
+			enabled: avail(h.GetNotifyConfig != nil && h.SetNotifyConfig != nil)},
+		{category: "Config", name: "Theme editor", run: w.showThemeEditor,
+			enabled: avail(h.GetTheme != nil && h.SetTheme != nil)},
+
+		// Application-wide actions. The palette itself is reference-only (you are
+		// already in it); the sidebar pin and help/quit are runnable.
+		{category: "App", name: "Pin / unpin sidebar", run: w.ToggleSidebarPin},
+		{category: "App", name: "Command palette", keys: "Ctrl+K, :"},
+		{category: "App", name: "Keybinding help", keys: "?", run: w.showHelpOverlay},
+		{category: "App", name: "Quit", keys: "Ctrl+Q", run: w.confirmQuit},
+	}
+}
+
+// focusActiveModel routes the keyboard to the focused session's model selector so
+// the "Switch model" palette action lands the user on the dropdown (Enter/Space
+// opens it). It no-ops for a read-only analysis window, which has no selector.
+func (w *Workbench) focusActiveModel() {
+	w.withActiveTranscript(func(sw *SessionWindow) {
+		if sw.modelSelect == nil {
+			return
+		}
+		w.desktop.SetFocus(sw.modelSelect)
+		w.desktop.Redraw()
+	})
+}
+
+// fuzzyScore reports whether pattern matches text as a case-insensitive
+// subsequence and, when it does, a score where LOWER is a better match. The
+// score penalises a late first match and gaps between matched runes, so a typed
+// "ns" ranks "New session" ahead of "Close other sessions". An empty pattern
+// matches everything with the best (zero) score.
+func fuzzyScore(pattern, text string) (int, bool) {
+	if strings.TrimSpace(pattern) == "" {
+		return 0, true
+	}
+	p := []rune(strings.ToLower(strings.TrimSpace(pattern)))
+	t := []rune(strings.ToLower(text))
+	score, ti, prev := 0, 0, -1
+	for _, pr := range p {
+		found := -1
+		for ti < len(t) {
+			if t[ti] == pr {
+				found = ti
+				break
+			}
+			ti++
+		}
+		if found < 0 {
+			return 0, false
+		}
+		if prev < 0 {
+			score += found // leading offset
+		} else {
+			score += found - prev - 1 // gap between matches
+		}
+		prev = found
+		ti = found + 1
+	}
+	return score, true
+}
+
+// filterCommands returns the available commands fuzzy-matching query, best match
+// first. Ties keep the table's (category-grouped) order, so an empty query lists
+// every command in its natural grouping. The sort is stable and deterministic.
+func filterCommands(cmds []command, query string) []command {
+	type scored struct {
+		cmd   command
+		score int
+	}
+	matches := make([]scored, 0, len(cmds))
+	for _, c := range cmds {
+		if !c.available() {
+			continue
+		}
+		if s, ok := fuzzyScore(query, c.name); ok {
+			matches = append(matches, scored{c, s})
+		}
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		return matches[i].score < matches[j].score
+	})
+	out := make([]command, len(matches))
+	for i, m := range matches {
+		out[i] = m.cmd
+	}
+	return out
+}
+
+// commandRowNameWidth is the column the palette reserves for the command name
+// before its key hint, so the hints line up in a tidy second column.
+const commandRowNameWidth = 30
+
+// formatCommandRow renders one palette row: the padded name followed by its key
+// hint (when bound).
+func formatCommandRow(c command) string {
+	row := padName(c.name, commandRowNameWidth)
+	if c.keys != "" {
+		row += "  " + c.keys
+	}
+	return strings.TrimRight(row, " ")
+}
+
+// helpText renders the keybinding cheatsheet from the visible commands, grouped
+// under their category headers in table order. It is pure so the overlay's body
+// can be unit-tested without a live desktop.
+func helpText(cmds []command) string {
+	var b strings.Builder
+	cur := ""
+	for _, c := range cmds {
+		if !c.visible() {
+			continue
+		}
+		if c.category != cur {
+			if cur != "" {
+				b.WriteByte('\n')
+			}
+			b.WriteString(c.category)
+			b.WriteByte('\n')
+			cur = c.category
+		}
+		fmt.Fprintf(&b, "  %-12s %s\n", c.keys, c.name)
+	}
+	return b.String()
+}
+
+// showCommandPalette opens the fuzzy command palette (issue #60): a filterable
+// list of every available action. Typing filters live; ↑/↓ move the selection
+// and Enter runs it (closing the palette first so the action's own dialog is not
+// buried under this modal). Esc dismisses.
+func (w *Workbench) showCommandPalette() {
+	width, height := paletteSize(w.app.Width(), w.app.Height())
+	x, y := centeredDialog(w, width, height)
+
+	dialog := tv.NewDialog("Command Palette", x, y, width, height)
+	dialog.Window.ShowClose = false
+
+	dialog.Window.AddContent(dialogLabel("Run:", tv.Rect{X: 2, Y: 1, W: 4, H: 1}))
+	searchBox := tv.NewTextBox("", tv.Rect{X: 6, Y: 1, W: width - 8, H: 1})
+	dialog.Window.AddContent(searchBox)
+
+	listY := 3
+	listH := height - listY - 3 // hint row + bottom margin + border
+	if listH < 3 {
+		listH = 3
+	}
+	list := tv.NewTree(tv.Rect{X: 2, Y: listY, W: width - 4, H: listH})
+	list.FG = tv.DefaultTheme.DialogFG
+	list.BG = tv.DefaultTheme.DialogBG
+	list.SelFG, list.SelBG = selectionColorsFor(
+		tv.DefaultTheme.DialogFG, tv.DefaultTheme.DialogBG,
+		tv.DefaultTheme.SelectionFG, tv.DefaultTheme.SelectionBG)
+	dialog.Window.AddContent(list)
+
+	dialog.Window.AddContent(dialogLabel("Type to filter · ↑↓ move · Enter run · Esc close",
+		tv.Rect{X: 2, Y: height - 2, W: width - 4, H: 1}))
+
+	var layer *tv.Layer
+	closeFn := func() { w.desktop.RemoveLayer(layer) }
+
+	all := w.commands()
+	render := func() {
+		items := filterCommands(all, searchBox.GetText())
+		nodes := make([]*tv.TreeNode, 0, len(items))
+		for i := range items {
+			n := tv.NewTreeNode(formatCommandRow(items[i]))
+			n.Data = items[i]
+			nodes = append(nodes, n)
+		}
+		list.Roots = nodes
+		w.desktop.Redraw()
+	}
+
+	runSelected := func() {
+		n := list.Selected()
+		if n == nil {
+			return
+		}
+		c, ok := n.Data.(command)
+		if !ok || c.run == nil {
+			return
+		}
+		closeFn()
+		c.run()
+	}
+	list.OnActivate = func(*tv.TreeNode) { runSelected() }
+
+	// The search box keeps focus so the user types continuously; Enter runs the
+	// selection and the vertical arrows drive the list underneath it (fzf-style).
+	boxType := searchBox.Component.OnTypeFn
+	searchBox.Component.OnTypeFn = func(c *tv.VisualComponent, event tui.TypeEvent) bool {
+		switch event.Key {
+		case tui.KeyEnter:
+			runSelected()
+			return true
+		case tui.KeyUp, tui.KeyDown:
+			list.Component.OnTypeFn(list.Component, event)
+			w.desktop.Redraw()
+			return true
+		}
+		handled := false
+		if boxType != nil {
+			handled = boxType(c, event)
+		}
+		render()
+		return handled
+	}
+
+	dialog.Root().OnTypeFn = func(_ *tv.VisualComponent, event tui.TypeEvent) bool {
+		if event.Key == tui.KeyEscape {
+			closeFn()
+			return true
+		}
+		return false
+	}
+
+	layer = tv.NewModalLayer("command-palette", dialog)
+	w.desktop.AddLayer(layer)
+	render()
+	w.desktop.SetFocus(searchBox)
+}
+
+// showHelpOverlay opens the keybinding cheatsheet (issue #60): a read-only,
+// scrollable list of every binding grouped by context, rendered from the same
+// command table that drives the palette so the two can never disagree. Esc or
+// Close dismisses.
+func (w *Workbench) showHelpOverlay() {
+	width, height := helpSize(w.app.Width(), w.app.Height())
+	x, y := centeredDialog(w, width, height)
+
+	dialog := tv.NewDialog("Keybindings", x, y, width, height)
+	dialog.Window.ShowClose = false
+
+	bodyH := height - 5 // title border + hint/button row + bottom margin
+	if bodyH < 3 {
+		bodyH = 3
+	}
+	body := tv.NewTextView(helpText(w.commands()), tv.Rect{X: 2, Y: 1, W: width - 4, H: bodyH})
+	body.FG = tv.DefaultTheme.DialogFG
+	body.BG = tv.DefaultTheme.DialogBG
+	dialog.Window.AddContent(body)
+
+	dialog.Window.AddContent(dialogLabel("↑↓/PgUp/PgDn scroll · Ctrl+K palette · Esc close",
+		tv.Rect{X: 2, Y: height - 2, W: width - 16, H: 1}))
+
+	var layer *tv.Layer
+	closeFn := func() { w.desktop.RemoveLayer(layer) }
+	dialog.Window.AddContent(tv.NewButton("Close",
+		tv.Rect{X: width - 11, Y: height - 2, W: 9, H: 1}, closeFn))
+
+	dialog.Root().OnTypeFn = func(_ *tv.VisualComponent, event tui.TypeEvent) bool {
+		if event.Key == tui.KeyEscape {
+			closeFn()
+			return true
+		}
+		return false
+	}
+
+	layer = tv.NewModalLayer("help-overlay", dialog)
+	w.desktop.AddLayer(layer)
+	w.desktop.SetFocus(body)
+}
+
+// paletteSize picks a palette size: tall enough to show a useful slice of the
+// command list on a large terminal, clamped to fit a small one.
+func paletteSize(screenW, screenH int) (width, height int) {
+	width, height = 60, 20
+	if w := screenW - 4; width > w {
+		width = w
+	}
+	if h := screenH - 4; height > h {
+		height = h
+	}
+	if width < 40 {
+		width = 40
+	}
+	if height < 10 {
+		height = 10
+	}
+	return width, height
+}
+
+// helpSize picks a cheatsheet size: wide enough for the "key  description"
+// columns, tall enough to show the whole table on a roomy terminal.
+func helpSize(screenW, screenH int) (width, height int) {
+	width, height = 56, 30
+	if w := screenW - 4; width > w {
+		width = w
+	}
+	if h := screenH - 4; height > h {
+		height = h
+	}
+	if width < 44 {
+		width = 44
+	}
+	if height < 12 {
+		height = 12
+	}
+	return width, height
+}

@@ -1,11 +1,23 @@
 package skill
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
+)
+
+// Limits applied when loading skills. The skills directories may be shared or
+// writable, so the loader treats them as a trust boundary: it never follows
+// links (CWE-59), keeps every file it reads inside the skills root, and bounds
+// both tree depth and file size to keep untrusted content out of the model
+// context (issue #15).
+const (
+	maxSkillTreeDepth = 16      // maximum directory nesting under a skills root
+	maxSkillFileSize  = 1 << 20 // 1 MiB; a SKILL.md is never this large
 )
 
 // Skill represents an agent skill
@@ -42,46 +54,109 @@ func NewSkillRegistry() *SkillRegistry {
 	}
 }
 
-// LoadSkills loads all skills from a directory tree (single read at startup)
+// LoadSkills loads all skills from a directory tree (single read at startup).
+// The directory is a trust boundary: symlinks are not followed and no file
+// outside it is ever read (issue #15). A missing directory is a no-op rather
+// than an error, since the skills directories are optional.
 func (r *SkillRegistry) LoadSkills(dir string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	return r.loadSkillsRecursive(dir)
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("resolve skills dir %s: %w", dir, err)
+	}
+	// Canonicalize the root by resolving the symlinks on its own path; the
+	// per-file containment check is compared against this resolved root.
+	root, err := filepath.EvalSymlinks(absDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil // optional skills directory not present
+		}
+		return fmt.Errorf("eval skills dir %s: %w", dir, err)
+	}
+
+	return r.loadSkillsRecursive(root, root, 0)
 }
 
-// loadSkillsRecursive loads skills from a directory recursively
-func (r *SkillRegistry) loadSkillsRecursive(dir string) error {
+// loadSkillsRecursive loads skills from a directory recursively. A skill that
+// fails to read or parse no longer vanishes silently: its error is aggregated
+// (alongside any sibling failures) and returned, while the rest still load
+// (issue #17). Symlinked entries are never traversed (issue #15). A missing
+// directory is a no-op rather than an error, since the skills directories are
+// optional.
+func (r *SkillRegistry) loadSkillsRecursive(dir, root string, depth int) error {
+	if depth > maxSkillTreeDepth {
+		return fmt.Errorf("max skill tree depth exceeded at %s", dir)
+	}
+
 	entries, err := os.ReadDir(dir)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil // optional skills directory not present
+		}
 		return fmt.Errorf("failed to read directory %s: %w", dir, err)
 	}
 
+	var errs error
 	for _, entry := range entries {
+		// Never follow symlinks anywhere in the skills tree (issue #15): a
+		// symlinked directory could otherwise pull arbitrary, out-of-tree
+		// content into the model context.
+		if entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
 		if entry.IsDir() {
-			// Check for SKILL.md in directory
-			skillPath := filepath.Join(dir, entry.Name(), "SKILL.md")
-			if info, err := os.Stat(skillPath); err == nil && !info.IsDir() {
-				r.loadSkillFile(skillPath, entry.Name())
+			subDir := filepath.Join(dir, entry.Name())
+			skillPath := filepath.Join(subDir, "SKILL.md")
+			if err := r.loadSkillFile(skillPath, root, entry.Name()); err != nil {
+				errs = errors.Join(errs, fmt.Errorf("skill %s: %w", entry.Name(), err))
 			}
-			// Recurse into subdirectories
-			r.loadSkillsRecursive(filepath.Join(dir, entry.Name()))
+			// Recurse into subdirectories.
+			if err := r.loadSkillsRecursive(subDir, root, depth+1); err != nil {
+				errs = errors.Join(errs, err)
+			}
 		}
 	}
 
-	return nil
+	return errs
 }
 
-// loadSkillFile loads a single skill file
-func (r *SkillRegistry) loadSkillFile(path string, name string) {
+// loadSkillFile loads a single SKILL.md, returning any read or parse error so
+// the caller can surface it instead of dropping the skill without a trace. It
+// returns nil when the file is absent, since not every directory holds a skill.
+// As a trust boundary (issue #15) it refuses symlinks and non-regular files,
+// verifies the file lies inside the skills root, and bounds its size — so a
+// shared or writable skills dir cannot inject arbitrary content into context.
+func (r *SkillRegistry) loadSkillFile(path, root, name string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil // no SKILL.md in this directory; not an error
+		}
+		return fmt.Errorf("stat %s: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing symlinked skill file %s", path)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("refusing non-regular skill file %s", path)
+	}
+	if !pathIsInside(path, root) {
+		return fmt.Errorf("skill file %s is outside the skills root", path)
+	}
+	if info.Size() > maxSkillFileSize {
+		return fmt.Errorf("skill file %s exceeds %d byte limit", path, maxSkillFileSize)
+	}
+
 	content, err := os.ReadFile(path)
 	if err != nil {
-		return
+		return fmt.Errorf("read %s: %w", path, err)
 	}
 
 	description, err := parseFrontmatter(string(content))
 	if err != nil {
-		return
+		return fmt.Errorf("parse %s: %w", path, err)
 	}
 
 	r.skills[name] = &Skill{
@@ -99,6 +174,20 @@ func (r *SkillRegistry) loadSkillFile(path string, name string) {
 
 	// Activate by default
 	r.activeSkills[name] = true
+	return nil
+}
+
+// pathIsInside reports whether path is strictly nested below root. Both paths
+// must already be absolute and symlink-free (the loader canonicalizes the root
+// and Lstats every file), so this is a lexical containment check that also
+// rejects prefix lookalikes (e.g. "/skills-secret" against root "/skills").
+func pathIsInside(path, root string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	rel = filepath.ToSlash(rel)
+	return rel != "." && !strings.HasPrefix(rel, "..")
 }
 
 // GetSkill gets a skill by name

@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # The production target is aarch64 (Raspberry Pi), where the race detector is
+  # unavailable. The detector's findings are architecture-independent, so we run
+  # the module under -race on an x86 runner to catch data races regardless.
+  test:
+    name: build & test (-race)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test (race)
+        run: go test ./... -race -count=1
+
+  vulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    # Advisory until the initial findings are triaged (see issue follow-up):
+    # the linter set is opinionated (gosec/wrapcheck) and we don't want to block
+    # merges on a first pass over an existing codebase.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # The repo's .golangci.yml is a v2 config, so use action v8 (which installs
+      # golangci-lint v2). The v6 action installs v1.64.x, built with go1.24,
+      # which refuses to target this module's go1.25 and never actually lints.
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest

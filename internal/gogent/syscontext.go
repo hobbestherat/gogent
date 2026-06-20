@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"gogent/internal/vcs"
 )
 
 // maxAgentsContextBytes caps the combined AGENTS.md content injected into the
@@ -74,6 +76,28 @@ func (g *Gogent) buildSystemContext() string {
 
 	if g.agentsContext != "" {
 		b.WriteString(g.agentsContext)
+	}
+
+	if g.repoMap != "" {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(g.repoMap)
+	}
+
+	// Inject a live git status so the agent always sees the current working-tree
+	// state (branch, staged/unstaged/untracked files) without having to ask. This
+	// is re-evaluated each loop, so it reflects edits and commits made mid-session.
+	if g.gitRepo {
+		if status := vcs.StatusSummary(g.workspaceRoot); status != "" {
+			if b.Len() > 0 {
+				b.WriteString("\n\n")
+			}
+			b.WriteString("## Git status\n")
+			b.WriteString("Current state of the workspace repository. Use the `git` tool to inspect or change it.\n```\n")
+			b.WriteString(status)
+			b.WriteString("\n```")
+		}
 	}
 
 	if g.skills != nil {

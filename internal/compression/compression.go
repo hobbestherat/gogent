@@ -172,6 +172,9 @@ func renderConversation(messages []model.Message) string {
 				fmt.Fprintf(&b, "[%s]: %s\n", role, content)
 			}
 		}
+		for range msg.Images {
+			fmt.Fprintf(&b, "[%s]: [image]\n", role)
+		}
 		for _, tc := range msg.ToolCalls {
 			fmt.Fprintf(&b, "[%s calls %s]: %s\n", role, tc.Function.Name, tc.Function.Arguments)
 		}

@@ -1,13 +1,19 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
+	"gogent/internal/mathexpr"
 	"gogent/internal/permission"
 	"gogent/internal/shell"
+	"gogent/internal/web"
 )
 
 type PermissionDecision string
@@ -25,6 +31,12 @@ type ToolContext struct {
 	ToolCallID        string
 	PermissionService *permission.Service
 	ToolCallback      func(toolName string, args map[string]interface{}) error
+	// Context carries the cancellation scope of the agent loop that invoked the
+	// tool. Tools that themselves run a model loop (e.g. spawn_subagent) thread it
+	// down so a stopped/closed parent also cancels its in-flight children (issue
+	// #24). It may be nil for callers that pre-date context plumbing; treat nil as
+	// context.Background().
+	Context context.Context
 }
 
 type Tool struct {
@@ -32,6 +44,14 @@ type Tool struct {
 	Description string
 	InputSchema interface{}
 	Execute     func(args map[string]interface{}, context ToolContext) (interface{}, error)
+	// ReadOnly marks a tool as read-only/idempotent: it inspects the workspace
+	// (or a remote resource) without mutating shared state, so several such calls
+	// from one turn can run concurrently without racing on files or on call
+	// ordering. Side-effecting tools (write, edit, shell, ...) leave it false and
+	// are executed serially. Unknown/dynamic tools (e.g. MCP) default to false,
+	// the safe choice. It is the property the parallel tool-call fast-path keys on
+	// (issue #50).
+	ReadOnly bool
 }
 
 type ToolRegistry struct {
@@ -42,18 +62,73 @@ type ToolRegistry struct {
 	// WorkspaceRoot is the directory shell commands run in. Empty falls back to
 	// the process working directory.
 	WorkspaceRoot string
+	// NetworkTimeout bounds web_fetch HTTP requests. Zero falls back to a
+	// built-in default (see web.DefaultTimeout).
+	NetworkTimeout time.Duration
 	// Permission gates side-effecting tools (shell, etc.). May be nil.
 	Permission *permission.Service
+	// mu guards enabled, which is per-registry: a cloned registry starts with
+	// every tool enabled regardless of its parent's toggles. The tools map itself
+	// is populated once at startup and read thereafter, so it stays unlocked.
+	mu      sync.RWMutex
+	enabled map[string]bool
+	// counts holds the per-tool invocation/outcome/duration counters. It is a
+	// pointer so a clone family (see CloneWithout) shares one set: calls executed
+	// on a session's mode-filtered clone aggregate into the same counters the
+	// global registry exposes for the Statistics view.
+	counts *toolCounts
+}
+
+// toolCounts holds the shared, mutex-guarded per-tool counters.
+type toolCounts struct {
+	mu          sync.RWMutex
+	invocations map[string]int
+	lastUsed    map[string]time.Time
+	success     map[string]int
+	failure     map[string]int
+	totalMs     map[string]int64
+}
+
+func newToolCounts() *toolCounts {
+	return &toolCounts{
+		invocations: make(map[string]int),
+		lastUsed:    make(map[string]time.Time),
+		success:     make(map[string]int),
+		failure:     make(map[string]int),
+		totalMs:     make(map[string]int64),
+	}
 }
 
 func NewToolRegistry() *ToolRegistry {
 	return &ToolRegistry{
-		tools: make(map[string]*Tool),
+		tools:   make(map[string]*Tool),
+		enabled: make(map[string]bool),
+		counts:  newToolCounts(),
 	}
 }
 
 func (tr *ToolRegistry) Register(tool *Tool) {
+	// Normalize the advertised schema once, here, so validation, the Resources
+	// display, and every provider's wire format all share one portable schema
+	// (object root with a properties map, no provider-rejected keywords) — see
+	// NormalizeSchema. MCP servers in particular hand us arbitrary schemas.
+	tool.InputSchema = NormalizeSchema(tool.InputSchema)
 	tr.tools[tool.Name] = tool
+}
+
+// SchemaJSON serializes a tool's input schema to indented JSON for display (the
+// Resources browser shows it in a tool's detail pane). It returns "" for a nil
+// schema or a marshaling failure. Go's encoder sorts object keys, so the output
+// is stable.
+func SchemaJSON(schema interface{}) string {
+	if schema == nil {
+		return ""
+	}
+	b, err := json.MarshalIndent(schema, "", "  ")
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 func (tr *ToolRegistry) Get(name string) *Tool {
@@ -68,9 +143,132 @@ func (tr *ToolRegistry) List() []*Tool {
 	return tools
 }
 
+// IsEnabled reports whether a tool is enabled. Tools are enabled by default;
+// SetEnabled is the only way to disable one.
+func (tr *ToolRegistry) IsEnabled(name string) bool {
+	tr.mu.RLock()
+	defer tr.mu.RUnlock()
+	enabled, ok := tr.enabled[name]
+	if !ok {
+		return true
+	}
+	return enabled
+}
+
+// SetEnabled enables or disables a tool. A disabled tool is hidden from the
+// model (it is omitted from the advertised tool set) and refused at execution
+// time, so the agent neither sees nor can call it.
+func (tr *ToolRegistry) SetEnabled(name string, enabled bool) {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	tr.enabled[name] = enabled
+}
+
+// ListEnabled returns the currently enabled tools. It backs the tool set
+// advertised to the model, so disabling a tool drops it from the agent's view.
+func (tr *ToolRegistry) ListEnabled() []*Tool {
+	tr.mu.RLock()
+	defer tr.mu.RUnlock()
+	tools := make([]*Tool, 0, len(tr.tools))
+	for name, t := range tr.tools {
+		if enabled, ok := tr.enabled[name]; ok && !enabled {
+			continue
+		}
+		tools = append(tools, t)
+	}
+	return tools
+}
+
+// Invocations returns how many times a tool has been invoked through the
+// registry (validated calls only).
+func (tr *ToolRegistry) Invocations(name string) int {
+	tr.counts.mu.RLock()
+	defer tr.counts.mu.RUnlock()
+	return tr.counts.invocations[name]
+}
+
+// LastUsed returns the time of a tool's most recent invocation, or the zero
+// time if it has never been used.
+func (tr *ToolRegistry) LastUsed(name string) time.Time {
+	tr.counts.mu.RLock()
+	defer tr.counts.mu.RUnlock()
+	return tr.counts.lastUsed[name]
+}
+
+// recordInvocation bumps a tool's invocation count and last-used timestamp. It
+// is called once a tool call has passed validation and is about to run.
+func (tr *ToolRegistry) recordInvocation(name string) {
+	tr.counts.mu.Lock()
+	defer tr.counts.mu.Unlock()
+	tr.counts.invocations[name]++
+	tr.counts.lastUsed[name] = time.Now()
+}
+
+// recordOutcome records the result and duration of a tool execution that already
+// passed validation. success follows the returned ToolCallResponse.Success flag
+// (an error or a non-success response counts as a failure). It pairs with
+// recordInvocation, which bumped the invocation count just before execution.
+func (tr *ToolRegistry) recordOutcome(name string, success bool, durationMs int64) {
+	tr.counts.mu.Lock()
+	defer tr.counts.mu.Unlock()
+	if success {
+		tr.counts.success[name]++
+	} else {
+		tr.counts.failure[name]++
+	}
+	tr.counts.totalMs[name] += durationMs
+}
+
+// ToolStats is a point-in-time view of one tool's usage: how many times it ran,
+// the success/failure split and the cumulative/average execution time. It is the
+// per-tool row the Statistics view (issue #57) renders.
+type ToolStats struct {
+	Name        string
+	Invocations int
+	Success     int
+	Failure     int
+	TotalMs     int64
+}
+
+// AvgMs returns the mean execution time per invocation, or 0 when the tool has
+// never run.
+func (s ToolStats) AvgMs() int64 {
+	if s.Invocations == 0 {
+		return 0
+	}
+	return s.TotalMs / int64(s.Invocations)
+}
+
+// GetAllToolStats returns a ToolStats row for every registered tool, sorted by
+// name for a stable display. Tools that have never run report zero counters.
+func (tr *ToolRegistry) GetAllToolStats() []ToolStats {
+	tr.counts.mu.RLock()
+	defer tr.counts.mu.RUnlock()
+	out := make([]ToolStats, 0, len(tr.tools))
+	names := make([]string, 0, len(tr.tools))
+	for name := range tr.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		out = append(out, ToolStats{
+			Name:        name,
+			Invocations: tr.counts.invocations[name],
+			Success:     tr.counts.success[name],
+			Failure:     tr.counts.failure[name],
+			TotalMs:     tr.counts.totalMs[name],
+		})
+	}
+	return out
+}
+
 // CloneWithout returns a shallow copy of the registry with the named tools
 // removed. It is used to hand sub-agents a registry that omits the sub-agent
-// spawning tools when recursive sub-agents are disabled.
+// spawning tools when recursive sub-agents are disabled. The per-tool counters
+// are shared with the parent (a fresh clone family aggregates into one set) so
+// usage recorded on a session's mode-filtered clone reaches the global registry
+// the Statistics view reads; the enabled map is intentionally not shared, so a
+// clone starts with every tool enabled regardless of its parent's toggles.
 func (tr *ToolRegistry) CloneWithout(names ...string) *ToolRegistry {
 	excluded := make(map[string]bool, len(names))
 	for _, n := range names {
@@ -79,7 +277,9 @@ func (tr *ToolRegistry) CloneWithout(names ...string) *ToolRegistry {
 	clone := NewToolRegistry()
 	clone.ShellTimeout = tr.ShellTimeout
 	clone.WorkspaceRoot = tr.WorkspaceRoot
+	clone.NetworkTimeout = tr.NetworkTimeout
 	clone.Permission = tr.Permission
+	clone.counts = tr.counts // share counters across the clone family
 	for name, t := range tr.tools {
 		if excluded[name] {
 			continue
@@ -87,6 +287,33 @@ func (tr *ToolRegistry) CloneWithout(names ...string) *ToolRegistry {
 		clone.tools[name] = t
 	}
 	return clone
+}
+
+// CloneForPlanMode returns a clone exposing only read-only tools plus the named
+// extras, stripping every side-effecting tool so a planning agent cannot mutate
+// the workspace (issue #43). It backs the plan-mode turn: write/edit/shell and
+// the sub-agent coordination tools are removed, leaving the read-only
+// investigation tools (and the named extras such as "todo" and
+// "structured_output"). The per-tool counters are shared with the source (see
+// CloneWithout) so plan-mode calls still aggregate into the Statistics view.
+func (tr *ToolRegistry) CloneForPlanMode(keep ...string) *ToolRegistry {
+	keepSet := make(map[string]bool, len(keep))
+	for _, n := range keep {
+		keepSet[n] = true
+	}
+	var strip []string
+	for name, t := range tr.tools {
+		if t.ReadOnly || keepSet[name] {
+			continue
+		}
+		strip = append(strip, name)
+	}
+	if len(strip) == 0 {
+		// Every tool is read-only or kept; CloneWithout with no exclusions still
+		// produces an independent clone sharing the counters.
+		return tr.CloneWithout()
+	}
+	return tr.CloneWithout(strip...)
 }
 
 type ToolCall struct {
@@ -101,12 +328,19 @@ type ToolCallResponse struct {
 	Error   string      `json:"error,omitempty"`
 }
 
-func (tr *ToolRegistry) ExecuteToolCall(toolCall *ToolCall, ctx ToolContext) (*ToolCallResponse, error) {
+func (tr *ToolRegistry) ExecuteToolCall(toolCall *ToolCall, ctx ToolContext) (resp *ToolCallResponse, err error) {
 	tool := tr.tools[toolCall.Tool]
 	if tool == nil {
 		return &ToolCallResponse{
 			Success: false,
 			Error:   fmt.Sprintf("unknown tool: %s", toolCall.Tool),
+		}, nil
+	}
+
+	if !tr.IsEnabled(toolCall.Tool) {
+		return &ToolCallResponse{
+			Success: false,
+			Error:   fmt.Sprintf("tool is disabled: %s", toolCall.Tool),
 		}, nil
 	}
 
@@ -116,6 +350,9 @@ func (tr *ToolRegistry) ExecuteToolCall(toolCall *ToolCall, ctx ToolContext) (*T
 			Error:   fmt.Sprintf("invalid args: %v", err),
 		}, nil
 	}
+
+	// Count the invocation now that it has been validated and is about to run.
+	tr.recordInvocation(toolCall.Tool)
 
 	// Make the registry's permission service available to tools that gate
 	// through the context (the agent loop builds a context without it).
@@ -127,7 +364,19 @@ func (tr *ToolRegistry) ExecuteToolCall(toolCall *ToolCall, ctx ToolContext) (*T
 		ctx.ToolCallback(toolCall.Tool, toolCall.Args)
 	}
 
+	start := time.Now()
+	// Contain a panicking tool (unchecked type assertion, parser slice index,
+	// nil deref, ...) so one bad tool call surfaces as an ordinary tool error
+	// instead of crashing the process and every concurrent session (issue #8).
+	defer func() {
+		if r := recover(); r != nil {
+			tr.recordOutcome(toolCall.Tool, false, time.Since(start).Milliseconds())
+			err = fmt.Errorf("tool %q panicked: %v", toolCall.Tool, r)
+			resp = &ToolCallResponse{Success: false, Error: err.Error()}
+		}
+	}()
 	result, err := tool.Execute(toolCall.Args, ctx)
+	tr.recordOutcome(toolCall.Tool, err == nil, time.Since(start).Milliseconds())
 	if err != nil {
 		return &ToolCallResponse{
 			Success: false,
@@ -146,6 +395,7 @@ func (tr *ToolRegistry) RegisterCalcTool() {
 	tr.Register(&Tool{
 		Name:        "calc",
 		Description: "Calculate mathematical expressions like 5+5 or 10*20/5. Returns the result of the calculation.",
+		ReadOnly:    true,
 		InputSchema: map[string]interface{}{
 			"type":       "object",
 			"properties": map[string]interface{}{"expression": map[string]interface{}{"type": "string"}},
@@ -157,12 +407,8 @@ func (tr *ToolRegistry) RegisterCalcTool() {
 				return nil, fmt.Errorf("expression argument is required")
 			}
 
-			// Clean expression
-			expr := expression
-			expr = strings.ReplaceAll(expr, " ", "")
-
-			// Evaluate using recursive descent parser
-			result, err := evalMath(expr)
+			// Evaluate using the shared, hardened evaluator.
+			result, err := mathexpr.Eval(expression)
 			if err != nil {
 				return nil, fmt.Errorf("calculation error: %v", err)
 			}
@@ -173,92 +419,6 @@ func (tr *ToolRegistry) RegisterCalcTool() {
 			}, nil
 		},
 	})
-}
-
-// evalMath evaluates a mathematical expression
-func evalMath(expr string) (float64, error) {
-	return evalExpr(expr)
-}
-
-// evalExpr handles + and -
-func evalExpr(expr string) (float64, error) {
-	// Find the last + or - that's not in parentheses
-	level := 0
-	for i := len(expr) - 1; i >= 0; i-- {
-		c := expr[i]
-		if c == ')' {
-			level++
-		} else if c == '(' {
-			level--
-		} else if level == 0 && (c == '+' || c == '-') {
-			left, err := evalExpr(expr[:i])
-			if err != nil {
-				return 0, err
-			}
-			right, err := evalExpr(expr[i+1:])
-			if err != nil {
-				return 0, err
-			}
-			if c == '+' {
-				return left + right, nil
-			}
-			return left - right, nil
-		}
-	}
-
-	// Handle parentheses
-	if len(expr) > 0 && expr[0] == '(' && expr[len(expr)-1] == ')' {
-		return evalExpr(expr[1 : len(expr)-1])
-	}
-
-	// Handle * and /
-	level = 0
-	for i := len(expr) - 1; i >= 0; i-- {
-		c := expr[i]
-		if c == ')' {
-			level++
-		} else if c == '(' {
-			level--
-		} else if level == 0 && (c == '*' || c == '/') {
-			left, err := evalExpr(expr[:i])
-			if err != nil {
-				return 0, err
-			}
-			right, err := evalExpr(expr[i+1:])
-			if err != nil {
-				return 0, err
-			}
-			if c == '*' {
-				return left * right, nil
-			}
-			return left / right, nil
-		}
-	}
-
-	// Parse number
-	if len(expr) > 0 {
-		// Try to parse as float
-		var result float64
-		_, err := fmt.Sscanf(expr, "%f", &result)
-		if err == nil {
-			return result, nil
-		}
-		// Try as int
-		var intResult int
-		_, err2 := fmt.Sscanf(expr, "%d", &intResult)
-		if err2 == nil {
-			return float64(intResult), nil
-		}
-		return 0, fmt.Errorf("invalid number: %s", expr)
-	}
-	return 0, fmt.Errorf("empty expression")
-}
-
-func validateArgs(args map[string]interface{}, schema interface{}) error {
-	if args == nil {
-		return fmt.Errorf("args cannot be nil")
-	}
-	return nil
 }
 
 // RegisterShellTool registers the shell tool for executing shell commands
@@ -281,11 +441,12 @@ func (tr *ToolRegistry) RegisterShellTool() {
 			// may choose "always"); then any path that escapes the workspace is
 			// gated per external root folder.
 			if tr.Permission != nil {
-				if err := tr.Permission.CheckWithDetail(permission.ActionShell, "", command); err != nil {
+				rc := permission.RequestContext{SessionID: ctx.SessionID, Agent: ctx.AgentID}
+				if err := tr.Permission.CheckWithContext(rc, permission.ActionShell, "", command); err != nil {
 					return nil, err
 				}
 				for _, root := range shell.ExternalRoots(command, tr.WorkspaceRoot) {
-					if err := tr.Permission.CheckWithDetail(permission.ActionExternal, root, command); err != nil {
+					if err := tr.Permission.CheckWithContext(rc, permission.ActionExternal, root, command); err != nil {
 						return nil, err
 					}
 				}
@@ -320,6 +481,92 @@ func (tr *ToolRegistry) RegisterShellTool() {
 	})
 }
 
+// RegisterWebFetchTool registers the web_fetch tool: it downloads an http(s)
+// URL, extracts the main content as readability-style Markdown, caps the size,
+// and serves repeat requests from a short-lived cache. Network access is gated
+// per domain through the permission service (ActionNetwork), so an "always"
+// grant is scoped to a single host. The fetcher (and its cache) is created once
+// here and captured by the tool closure, so it is shared across calls and any
+// sub-agent registries cloned from this one.
+func (tr *ToolRegistry) RegisterWebFetchTool() {
+	fetcher := web.NewFetcher(web.Config{Timeout: tr.NetworkTimeout})
+	tr.Register(&Tool{
+		Name:     "web_fetch",
+		ReadOnly: true,
+		Description: "Fetch a web page over http(s) and return its main content as Markdown " +
+			"(readability-extracted, size-capped, short-TTL cached). Prefer this over running " +
+			"curl in the shell for reading docs, API references and error lookups: it returns " +
+			"clean Markdown instead of raw HTML. Network access is gated per domain.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"url":        map[string]interface{}{"type": "string", "description": "Absolute http(s) URL to fetch."},
+				"max_length": map[string]interface{}{"type": "integer", "description": "Optional cap on the number of Markdown characters returned."},
+			},
+			"required": []string{"url"},
+		},
+		Execute: func(args map[string]interface{}, ctx ToolContext) (interface{}, error) {
+			rawURL, ok := args["url"].(string)
+			if !ok || strings.TrimSpace(rawURL) == "" {
+				return nil, fmt.Errorf("url argument is required")
+			}
+			rawURL = strings.TrimSpace(rawURL)
+			u, err := url.Parse(rawURL)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return nil, fmt.Errorf("url must be an absolute http(s) URL")
+			}
+
+			// Gate network access per host so an "always" grant covers one domain.
+			perm := ctx.PermissionService
+			if perm == nil {
+				perm = tr.Permission
+			}
+			if perm != nil {
+				rc := permission.RequestContext{SessionID: ctx.SessionID, Agent: ctx.AgentID}
+				if err := perm.CheckWithContext(rc, permission.ActionNetwork, u.Host, rawURL); err != nil {
+					return nil, err
+				}
+			}
+
+			res, err := fetcher.Fetch(rawURL)
+			if err != nil {
+				return nil, fmt.Errorf("web_fetch failed: %v", err)
+			}
+
+			markdown, truncated := res.Markdown, res.Truncated
+			if max, ok := intArg(args["max_length"]); ok && max > 0 {
+				if cut, didCut := web.TruncateChars(markdown, max); didCut {
+					markdown, truncated = cut, true
+				}
+			}
+
+			return map[string]interface{}{
+				"url":        res.URL,
+				"title":      res.Title,
+				"markdown":   markdown,
+				"truncated":  truncated,
+				"from_cache": res.FromCache,
+			}, nil
+		},
+	})
+}
+
+// intArg coerces a JSON-decoded argument to an int. JSON numbers decode to
+// float64; integer Go types are accepted defensively for non-JSON callers.
+func intArg(v interface{}) (int, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int(n), true
+	case float32:
+		return int(n), true
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	}
+	return 0, false
+}
+
 type StructuredOutput struct {
 	Response string    `json:"response"`
 	ToolCall *ToolCall `json:"tool_call,omitempty"`
@@ -327,68 +574,80 @@ type StructuredOutput struct {
 }
 
 func (tr *ToolRegistry) ParseToolCall(response string) (*ToolCall, error) {
-	var toolCall ToolCall
-	if err := json.Unmarshal([]byte(response), &toolCall); err == nil {
-		return &toolCall, nil
+	if calls := ParseToolCalls(response); len(calls) > 0 {
+		return &calls[0], nil
 	}
-
-	if extracted := extractJSON(response); extracted != "" {
-		if err := json.Unmarshal([]byte(extracted), &toolCall); err == nil {
-			return &toolCall, nil
-		}
-	}
-
 	return nil, fmt.Errorf("no valid tool call found in response")
 }
 
-func extractJSON(text string) string {
-	start := -1
-	end := -1
-
-	for i := 0; i < len(text)-2; i++ {
-		if text[i] == '`' && text[i+1] == '`' && text[i+2] == '`' {
-			if start == -1 {
-				start = i + 3
-			} else {
-				end = i
-				break
-			}
+// ParseToolCalls is the tolerant fallback for models without native
+// tool-calling: it returns every JSON tool call embedded in a model response,
+// in order of appearance. It scans for balanced {...} objects and keeps each one
+// that decodes to a call naming a tool, so it is robust to the formatting
+// variations small/local models produce — surrounding prose, Markdown code
+// fences, pretty-printing, key reordering, whitespace around colons, and several
+// calls in one reply. Returns nil when no tool call is present.
+func ParseToolCalls(response string) []ToolCall {
+	var calls []ToolCall
+	for _, obj := range ExtractJSONObjects(response) {
+		var tc ToolCall
+		if err := json.Unmarshal([]byte(obj), &tc); err == nil && tc.Tool != "" {
+			calls = append(calls, tc)
 		}
 	}
-
-	if start != -1 && end != -1 && end > start {
-		jsonStr := text[start:end]
-		if idx := strings.Index(jsonStr, "{"); idx != -1 {
-			return extractJSONFrom(jsonStr[idx:])
-		}
-	}
-
-	if idx := strings.Index(text, "{"); idx != -1 {
-		return extractJSONFrom(text[idx:])
-	}
-
-	return ""
+	return calls
 }
 
-func extractJSONFrom(text string) string {
-	braceCount := 0
+// ExtractJSONObjects scans text for balanced, top-level {...} JSON objects and
+// returns their source substrings in order of appearance. It is the single
+// tolerant extractor shared by every JSON-text tool-call fallback (issue #32),
+// replacing the brittle substring matching that only recognised one exact
+// `{"tool":` shape.
+//
+// Braces inside JSON string literals (including escaped quotes) are ignored, so
+// a value like {"content":"a } b"} is extracted whole. Non-JSON characters
+// between objects — prose, Markdown ```json fences, list markers — are skipped,
+// which is why fenced and prose-wrapped calls are handled without a separate
+// fence-stripping pass. Nested objects are returned as part of their enclosing
+// top-level object, not separately.
+func ExtractJSONObjects(text string) []string {
+	var objs []string
+	depth := 0
 	start := -1
-
-	for i, ch := range text {
-		if ch == '{' {
-			if braceCount == 0 {
+	inString := false
+	escaped := false
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+		case '{':
+			if depth == 0 {
 				start = i
 			}
-			braceCount++
-		} else if ch == '}' {
-			braceCount--
-			if braceCount == 0 && start != -1 {
-				return text[start : i+1]
+			depth++
+		case '}':
+			if depth > 0 {
+				depth--
+				if depth == 0 && start != -1 {
+					objs = append(objs, text[start:i+1])
+					start = -1
+				}
 			}
 		}
 	}
-
-	return ""
+	return objs
 }
 
 // UnmarshalJSON is a helper to unmarshal JSON

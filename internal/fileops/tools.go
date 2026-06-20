@@ -41,11 +41,12 @@ func (rt *ReadTool) Execute(args map[string]interface{}) (interface{}, error) {
 		return nil, fmt.Errorf("missing path argument")
 	}
 
-	if err := CheckFileAccess(rt.permission, rt.location, false, path); err != nil {
+	auth, err := CheckFileAccess(rt.permission, rt.location, false, path, permission.RequestContext{})
+	if err != nil {
 		return nil, err
 	}
 
-	content, err := rt.fileSys.Read(path)
+	content, err := rt.fileSys.Read(path, auth)
 	if err != nil {
 		return nil, err
 	}
@@ -86,11 +87,12 @@ func (wt *WriteTool) Execute(args map[string]interface{}) (interface{}, error) {
 		return nil, fmt.Errorf("missing path argument: content")
 	}
 
-	if err := CheckFileAccess(wt.permission, wt.location, true, path); err != nil {
+	auth, err := CheckFileAccess(wt.permission, wt.location, true, path, permission.RequestContext{})
+	if err != nil {
 		return nil, err
 	}
 
-	result, err := wt.fileMutation.Write(path, []byte(content))
+	result, err := wt.fileMutation.Write(path, []byte(content), auth)
 	if err != nil {
 		return nil, err
 	}
@@ -123,7 +125,7 @@ func NewEditTool(fileMutation *FileMutation, location *LocationMutation, perm *p
 func (et *EditTool) Name() string { return "edit" }
 
 func (et *EditTool) Description() string {
-	return "Edit a file by replacing exact text. The path may be absolute or relative to the workspace root; relative paths are resolved against the workspace root, absolute paths are used as-is. Uses conditional write for safety. Returns operation details."
+	return "Edit a file by replacing exact text. The path may be absolute or relative to the workspace root; relative paths are resolved against the workspace root, absolute paths are used as-is. The find text must match exactly once; include enough surrounding context to make it unique, or set replace_all to true to replace every occurrence. Uses conditional write for safety. Returns operation details."
 }
 
 func (et *EditTool) Execute(args map[string]interface{}) (interface{}, error) {
@@ -142,23 +144,24 @@ func (et *EditTool) Execute(args map[string]interface{}) (interface{}, error) {
 		return nil, fmt.Errorf("missing path argument: replace")
 	}
 
-	if err := CheckFileAccess(et.permission, et.location, true, path); err != nil {
+	replaceAll, _ := args["replace_all"].(bool)
+
+	auth, err := CheckFileAccess(et.permission, et.location, true, path, permission.RequestContext{})
+	if err != nil {
 		return nil, err
 	}
 
-	current, err := et.fileMutation.fileSys.Read(path)
+	current, err := et.fileMutation.fileSys.Read(path, auth)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
 
-	currentStr := string(current)
-
-	newContent := replaceAll(currentStr, find, replace)
-	if newContent == currentStr {
-		return nil, fmt.Errorf("no changes made: find text not found in file")
+	newContent, err := editContent(string(current), find, replace, replaceAll)
+	if err != nil {
+		return nil, err
 	}
 
-	result, err := et.fileMutation.WriteIfUnchanged(path, current, []byte(newContent))
+	result, err := et.fileMutation.WriteIfUnchanged(path, current, []byte(newContent), auth)
 	if err != nil {
 		if _, ok := err.(*StaleContentError); ok {
 			return nil, fmt.Errorf("file changed while editing: %s", path)

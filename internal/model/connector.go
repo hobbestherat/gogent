@@ -1,5 +1,10 @@
 package model
 
+import (
+	"context"
+	"encoding/json"
+)
+
 // This file defines the clean, reusable interface surface for "something that
 // can talk to a model". It is intentionally split into small capability
 // interfaces so the connector can later be extracted into its own standalone
@@ -17,12 +22,26 @@ type Completer interface {
 // the model can emit structured tool calls.
 type ToolCompleter interface {
 	CompleteWithTools(messages []Message, tools []ToolDef) (*CompletionResponse, error)
+	// CompleteWithToolsCtx is CompleteWithTools bound to a context so an in-flight
+	// completion can be cancelled — the agent loop uses it to make "Stop"/session
+	// close abort the request instead of running to the timeout (issue #24).
+	CompleteWithToolsCtx(ctx context.Context, messages []Message, tools []ToolDef) (*CompletionResponse, error)
 }
 
 // Streamer supports incremental/streaming completions. gogent uses this to
 // surface live progress as tokens arrive.
 type Streamer interface {
 	CompleteStream(messages []Message) (<-chan StreamResponse, <-chan error)
+}
+
+// StructuredCompleter additionally supports constraining the model's output to a
+// response format — typically a strict JSON schema (see JSONSchemaResponseFormat)
+// — so programmatic consumers get deterministically schema-valid output instead
+// of best-effort, prompt-extracted JSON (issue #49). It is kept out of the core
+// Connector because not every backend enforces it; callers should type-assert to
+// StructuredCompleter and fall back to a prompted/tool-based approach when absent.
+type StructuredCompleter interface {
+	CompleteStructuredCtx(ctx context.Context, messages []Message, tools []ToolDef, format *ResponseFormat) (*CompletionResponse, error)
 }
 
 // StatsReporter exposes accumulated usage/latency counters collected by the
@@ -53,6 +72,26 @@ type ModelInfo struct {
 	OwnedBy string `json:"owned_by,omitempty"`
 }
 
+// UnmarshalJSON reads a listing entry, falling back to a "name" field when the
+// OpenAI-style "id" is absent. Non-OpenAI listings key the identifier on name
+// (Ollama's /api/tags, Gemini's /v1beta/models), so this lets ListModels handle
+// those shapes without a per-provider response parser.
+func (m *ModelInfo) UnmarshalJSON(data []byte) error {
+	type alias ModelInfo // strips methods to avoid infinite recursion
+	var raw struct {
+		alias
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*m = ModelInfo(raw.alias)
+	if m.ID == "" {
+		m.ID = raw.Name
+	}
+	return nil
+}
+
 // ModelLister is an optional capability: a backend that can report which models
 // it serves (the OpenAI/OpenRouter "GET /v1/models" convention). It is kept out
 // of the core Connector because not every backend supports it; callers should
@@ -64,8 +103,9 @@ type ModelLister interface {
 // Compile-time assertions that the concrete HTTP connection satisfies the full
 // Connector contract and the optional model-listing capability.
 var (
-	_ Connector   = (*ModelConnection)(nil)
-	_ ModelLister = (*ModelConnection)(nil)
+	_ Connector           = (*ModelConnection)(nil)
+	_ ModelLister         = (*ModelConnection)(nil)
+	_ StructuredCompleter = (*ModelConnection)(nil)
 )
 
 // StatsSnapshot is a mutex-free, copyable view of a connector's accumulated
@@ -76,6 +116,7 @@ type StatsSnapshot struct {
 	SuccessCount               int
 	ErrorCount                 int
 	TotalTokensIn              int
+	TotalCachedTokensIn        int
 	TotalTokensOut             int
 	TotalTimeMs                int64
 	TimeoutCount               int
@@ -92,6 +133,7 @@ func (s StatsSnapshot) Add(other StatsSnapshot) StatsSnapshot {
 		SuccessCount:               s.SuccessCount + other.SuccessCount,
 		ErrorCount:                 s.ErrorCount + other.ErrorCount,
 		TotalTokensIn:              s.TotalTokensIn + other.TotalTokensIn,
+		TotalCachedTokensIn:        s.TotalCachedTokensIn + other.TotalCachedTokensIn,
 		TotalTokensOut:             s.TotalTokensOut + other.TotalTokensOut,
 		TotalTimeMs:                s.TotalTimeMs + other.TotalTimeMs,
 		TimeoutCount:               s.TimeoutCount + other.TimeoutCount,
@@ -110,6 +152,7 @@ func (s *ModelStats) Snapshot() StatsSnapshot {
 		SuccessCount:               s.SuccessCount,
 		ErrorCount:                 s.ErrorCount,
 		TotalTokensIn:              s.TotalTokensIn,
+		TotalCachedTokensIn:        s.TotalCachedTokensIn,
 		TotalTokensOut:             s.TotalTokensOut,
 		TotalTimeMs:                s.TotalTimeMs,
 		TimeoutCount:               s.TimeoutCount,
@@ -117,4 +160,25 @@ func (s *ModelStats) Snapshot() StatsSnapshot {
 		RefusalCount:               s.RefusalCount,
 		GenericErrorCount:          s.GenericErrorCount,
 	}
+}
+
+// Carry folds a previously-accumulated snapshot into these counters. It is used
+// when a session's model backend is swapped (ModelSession.Resume): the incoming
+// connector starts with zeroed stats, so the outgoing connector's totals are
+// carried over to keep per-session usage cumulative across model switches
+// instead of appearing to reset to zero (issue #146).
+func (s *ModelStats) Carry(prev StatsSnapshot) {
+	s.Mutex.Lock()
+	defer s.Mutex.Unlock()
+	s.RequestCount += prev.RequestCount
+	s.SuccessCount += prev.SuccessCount
+	s.ErrorCount += prev.ErrorCount
+	s.TotalTokensIn += prev.TotalTokensIn
+	s.TotalCachedTokensIn += prev.TotalCachedTokensIn
+	s.TotalTokensOut += prev.TotalTokensOut
+	s.TotalTimeMs += prev.TotalTimeMs
+	s.TimeoutCount += prev.TimeoutCount
+	s.ContextWindowOverflowCount += prev.ContextWindowOverflowCount
+	s.RefusalCount += prev.RefusalCount
+	s.GenericErrorCount += prev.GenericErrorCount
 }

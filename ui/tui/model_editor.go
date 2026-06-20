@@ -3,12 +3,50 @@ package ui
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"gogent/internal/model"
 
 	tui "github.com/hobbestherat/turbotui"
 	tv "github.com/hobbestherat/turbotui/turbotv"
 )
+
+// modelEditor layout constants: the field labels occupy labelW cells from X=2,
+// and the boxed fields (and the model Select) start at boxX. boxW is derived as
+// width - boxX - 3 so the fields and the trailing Scan button fit the dialog.
+const (
+	modelEditorLabelW = 16
+	modelEditorBoxX   = 2 + modelEditorLabelW
+)
+
+// modelEditorWidth picks the model-editor dialog width so the widest Select
+// option (longestOption cells) fits its box without clipping, clamped to the
+// available screen width (issue #108). The Select needs two extra cells for its
+// value padding and ▼ glyph, and boxW = width - modelEditorBoxX - 3, so the
+// minimum non-clipping width is longestOption + 2 + modelEditorBoxX + 3. A
+// baseline minimum keeps the dialog from collapsing for short names.
+func modelEditorWidth(longestOption, screen int) int {
+	const minWidth = 64
+	width := longestOption + 2 + modelEditorBoxX + 3
+	if width < minWidth {
+		width = minWidth
+	}
+	if screen > 0 && width > screen {
+		width = screen
+	}
+	return width
+}
+
+// longestRuneLen returns the display width (in cells) of the widest string in ss.
+func longestRuneLen(ss []string) int {
+	max := 0
+	for _, s := range ss {
+		if l := runeLen(s); l > max {
+			max = l
+		}
+	}
+	return max
+}
 
 // showModelEditor opens a modal editor for the configured model backends. A
 // Select switches between models; the text fields below edit the selected
@@ -17,24 +55,18 @@ import (
 // only when the user presses Save.
 func (w *Workbench) showModelEditor() {
 	if w.handlers.GetModels == nil || w.handlers.UpdateModel == nil {
-		tv.ShowConfirmYesNo(w.desktop, "Models", "Model editing is unavailable.", nil)
+		w.showConfirm("Models", "Model editing is unavailable.", nil)
 		return
 	}
 	models := w.handlers.GetModels()
 	if len(models) == 0 {
-		tv.ShowConfirmYesNo(w.desktop, "Models", "No models are configured.", nil)
+		w.showConfirm("Models", "No models are configured.", nil)
 		return
 	}
 
-	const width = 64
 	const height = 18
-	const labelW = 16
-	const boxX = 2 + labelW
-	boxW := width - boxX - 3
-	x, y := centeredDialog(w, width, height)
-
-	dialog := tv.NewDialog("Model Settings", x, y, width, height)
-	dialog.Window.ShowClose = false
+	const labelW = modelEditorLabelW
+	const boxX = modelEditorBoxX
 
 	names := make([]string, len(models))
 	for i, m := range models {
@@ -44,6 +76,15 @@ func (w *Workbench) showModelEditor() {
 		}
 		names[i] = fmt.Sprintf("%s (%s)", label, m.Name)
 	}
+
+	// Size the dialog so the widest option label fits the boxed fields without
+	// clipping, clamped to the screen (issue #108).
+	width := modelEditorWidth(longestRuneLen(names), w.app.Width())
+	boxW := width - boxX - 3
+	x, y := centeredDialog(w, width, height)
+
+	dialog := tv.NewDialog("Model Settings", x, y, width, height)
+	dialog.Window.ShowClose = false
 
 	// field builds a labelled text field, registers it on the dialog, and
 	// returns its box for later get/set.
@@ -89,6 +130,15 @@ func (w *Workbench) showModelEditor() {
 	apiKey := field("API key:", 7)
 	temp := field("Temperature:", 8)
 	maxTokens := field("Max tokens:", 9)
+	reasoningEffort := field("Reasoning:", 10)
+
+	// Thinking is tri-state: "default" leaves the toggle unset (provider
+	// default), "on"/"off" force it. Only providers that understand it actually
+	// send it (see buildRequest), so it is safe to show for every model.
+	dialog.Window.AddContent(dialogLabel("Thinking:", tv.Rect{X: 2, Y: 11, W: labelW, H: 1}))
+	thinkingOpts := []string{"default", "on", "off"}
+	thinking := tv.NewSelect(w.desktop, thinkingOpts, tv.Rect{X: boxX, Y: 11, W: boxW, H: 1})
+	dialog.Window.AddContent(thinking)
 
 	// currentModelID reads the model id from whichever model widget is active.
 	currentModelID := func() string {
@@ -111,6 +161,8 @@ func (w *Workbench) showModelEditor() {
 		apiKey.SetText(m.APIKey)
 		temp.SetText(strconv.FormatFloat(float64(m.Temperature), 'g', -1, 32))
 		maxTokens.SetText(strconv.Itoa(m.MaxTokens))
+		reasoningEffort.SetText(m.ReasoningEffort)
+		thinking.SetSelected(thinkingIndex(m.Thinking))
 	}
 	store := func(i int) {
 		models[i].DisplayName = display.GetText()
@@ -122,10 +174,12 @@ func (w *Workbench) showModelEditor() {
 			models[i].Temperature = float32(v)
 		}
 		models[i].MaxTokens = atoiOr(maxTokens.GetText(), models[i].MaxTokens)
+		models[i].ReasoningEffort = strings.TrimSpace(reasoningEffort.GetText())
+		models[i].Thinking = thinkingValue(thinking.Value())
 	}
 	scanModels = func() {
 		if w.handlers.ScanModels == nil {
-			tv.ShowConfirmYesNo(w.desktop, "Scan", "Model scanning is unavailable.", nil)
+			w.showConfirm("Scan", "Model scanning is unavailable.", nil)
 			return
 		}
 		store(cur)
@@ -136,7 +190,7 @@ func (w *Workbench) showModelEditor() {
 			ids, err := w.handlers.ScanModels(draft)
 			w.desktop.Post(func() {
 				if err != nil {
-					tv.ShowConfirmYesNo(w.desktop, "Scan", "Failed to list models:\n"+err.Error(), nil)
+					w.showConfirm("Scan", "Failed to list models:\n"+err.Error(), nil)
 					return
 				}
 				if target != cur {
@@ -173,7 +227,7 @@ func (w *Workbench) showModelEditor() {
 		w.desktop.RemoveLayer(layer)
 		w.rebuildMenu()
 		if failed != "" {
-			tv.ShowConfirmYesNo(w.desktop, "Models", "Some models failed to save:\n"+failed, nil)
+			w.showConfirm("Models", "Some models failed to save:\n"+failed, nil)
 		}
 	}
 	cancel := func() { w.desktop.RemoveLayer(layer) }
@@ -192,6 +246,34 @@ func (w *Workbench) showModelEditor() {
 	layer = tv.NewModalLayer("model-editor", dialog)
 	w.desktop.AddLayer(layer)
 	w.desktop.SetFocus(sel)
+}
+
+// thinkingIndex maps a ModelConfig.Thinking pointer to its index in the
+// "default"/"on"/"off" select (nil => default).
+func thinkingIndex(t *bool) int {
+	switch {
+	case t == nil:
+		return 0
+	case *t:
+		return 1
+	default:
+		return 2
+	}
+}
+
+// thinkingValue maps the "default"/"on"/"off" select value back to a
+// ModelConfig.Thinking pointer (default => nil, leaving the param unset).
+func thinkingValue(v string) *bool {
+	switch v {
+	case "on":
+		on := true
+		return &on
+	case "off":
+		off := false
+		return &off
+	default:
+		return nil
+	}
 }
 
 // indexOrZero returns the index of value in opts, or 0 (the default option) when

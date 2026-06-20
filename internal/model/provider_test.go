@@ -50,6 +50,28 @@ func TestNormalizeBaseURL(t *testing.T) {
 	}
 }
 
+func TestNormalizeBaseURLPreservesQuery(t *testing.T) {
+	openai := specFor(APITypeOpenAI)
+
+	// A full chat-completions URL carrying a query string (Azure's
+	// ?api-version=) must have only the chat path stripped, with the query kept
+	// so it can ride onto the derived chat/models endpoints. The old LastIndex
+	// surgery left the path in place because it was not the literal tail.
+	const azure = "https://r.openai.azure.com/openai/deployments/dep/chat/completions?api-version=2024-02-01"
+	gotBase := normalizeBaseURL(azure, openai)
+	wantBase := "https://r.openai.azure.com/openai/deployments/dep?api-version=2024-02-01"
+	if gotBase != wantBase {
+		t.Fatalf("normalizeBaseURL(azure) = %q, want %q", gotBase, wantBase)
+	}
+	if got := openai.chatURL(gotBase); got != azure {
+		t.Errorf("chatURL round-trip = %q, want %q", got, azure)
+	}
+	wantModels := "https://r.openai.azure.com/openai/deployments/dep/models?api-version=2024-02-01"
+	if got := openai.modelsURL(gotBase); got != wantModels {
+		t.Errorf("modelsURL = %q, want %q", got, wantModels)
+	}
+}
+
 func TestNewModelConnectionFromConfigBaseURL(t *testing.T) {
 	// An OpenAI backend given only a base URL gets /chat/completions appended.
 	conn := NewModelConnectionFromConfig(&config.ModelConfig{
@@ -81,7 +103,11 @@ func TestZAIMaxTokensClamp(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req CompletionRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		gotMaxTokens = req.MaxTokens
+		if req.MaxTokens != nil {
+			gotMaxTokens = *req.MaxTokens
+		} else {
+			gotMaxTokens = 0
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(CompletionResponse{Content: "ok", Role: RoleAssistant, FinishReason: "stop"})
 	}))
@@ -137,6 +163,29 @@ func TestZAIModelsListing(t *testing.T) {
 		t.Fatalf("ListModels failed: %v", err)
 	}
 	if len(models) != 1 || models[0].ID != "glm-4.6" {
+		t.Errorf("unexpected models: %+v", models)
+	}
+}
+
+func TestListModelsNameKeyedShape(t *testing.T) {
+	// Non-OpenAI listings key the identifier on "name" rather than "id" and wrap
+	// the list under "models" (Ollama's /api/tags, Gemini's /v1beta/models). The
+	// ModelInfo decoder must fall back to name so these entries are not dropped.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[{"name":"llama3:latest"},{"name":"mistral"}]}`))
+	}))
+	defer server.Close()
+
+	conn := NewModelConnectionFromConfig(&config.ModelConfig{
+		Endpoint: server.URL,
+		Model:    "llama3",
+	})
+	models, err := conn.ListModels()
+	if err != nil {
+		t.Fatalf("ListModels failed: %v", err)
+	}
+	if len(models) != 2 || models[0].ID != "llama3:latest" || models[1].ID != "mistral" {
 		t.Errorf("unexpected models: %+v", models)
 	}
 }

@@ -43,14 +43,15 @@ func NewFileMutation(fileSys *FileSystem, location *LocationMutation) *FileMutat
 	}
 }
 
-// Write writes content to a file (unconditional)
-func (fm *FileMutation) Write(path string, content []byte) (*WriteResult, error) {
+// Write writes content to a file (unconditional). The Authorization is forwarded
+// to the underlying file system so an approved external path can be written.
+func (fm *FileMutation) Write(path string, content []byte, auth Authorization) (*WriteResult, error) {
 	existed, err := fm.fileSys.Exists(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check if file exists: %w", err)
 	}
 
-	if err := fm.fileSys.Write(path, content); err != nil {
+	if err := fm.fileSys.Write(path, content, auth); err != nil {
 		return nil, fmt.Errorf("failed to write file: %w", err)
 	}
 
@@ -67,9 +68,10 @@ func (fm *FileMutation) Write(path string, content []byte) (*WriteResult, error)
 	}, nil
 }
 
-// WriteIfUnchanged writes content only if the file hasn't changed
-func (fm *FileMutation) WriteIfUnchanged(path string, expected []byte, content []byte) (*WriteResult, error) {
-	current, err := fm.fileSys.Read(path)
+// WriteIfUnchanged writes content only if the file hasn't changed. The
+// Authorization is forwarded to the underlying reads/writes.
+func (fm *FileMutation) WriteIfUnchanged(path string, expected []byte, content []byte, auth Authorization) (*WriteResult, error) {
+	current, err := fm.fileSys.Read(path, auth)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
@@ -78,7 +80,7 @@ func (fm *FileMutation) WriteIfUnchanged(path string, expected []byte, content [
 		return nil, &StaleContentError{Path: path}
 	}
 
-	return fm.Write(path, content)
+	return fm.Write(path, content, auth)
 }
 
 // Remove removes a file
@@ -86,12 +88,13 @@ func (fm *FileMutation) Remove(path string) error {
 	return fm.fileSys.Remove(path)
 }
 
-// WriteTextPreservingBOM writes text while preserving UTF-8 BOM
-func (fm *FileMutation) WriteTextPreservingBOM(path string, content string) (*WriteResult, error) {
+// WriteTextPreservingBOM writes text while preserving UTF-8 BOM. The
+// Authorization is forwarded to the underlying reads/writes.
+func (fm *FileMutation) WriteTextPreservingBOM(path string, content string, auth Authorization) (*WriteResult, error) {
 	hasBOM := false
 	existed, err := fm.fileSys.Exists(path)
 	if err == nil && existed {
-		current, _ := fm.fileSys.Read(path)
+		current, _ := fm.fileSys.Read(path, auth)
 		if len(current) >= 3 && current[0] == 0xEF && current[1] == 0xBB && current[2] == 0xBF {
 			hasBOM = true
 		}
@@ -101,51 +104,157 @@ func (fm *FileMutation) WriteTextPreservingBOM(path string, content string) (*Wr
 		content = "\uFEFF" + content
 	}
 
-	return fm.Write(path, []byte(content))
+	return fm.Write(path, []byte(content), auth)
 }
 
-// WriteFile writes content to a file
-func (fm *FileMutation) WriteFile(path string, content string) error {
-	_, err := fm.WriteTextPreservingBOM(path, content)
+// WriteFile writes content to a file. The Authorization is forwarded to the
+// underlying writes.
+func (fm *FileMutation) WriteFile(path string, content string, auth Authorization) error {
+	_, err := fm.WriteTextPreservingBOM(path, content, auth)
 	return err
 }
 
-// EditFile edits a file by replacing text
-func (fm *FileMutation) EditFile(path, find, replace string) error {
-	current, err := fm.fileSys.Read(path)
+// PreviewWrite returns the file's current content and the content a Write would
+// produce, without writing anything. The "before" is empty when the file does
+// not yet exist. It backs the diff preview shown before an approved write
+// (issue #64).
+func (fm *FileMutation) PreviewWrite(path, content string, auth Authorization) (before, after string, err error) {
+	before, err = fm.currentContent(path, auth)
+	if err != nil {
+		return "", "", err
+	}
+	return before, content, nil
+}
+
+// PreviewEdit returns the file's current content and the content an EditFile
+// would produce by replacing find→replace, without writing anything. It honours
+// the same uniqueness rule as EditFile, so an ambiguous edit is rejected at
+// preview time rather than being silently applied.
+func (fm *FileMutation) PreviewEdit(path, find, replace string, replaceAll bool, auth Authorization) (before, after string, err error) {
+	before, err = fm.currentContent(path, auth)
+	if err != nil {
+		return "", "", err
+	}
+	after, err = editContent(before, find, replace, replaceAll)
+	if err != nil {
+		return "", "", err
+	}
+	return before, after, nil
+}
+
+// currentContent reads a file's content for diff preview, returning "" (and no
+// error) when the file does not exist yet. A leading UTF-8 BOM is stripped so the
+// preview is not polluted by the BOM that WriteTextPreservingBOM transparently
+// re-adds on write.
+func (fm *FileMutation) currentContent(path string, auth Authorization) (string, error) {
+	existed, err := fm.fileSys.Exists(path)
+	if err != nil {
+		return "", err
+	}
+	if !existed {
+		return "", nil
+	}
+	data, err := fm.fileSys.Read(path, auth)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimPrefix(string(data), "\uFEFF"), nil
+}
+
+// EditOp is a single find→replace within a multi-edit. ReplaceAll relaxes the
+// uniqueness rule for that one edit (see editContent).
+type EditOp struct {
+	Find       string
+	Replace    string
+	ReplaceAll bool
+}
+
+// PreviewMultiEdit returns the file's current content and the content a
+// MultiEditFile would produce by applying edits in order, without writing
+// anything. Each edit honours editContent's uniqueness rule against the running
+// result of the prior edits, so an ambiguous or missing match is rejected at
+// preview time rather than being half-applied.
+func (fm *FileMutation) PreviewMultiEdit(path string, edits []EditOp, auth Authorization) (before, after string, err error) {
+	before, err = fm.currentContent(path, auth)
+	if err != nil {
+		return "", "", err
+	}
+	after, err = multiEditContent(before, edits)
+	if err != nil {
+		return "", "", err
+	}
+	return before, after, nil
+}
+
+// MultiEditFile applies a batch of find→replace edits to a file in order. The
+// batch is all-or-nothing: if any edit is ambiguous or its find text is absent,
+// nothing is written and the file is left untouched. The Authorization is
+// forwarded to the underlying reads/writes.
+func (fm *FileMutation) MultiEditFile(path string, edits []EditOp, auth Authorization) error {
+	current, err := fm.fileSys.Read(path, auth)
 	if err != nil {
 		return fmt.Errorf("failed to read file: %w", err)
 	}
 
-	updated := strings.ReplaceAll(string(current), find, replace)
-
-	return fm.WriteFile(path, updated)
-}
-
-// replaceString replaces all occurrences of old with new
-func replaceString(s, old, new string) string {
-	if old == "" {
-		return s
-	}
-	return replaceAll(s, old, new)
-}
-
-func replaceAll(s, old, new string) string {
-	if old == "" {
-		return s
+	updated, err := multiEditContent(string(current), edits)
+	if err != nil {
+		return err
 	}
 
-	var result string
-	lastIndex := 0
+	return fm.WriteFile(path, updated, auth)
+}
 
-	for i := 0; i <= len(s)-len(old); i++ {
-		if s[i:i+len(old)] == old {
-			result += s[lastIndex:i] + new
-			lastIndex = i + len(old)
-			i += len(old) - 1
+// multiEditContent folds edits over content in order, each applied to the result
+// of the previous one. It fails (returning the original unchanged) the moment any
+// edit cannot be applied, so a caller never persists a partially-applied batch.
+func multiEditContent(content string, edits []EditOp) (string, error) {
+	if len(edits) == 0 {
+		return "", fmt.Errorf("no edits provided")
+	}
+	for i, e := range edits {
+		updated, err := editContent(content, e.Find, e.Replace, e.ReplaceAll)
+		if err != nil {
+			return "", fmt.Errorf("edit %d: %w", i+1, err)
 		}
+		content = updated
+	}
+	return content, nil
+}
+
+// EditFile edits a file by replacing text. Unless replaceAll is set the find
+// text must occur exactly once (see editContent). The Authorization is forwarded
+// to the underlying reads/writes.
+func (fm *FileMutation) EditFile(path, find, replace string, replaceAll bool, auth Authorization) error {
+	current, err := fm.fileSys.Read(path, auth)
+	if err != nil {
+		return fmt.Errorf("failed to read file: %w", err)
 	}
 
-	result += s[lastIndex:]
-	return result
+	updated, err := editContent(string(current), find, replace, replaceAll)
+	if err != nil {
+		return err
+	}
+
+	return fm.WriteFile(path, updated, auth)
+}
+
+// editContent computes the result of replacing find with replace in content.
+// Unless replaceAll is set it requires find to occur exactly once, so an
+// ambiguous edit fails loudly instead of silently rewriting every match
+// (issue #18). It returns an error when find is empty, absent, or — in unique
+// mode — present more than once.
+func editContent(content, find, replace string, replaceAll bool) (string, error) {
+	if find == "" {
+		return "", fmt.Errorf("find text must not be empty")
+	}
+
+	count := strings.Count(content, find)
+	switch {
+	case count == 0:
+		return "", fmt.Errorf("no changes made: find text not found in file")
+	case count > 1 && !replaceAll:
+		return "", fmt.Errorf("find text is not unique: found %d occurrences; provide more surrounding context to identify a single match, or set replace_all to replace every occurrence", count)
+	}
+
+	return strings.ReplaceAll(content, find, replace), nil
 }

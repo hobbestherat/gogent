@@ -19,12 +19,15 @@ import (
 type Action string
 
 const (
-	ActionRead     Action = "read"     // read a file inside the workspace
-	ActionWrite    Action = "write"    // write/edit a file inside the workspace
-	ActionShell    Action = "shell"    // run a shell command (session-wide gate)
-	ActionExternal Action = "external" // touch a path outside the workspace
-	ActionNetwork  Action = "network"  // network access
-	ActionSubagent Action = "subagent" // spawn a sub-agent
+	ActionRead        Action = "read"        // read a file inside the workspace
+	ActionWrite       Action = "write"       // write/edit a file inside the workspace
+	ActionShell       Action = "shell"       // run a shell command (session-wide gate)
+	ActionExternal    Action = "external"    // touch a path outside the workspace
+	ActionNetwork     Action = "network"     // network access
+	ActionSubagent    Action = "subagent"    // spawn a sub-agent
+	ActionMCP         Action = "mcp"         // launch/connect to an MCP server
+	ActionDiagnostics Action = "diagnostics" // run the configured compiler/linter
+	ActionVerify      Action = "verify"      // run the configured test command
 )
 
 // Effect is the resolved policy for a request.
@@ -54,11 +57,22 @@ type Rule struct {
 	Effect   string `json:"effect"`
 }
 
+// RequestContext identifies the session (and optionally the sub-agent) on whose
+// behalf a decision is requested, so the UI can badge the requesting session's
+// sidebar node, alert when it is unfocused and let the user jump straight to it.
+// The zero value is valid: headless or CLI callers leave it empty and the prompt
+// stays session-agnostic.
+type RequestContext struct {
+	SessionID string // requesting session id ("" if unknown)
+	Agent     string // requesting sub-agent id ("" for the session's main agent)
+}
+
 // Request is handed to a Prompter when a decision is needed.
 type Request struct {
 	Action   Action
 	Resource string
-	Detail   string // human context, e.g. the shell command being run
+	Detail   string         // human context, e.g. the shell command being run
+	Context  RequestContext // who is asking (for alerting/routing); optional
 }
 
 // Prompter asks the user for a decision. It blocks until the user answers and
@@ -81,6 +95,11 @@ func (e *DeniedError) Error() string {
 	return "permission denied: " + string(e.Action) + " on " + e.Resource
 }
 
+// AuditSink records the outcome of a resolved permission check so it can be
+// written to an append-only audit trail (issue #51). allowed reports whether the
+// request was authorized. It must not block; it is called on the request path.
+type AuditSink func(rc RequestContext, action Action, resource string, allowed bool)
+
 // Service is the central permission gate. It is safe for concurrent use.
 type Service struct {
 	mu        sync.Mutex
@@ -88,6 +107,7 @@ type Service struct {
 	rules     []Rule
 	saved     map[string]Decision
 	prompter  Prompter
+	audit     AuditSink
 }
 
 // New creates a Service whose persisted "always" decisions live under
@@ -106,6 +126,14 @@ func New(configDir string) *Service {
 func (s *Service) SetPrompter(p Prompter) {
 	s.mu.Lock()
 	s.prompter = p
+	s.mu.Unlock()
+}
+
+// SetAuditSink installs the sink that records resolved permission decisions. A
+// nil sink (the default) disables auditing.
+func (s *Service) SetAuditSink(sink AuditSink) {
+	s.mu.Lock()
+	s.audit = sink
 	s.mu.Unlock()
 }
 
@@ -155,10 +183,25 @@ func (s *Service) Check(a Action, resource string) error {
 
 // CheckWithDetail is Check with extra human context for the prompt.
 func (s *Service) CheckWithDetail(a Action, resource, detail string) error {
+	return s.CheckWithContext(RequestContext{}, a, resource, detail)
+}
+
+// CheckWithContext is CheckWithDetail that additionally records which session
+// (and sub-agent) is asking, so the prompter can alert and route the user to the
+// requesting session. The context is carried only when the request reaches the
+// prompter; persisted and rule-based decisions are session-agnostic.
+func (s *Service) CheckWithContext(rc RequestContext, a Action, resource, detail string) (err error) {
 	s.mu.Lock()
 	eff := s.effect(a, resource)
 	prompter := s.prompter
+	sink := s.audit
 	s.mu.Unlock()
+
+	// Record the resolved decision on the audit trail, however it is reached
+	// (rule, persisted, or interactive prompt). err==nil means allowed.
+	if sink != nil {
+		defer func() { sink(rc, a, resource, err == nil) }()
+	}
 
 	switch eff {
 	case EffectAllow:
@@ -171,7 +214,7 @@ func (s *Service) CheckWithDetail(a Action, resource, detail string) error {
 		return &DeniedError{Action: a, Resource: resource}
 	}
 
-	switch prompter.AskPermission(Request{Action: a, Resource: resource, Detail: detail}) {
+	switch prompter.AskPermission(Request{Action: a, Resource: resource, Detail: detail, Context: rc}) {
 	case DecisionAllow:
 		return nil
 	case DecisionAlways:
@@ -185,11 +228,19 @@ func (s *Service) CheckWithDetail(a Action, resource, detail string) error {
 	}
 }
 
+// persist records a sticky decision and flushes the snapshot to disk. The map
+// mutation and its marshalling happen under a single lock so a concurrent
+// persist cannot interleave between them; only the file I/O runs outside the
+// lock, on the stable snapshot.
 func (s *Service) persist(a Action, resource string, d Decision) {
 	s.mu.Lock()
 	s.saved[key(a, resource)] = d
+	data, err := json.MarshalIndent(savedFile{Saved: s.saved}, "", "  ")
 	s.mu.Unlock()
-	s.save()
+	if err != nil {
+		return
+	}
+	s.write(data)
 }
 
 func (s *Service) configPath() string {
@@ -221,21 +272,18 @@ func (s *Service) load() {
 	}
 }
 
-func (s *Service) save() error {
+// write replaces the persisted snapshot on disk. The grant file records what
+// the agent is permitted to do, so it is created owner-only: the directory with
+// 0700 and the file with 0600, never readable by other local users (CWE-732).
+func (s *Service) write(data []byte) error {
 	path := s.configPath()
 	if path == "" {
 		return nil
 	}
-	if err := os.MkdirAll(s.configDir, 0755); err != nil {
+	if err := os.MkdirAll(s.configDir, 0700); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	data, err := json.MarshalIndent(savedFile{Saved: s.saved}, "", "  ")
-	s.mu.Unlock()
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, data, 0600)
 }
 
 func splitKey(k string) (Action, string) {

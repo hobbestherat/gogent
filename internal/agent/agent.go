@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"sync"
 
 	"gogent/internal/model"
@@ -59,7 +60,28 @@ type Agent struct {
 	Result       string
 	TimeoutMs    int64
 	ToolRegistry *tool.ToolRegistry
-	mu           sync.Mutex
+	// TokenBudget caps the cumulative tokens (prompt + completion) this agent's
+	// task loop may spend before it stops gracefully with a BUDGET_EXCEEDED
+	// result. Zero means unbounded — the agent runs until it finishes or hits the
+	// step limit, preserving prior behavior. Sub-agents inherit a budget from the
+	// session's SubAgentConfig so a deep fan-out cannot loop to the step cap with
+	// no token ceiling (issue #28).
+	TokenBudget int
+	// TokensUsed is the running total of tokens this agent has spent across its
+	// loop's model round-trips. It is compared against TokenBudget to decide when
+	// to stop. Guarded by mu.
+	TokensUsed int
+	mu         sync.Mutex
+	// cancel aborts the agent's currently running task loop. It is set while a
+	// loop is in flight (see UserSession.runLoop) and invoked by Cancel — which
+	// is how StopAgent and session close actually interrupt in-flight model work
+	// instead of merely flipping a state field (issue #24).
+	cancel context.CancelFunc
+	// stateChange, when set, is invoked after State transitions to a different
+	// value, outside the agent mutex, so a higher layer can observe lifecycle
+	// transitions — gogent wires it to fire HookStateChange (issue #47). Set via
+	// SetStateChangeCallback.
+	stateChange func(old, new AgentState)
 }
 
 // NewAgent creates a new agent
@@ -81,8 +103,26 @@ func NewAgent(id string, modelSession *model.ModelSession) *Agent {
 func (a *Agent) AddSubAgent(subAgent *Agent) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	subAgent.Parent = a
+	subAgent.setParent(a)
 	a.SubAgents = append(a.SubAgents, subAgent)
+}
+
+// setParent links this agent to its parent. It is called only from AddSubAgent
+// (which holds the parent's mutex) and takes the child's own mutex so the write
+// is published under the same lock that GetParent reads through.
+func (a *Agent) setParent(parent *Agent) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.Parent = parent
+}
+
+// GetParent returns the parent agent, or nil for the root. The read is
+// mutex-guarded so it is safe to call while another goroutine is linking a
+// freshly-spawned child via AddSubAgent.
+func (a *Agent) GetParent() *Agent {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.Parent
 }
 
 // RemoveSubAgent removes a sub-agent
@@ -115,10 +155,13 @@ func (a *Agent) GetSubAgent(id string) *Agent {
 // GetRootAgent returns the root agent of the tree
 func (a *Agent) GetRootAgent() *Agent {
 	current := a
-	for current.Parent != nil {
-		current = current.Parent
+	for {
+		parent := current.GetParent()
+		if parent == nil {
+			return current
+		}
+		current = parent
 	}
-	return current
 }
 
 // GetSubAgents returns a copy of sub-agents
@@ -131,21 +174,25 @@ func (a *Agent) GetSubAgents() []*Agent {
 	return subAgents
 }
 
-// ListAllAgents returns all agents in the tree recursively
+// ListAllAgents returns all agents in the tree recursively. Each level reads its
+// children through the lock-guarded GetSubAgents, so it is safe to call while
+// other goroutines add sub-agents to the tree.
 func (a *Agent) ListAllAgents() []*Agent {
 	result := []*Agent{a}
-	for _, sub := range a.SubAgents {
+	for _, sub := range a.GetSubAgents() {
 		result = append(result, sub.ListAllAgents()...)
 	}
 	return result
 }
 
-// GetAgentByID finds an agent by ID in the tree
+// GetAgentByID finds an agent by ID in the tree. The traversal reads children
+// through GetSubAgents, so it is safe to call while other goroutines add
+// sub-agents to the tree.
 func (a *Agent) GetAgentByID(id string) *Agent {
 	if a.ID == id {
 		return a
 	}
-	for _, sub := range a.SubAgents {
+	for _, sub := range a.GetSubAgents() {
 		if found := sub.GetAgentByID(id); found != nil {
 			return found
 		}
@@ -153,11 +200,26 @@ func (a *Agent) GetAgentByID(id string) *Agent {
 	return nil
 }
 
-// SetState sets the agent state
+// SetState sets the agent state, notifying any registered state-change callback
+// when the value actually changes (issue #47).
 func (a *Agent) SetState(state AgentState) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
+	old := a.State
 	a.State = state
+	cb := a.stateChange
+	a.mu.Unlock()
+	if cb != nil && old != state {
+		cb(old, state)
+	}
+}
+
+// SetStateChangeCallback registers a function invoked whenever this agent's State
+// transitions to a different value (issue #47). It is called outside the agent
+// mutex, so the callback may safely read agent state. Passing nil disables it.
+func (a *Agent) SetStateChangeCallback(cb func(old, new AgentState)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.stateChange = cb
 }
 
 // GetState returns the agent state
@@ -167,12 +229,37 @@ func (a *Agent) GetState() AgentState {
 	return a.State
 }
 
-// UpdateState updates state and returns old state
-func (a *Agent) UpdateState(newState AgentState) AgentState {
+// setCancel records the cancel func of the agent's in-flight task loop. Passing
+// nil clears it (the loop has finished). It is unexported because only the task
+// loop should arm/disarm it.
+func (a *Agent) setCancel(cancel context.CancelFunc) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.cancel = cancel
+}
+
+// Cancel aborts the agent's currently running task loop, if any. It is safe to
+// call when no loop is running (a no-op) and from any goroutine.
+func (a *Agent) Cancel() {
+	a.mu.Lock()
+	cancel := a.cancel
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// UpdateState updates state and returns old state, notifying any registered
+// state-change callback when the value actually changes (issue #47).
+func (a *Agent) UpdateState(newState AgentState) AgentState {
+	a.mu.Lock()
 	oldState := a.State
 	a.State = newState
+	cb := a.stateChange
+	a.mu.Unlock()
+	if cb != nil && oldState != newState {
+		cb(oldState, newState)
+	}
 	return oldState
 }
 
@@ -209,6 +296,38 @@ func (a *Agent) GetResult() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.Result
+}
+
+// SetTokenBudget sets the cumulative token budget for the agent's task loop. A
+// non-positive budget leaves the agent unbounded.
+func (a *Agent) SetTokenBudget(budget int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.TokenBudget = budget
+}
+
+// AddTokensUsed adds a round-trip's prompt and completion tokens to the agent's
+// running total and returns the new total.
+func (a *Agent) AddTokensUsed(promptTokens, completionTokens int) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.TokensUsed += promptTokens + completionTokens
+	return a.TokensUsed
+}
+
+// GetTokensUsed returns the agent's cumulative token usage.
+func (a *Agent) GetTokensUsed() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.TokensUsed
+}
+
+// BudgetExceeded reports whether the agent has spent at least its token budget.
+// An agent with no budget (TokenBudget <= 0) is never over budget.
+func (a *Agent) BudgetExceeded() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.TokenBudget > 0 && a.TokensUsed >= a.TokenBudget
 }
 
 // DisplayName returns the friendly name for the agent, falling back to its ID.

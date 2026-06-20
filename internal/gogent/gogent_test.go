@@ -1,6 +1,7 @@
 package gogent
 
 import (
+	"context"
 	"testing"
 
 	"gogent/internal/agent"
@@ -9,7 +10,7 @@ import (
 )
 
 func TestGogentCreate(t *testing.T) {
-	g := NewGogent("/tmp/test")
+	g := NewGogent(t.TempDir())
 
 	if g == nil {
 		t.Error("Expected Gogent to be created")
@@ -20,8 +21,83 @@ func TestGogentCreate(t *testing.T) {
 	}
 }
 
+// TestEphemeralSessionNotPersisted covers issue #25: the per-client sessions the
+// HTTP server creates must never be written to disk or auto-restored, while a
+// normal session still persists.
+func TestEphemeralSessionNotPersisted(t *testing.T) {
+	g := NewGogent(t.TempDir())
+	if g.store == nil {
+		t.Skip("session store unavailable")
+	}
+
+	eph := g.NewEphemeralSession("client-xyz")
+	eph.RootAgent.ThoughtTrain.AppendMessages(model.Message{Role: model.RoleUser, Content: "hi"})
+	g.persistSession("client-xyz")
+
+	loaded, err := g.store.ListActive()
+	if err != nil {
+		t.Fatalf("ListActive: %v", err)
+	}
+	if len(loaded) != 0 {
+		t.Fatalf("ephemeral session was persisted: %+v", loaded)
+	}
+
+	// Eviction must not error on an ephemeral session (nothing to archive).
+	g.RemoveSession("client-xyz")
+	if g.GetUserSession("client-xyz") != nil {
+		t.Fatal("ephemeral session not removed")
+	}
+
+	// A normal session, by contrast, is persisted and listed.
+	norm := g.NewSession("session-1")
+	norm.RootAgent.ThoughtTrain.AppendMessages(model.Message{Role: model.RoleUser, Content: "hi"})
+	g.persistSession("session-1")
+	loaded, _ = g.store.ListActive()
+	if len(loaded) != 1 || loaded[0].ID != "session-1" {
+		t.Fatalf("normal session not persisted as expected: %+v", loaded)
+	}
+}
+
+// TestNotificationsRoundTrip covers the issue #59 config plumbing: Notifications
+// returns the defaults until SetNotifications records an explicit config, which
+// is then returned verbatim. (Persistence to disk is best-effort and not
+// asserted here; the accessor round-trip is the contract the UI relies on.)
+func TestNotificationsRoundTrip(t *testing.T) {
+	g := NewGogent(t.TempDir())
+
+	if !g.Notifications().Enabled {
+		t.Error("Notifications() should default to enabled")
+	}
+
+	custom := config.NotifyConfig{Enabled: true, Native: true, OnComplete: false}
+	g.SetNotifications(custom)
+	got := g.Notifications()
+	if !got.Native || got.OnComplete {
+		t.Errorf("Notifications() = %+v after SetNotifications, want %+v", got, custom)
+	}
+}
+
+// TestBudgetRoundTrip covers the issue #63 budget plumbing: Budget() defaults to
+// the zero (alerting-off) value until SetBudget records an explicit one, which is
+// then returned verbatim. (Persistence to disk is best-effort and not asserted
+// here; the accessor round-trip is the contract the UI relies on.)
+func TestBudgetRoundTrip(t *testing.T) {
+	g := NewGogent(t.TempDir())
+
+	if g.Budget().TokenBudget != 0 {
+		t.Error("Budget() should default to zero (alerting off)")
+	}
+
+	custom := config.BudgetConfig{TokenBudget: 50000, WarnFraction: 0.9}
+	g.SetBudget(custom)
+	got := g.Budget()
+	if got.TokenBudget != 50000 || got.WarnFraction != 0.9 {
+		t.Errorf("Budget() = %+v after SetBudget, want %+v", got, custom)
+	}
+}
+
 func TestGogentCreateUserSession(t *testing.T) {
-	g := NewGogent("/tmp/test")
+	g := NewGogent(t.TempDir())
 	m := model.NewModelConnection()
 	s := model.NewModelSession("session1", m)
 	agent := agent.NewAgent("agent1", s)
@@ -34,7 +110,7 @@ func TestGogentCreateUserSession(t *testing.T) {
 }
 
 func TestGogentGetUserSession(t *testing.T) {
-	g := NewGogent("/tmp/test")
+	g := NewGogent(t.TempDir())
 	m := model.NewModelConnection()
 	s := model.NewModelSession("session2", m)
 	agent := agent.NewAgent("agent2", s)
@@ -47,8 +123,8 @@ func TestGogentGetUserSession(t *testing.T) {
 	}
 }
 
-func TestGogentListSessions(t *testing.T) {
-	g := NewGogent("/tmp/test")
+func TestGogentSessionIDs(t *testing.T) {
+	g := NewGogent(t.TempDir())
 	m := model.NewModelConnection()
 
 	// Create first session
@@ -61,7 +137,7 @@ func TestGogentListSessions(t *testing.T) {
 	agent2 := agent.NewAgent("a2", s2)
 	g.CreateUserSession("session2", agent2)
 
-	sessions := g.ListSessions()
+	sessions := g.SessionIDs()
 	if len(sessions) != 2 {
 		t.Errorf("Expected 2 sessions, got %d", len(sessions))
 	}
@@ -70,14 +146,14 @@ func TestGogentListSessions(t *testing.T) {
 func TestGogentSendMessage(t *testing.T) {
 	requireModel(t)
 
-	g := NewGogent("/tmp/test")
+	g := NewGogent(t.TempDir())
 	m := model.NewModelConnection()
 	m.SetURL(config.DefaultEndpoint())
 	s := model.NewModelSession("session3", m)
 	agent := agent.NewAgent("agent3", s)
 	g.CreateUserSession("session3", agent)
 
-	resp, err := g.SendMessageToSession("session3", "agent3", "hi")
+	resp, err := g.SendMessageToSession(context.Background(), "session3", "agent3", "hi")
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
@@ -87,9 +163,9 @@ func TestGogentSendMessage(t *testing.T) {
 }
 
 func TestGogentSendMessageNotFound(t *testing.T) {
-	g := NewGogent("/tmp/test")
+	g := NewGogent(t.TempDir())
 
-	_, err := g.SendMessageToSession("nonexistent", "agent", "hi")
+	_, err := g.SendMessageToSession(context.Background(), "nonexistent", "agent", "hi")
 	if err == nil {
 		t.Error("Expected error for non-existent session")
 	}
@@ -101,7 +177,7 @@ func TestGogentSendMessageNotFound(t *testing.T) {
 }
 
 func TestGogentCountMessages(t *testing.T) {
-	g := NewGogent("/tmp/test")
+	g := NewGogent(t.TempDir())
 	m := model.NewModelConnection()
 	s := model.NewModelSession("session4", m)
 	agent := agent.NewAgent("agent4", s)
@@ -115,7 +191,7 @@ func TestGogentCountMessages(t *testing.T) {
 }
 
 func TestGogentCountMessagesNotFound(t *testing.T) {
-	g := NewGogent("/tmp/test")
+	g := NewGogent(t.TempDir())
 
 	count := g.CountMessages("nonexistent")
 	if count != 0 {
@@ -124,7 +200,7 @@ func TestGogentCountMessagesNotFound(t *testing.T) {
 }
 
 func TestGogentAddHook(t *testing.T) {
-	g := NewGogent("/tmp/test")
+	g := NewGogent(t.TempDir())
 
 	received := false
 	g.AddHook("test1", func(event HookEvent) {
@@ -141,7 +217,7 @@ func TestGogentAddHook(t *testing.T) {
 }
 
 func TestGogentRemoveHook(t *testing.T) {
-	g := NewGogent("/tmp/test")
+	g := NewGogent(t.TempDir())
 
 	hookCalled := false
 	hook := func(event HookEvent) {

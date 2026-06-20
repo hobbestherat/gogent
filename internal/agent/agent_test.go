@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 
 	"gogent/internal/model"
@@ -186,5 +188,158 @@ func TestAgentUpdateState(t *testing.T) {
 
 	if a.GetState() != StateThinking {
 		t.Errorf("Expected state Thinking, got %v", a.GetState())
+	}
+}
+
+// TestAgentStateChangeCallback verifies the lifecycle observer wired for hooks
+// (issue #47): it fires on a real transition (via both SetState and UpdateState),
+// stays silent on a no-op transition, and can be cleared.
+func TestAgentStateChangeCallback(t *testing.T) {
+	a := NewAgent("agent", nil)
+
+	var got [][2]AgentState
+	a.SetStateChangeCallback(func(old, new AgentState) {
+		got = append(got, [2]AgentState{old, new})
+	})
+
+	a.SetState(StateThinking) // idle -> thinking: fires
+	a.SetState(StateThinking) // thinking -> thinking: no-op, no fire
+	if old := a.UpdateState(StateIdle); old != StateThinking {
+		t.Errorf("UpdateState returned old %v, want thinking", old)
+	}
+
+	want := [][2]AgentState{
+		{StateIdle, StateThinking},
+		{StateThinking, StateIdle},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("callback fired %d times (%v), want %d", len(got), got, len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("transition %d = %v, want %v", i, got[i], want[i])
+		}
+	}
+
+	// A nil callback disables further notifications.
+	a.SetStateChangeCallback(nil)
+	a.SetState(StateThinking)
+	if len(got) != len(want) {
+		t.Errorf("callback fired after being cleared: %v", got)
+	}
+}
+
+func TestAgentGetParent(t *testing.T) {
+	m := model.NewModelConnection()
+	s := model.NewModelSession("test10", m)
+	root := NewAgent("root", s)
+	child := NewAgent("child", s)
+	grandChild := NewAgent("grandChild", s)
+
+	root.AddSubAgent(child)
+	child.AddSubAgent(grandChild)
+
+	cases := []struct {
+		name  string
+		agent *Agent
+		want  *Agent
+	}{
+		{"root has no parent", root, nil},
+		{"child parent is root", child, root},
+		{"grandchild parent is child", grandChild, child},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.agent.GetParent(); got != tc.want {
+				t.Errorf("GetParent() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAgentTreeConcurrentReadWrite exercises the race described in issue #11:
+// parallel AddSubAgent calls append to a parent's SubAgents slice while reader
+// goroutines traverse that same slice via ListAllAgents / GetAgentByID. Every
+// tree read must be lock-guarded so the concurrent append never tears the slice
+// header under the readers. It also checks the post-condition invariants
+// (complete child set, correct parent and root links) once all writers finish.
+func TestAgentTreeConcurrentReadWrite(t *testing.T) {
+	m := model.NewModelConnection()
+	s := model.NewModelSession("test11", m)
+	root := NewAgent("root", s)
+
+	const (
+		writers           = 8
+		childrenPerWriter = 64
+		readers           = 4
+	)
+	totalChildren := writers * childrenPerWriter
+
+	// Writers add distinct children under the root in parallel.
+	var writersDone sync.WaitGroup
+	writersDone.Add(writers)
+	for w := 0; w < writers; w++ {
+		w := w
+		go func() {
+			defer writersDone.Done()
+			for i := 0; i < childrenPerWriter; i++ {
+				root.AddSubAgent(NewAgent(fmt.Sprintf("child-%d-%d", w, i), s))
+			}
+		}()
+	}
+
+	// Readers hammer the tree traversals until the writers finish. Under the old
+	// code these unlocked reads raced with AddSubAgent's append.
+	stop := make(chan struct{})
+	var readersDone sync.WaitGroup
+	readersDone.Add(readers)
+	for r := 0; r < readers; r++ {
+		go func() {
+			defer readersDone.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_ = root.ListAllAgents()
+				_ = root.GetAgentByID("root")
+			}
+		}()
+	}
+
+	writersDone.Wait()
+	close(stop)
+	readersDone.Wait()
+
+	// Every appended child must be present exactly once.
+	subs := root.GetSubAgents()
+	if len(subs) != totalChildren {
+		t.Fatalf("expected %d children, got %d", totalChildren, len(subs))
+	}
+	all := root.ListAllAgents()
+	if len(all) != totalChildren+1 {
+		t.Fatalf("expected %d agents in tree, got %d", totalChildren+1, len(all))
+	}
+
+	seen := make(map[string]bool, totalChildren+1)
+	for _, a := range all {
+		if seen[a.ID] {
+			t.Errorf("agent %q surfaced more than once", a.ID)
+		}
+		seen[a.ID] = true
+	}
+	if !seen["root"] {
+		t.Errorf("root missing from ListAllAgents")
+	}
+
+	// Parent and root links must resolve through the locked accessors.
+	for _, sub := range subs {
+		if sub.GetParent() != root {
+			t.Errorf("child %q parent is not root", sub.ID)
+		}
+		if sub.GetRootAgent() != root {
+			t.Errorf("child %q root is not root", sub.ID)
+		}
 	}
 }
