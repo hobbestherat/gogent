@@ -241,3 +241,22 @@ func TestCommandPaletteOpensAndCloses(t *testing.T) {
 		t.Fatalf("top layer after help = %v, want help-overlay", top)
 	}
 }
+
+// TestCloseableDialogAffordance verifies the visible close affordance (issue
+// #173): the dialog exposes a title-bar [x] (ShowClose) whose OnClose runs the
+// caller's close function, so the palette/help overlay no longer rely on the
+// user guessing Esc.
+func TestCloseableDialogAffordance(t *testing.T) {
+	closed := false
+	d := newCloseableDialog("X", 0, 0, 20, 10, func() { closed = true })
+	if !d.Window.ShowClose {
+		t.Error("ShowClose should be true so the [x] button is drawn")
+	}
+	if d.Window.OnClose == nil {
+		t.Fatal("OnClose must be wired to the close function")
+	}
+	d.Window.OnClose(d.Window) // simulate the title-bar [x] click
+	if !closed {
+		t.Error("clicking [x] did not invoke the close function")
+	}
+}
