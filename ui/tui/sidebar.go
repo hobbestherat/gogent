@@ -145,25 +145,27 @@ func newSidebar(wb *Workbench) *sidebar {
 		if w < 3 || h < 2 {
 			return
 		}
-		// Reserve the bottom band for the Overall stats panel when there is room
-		// for both it and a usable tree; otherwise drop the band so a very short
-		// sidebar keeps the session list.
+		// Split the panel below the title row (h-1) into the tree, the middle TODO
+		// region and the bottom Overall band, with a strict precedence so the tree
+		// always wins: drop the per-session TODO region first, then the Overall
+		// band, whenever a region would push the tree below minSidebarTreeHeight.
+		// Dropping todos before the band keeps the persistent global summary as the
+		// last region standing and makes the drop monotonic — shrinking the sidebar
+		// never makes the todos reappear after the band is gone. With an empty
+		// checklist todosH is 0, so this reduces to the original band-only split.
+		treeAvail := h - 1
 		bandH := overallBandHeight
-		if h-1-bandH < minSidebarTreeHeight {
-			bandH = 0
-		}
-		// Reserve the middle TODO region (issue #190) above the band, sized to the
-		// focused session's checklist. It drops before the band does: a session
-		// list that still has room for the band but not the todos keeps the band.
-		// With an empty checklist todosH is 0, so the band split above is unchanged.
 		todosH := s.todosRegionHeight()
-		if h-1-bandH-todosH < minSidebarTreeHeight {
+		if treeAvail-bandH-todosH < minSidebarTreeHeight {
 			todosH = 0
+		}
+		if treeAvail-bandH-todosH < minSidebarTreeHeight {
+			bandH = 0
 		}
 		s.overallBandH = bandH
 		s.todosBandH = todosH
 		// Leave the first column for the divider and the first row for the title.
-		tree.Root().SetBounds(tv.Rect{X: 2, Y: 1, W: w - 3, H: h - 1 - bandH - todosH})
+		tree.Root().SetBounds(tv.Rect{X: 2, Y: 1, W: w - 3, H: treeAvail - bandH - todosH})
 		// The drag handle overlays the left-edge divider glyph (col 0, full height).
 		if s.divider != nil {
 			s.divider.SetBounds(tv.Rect{X: 0, Y: 0, W: 1, H: h})

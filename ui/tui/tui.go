@@ -874,11 +874,8 @@ func (w *Workbench) Focus(id string) {
 	w.desktop.AddLayer(sw.layer)
 	w.desktop.SetFocus(sw.input)
 	// The middle TODO region (issue #190) and the Overall panel's "model"/"api"
-	// rows (issue #107) both follow the focused session; point them at it and
-	// refresh before the redraw below so the new session's state shows at once.
-	if w.sidebar != nil {
-		w.sidebar.focusSession(id)
-	}
+	// rows (issue #107) both follow the active session; refreshOverall resolves
+	// both from the raised top window, so refresh before the redraw below.
 	w.refreshOverall()
 	w.desktop.Redraw()
 }
@@ -1635,7 +1632,18 @@ func (w *Workbench) scheduleOverallRefresh() {
 // aggregate; the caller owns the redraw (mirrors SessionWindow's refreshStatus
 // contract). No-op without a sidebar or statistics handler. Runs on the UI thread.
 func (w *Workbench) refreshOverall() {
-	if w.sidebar == nil || w.handlers.GetStatistics == nil {
+	if w.sidebar == nil {
+		return
+	}
+	// Both bottom regions follow the active top-most session — the Overall band's
+	// model/api rows (issue #107) and the middle TODO region (issue #190). Resolve
+	// the focus from the same source (the top window) so the two never diverge:
+	// session creation, raise, cycle and close all funnel through here, so the
+	// TODO region tracks the window the user is actually looking at without a
+	// separate Focus hop. Done before the statistics guard so the TODO region
+	// still follows focus even when no statistics handler is wired.
+	w.sidebar.focusSession(w.ActiveID())
+	if w.handlers.GetStatistics == nil {
 		return
 	}
 	w.sidebar.refreshOverallStats(w.handlers.GetStatistics(), w.activeModelConfig())
