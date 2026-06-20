@@ -163,6 +163,24 @@ type Handlers struct {
 	// injected mid-turn (and must not also auto-fire on idle) or should wait to
 	// drain on idle. May be nil, treated as false (drain-on-idle only).
 	InjectQueuedInputEnabled func() bool
+	// SupervisorEnabled reports whether the harness-level supervisor (issue #172)
+	// is enabled (experimental.supervisor). When false the idle watchdog never
+	// runs, so a session's /goal is purely informational. May be nil, treated as
+	// false (supervisor off).
+	SupervisorEnabled func() bool
+	// SupervisorMaxNudges returns the bound on consecutive supervisor nudges for a
+	// single idle session before the watchdog gives up and notifies the user
+	// (issue #172). May be nil; a non-positive value resolves to a built-in
+	// default in the window.
+	SupervisorMaxNudges func() int
+	// OnSupervisorCheck runs the supervisor's completion check for a session: is
+	// goal satisfied given the conversation so far (issue #172)? It runs the cheap
+	// todo short-circuit and, when needed, a single lightweight model judge on the
+	// backend, returning done=true when the goal is met. It is called on a
+	// background goroutine from the idle watchdog so a model judge does not block
+	// the UI; an errored check is treated as "not done". May be nil, in which case
+	// the supervisor never fires.
+	OnSupervisorCheck func(sessionID, goal string) (done bool, err error)
 }
 
 // RestoredSession describes a session to be re-opened from persisted state.
@@ -1274,6 +1292,7 @@ func (w *Workbench) captureLayout() gogent.Layout {
 			Pinned:    w.pinned[id],
 			Minimized: sw.window.IsMinimized(),
 			Effort:    sw.selectedEffort(),
+			Goal:      sw.goal,
 			X:         bounds.X,
 			Y:         bounds.Y,
 			W:         bounds.W,
@@ -1337,6 +1356,9 @@ func (w *Workbench) applyLayout(layout gogent.Layout) {
 		// no-op when the saved effort is not among the current model's options
 		// (e.g. the model's effort set changed since the layout was written).
 		sw.applyEffort(e.Effort)
+		// Restore the per-session supervisor goal (issue #172) so the idle watchdog
+		// resumes supervising the same objective after a restart.
+		sw.goal = e.Goal
 		bounds := clampWindowRect(tv.Rect{X: e.X, Y: e.Y, W: e.W, H: e.H},
 			area.W, area.H, sw.window.MinWidth, sw.window.MinHeight)
 		sw.window.Component.SetBounds(bounds)

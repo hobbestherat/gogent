@@ -467,6 +467,11 @@ type Config struct {
 	// value leaves every experimental feature off, so an older config.json without
 	// the key behaves exactly as before.
 	Experimental ExperimentalConfig `json:"experimental,omitempty"`
+	// Supervisor tunes the harness-level supervisor (issue #172): the bounded
+	// idle-watchdog that re-prompts a session toward a persisted /goal. It only
+	// takes effect when Experimental.Supervisor is enabled; the zero value resolves
+	// to the built-in defaults via the *OrDefault accessors.
+	Supervisor SupervisorConfig `json:"supervisor,omitempty"`
 }
 
 // ExperimentalConfig collects opt-in features that are off by default (issue
@@ -481,6 +486,36 @@ type ExperimentalConfig struct {
 	// (phase 1) is always on regardless of this flag; this only changes when a
 	// queued message fires for a turn that is still in flight.
 	InjectQueuedInput bool `json:"inject_queued_input,omitempty"`
+	// Supervisor, when true, enables the harness-level idle watchdog (issue #172):
+	// on each busy→idle transition, if a session has a /goal set, a cheap completion
+	// check decides whether the goal is met and, if not, nudges the session to
+	// continue — bounded by Supervisor.MaxNudges. Off by default, so a config
+	// without the key keeps the previous (no-supervisor) behaviour exactly.
+	Supervisor bool `json:"supervisor,omitempty"`
+}
+
+// SupervisorConfig tunes the harness-level supervisor (issue #172). It is only
+// consulted when ExperimentalConfig.Supervisor is enabled; a zero value resolves
+// to the built-in defaults via the *OrDefault accessors.
+type SupervisorConfig struct {
+	// MaxNudges bounds how many consecutive supervisor nudges a single idle
+	// session may receive before the supervisor gives up and surfaces a note to
+	// the user. Zero (the default) resolves to defaultSupervisorMaxNudges. A real
+	// (non-supervisor) user message resets the budget.
+	MaxNudges int `json:"max_nudges,omitempty"`
+}
+
+// defaultSupervisorMaxNudges is the built-in nudge budget applied when
+// SupervisorConfig.MaxNudges is left unset (<=0).
+const defaultSupervisorMaxNudges = 3
+
+// MaxNudgesOrDefault returns the configured consecutive-nudge budget, or the
+// built-in default when unset (<=0).
+func (c SupervisorConfig) MaxNudgesOrDefault() int {
+	if c.MaxNudges <= 0 {
+		return defaultSupervisorMaxNudges
+	}
+	return c.MaxNudges
 }
 
 // NotifyConfig returns the effective notification configuration, substituting
