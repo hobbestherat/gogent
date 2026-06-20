@@ -28,9 +28,19 @@ const (
 )
 
 // minSidebarTreeHeight is the smallest tree region worth showing. When the
-// Overall stats band would leave the tree shorter than this, the band is dropped
-// so a very short terminal keeps the session list usable.
+// Overall stats band (and/or the TODO region) would leave the tree shorter than
+// this, those regions are dropped so a very short terminal keeps the session
+// list usable.
 const minSidebarTreeHeight = 4
+
+// maxTodoRegionItems caps how many checklist rows the middle TODO region renders
+// for the focused session, so a long todo list cannot crowd out the session tree
+// (the region drops entirely before the tree shrinks below minSidebarTreeHeight).
+const maxTodoRegionItems = 8
+
+// todoRegionTitleLines is the fixed overhead of the middle TODO region: a single
+// "TODOs" header row above the per-session checklist rows.
+const todoRegionTitleLines = 1
 
 // approvalBadge marks a session that has a permission prompt waiting for the
 // user (issue #55). It is appended to the requesting session's node label and,
@@ -48,10 +58,16 @@ type sidebar struct {
 
 	sessions map[string]*tv.TreeNode // sessionID -> root node
 	agents   map[string]*tv.TreeNode // agentID  -> sub-agent node
-	// todos holds the checklist child nodes rendered under each session (issue
-	// #43), keyed by session id. applyTodo rebuilds a session's set on every
-	// update; the nodes are tracked here so the previous set can be removed first.
-	todos map[string][]*tv.TreeNode
+	// todos is the source of truth for each session's checklist (issue #43),
+	// keyed by session id. It is no longer embedded in the session tree (issue
+	// #190): the focused session's list is drawn in its own middle region by
+	// drawTodos. applyTodo replaces a session's slice on every update.
+	todos map[string][]agent.TodoItem
+	// focused is the session whose checklist the middle TODO region shows. It
+	// follows the raised session (set by focusSession from Workbench.Focus),
+	// mirroring how the Overall band's model/api rows follow the focused session
+	// (issue #107). Empty before any session is raised.
+	focused string
 
 	// approvals tracks which sessions currently have a permission prompt waiting,
 	// so their node keeps the "needs approval" badge across unrelated relabels
@@ -66,6 +82,11 @@ type sidebar struct {
 	// too short to show the panel); DrawFn reads it to place the band.
 	overall      overallStats
 	overallBandH int
+	// todosBandH is the middle TODO region's height resolved by LayoutFn (issue
+	// #190): todoRegionTitleLines + the focused session's (capped) item count, or
+	// 0 when the focused session has no todos or the sidebar is too short. DrawFn
+	// reads it to place the region directly above the Overall band.
+	todosBandH int
 
 	// divider is a 1-column drag handle pinned to the sidebar's left edge (issue
 	// #175). Dragging it left/right changes the live sidebar width; it sits in
@@ -87,7 +108,7 @@ func newSidebar(wb *Workbench) *sidebar {
 		wb:           wb,
 		sessions:     make(map[string]*tv.TreeNode),
 		agents:       make(map[string]*tv.TreeNode),
-		todos:        make(map[string][]*tv.TreeNode),
+		todos:        make(map[string][]agent.TodoItem),
 		approvals:    make(map[string]bool),
 		overallBandH: overallBandHeight,
 	}
@@ -113,7 +134,9 @@ func newSidebar(wb *Workbench) *sidebar {
 			}
 			surface.WriteString(x, abs.Y, ind, tui.Cell{FG: chromeAccent, BG: chromePanelBG})
 		}
-		// Bottom "Overall" aggregate-stats panel (issue #53).
+		// Middle per-session TODO region (issue #190), then the bottom "Overall"
+		// aggregate-stats panel (issue #53). Both read heights resolved by LayoutFn.
+		s.drawTodos(surface, abs)
 		s.drawOverall(surface, abs)
 	}
 	panel.LayoutFn = func(c *tv.VisualComponent) {
@@ -122,16 +145,27 @@ func newSidebar(wb *Workbench) *sidebar {
 		if w < 3 || h < 2 {
 			return
 		}
-		// Reserve the bottom band for the Overall stats panel when there is room
-		// for both it and a usable tree; otherwise drop the band so a very short
-		// sidebar keeps the session list.
+		// Split the panel below the title row (h-1) into the tree, the middle TODO
+		// region and the bottom Overall band, with a strict precedence so the tree
+		// always wins: drop the per-session TODO region first, then the Overall
+		// band, whenever a region would push the tree below minSidebarTreeHeight.
+		// Dropping todos before the band keeps the persistent global summary as the
+		// last region standing and makes the drop monotonic — shrinking the sidebar
+		// never makes the todos reappear after the band is gone. With an empty
+		// checklist todosH is 0, so this reduces to the original band-only split.
+		treeAvail := h - 1
 		bandH := overallBandHeight
-		if h-1-bandH < minSidebarTreeHeight {
+		todosH := s.todosRegionHeight()
+		if treeAvail-bandH-todosH < minSidebarTreeHeight {
+			todosH = 0
+		}
+		if treeAvail-bandH-todosH < minSidebarTreeHeight {
 			bandH = 0
 		}
 		s.overallBandH = bandH
+		s.todosBandH = todosH
 		// Leave the first column for the divider and the first row for the title.
-		tree.Root().SetBounds(tv.Rect{X: 2, Y: 1, W: w - 3, H: h - 1 - bandH})
+		tree.Root().SetBounds(tv.Rect{X: 2, Y: 1, W: w - 3, H: treeAvail - bandH - todosH})
 		// The drag handle overlays the left-edge divider glyph (col 0, full height).
 		if s.divider != nil {
 			s.divider.SetBounds(tv.Rect{X: 0, Y: 0, W: 1, H: h})
@@ -231,6 +265,19 @@ func (s *sidebar) removeSession(id string) {
 	delete(s.sessions, id)
 	delete(s.approvals, id)
 	delete(s.todos, id)
+	// Drop the middle TODO region's focus when its session goes away, so it does
+	// not point at a removed session (the next Focus re-sets it).
+	if s.focused == id {
+		s.focused = ""
+	}
+}
+
+// focusSession records which session's checklist the middle TODO region shows
+// (issue #190). It mirrors the Overall band's "follows the focused session"
+// behaviour (issue #107) so both bottom regions describe one session. Called
+// from Workbench.Focus on the UI thread.
+func (s *sidebar) focusSession(id string) {
+	s.focused = id
 }
 
 // setApproval toggles the "needs approval" badge on a session node (issue #55)
@@ -263,6 +310,59 @@ func (s *sidebar) setGlobalApprovals(n int) {
 // refreshStatus contract). Runs on the UI thread.
 func (s *sidebar) refreshOverallStats(report stats.Report, model *config.ModelConfig) {
 	s.overall = buildOverallStats(report, len(s.sessions), len(s.agents), model)
+}
+
+// todoLineCount is the number of checklist rows the middle region renders for
+// the focused session: its item count, capped at maxTodoRegionItems. It is 0
+// when there is no focused session or the focused session has no todos, which is
+// what hides the region entirely (no blank block).
+func (s *sidebar) todoLineCount() int {
+	n := len(s.todos[s.focused])
+	if n > maxTodoRegionItems {
+		n = maxTodoRegionItems
+	}
+	return n
+}
+
+// todosRegionHeight is the middle TODO region's desired height: the title row
+// plus the (capped) checklist rows, or 0 when the focused session has no todos.
+// LayoutFn reserves this much above the Overall band, dropping it first when the
+// sidebar is too short for a usable tree.
+func (s *sidebar) todosRegionHeight() int {
+	n := s.todoLineCount()
+	if n == 0 {
+		return 0
+	}
+	return todoRegionTitleLines + n
+}
+
+// drawTodos renders the middle per-session TODO region (issue #190): a "TODOs"
+// header row over a separator, then the focused session's checklist, placed
+// directly above the Overall band. It is a no-op when LayoutFn resolved the
+// region height to 0 (no focused todos, or the sidebar is too short). Each row
+// is clipped to the content width so a long task can never run into the divider
+// or the panel edge. Runs on the UI thread.
+func (s *sidebar) drawTodos(surface tv.Surface, abs tv.Rect) {
+	todosH := s.todosBandH
+	if todosH <= 0 || todosH >= abs.H {
+		return
+	}
+	contentW := abs.W - 3 // leave the divider (col 0) and a right margin
+	if contentW < 1 {
+		return
+	}
+	top := abs.Y + abs.H - s.overallBandH - todosH
+	// Header row: a separator under the tree with the "TODOs" title over it, so
+	// the region reads as a labelled section in a single line.
+	for x := 1; x < abs.W-1; x++ {
+		surface.SetCell(abs.X+x, top, tui.Cell{Ch: '─', FG: chromeDivider, BG: chromePanelBG})
+	}
+	surface.WriteString(abs.X+2, top, "TODOs", tui.Cell{FG: chromeTitle, BG: chromePanelBG})
+	items := s.todos[s.focused]
+	for i := 0; i < todosH-todoRegionTitleLines && i < len(items); i++ {
+		surface.WriteString(abs.X+2, top+todoRegionTitleLines+i,
+			truncateRunes(todoLabel(items[i]), contentW), tui.Cell{FG: chromePanelFG, BG: chromePanelBG})
+	}
 }
 
 // drawOverall renders the bottom aggregate-stats band: a separator under the
@@ -321,49 +421,23 @@ func (s *sidebar) applySubAgent(sessionID string, ev agent.SessionEvent) {
 	node.Label = agentLabel(ev.Name, ev.Status, ev.Kind)
 }
 
-// applyTodo rebuilds a session's checklist child nodes from a todo update (issue
-// #43). The previous set is removed from the session node before the new one is
-// appended, so the list reflects the latest todo tool call. An empty list clears
-// the nodes. Runs on the UI thread (called from EmitSessionEvent).
+// applyTodo records a session's checklist from a todo update (issue #43). Since
+// issue #190 the todos are no longer embedded as session-tree children: this
+// only updates s.todos (the source of truth), and the focused session's list is
+// drawn in the middle region by drawTodos. An empty list clears the entry.
+// Unknown sessions are ignored. Runs on the UI thread (called from
+// EmitSessionEvent).
 func (s *sidebar) applyTodo(sessionID string, items []agent.TodoItem) {
-	parent := s.sessions[sessionID]
-	if parent == nil {
+	if s.sessions[sessionID] == nil {
 		return
-	}
-	if old := s.todos[sessionID]; len(old) > 0 {
-		parent.Children = excludeNodes(parent.Children, old)
 	}
 	if len(items) == 0 {
 		delete(s.todos, sessionID)
 		return
 	}
-	nodes := make([]*tv.TreeNode, 0, len(items))
-	for _, it := range items {
-		node := tv.NewTreeNode(todoLabel(it))
-		node.Data = nodeRef{sessionID: sessionID, name: it.Content}
-		parent.Add(node)
-		nodes = append(nodes, node)
-	}
-	s.todos[sessionID] = nodes
-}
-
-// excludeNodes returns children with every node in remove dropped. It allocates
-// a fresh slice so the caller can reassign the parent's Children safely.
-func excludeNodes(children, remove []*tv.TreeNode) []*tv.TreeNode {
-	if len(remove) == 0 {
-		return children
-	}
-	drop := make(map[*tv.TreeNode]bool, len(remove))
-	for _, n := range remove {
-		drop[n] = true
-	}
-	out := make([]*tv.TreeNode, 0, len(children))
-	for _, c := range children {
-		if !drop[c] {
-			out = append(out, c)
-		}
-	}
-	return out
+	cp := make([]agent.TodoItem, len(items))
+	copy(cp, items)
+	s.todos[sessionID] = cp
 }
 
 // todoLabel renders one checklist row: a status glyph followed by the content.
@@ -375,13 +449,17 @@ func todoLabel(it agent.TodoItem) string {
 	return fmt.Sprintf("%s %s", todoStatusIcon(it.Status), content)
 }
 
-// todoStatusIcon maps a todo status to a compact glyph for the sidebar.
+// todoStatusIcon maps a todo status to a compact glyph for the middle TODO
+// region. The glyphs are deliberately distinct from statusIcon's sub-agent set
+// (▶ ‖ ✓ ✗ •) so a checklist row is unambiguous at a glance even though the two
+// kinds now live in separate regions (issue #190): pending ☐, in-progress ◐,
+// completed ☑.
 func todoStatusIcon(status agent.TodoStatus) string {
 	switch status {
 	case agent.TodoInProgress:
-		return "▶"
+		return "◐"
 	case agent.TodoCompleted:
-		return "✓"
+		return "☑"
 	default:
 		return "☐"
 	}
