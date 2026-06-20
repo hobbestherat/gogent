@@ -1,5 +1,5 @@
-github.com/kloune/turbotui v0.3.1-0.20260620061254-6328e252d917 h1:yPGCby1gOuHGOK764IGrtgLYiLMbGSM7fL+drNviC9s=
-github.com/kloune/turbotui v0.3.1-0.20260620061254-6328e252d917/go.mod h1:+cXzY+fhI8sBSN3k2L1Rb7mp1psKGT+D8R3qcCT+2d0=
+github.com/hobbestherat/turbotui v0.3.1-0.20260620075720-9a6fe2956bd0 h1:gkCUyGunVkd6IJhkjDnr0b6jgcgS4lci/1fHFYQB5vA=
+github.com/hobbestherat/turbotui v0.3.1-0.20260620075720-9a6fe2956bd0/go.mod h1:+cXzY+fhI8sBSN3k2L1Rb7mp1psKGT+D8R3qcCT+2d0=
 golang.org/x/sys v0.46.0 h1:noSf2Fq6F8DBgS+LysIkx7rIExoNHJsxOAtPp4rthXw=
 golang.org/x/sys v0.46.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
 golang.org/x/term v0.44.0 h1:0rLvDRCtNj0gZkyIXhCyOb2OAzEhLVqc4B+hrsBhrmc=
