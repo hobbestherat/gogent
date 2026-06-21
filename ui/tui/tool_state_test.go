@@ -242,3 +242,115 @@ func TestToolStateMultipleTurnsReset(t *testing.T) {
 	sw.apply(agent.SessionEvent{Type: agent.SessionEventFinal, Text: "turn 2 done"})
 	assertNoRunning(t, sw)
 }
+
+// TestToolStateDuplicateCallIDSupersededFirstEntry covers the duplicate-CallID
+// case a misbehaving model can produce (two tool_calls sharing one id). The first
+// entry can no longer be matched to a result, so it must be flipped terminal
+// ("(superseded)") at overwrite time rather than left "(running...)" beyond the
+// safety net's reach (issue #187 regression guard).
+func TestToolStateDuplicateCallIDSupersededFirstEntry(t *testing.T) {
+	sw := newTestSession()
+	sw.apply(agent.SessionEvent{Type: agent.SessionEventToolCall, CallID: "dup", Tool: "Read", Args: map[string]interface{}{"path": "a"}})
+	sw.apply(agent.SessionEvent{Type: agent.SessionEventToolCall, CallID: "dup", Tool: "Read", Args: map[string]interface{}{"path": "b"}})
+
+	// The first entry is already terminal ("(superseded)"); only the second (live)
+	// call is in flight and tracked under "dup". So exactly one entry is running.
+	if got := len(sw.pendingTools); got != 1 {
+		t.Fatalf("pendingTools should hold exactly the live call after a dup id, got %d (%v)", got, sw.pendingTools)
+	}
+	if got, want := countRunning(sw), 1; got != want {
+		t.Fatalf("expected exactly the live call to be \"(running...)\" (%d), got %d:\n%s", want, got, sw.transcript.view.AllText())
+	}
+	if !strings.Contains(sw.transcript.view.AllText(), "tool: Read (superseded)") {
+		t.Errorf("the displaced first entry should already be \"(superseded)\", got:\n%s", sw.transcript.view.AllText())
+	}
+
+	sw.apply(agent.SessionEvent{Type: agent.SessionEventToolResult, CallID: "dup", Tool: "Read", Result: "b-body"})
+
+	text := sw.transcript.view.AllText()
+	if got := strings.Count(text, "(superseded)"); got != 1 {
+		t.Errorf("expected 1 \"(superseded)\" entry, got %d:\n%s", got, text)
+	}
+	if !strings.Contains(text, "tool: Read (done)") {
+		t.Errorf("the live call should be \"(done)\", got:\n%s", text)
+	}
+	if strings.Contains(text, "(running...)") {
+		t.Errorf("no entry should remain \"(running...)\" after the duplicate-id batch resolves, got:\n%s", text)
+	}
+	if got := len(sw.pendingTools); got != 0 {
+		t.Errorf("pendingTools should be empty after the result, got %d", got)
+	}
+}
+
+// TestToolStateTripleDuplicateCallIDAllTerminal stacks three calls on one id:
+// the first two are superseded, the third resolves. Every entry must reach a
+// terminal state (issue #187) — toolHeaderName must recover the name even from an
+// already-superseded header when the second overwrite happens.
+func TestToolStateTripleDuplicateCallIDAllTerminal(t *testing.T) {
+	sw := newTestSession()
+	for i := 0; i < 3; i++ {
+		sw.apply(agent.SessionEvent{Type: agent.SessionEventToolCall, CallID: "dup", Tool: "Read", Args: map[string]interface{}{"path": "p"}})
+	}
+	// Only the third (live) call is in flight; the two earlier are superseded.
+	if got, want := len(sw.pendingTools), 1; got != want {
+		t.Fatalf("pendingTools = %d, want %d (only the live call tracked)", got, want)
+	}
+	sw.apply(agent.SessionEvent{Type: agent.SessionEventToolResult, CallID: "dup", Tool: "Read", Result: "r"})
+
+	text := sw.transcript.view.AllText()
+	if got := strings.Count(text, "(superseded)"); got != 2 {
+		t.Errorf("expected 2 \"(superseded)\" entries, got %d:\n%s", got, text)
+	}
+	if got := countDone(sw); got != 1 {
+		t.Errorf("expected 1 \"(done)\" entry, got %d:\n%s", got, text)
+	}
+	assertNoRunning(t, sw)
+}
+
+// TestToolStateEmptyCallIDEntryIsSweptOnIdle covers the id-less (legacy/stray)
+// ToolCall: it cannot be paired to a result by id, but it must still be tracked
+// under a synthetic key so the busy→idle safety net sweeps it instead of leaving
+// it "(running...)" forever (issue #187 regression guard).
+func TestToolStateEmptyCallIDEntryIsSweptOnIdle(t *testing.T) {
+	w := newTestWorkbench(t)
+	sw := w.openWindow("s", "S")
+
+	sw.setBusy(true)
+	sw.apply(agent.SessionEvent{Type: agent.SessionEventToolCall, CallID: "", Tool: "Read", Args: map[string]interface{}{"path": "legacy"}})
+	// Tracked (under a synthetic key), not dropped from the pending map.
+	if got := len(sw.pendingTools); got != 1 {
+		t.Fatalf("id-less call should be tracked under a synthetic key, pendingTools = %d", got)
+	}
+	if countRunning(sw) != 1 {
+		t.Fatalf("expected the id-less call to render as \"(running...)\" while in flight")
+	}
+
+	// Turn ends with no matching result (it can't be paired by empty id).
+	sw.apply(agent.SessionEvent{Type: agent.SessionEventFinal, Text: "done"})
+
+	assertNoRunning(t, sw)
+	if !strings.Contains(sw.transcript.view.AllText(), "(interrupted)") {
+		t.Errorf("id-less \"(running...)\" entry should be swept to \"(interrupted)\" on idle, got:\n%s", sw.transcript.view.AllText())
+	}
+}
+
+// TestToolStateEmptyCallIDResultFallsBackToFreshEntry pairs an id-less result
+// with an id-less call: the result cannot match the synthetic-tracked call, so it
+// renders as its own fresh entry (never dropped), while the original running entry
+// is swept on busy→idle (issue #187).
+func TestToolStateEmptyCallIDResultFallsBackToFreshEntry(t *testing.T) {
+	w := newTestWorkbench(t)
+	sw := w.openWindow("s", "S")
+
+	sw.setBusy(true)
+	sw.apply(agent.SessionEvent{Type: agent.SessionEventToolCall, CallID: "", Tool: "Read", Args: map[string]interface{}{"path": "x"}})
+	sw.apply(agent.SessionEvent{Type: agent.SessionEventToolResult, CallID: "", Tool: "Read", Result: "legacy-payload"})
+	sw.apply(agent.SessionEvent{Type: agent.SessionEventFinal, Text: "done"})
+
+	text := sw.transcript.view.AllText()
+	// The result body must be rendered somewhere — never silently dropped.
+	if !strings.Contains(text, "legacy-payload") {
+		t.Errorf("id-less result should still render its payload, got:\n%s", text)
+	}
+	assertNoRunning(t, sw)
+}
