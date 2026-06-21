@@ -8,18 +8,55 @@ import (
 	"gogent/internal/agent"
 )
 
-// applyClarifyEvent reproduces the sidebar side-effects that
-// Workbench.EmitSessionEvent performs for a SessionEventSubAgent (the clarify
-// shim at tui.go around EmitSessionEvent): it toggles the owning session's
-// clarify flag based on whether the sub-agent is waiting, then recomputes the
-// global count from the clarify set. It stands in for a real EmitSessionEvent
-// call because desktop.Post only drains from the running event loop, which the
-// sidebar unit tests never start — so EmitSessionEvent's closure would never
-// run. The two lines below are an exact mirror of the production shim, which
-// keeps these lifecycle tests faithful to the real wiring.
+// applyClarifyEvent drives the sidebar's clarify API directly: it calls
+// setClarify (reference-counting clarifyCount) and resyncs globalClarify, i.e.
+// the TAIL of Workbench.EmitSessionEvent's clarify block, AFTER the per-sub-agent
+// dedup. It is used for sidebar-layer unit tests that exercise setClarify /
+// setGlobalClarify in isolation. It deliberately does NOT reproduce the
+// clarifyWaiting dedup (that lives on the Workbench, above the sidebar) — use
+// emitSubAgentClarify for whole-flow lifecycle tests that must exercise it.
 func applyClarifyEvent(s *sidebar, id, title string, pinned bool, status agent.AgentStatus) {
 	s.setClarify(id, title, pinned, status == agent.StatusWaiting)
 	s.setGlobalClarify(len(s.clarify))
+}
+
+// subAgentEvent builds a SessionEventSubAgent carrying the given sub-agent
+// identity and lifecycle status, matching what agent.UserSession.emitSubAgent
+// produces (AgentID + Name + Status).
+func subAgentEvent(agentID, name string, status agent.AgentStatus) agent.SessionEvent {
+	return agent.SessionEvent{Type: agent.SessionEventSubAgent, AgentID: agentID, Name: name, Status: status}
+}
+
+// emitSubAgentClarify reproduces — verbatim — the clarify side-effects that
+// Workbench.EmitSessionEvent performs for a SessionEventSubAgent (tui.go's
+// clarify block). It stands in for a real EmitSessionEvent call because
+// desktop.Post only drains from the running event loop, which sidebar tests
+// never start, so EmitSessionEvent's closure would never run. Mirroring the
+// WHOLE block (including the per-sub-agent clarifyWaiting dedup that collapses
+// repeated same-state events) keeps these lifecycle tests faithful to the real
+// set/clear contract — including the multi-round-CLARIFY fix.
+func emitSubAgentClarify(w *Workbench, id, title string, pinned bool, ev agent.SessionEvent) {
+	if w.sidebar == nil {
+		return
+	}
+	w.sidebar.applySubAgent(id, ev)
+	key := ev.AgentID
+	if key == "" {
+		key = id + "/" + ev.Name
+	}
+	waiting := ev.Status == agent.StatusWaiting
+	if w.clarifyWaiting == nil {
+		w.clarifyWaiting = make(map[string]bool)
+	}
+	if waiting != w.clarifyWaiting[key] {
+		if waiting {
+			w.clarifyWaiting[key] = true
+		} else {
+			delete(w.clarifyWaiting, key)
+		}
+		w.sidebar.setClarify(id, title, pinned, waiting)
+		w.sidebar.setGlobalClarify(len(w.sidebar.clarify))
+	}
 }
 
 // TestClarifyBadgeConstant pins the clarify glyph and, critically, that it is
@@ -415,35 +452,46 @@ func TestClarifyHeaderNoOverlapAtMinWidth(t *testing.T) {
 	}
 }
 
-// TestClarifyBadgeMultipleSubAgentsOneSession is a regression test for the
-// per-session-bool model: when a session has more than one sub-agent and one
-// resumes while another is still StatusWaiting, the ❓ badge must persist until
-// the LAST waiting sub-agent resolves. This originally failed under a single
-// per-session bool (cleared by any non-waiting event); the sidebar now keeps a
-// clarifyCount of in-flight waiting sub-agents per session.
+// TestClarifyBadgeMultipleSubAgentsOneSession drives the real EmitSessionEvent
+// clarify flow (via emitSubAgentClarify) with two DISTINCT sub-agents in one
+// session. The ❓ badge must persist while either is StatusWaiting and clear only
+// when the last one resolves. This also confirms the per-sub-agent clarifyWaiting
+// dedup keys by AgentID, so two different agents each count once.
 func TestClarifyBadgeMultipleSubAgentsOneSession(t *testing.T) {
-	s := newTestSidebar()
-	s.addSession("s1", "Session 1", false)
+	w := newTestWorkbench(t)
+	w.sidebar.addSession("s1", "Session 1", false)
 
 	// Sub-agent A goes waiting (asks a CLARIFY question).
-	applyClarifyEvent(s, "s1", "Session 1", false, agent.StatusWaiting)
-	if !s.clarify["s1"] || s.globalClarify != 1 {
-		t.Fatalf("session should be flagged after first sub-agent waits (globalClarify=%d)", s.globalClarify)
+	emitSubAgentClarify(w, "s1", "Session 1", false, subAgentEvent("A", "asker", agent.StatusWaiting))
+	if !w.sidebar.clarify["s1"] || w.sidebar.globalClarify != 1 {
+		t.Fatalf("session should be flagged after first sub-agent waits (globalClarify=%d)", w.sidebar.globalClarify)
 	}
 
 	// Sub-agent B goes waiting too; the session is still flagged once.
-	applyClarifyEvent(s, "s1", "Session 1", false, agent.StatusWaiting)
-	if !s.clarify["s1"] || s.globalClarify != 1 {
-		t.Fatalf("session should remain flagged once with two waiting sub-agents (globalClarify=%d)", s.globalClarify)
+	emitSubAgentClarify(w, "s1", "Session 1", false, subAgentEvent("B", "helper", agent.StatusWaiting))
+	if !w.sidebar.clarify["s1"] || w.sidebar.globalClarify != 1 {
+		t.Fatalf("session should remain flagged once with two waiting sub-agents (globalClarify=%d)", w.sidebar.globalClarify)
+	}
+	if w.sidebar.clarifyCount["s1"] != 2 {
+		t.Fatalf("clarifyCount=%d, want 2 (two distinct waiting sub-agents)", w.sidebar.clarifyCount["s1"])
 	}
 
-	// Sub-agent A resumes while B is STILL waiting. The badge must remain.
-	applyClarifyEvent(s, "s1", "Session 1", false, agent.StatusRunning)
-	if !s.clarify["s1"] {
-		t.Fatalf("clarify badge cleared while another sub-agent is still waiting (globalClarify=%d)", s.globalClarify)
+	// Sub-agent A resolves while B is STILL waiting. The badge must remain.
+	emitSubAgentClarify(w, "s1", "Session 1", false, subAgentEvent("A", "asker", agent.StatusCompleted))
+	if !w.sidebar.clarify["s1"] {
+		t.Fatalf("clarify badge cleared while another sub-agent is still waiting (globalClarify=%d)", w.sidebar.globalClarify)
 	}
-	if s.globalClarify != 1 {
-		t.Fatalf("globalClarify=%d, want 1 (a sub-agent is still waiting)", s.globalClarify)
+	if w.sidebar.globalClarify != 1 {
+		t.Fatalf("globalClarify=%d, want 1 (a sub-agent is still waiting)", w.sidebar.globalClarify)
+	}
+
+	// B resolves too: badge clears, count back to 0.
+	emitSubAgentClarify(w, "s1", "Session 1", false, subAgentEvent("B", "helper", agent.StatusCompleted))
+	if w.sidebar.clarify["s1"] {
+		t.Fatalf("clarify badge should clear once the last waiting sub-agent resolves (clarifyCount=%d)", w.sidebar.clarifyCount["s1"])
+	}
+	if w.sidebar.globalClarify != 0 {
+		t.Fatalf("globalClarify=%d, want 0 after all sub-agents resolved", w.sidebar.globalClarify)
 	}
 }
 
@@ -472,46 +520,77 @@ func TestSidebarClarifyNoStaleGlobalAfterRemove(t *testing.T) {
 	}
 }
 
-// TestClarifyBadgeMultiRoundSingleSubAgent exposes a defect in the clarifyCount
-// event-counting model.
+// TestClarifyBadgeMultiRoundSingleSubAgent is a regression test for the
+// clarifyWaiting dedup in Workbench.EmitSessionEvent.
 //
-// clarifyCount is bumped on every SessionEventSubAgent(StatusWaiting) and
-// decremented on every non-waiting one, per session. But Agent.SetStatus does
-// NOT emit a sub-agent event — only the explicit emitSubAgent calls do. In
+// Agent.SetStatus does not emit; only the explicit emitSubAgent calls do. In
 // runInteractive, a sub-agent that asks CLARIFY more than once (the primary use
-// case for interactive agents) emits: Running (launch) → Waiting (round 1) →
-// Waiting (round 2) → … → Completed. The resume between rounds — when the
-// coordinator answers and the loop's top-of-round SetStatus(StatusRunning) runs
-// — is NEVER emitted, so clarifyCount receives consecutive increments with no
-// balancing decrement. After N CLARIFY rounds the count sits at N-1 once the
-// agent completes, leaving the ❓ badge (and globalClarify) stuck ON forever.
+// case for interactive agents) emits: Running (launch) → Waiting (CLARIFY #1)
+// → Waiting (CLARIFY #2) → … → Completed. The resume between rounds (the loop's
+// top-of-round SetStatus(StatusRunning) after the coordinator answers) is NEVER
+// emitted, so a naive per-session event counter would see two consecutive
+// StatusWaiting increments with no balancing decrement and inflate, leaving the
+// ❓ badge stuck ON after completion.
 //
-// This replays the exact emitSubAgent sequence runInteractive produces for one
-// sub-agent that CLARIFIES twice then completes. It asserts the correct
-// behaviour (badge cleared) and is expected to FAIL against the current model
-// until waiting is tracked per sub-agent id (SessionEvent.AgentID) rather than
-// by counting waiting/non-waiting events per session.
+// EmitSessionEvent collapses repeated same-state events per sub-agent
+// (clarifyWaiting[key]), so the second StatusWaiting is a no-op and the count
+// stays balanced. This replays that exact sequence through the real flow
+// (emitSubAgentClarify) and asserts the badge clears on completion.
 func TestClarifyBadgeMultiRoundSingleSubAgent(t *testing.T) {
-	s := newTestSidebar()
-	s.addSession("s1", "Session 1", false)
+	w := newTestWorkbench(t)
+	w.sidebar.addSession("s1", "Session 1", false)
 
 	// Faithful replay of runInteractive's emitSubAgent sequence for one
-	// interactive sub-agent that CLARIFIES twice then completes. Note the resume
+	// interactive sub-agent that CLARIFIES twice then completes. The resume
 	// between the two CLARIFY rounds is never emitted (no Running event lands).
-	applyClarifyEvent(s, "s1", "Session 1", false, agent.StatusRunning) // launch
-	applyClarifyEvent(s, "s1", "Session 1", false, agent.StatusWaiting) // CLARIFY #1
-	applyClarifyEvent(s, "s1", "Session 1", false, agent.StatusWaiting) // CLARIFY #2 (resume not emitted)
-	if !s.clarify["s1"] {
-		t.Fatalf("session should be flagged while the sub-agent waits (clarifyCount=%d)", s.clarifyCount["s1"])
+	emitSubAgentClarify(w, "s1", "Session 1", false, subAgentEvent("A", "asker", agent.StatusRunning)) // launch
+	emitSubAgentClarify(w, "s1", "Session 1", false, subAgentEvent("A", "asker", agent.StatusWaiting)) // CLARIFY #1
+	emitSubAgentClarify(w, "s1", "Session 1", false, subAgentEvent("A", "asker", agent.StatusWaiting)) // CLARIFY #2 (resume not emitted)
+
+	if !w.sidebar.clarify["s1"] {
+		t.Fatalf("session should be flagged while the sub-agent waits (clarifyCount=%d)", w.sidebar.clarifyCount["s1"])
+	}
+	if w.sidebar.clarifyCount["s1"] != 1 {
+		t.Fatalf("dedup should keep clarifyCount at 1 for one waiting sub-agent, got %d", w.sidebar.clarifyCount["s1"])
 	}
 
-	// The sub-agent finishes. The badge must clear.
-	applyClarifyEvent(s, "s1", "Session 1", false, agent.StatusCompleted) // finish
+	// The sub-agent finishes. The badge must clear (count balanced back to 0).
+	emitSubAgentClarify(w, "s1", "Session 1", false, subAgentEvent("A", "asker", agent.StatusCompleted)) // finish
 
-	if s.clarify["s1"] {
-		t.Fatalf("DEFECT: clarify badge stuck ON after a multi-round CLARIFY sub-agent completed (clarifyCount=%d, globalClarify=%d)", s.clarifyCount["s1"], s.globalClarify)
+	if w.sidebar.clarify["s1"] {
+		t.Fatalf("clarify badge stuck ON after a multi-round CLARIFY sub-agent completed (clarifyCount=%d, globalClarify=%d)", w.sidebar.clarifyCount["s1"], w.sidebar.globalClarify)
 	}
-	if s.globalClarify != 0 {
-		t.Fatalf("DEFECT: globalClarify=%d, want 0 after the sub-agent completed", s.globalClarify)
+	if w.sidebar.globalClarify != 0 {
+		t.Fatalf("globalClarify=%d, want 0 after the sub-agent completed", w.sidebar.globalClarify)
+	}
+}
+
+// TestClarifyWaitingDedupIdempotentReArm confirms a single sub-agent that waits,
+// resolves, then waits again (a fresh CLARIFY after a resumed round) re-arms the
+// badge exactly once each time — the dedup must not permanently latch, nor
+// double-count the second waiting.
+func TestClarifyWaitingDedupIdempotentReArm(t *testing.T) {
+	w := newTestWorkbench(t)
+	w.sidebar.addSession("s1", "Session 1", false)
+	ev := func(status agent.AgentStatus) agent.SessionEvent {
+		return subAgentEvent("A", "asker", status)
+	}
+
+	emitSubAgentClarify(w, "s1", "Session 1", false, ev(agent.StatusWaiting))
+	if w.sidebar.clarifyCount["s1"] != 1 {
+		t.Fatalf("first wait: clarifyCount=%d, want 1", w.sidebar.clarifyCount["s1"])
+	}
+	// Resumed round (a non-waiting event lands), then a fresh CLARIFY.
+	emitSubAgentClarify(w, "s1", "Session 1", false, ev(agent.StatusRunning))
+	if w.sidebar.clarify["s1"] {
+		t.Fatalf("badge should clear on resume (clarifyCount=%d)", w.sidebar.clarifyCount["s1"])
+	}
+	emitSubAgentClarify(w, "s1", "Session 1", false, ev(agent.StatusWaiting))
+	if w.sidebar.clarifyCount["s1"] != 1 {
+		t.Fatalf("re-arm: clarifyCount=%d, want 1 (dedup must allow re-arm)", w.sidebar.clarifyCount["s1"])
+	}
+	emitSubAgentClarify(w, "s1", "Session 1", false, ev(agent.StatusCompleted))
+	if w.sidebar.clarify["s1"] || w.sidebar.globalClarify != 0 {
+		t.Fatalf("badge should clear after completion (clarifyCount=%d, globalClarify=%d)", w.sidebar.clarifyCount["s1"], w.sidebar.globalClarify)
 	}
 }
