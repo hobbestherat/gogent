@@ -707,15 +707,25 @@ func (sw *SessionWindow) selectedEffort() string {
 // when the window is built and whenever the model selector changes, so the effort
 // choices always match the active model. A selector with no model options is left
 // showing just "(default)" and greyed out — its effort is then a no-op the request
-// gate would drop anyway. The previously selected value is preserved when it is
-// still offered, otherwise the selection resets to "(default)".
+// gate would drop anyway.
+//
+// Selection (issue #255), in priority order:
+//  1. An explicit prior pick (not the "(default)" sentinel) is preserved when the
+//     new model still offers it — a user's choice survives a model switch.
+//  2. Otherwise — a fresh session, or a prior value that was the sentinel or is no
+//     longer offered — the model's configured ReasoningEffort seeds the selection
+//     when it is one of the offered options. This pins the value in effect at
+//     session-create / model-switch time as the session's effort (the tradeoff:
+//     such a session no longer follows later config edits to reasoning_effort).
+//  3. Otherwise the selection falls back to "(default)" (index 0).
 func (sw *SessionWindow) rebuildEffortOptions() {
 	if sw.effortSelect == nil {
 		return
 	}
 	prev := sw.effortSelect.Value()
+	cfg := sw.selectedModelConfig()
 	options := []string{effortDefaultOption}
-	if cfg := sw.selectedModelConfig(); cfg != nil {
+	if cfg != nil {
 		options = append(options, cfg.EffortOptions...)
 	}
 	sw.effortSelect.Options = options
@@ -728,13 +738,30 @@ func (sw *SessionWindow) rebuildEffortOptions() {
 			sw.effortLabel.FG = colorNote
 		}
 	}
-	// Preserve the prior pick when the new model still offers it; otherwise fall
-	// back to "(default)" (index 0).
+	// (1) Preserve an explicit prior pick still offered by the new model. The
+	// "(default)" sentinel is not an explicit pick, so it does not block seeding
+	// the configured value below.
 	sw.effortSelect.Selected = 0
-	for i, opt := range options {
-		if opt == prev {
-			sw.effortSelect.Selected = i
-			break
+	preserved := false
+	if prev != "" && prev != effortDefaultOption {
+		for i, opt := range options {
+			if opt == prev {
+				sw.effortSelect.Selected = i
+				preserved = true
+				break
+			}
+		}
+	}
+	// (2) No carried-over explicit pick: seed from the model's configured
+	// reasoning_effort when that value is one of the offered options. (3) Falls
+	// through to "(default)" (index 0) when there is no configured value or it is
+	// not offered.
+	if !preserved && cfg != nil && cfg.ReasoningEffort != "" {
+		for i, opt := range options {
+			if opt == cfg.ReasoningEffort {
+				sw.effortSelect.Selected = i
+				break
+			}
 		}
 	}
 }
