@@ -396,11 +396,20 @@ func (u *TokenUsage) UnmarshalJSON(data []byte) error {
 }
 
 // StreamResponse is one event delivered on the streaming channel. Content/Role
-// carry an incremental text delta as it arrives; the terminal event (Done) is
-// emitted once at end-of-stream and carries the finish reason, the fully
-// assembled tool calls and the final token usage.
+// carry an incremental text delta as it arrives; Reasoning carries an
+// incremental chain-of-thought (thinking) delta, emitted separately from the
+// visible answer so a UI can render the model's reasoning live and fold it once
+// the turn completes (issue #217). The terminal event (Done) is emitted once at
+// end-of-stream and carries the finish reason, the fully assembled tool calls
+// and the final token usage.
 type StreamResponse struct {
-	Content      string      `json:"content,omitempty"`
+	Content string `json:"content,omitempty"`
+	// Reasoning is an incremental chain-of-thought delta. It is the streamed
+	// counterpart of the visible Content: providers that expose reasoning emit it
+	// in a side channel (OpenAI-compatible: reasoning_content / reasoning;
+	// Anthropic: thinking_delta), and it is surfaced here so callers can show live
+	// thinking. Empty for providers (or turns) that stream no reasoning.
+	Reasoning    string      `json:"reasoning,omitempty"`
 	Role         Role        `json:"role,omitempty"`
 	ToolCalls    []ToolCall  `json:"tool_calls,omitempty"`
 	FinishReason *string     `json:"finish_reason,omitempty"`
@@ -424,9 +433,16 @@ type streamChoice struct {
 }
 
 type streamDelta struct {
-	Role      Role             `json:"role"`
-	Content   string           `json:"content"`
-	ToolCalls []streamToolCall `json:"tool_calls"`
+	Role    Role   `json:"role"`
+	Content string `json:"content"`
+	// ReasoningContent / Reasoning carry the streamed chain-of-thought delta.
+	// OpenAI-compatible reasoning backends disagree on the field name — Z.AI/GLM
+	// and DeepSeek use reasoning_content, OpenRouter uses reasoning — so both are
+	// read and whichever is populated becomes the StreamResponse.Reasoning delta
+	// (issue #217). Backends that stream no reasoning leave both empty.
+	ReasoningContent string           `json:"reasoning_content"`
+	Reasoning        string           `json:"reasoning"`
+	ToolCalls        []streamToolCall `json:"tool_calls"`
 }
 
 // streamToolCall is a tool-call fragment within a delta. The model streams a
@@ -732,6 +748,72 @@ func (c *ModelConnection) CompleteStream(messages []Message) (<-chan StreamRespo
 	}()
 
 	return streamCh, errCh
+}
+
+// CompleteWithToolsStreamCtx issues a streaming tool-calling completion that
+// behaves like CompleteWithToolsCtx — same request, and the same fully assembled
+// *CompletionResponse (content, native tool calls, token usage) — but
+// additionally forwards the model's chain-of-thought (reasoning) deltas to
+// onReasoning as they arrive, so a caller can render live thinking and fold it
+// when the turn completes (issue #217).
+//
+// onReasoning may be nil, in which case reasoning deltas are discarded and this
+// is a plain streamed completion. A backend (or a turn) that streams no
+// reasoning simply never invokes onReasoning, so the method degrades to an
+// ordinary streamed completion with no thinking shown. Like the blocking path it
+// is abandoned the moment ctx is cancelled.
+//
+// Note: unlike the blocking complete() path this does not retry transient
+// failures — a streamed response cannot be safely replayed mid-stream — so it is
+// used only on the opt-in streaming-thinking path; the default loop keeps the
+// retrying blocking path.
+func (c *ModelConnection) CompleteWithToolsStreamCtx(ctx context.Context, messages []Message, tools []ToolDef, onReasoning ReasoningSink) (*CompletionResponse, error) {
+	streamCh := make(chan StreamResponse, 100)
+	errCh := make(chan error, 1)
+
+	go func() {
+		// Mirror the loop-wide panic guard (issue #8): completeStream runs on this
+		// separate goroutine, OUTSIDE runLoop's recover, so a panic in stream
+		// parsing would otherwise crash the whole multi-session process instead of
+		// failing this one request. Contain it and surface it as an ordinary error.
+		// Both channels are closed the same way as the sibling CompleteStream so a
+		// future second reader cannot hang.
+		defer close(errCh)
+		defer close(streamCh)
+		defer func() {
+			if r := recover(); r != nil {
+				errCh <- &ModelError{Type: ErrorGeneric, Message: fmt.Sprintf("stream panicked: %v", r)}
+			}
+		}()
+		if _, err := c.completeStream(ctx, messages, tools, streamCh); err != nil {
+			errCh <- err
+		}
+	}()
+
+	var content strings.Builder
+	resp := &CompletionResponse{Role: RoleAssistant}
+	for ev := range streamCh {
+		if ev.Reasoning != "" && onReasoning != nil {
+			onReasoning(ev.Reasoning)
+		}
+		if ev.Content != "" {
+			content.WriteString(ev.Content)
+		}
+		if ev.Done {
+			// The terminal event carries the authoritative assembled tool calls,
+			// finish reason and usage (see parseOpenAIStream / anthropic parseStream).
+			resp.ToolCalls = ev.ToolCalls
+			if ev.FinishReason != nil {
+				resp.FinishReason = *ev.FinishReason
+			}
+			resp.Usage = ev.Usage
+		}
+	}
+	if err := <-errCh; err != nil {
+		return nil, err
+	}
+	resp.Content = content.String()
+	return resp, nil
 }
 
 func (c *ModelConnection) CompleteWithStats(messages []Message) (*CompletionResponse, *TokenUsage, error) {
@@ -1067,6 +1149,15 @@ func parseOpenAIStream(body io.Reader, streamCh chan<- StreamResponse) (string, 
 					usage = chunk.Usage
 				}
 				for _, ch := range chunk.Choices {
+					// Surface a reasoning (thinking) delta separately from the visible
+					// answer so callers can render live chain-of-thought (issue #217).
+					// reasoning_content (Z.AI/GLM, DeepSeek) and reasoning (OpenRouter)
+					// are alternative names for the same channel; prefer whichever is set.
+					if r := ch.Delta.ReasoningContent; r != "" {
+						streamCh <- StreamResponse{Reasoning: r, Role: ch.Delta.Role}
+					} else if r := ch.Delta.Reasoning; r != "" {
+						streamCh <- StreamResponse{Reasoning: r, Role: ch.Delta.Role}
+					}
 					if ch.Delta.Content != "" {
 						content.WriteString(ch.Delta.Content)
 						streamCh <- StreamResponse{Content: ch.Delta.Content, Role: ch.Delta.Role}

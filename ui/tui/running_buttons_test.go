@@ -74,19 +74,11 @@ func layout(sw *SessionWindow, wd, ht, inputH int) {
 // boundsOf returns a button's current bounds for layout assertions.
 func boundsOf(b *tv.Button) tv.Rect { return b.Component.Bounds }
 
-// rectsMeet reports whether two rects touch or overlap (their column ranges
-// intersect). Used to assert the input-row widgets never collide.
-func rectsMeet(a, b tv.Rect) bool {
-	if a.Empty() || b.Empty() {
-		return false
-	}
-	return a.X < b.X+b.W && b.X < a.X+a.W
-}
-
 // TestButtonWidthHelper checks the running-button sizing helpers (issue #201):
 // buttonWidth is the label plus the "[ … ]" frame (so "Send" stays the 8 cells
-// the idle row already reserves), and runningButtonsWidth folds in the inter-
-// button gaps and right margin.
+// the idle row already reserves), and runningButtonsColumnWidth is the horizontal
+// room the vertically-stacked column claims (issue #234): one uniform frame plus
+// the gap to the prompt and the right margin.
 func TestButtonWidthHelper(t *testing.T) {
 	for _, tc := range []struct {
 		label string
@@ -104,13 +96,16 @@ func TestButtonWidthHelper(t *testing.T) {
 			t.Errorf("buttonWidth(%q) = %d, want %d", tc.label, got, tc.want)
 		}
 	}
-	// Full labels: 13 + 11 + 10 + two gaps + right margin.
-	if got := runningButtonsWidth(interjectLabel, queueLabel, stopLabel); got != 37 {
-		t.Errorf("runningButtonsWidth(full) = %d, want 37", got)
+	// Full labels, uniformly sized (issue #214): the three stacked buttons share
+	// the widest label's width (Interject → 13). The vertical column (issue #234)
+	// claims ONE frame plus the prompt gap and right margin, so 13 + 1 + 1 = 15
+	// (was 42 when the three buttons sat side by side).
+	if got := runningButtonsColumnWidth(interjectLabel, queueLabel, stopLabel); got != 15 {
+		t.Errorf("runningButtonsColumnWidth(full) = %d, want 15 (uniformButtonWidth + gap + margin)", got)
 	}
-	// Glyphs: 5 + 5 + 5 + two gaps + right margin.
-	if got := runningButtonsWidth(interjectGlyph, queueGlyph, stopGlyph); got != 18 {
-		t.Errorf("runningButtonsWidth(glyph) = %d, want 18", got)
+	// Glyphs: 5 + gap 1 + margin 1 (all glyphs already equal).
+	if got := runningButtonsColumnWidth(interjectGlyph, queueGlyph, stopGlyph); got != 7 {
+		t.Errorf("runningButtonsColumnWidth(glyph) = %d, want 7", got)
 	}
 }
 
@@ -149,10 +144,11 @@ func TestIdleRowShowsSendHidesRunningButtons(t *testing.T) {
 // boundsOfInput returns the input box's current bounds.
 func boundsOfInput(sw *SessionWindow) tv.Rect { return sw.input.Component.Bounds }
 
-// TestBusyRowShowsRunningButtonsHidesSend verifies the busy input row (issue
-// #201): Send is hidden and the three running-turn buttons appear right-aligned
-// in the recommended order — [ Interject ] [ Queue ⏎ ] [ ■ Stop ] — with Stop on
-// the far right and the prompt shrunk to the room left of them.
+// TestBusyRowShowsRunningButtonsHidesSend verifies the busy input row (issue #201,
+// stacked vertically by #234): Send is hidden and the three running-turn buttons
+// appear as a single right-aligned column — top→bottom Queue / Interject / Stop —
+// all sharing one X and one uniform width, with Stop flush against the right margin
+// and the prompt shrunk to the room left of the column.
 func TestBusyRowShowsRunningButtonsHidesSend(t *testing.T) {
 	w := newTestWorkbench(t)
 	sw := w.openWindow("s", "S")
@@ -164,34 +160,48 @@ func TestBusyRowShowsRunningButtonsHidesSend(t *testing.T) {
 	if r := boundsOf(sw.sendButton); !r.Empty() {
 		t.Errorf("busy row should hide Send, got bounds %+v", r)
 	}
-	interject := boundsOf(sw.interjectButton)
 	queue := boundsOf(sw.queueButton)
+	interject := boundsOf(sw.interjectButton)
 	stop := boundsOf(sw.stopButton)
 	for name, r := range map[string]tv.Rect{"interject": interject, "queue": queue, "stop": stop} {
 		if r.Empty() {
 			t.Errorf("busy row should show the %s button", name)
 		}
 	}
-	// Button order left-to-right: interject, queue, stop (Stop far right).
-	if interject.X >= queue.X || queue.X >= stop.X {
-		t.Errorf("buttons not in [Interject][Queue][Stop] order: i=%+v q=%+v s=%+v", interject, queue, stop)
+	// Stacked vertically: distinct, strictly increasing Y in Queue→Interject→Stop
+	// order, sharing one X (issue #234).
+	if queue.Y >= interject.Y || interject.Y >= stop.Y {
+		t.Errorf("buttons not in Queue→Interject→Stop vertical order: q=%+v i=%+v s=%+v", queue, interject, stop)
 	}
-	// Widths match the chosen (full, on a wide window) labels.
-	if interject.W != buttonWidth(interjectLabel) || queue.W != buttonWidth(queueLabel) || stop.W != buttonWidth(stopLabel) {
-		t.Errorf("button widths mismatch labels: i=%+v q=%+v s=%+v", interject, queue, stop)
+	if queue.X != interject.X || interject.X != stop.X {
+		t.Errorf("column buttons differ in X: q.X=%d i.X=%d s.X=%d", queue.X, interject.X, stop.X)
 	}
-	// Stop sits flush against the right margin.
-	if got := stop.X + stop.W; got != wd-inputRowMargin {
-		t.Errorf("stop right edge = %d, want %d", got, wd-inputRowMargin)
+	// Widths are uniform: all three share one width (the widest label's, issue
+	// #214) rather than each sizing to its own label. On a wide window that is the
+	// full-label uniform width (13); Queue/Stop are NOT their own (shorter) widths.
+	wantW := uniformButtonWidth(interjectLabel, queueLabel, stopLabel)
+	if interject.W != wantW || queue.W != wantW || stop.W != wantW {
+		t.Errorf("button widths not uniform: i.W=%d q.W=%d s.W=%d, want all %d", interject.W, queue.W, stop.W, wantW)
 	}
-	// No widget overlaps another (one-cell gaps between neighbours).
+	if queue.W == buttonWidth(queueLabel) || stop.W == buttonWidth(stopLabel) {
+		t.Errorf("a button reverted to per-label width: i=%+v q=%+v s=%+v", interject, queue, stop)
+	}
+	// Every button sits flush against the right margin (the column is right-aligned).
+	for name, r := range map[string]tv.Rect{"queue": queue, "interject": interject, "stop": stop} {
+		if got := r.X + r.W; got != wd-inputRowMargin {
+			t.Errorf("%s right edge = %d, want %d", name, got, wd-inputRowMargin)
+		}
+	}
+	// No widget overlaps another in 2D. The buttons share an X, so an X-axis-only
+	// overlap check would wrongly flag the stack; rectsOverlap2D checks both axes
+	// and confirms the stacked buttons sit on distinct rows.
 	in := boundsOfInput(sw)
-	for _, pair := range [][2]tv.Rect{{in, interject}, {interject, queue}, {queue, stop}} {
-		if rectsMeet(pair[0], pair[1]) {
+	for _, pair := range [][2]tv.Rect{{in, queue}, {in, interject}, {in, stop}, {queue, interject}, {interject, stop}, {queue, stop}} {
+		if rectsOverlap2D(pair[0], pair[1]) {
 			t.Errorf("input-row widgets overlap: %+v and %+v", pair[0], pair[1])
 		}
 	}
-	// The prompt shrinks to make room for the buttons.
+	// The prompt shrinks to make room for the column.
 	if in.W <= 0 || in.W >= wd-10 {
 		t.Errorf("busy input width = %d, want it shrunk below the idle %d", in.W, wd-10)
 	}
@@ -246,25 +256,27 @@ func TestBusyRowDegradesToGlyphsOnNarrowWindow(t *testing.T) {
 
 // TestBusyRowLabelDegradationThreshold pins the exact width at which the labels
 // flip between glyph and full form, and — crucially — that at the flip point the
-// prompt gets exactly minInputWidth cells (issue #201). The threshold budget
-// includes the one-cell gap between the prompt and the first button
-// (runningButtonsWidth > wd-minInputWidth-inputRowGap); without that gap the
-// prompt ended up a cell short of the floor, so this guards against the off-by-one
-// regressing.
+// prompt gets exactly minInputWidth cells (issue #201). The vertical column (#234)
+// claims only one button width, so the footprint shrank from 42 to 15 and the flip
+// moved down from wd=63 to wd=35. The threshold budget includes the one-cell gap
+// between the prompt and the column (runningButtonsColumnWidth > wd-minInputWidth);
+// without that gap the prompt ended up a cell short of the floor, so this guards
+// against the off-by-one regressing.
 func TestBusyRowLabelDegradationThreshold(t *testing.T) {
 	w := newTestWorkbench(t)
 	sw := w.openWindow("s", "S")
 	sw.busy = true
 
-	// One cell below the flip: still glyphs.
-	layout(sw, 57, 24, 3)
+	// One cell below the flip: still glyphs. The vertical column (#234) narrowed
+	// the footprint from 42 to 15, so the flip moved from wd=63 down to wd=35.
+	layout(sw, 34, 24, 3)
 	if sw.interjectButton.Label != interjectGlyph {
-		t.Errorf("wd=57 should use glyphs, got %q", sw.interjectButton.Label)
+		t.Errorf("wd=34 should use glyphs, got %q", sw.interjectButton.Label)
 	}
-	// At the flip (wd=58): full labels, and the prompt gets exactly minInputWidth.
-	layout(sw, 58, 24, 3)
+	// At the flip (wd=35): full labels, and the prompt gets exactly minInputWidth.
+	layout(sw, 35, 24, 3)
 	if sw.interjectButton.Label != interjectLabel {
-		t.Errorf("wd=58 should use full labels, got %q", sw.interjectButton.Label)
+		t.Errorf("wd=35 should use full labels, got %q", sw.interjectButton.Label)
 	}
 	if in := boundsOfInput(sw).W; in != minInputWidth {
 		t.Errorf("flip-point input width = %d, want exactly %d (minInputWidth)", in, minInputWidth)
@@ -277,28 +289,39 @@ func TestBusyRowLabelDegradationThreshold(t *testing.T) {
 }
 
 // TestBusyRowNoOverlapAcrossWidths is a property check that, across realistic
-// window widths, the prompt and the three running buttons never overlap and Stop
-// stays flush with the right margin (issue #201). Widths start at 40, matching
-// the window minimum, so every rect stays on screen.
+// window widths (spanning both glyph and full-label modes), the three running
+// buttons always form a vertical column, the prompt never overlaps any of them,
+// and the column stays flush with the right margin (issues #201, #234). The
+// buttons share an X, so overlap is checked in 2D (rectsOverlap2D), not with an
+// X-axis-only check. Widths start at 30, below the wd=35 glyph flip.
 func TestBusyRowNoOverlapAcrossWidths(t *testing.T) {
 	w := newTestWorkbench(t)
 	sw := w.openWindow("s", "S")
 	sw.busy = true
 
-	for _, wd := range []int{40, 44, 50, 56, 57, 60, 70, 80, 100, 120} {
+	for _, wd := range []int{30, 34, 35, 40, 44, 50, 56, 57, 60, 70, 80, 100, 120} {
 		layout(sw, wd, 24, 3)
 		in := boundsOfInput(sw)
-		interject := boundsOf(sw.interjectButton)
 		queue := boundsOf(sw.queueButton)
+		interject := boundsOf(sw.interjectButton)
 		stop := boundsOf(sw.stopButton)
 		if in.W < 1 {
 			t.Errorf("wd=%d: input width %d must be >= 1", wd, in.W)
 		}
+		// Vertical column invariant at every width.
+		if queue.Y >= interject.Y || interject.Y >= stop.Y {
+			t.Errorf("wd=%d: not in Queue→Interject→Stop vertical order: q=%+v i=%+v s=%+v", wd, queue, interject, stop)
+		}
+		if queue.X != interject.X || interject.X != stop.X {
+			t.Errorf("wd=%d: column buttons differ in X: q=%d i=%d s=%d", wd, queue.X, interject.X, stop.X)
+		}
+		// Stop (and thus the whole column) stays flush with the right margin.
 		if got := stop.X + stop.W; got != wd-inputRowMargin {
 			t.Errorf("wd=%d: stop right edge %d, want %d", wd, got, wd-inputRowMargin)
 		}
-		for _, pair := range [][2]tv.Rect{{in, interject}, {interject, queue}, {queue, stop}} {
-			if rectsMeet(pair[0], pair[1]) {
+		// No widget overlaps another in 2D.
+		for _, pair := range [][2]tv.Rect{{in, queue}, {in, interject}, {in, stop}, {queue, interject}, {interject, stop}, {queue, stop}} {
+			if rectsOverlap2D(pair[0], pair[1]) {
 				t.Errorf("wd=%d: widgets overlap: %+v and %+v", wd, pair[0], pair[1])
 			}
 		}
@@ -552,8 +575,17 @@ func TestInterjectInjectsCurrentInput(t *testing.T) {
 	if got := sw.input.GetText(); strings.TrimSpace(got) != "" {
 		t.Errorf("input should be cleared after interjecting, got %q", got)
 	}
-	if !noteContains(sw, "interjected") {
-		t.Error("expected an 'interjected' transcript note")
+	// Issue #242: the interjection renders as the user's own "You (clarification):"
+	// record (kindUser), not the old [System] "interjected:" note.
+	rec := lastClarification(sw)
+	if rec == nil {
+		t.Fatal("expected a 'You (clarification):' record after interjecting, found none")
+	}
+	if rec.kind != kindUser {
+		t.Errorf("interjection record kind = %v, want kindUser", rec.kind)
+	}
+	if rec.body() != "a quick clarification" {
+		t.Errorf("interjection body = %q, want %q", rec.body(), "a quick clarification")
 	}
 }
 

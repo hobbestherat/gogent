@@ -82,6 +82,16 @@ type SessionWindow struct {
 	// synthetic key so an id-less "(running...)" entry is still swept on busy→idle
 	// even though it can never be paired to a result by id (issue #187).
 	untrackedTools int
+	// liveThought is the in-flight streamed "thinking" record for the current turn,
+	// or nil when no reasoning is streaming (issue #217). Streamed reasoning deltas
+	// (SessionEventThinkingDelta) append to it expanded so the user watches it live;
+	// it is relabelled "thought", collapsed and cleared when the turn's thinking
+	// completes (SessionEventThinkingDone) or on the busy→idle safety net.
+	// liveThoughtBuf line-buffers partial deltas so only complete lines are
+	// committed to the entry (the trailing partial is flushed when the entry folds).
+	// Touched only on the UI thread.
+	liveThought    *transcriptRecord
+	liveThoughtBuf string
 	busy           bool
 	// statusState is the current left-hand status text (idle/working.../thinking
 	// ... (step N)); statusStats holds the latest per-session stats snapshot.
@@ -251,10 +261,10 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 	stopButton.FG = colorError
 	stopButton.FocusFG = colorError
 	modelLabel := tv.NewLabel("Model", tv.Rect{})
-	modelSelect := tv.NewSelect(wb.desktop, wb.modelNames, tv.Rect{})
+	modelSelect := newSelect(wb.desktop, wb.modelNames, tv.Rect{})
 	modelLabel.SetTarget(modelSelect)
 	effortLabel := tv.NewLabel("Effort", tv.Rect{})
-	effortSelect := tv.NewSelect(wb.desktop, []string{effortDefaultOption}, tv.Rect{})
+	effortSelect := newSelect(wb.desktop, []string{effortDefaultOption}, tv.Rect{})
 	effortLabel.SetTarget(effortSelect)
 	status := tv.NewLabel("idle", tv.Rect{})
 	status.FG = colorNote
@@ -310,6 +320,10 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 		if wd < 4 || ht < 7 {
 			return
 		}
+		// The prompt box is three rows tall. While a turn runs that height also hosts
+		// the running-turn controls, which stack one-per-row in a column beside the
+		// prompt (Queue / Interject / Stop, issue #234), so the three buttons line up
+		// against the three prompt rows — keep inputH >= 3 if this ever changes.
 		inputH := 3
 		selW := headerSelectWidth(sw.wb.longestModelNameWidth(), wd)
 		modelLabel.Component.SetBounds(tv.Rect{X: 0, Y: 0, W: 6, H: 1})
@@ -851,12 +865,35 @@ const (
 // frame. It matches the 8-wide idle Send button (4-cell "Send" + 4-cell frame).
 func buttonWidth(label string) int { return tui.StringWidth(label) + 4 }
 
-// runningButtonsWidth is the total width the three running-turn buttons occupy on
-// the input row: the three frames, the gaps between them and the right margin
-// (issue #201).
-func runningButtonsWidth(interject, queue, stop string) int {
-	return buttonWidth(interject) + buttonWidth(queue) + buttonWidth(stop) +
-		2*inputRowGap + inputRowMargin
+// uniformButtonWidth is the common cell width the three running-turn buttons share
+// so they read as one set rather than three differently sized boxes (issue #214):
+// the widest of the given labels' individual buttonWidths. In full-label mode that
+// is Interject (the longest label); in glyph mode all three are equal, so it
+// collapses to the single glyph width. turbotui's Button centres its "[ … ]"
+// caption within its bounds, so widening a shorter label's box just pads it.
+func uniformButtonWidth(labels ...string) int {
+	w := 0
+	for _, label := range labels {
+		if bw := buttonWidth(label); bw > w {
+			w = bw
+		}
+	}
+	return w
+}
+
+// buttonRowY centres a 1-row input-row button against the multi-row prompt box so
+// it sits on the prompt's middle line rather than floating at its top edge (issue
+// #214). top is the input area's first row; inputH its height.
+func buttonRowY(top, inputH int) int { return top + (inputH-1)/2 }
+
+// runningButtonsColumnWidth is the horizontal room the vertically-stacked running-
+// turn buttons claim on the input row (issue #234): the three buttons share a single
+// right-aligned column, so it is one uniform button frame plus the one-cell gap to the
+// prompt box on its left and the right margin past it — not three frames summed side by
+// side as in the pre-#234 horizontal layout. It is the budget the glyph-degradation
+// check measures the prompt against (uniform sizing, issue #214).
+func runningButtonsColumnWidth(interject, queue, stop string) int {
+	return uniformButtonWidth(interject, queue, stop) + inputRowGap + inputRowMargin
 }
 
 // controlsSeparatorRune is the box-drawing glyph repeated across the divider rule
@@ -880,13 +917,14 @@ func (sw *SessionWindow) layoutControlsSeparator(wd, y int) {
 
 // layoutInputRow positions the prompt box and its buttons on the bottom input row
 // (issue #201). Idle shows the single Send button at the right with the three
-// running-turn controls hidden (zero bounds); busy hides Send and lays out
-// [ Interject ] [ Queue ⏎ ] [ ■ Stop ] right-aligned — the two send-actions
-// grouped, the destructive Stop on the far right — shrinking the input to the room
-// left of them. On a window too narrow to show the full labels beside a usable
-// input the labels degrade to single glyphs before the input overflows.
+// running-turn controls hidden (zero bounds). Busy hides Send and stacks the three
+// running-turn controls in a single right-aligned column, one per input row, top→
+// bottom Queue / Interject / Stop (issue #234) — the prompt box is inputH rows tall
+// and each button is one row, so the column lines up with it — shrinking the input to
+// the room left of the column. On a window too narrow to show the full labels beside a
+// usable input the labels degrade to single glyphs before the input overflows.
 func (sw *SessionWindow) layoutInputRow(wd, ht, inputH int) {
-	y := ht - inputH
+	top := ht - inputH
 	if !sw.busy {
 		// Hide via Visible, not just zero bounds: turbotv's focus traversal
 		// (collectFocusable) skips !Visible/!Enabled but not zero-bounds widgets, so
@@ -896,8 +934,12 @@ func (sw *SessionWindow) layoutInputRow(wd, ht, inputH int) {
 		sw.hideRunningButton(sw.queueButton)
 		sw.hideRunningButton(sw.stopButton)
 		sw.sendButton.Component.Visible = true
-		sw.input.Component.SetBounds(tv.Rect{X: 0, Y: y, W: wd - 10, H: inputH})
-		sw.sendButton.Component.SetBounds(tv.Rect{X: wd - 9, Y: y, W: 8, H: 1})
+		// The idle Send button is one row tall; centre it on the prompt box's middle
+		// line so it lines up with it instead of floating at its top edge (issue #214).
+		// The busy column instead spans every input row, so it does not use this.
+		rowY := buttonRowY(top, inputH)
+		sw.input.Component.SetBounds(tv.Rect{X: 0, Y: top, W: wd - 10, H: inputH})
+		sw.sendButton.Component.SetBounds(tv.Rect{X: wd - 9, Y: rowY, W: 8, H: 1})
 		return
 	}
 	sw.hideRunningButton(sw.sendButton)
@@ -905,29 +947,57 @@ func (sw *SessionWindow) layoutInputRow(wd, ht, inputH int) {
 	sw.queueButton.Component.Visible = true
 	sw.stopButton.Component.Visible = true
 	il, ql, sl := interjectLabel, queueLabel, stopLabel
-	// Degrade to glyphs once the full-label buttons would leave the prompt fewer
-	// than minInputWidth cells. The buttons consume runningButtonsWidth plus the
-	// one-cell gap between the prompt and the first button, so that gap is part of
-	// the budget too — without it the prompt ends up a cell short of the floor
-	// (issue #201).
-	if runningButtonsWidth(il, ql, sl) > wd-minInputWidth-inputRowGap {
+	// Degrade to glyphs once the full-label button column would leave the prompt fewer
+	// than minInputWidth cells. The column consumes runningButtonsColumnWidth — one
+	// uniform button frame plus the gap to the prompt on its left and the right margin —
+	// so the whole of that is the budget the prompt is measured against (issues #201,
+	// #234).
+	if runningButtonsColumnWidth(il, ql, sl) > wd-minInputWidth {
 		il, ql, sl = interjectGlyph, queueGlyph, stopGlyph
 	}
 	sw.interjectButton.SetLabel(il)
 	sw.queueButton.SetLabel(ql)
 	sw.stopButton.SetLabel(sl)
-	interjectW, queueW, stopW := buttonWidth(il), buttonWidth(ql), buttonWidth(sl)
-	stopX := wd - inputRowMargin - stopW
-	queueX := stopX - inputRowGap - queueW
-	interjectX := queueX - inputRowGap - interjectW
-	inputW := interjectX - inputRowGap
+	// One uniform width for all three so they read as a consistent column; turbotui
+	// centres each button's caption within its box (issue #214).
+	btnW := uniformButtonWidth(il, ql, sl)
+	// Stack the buttons in a single right-aligned column — they share one X and width,
+	// one button per input row, top→bottom Queue / Interject / Stop (issue #234). With
+	// inputH == 3 (the prompt box height) the rows are top, top+1, top+2: exactly the
+	// prompt's three rows, so the column lines up cleanly beside it. The prompt shrinks
+	// to the room left of the column (its left gap included).
+	btnX := wd - inputRowMargin - btnW
+	inputW := btnX - inputRowGap
 	if inputW < 1 {
 		inputW = 1
 	}
-	sw.input.Component.SetBounds(tv.Rect{X: 0, Y: y, W: inputW, H: inputH})
-	sw.interjectButton.Component.SetBounds(tv.Rect{X: interjectX, Y: y, W: interjectW, H: 1})
-	sw.queueButton.Component.SetBounds(tv.Rect{X: queueX, Y: y, W: queueW, H: 1})
-	sw.stopButton.Component.SetBounds(tv.Rect{X: stopX, Y: y, W: stopW, H: 1})
+	queueY, interjectY, stopY := runningButtonStackRows(top, inputH)
+	sw.input.Component.SetBounds(tv.Rect{X: 0, Y: top, W: inputW, H: inputH})
+	sw.queueButton.Component.SetBounds(tv.Rect{X: btnX, Y: queueY, W: btnW, H: 1})
+	sw.interjectButton.Component.SetBounds(tv.Rect{X: btnX, Y: interjectY, W: btnW, H: 1})
+	sw.stopButton.Component.SetBounds(tv.Rect{X: btnX, Y: stopY, W: btnW, H: 1})
+}
+
+// runningButtonStackRows returns the Y rows of the three vertically-stacked running-
+// turn buttons (issue #234), top→bottom Queue / Interject / Stop, anchored to the top
+// of the input area at row top. With inputH >= 3 (the prompt box is three rows tall)
+// they take three consecutive rows — top, top+1, top+2 — so the column fills the prompt
+// box beside it. For a shorter input area each row is clamped to its last row
+// (top+inputH-1) so a button can never spill below the input area onto the status line
+// that sits directly under it — trading an out-of-bounds row for two buttons sharing
+// the bottom row (a visible overlap, the least-bad option once three single-row buttons
+// no longer fit). That clamp is only a safety net for a future inputH < 3, not a
+// configuration any current caller produces: the sole caller passes inputH == 3 (where
+// no clamping occurs), and the layout guard requires the window be tall enough for it.
+func runningButtonStackRows(top, inputH int) (queue, interject, stop int) {
+	last := top + inputH - 1
+	clamp := func(y int) int {
+		if y > last {
+			return last
+		}
+		return y
+	}
+	return clamp(top), clamp(top + 1), clamp(top + 2)
 }
 
 // hideRunningButton removes an input-row button from view and, crucially, from the
@@ -959,25 +1029,64 @@ func (sw *SessionWindow) restoreInputFocusFromButtons() {
 	}
 }
 
-// guardInterjectButton greys the Interject button while it is disabled — the input
-// is empty, so there is nothing to slip into the running turn (issue #201). It
-// wraps the button's draw to swap its colour, mirroring guardEffortSelect; the
-// interject() action enforces the same guard, so a stray activation is inert too.
+// guardInterjectButton recolours the Interject button per draw to track its
+// enabled/disabled state — the input is empty, so there is nothing to slip into the
+// running turn (issue #201). It wraps the button's draw to swap its foreground via
+// interjectButtonFG, mirroring guardEffortSelect; the interject() action enforces
+// the same guard, so a stray activation is inert too.
 func (sw *SessionWindow) guardInterjectButton() {
 	b := sw.interjectButton
 	baseDraw := b.Component.DrawFn
-	// The enabled colour is read live from the active turbotui theme (not captured
-	// at construction) so a live theme change recolours it without a restart (#204).
+	// The colour is read live from the active turbotui theme (not captured at
+	// construction) so a live theme change recolours it without a restart (#204).
 	b.Component.DrawFn = func(vc *tv.VisualComponent, surface tv.Surface) {
-		if sw.interjectEnabled() {
-			b.FG = tv.ActiveTheme().ButtonFG
-		} else {
-			b.FG = colorNote
-		}
+		b.FG = interjectButtonFG(sw.interjectEnabled())
 		if baseDraw != nil {
 			baseDraw(vc, surface)
 		}
 	}
+}
+
+// interjectButtonFG is the Interject button's foreground for the given enabled
+// state, read live from the active theme so a live theme switch recolours it
+// (issues #214, #204). Enabled, it matches Queue (the theme's ButtonFG) and stays
+// distinct from Stop's error red. Disabled (empty input), it de-emphasises the
+// label without dropping it to the illegible ~1.3:1 the old colorNote reached on the
+// default theme's green button: colorNote is kept where it still clears the 3:1
+// large-text floor against the button background (the dark button canvas of the
+// dark/high-contrast presets) or where that background is the terminal default
+// (NO_COLOR — contrast is undeterminable and colorNote is itself the default);
+// otherwise it falls back to the higher-contrast of black/white, which on the green
+// button is black: clearly readable yet visibly recessed from the bright-white
+// enabled label. Coordinates with the #202 contrast audit (contrastRatio,
+// minContrastLarge) rather than re-introducing a one-off low-contrast colour.
+//
+// This drives only the resting foreground (b.FG). On keyboard focus turbotui paints
+// the button with the theme's ButtonFocusFG/ButtonFocusBG instead, so a focused
+// Interject deliberately follows the default button focus colours — matching a
+// focused Queue (the "consistent with Queue" ask) and staying legible — rather than
+// pinning a focus FG the way Stop pins colorError, whose red is a semantic identity
+// Interject does not share.
+func interjectButtonFG(enabled bool) tui.Color {
+	th := tv.ActiveTheme()
+	if enabled {
+		return th.ButtonFG
+	}
+	if c := contrastRatio(colorNote, th.ButtonBG); c == 0 || c >= minContrastLarge {
+		return colorNote
+	}
+	return mostReadableOn(th.ButtonBG)
+}
+
+// mostReadableOn returns whichever of black/white has the greater WCAG contrast
+// against bg — the most legible monochrome foreground for an arbitrary button
+// background (issue #214).
+func mostReadableOn(bg tui.Color) tui.Color {
+	black, white := tui.ANSIColor(0), tui.ANSIColor(15)
+	if contrastRatio(white, bg) >= contrastRatio(black, bg) {
+		return white
+	}
+	return black
 }
 
 // refreshTheme re-applies the active palette to a live session window after a
@@ -1073,6 +1182,7 @@ func reseedSelect(s *tv.Select, th tv.Theme) {
 		return
 	}
 	s.FG, s.BG, s.FocusFG, s.FocusBG = th.InputFG, th.InputBG, th.InputFocusFG, th.InputFocusBG
+	applySelectShadow(s) // re-apply the NoShadow toggle live (issue #231)
 }
 
 // reseedButton re-applies a turbotui theme's button colours to a button whose
@@ -1124,7 +1234,11 @@ func (sw *SessionWindow) interject() {
 	}
 	sw.completer.hide()
 	sw.input.Clear()
-	sw.addNote("interjected: " + text)
+	// Echo the interjection as the user's own message — a "You (clarification):"
+	// record, not a [System] note — since it is the user's input, equally with a
+	// normally-sent message (issue #242). This is the one place the text is shown;
+	// the backend no longer re-emits it as an assistant "thought".
+	sw.addClarification(text)
 	go sw.wb.handlers.OnInject(sw.id, text)
 }
 
@@ -1341,6 +1455,9 @@ func (sw *SessionWindow) setBusy(busy bool) {
 		// terminal state so nothing is left stuck "running" (issue #187). A clean
 		// turn leaves the map empty, so this is a no-op then.
 		sw.failPendingTools("interrupted")
+		// Likewise fold any live streamed thinking entry left open by a cancelled or
+		// crashed turn so it doesn't stay expanded "thinking…" forever (issue #217).
+		sw.foldLiveThought()
 	}
 	sw.refreshStatus()
 	// On the busy→idle edge the running-turn buttons are about to be hidden by the
@@ -1435,6 +1552,10 @@ func (sw *SessionWindow) apply(ev agent.SessionEvent) {
 	case agent.SessionEventThinking:
 		sw.statusState = fmt.Sprintf("thinking... (step %d)", ev.Step)
 		sw.refreshStatus()
+	case agent.SessionEventThinkingDelta:
+		sw.appendThinkingDelta(ev.Text)
+	case agent.SessionEventThinkingDone:
+		sw.foldLiveThought()
 	case agent.SessionEventUsage:
 		sw.statusStats = ev.Stats
 		sw.refreshStatus()
@@ -1502,6 +1623,18 @@ func (sw *SessionWindow) addUser(text string) {
 	})
 }
 
+// addClarification appends an interjected message as the user's own input
+// (issue #242). It is the same kindUser/colorUser/roleUser record as addUser —
+// so it reads as "You", not as a [System] note or a model "thought" — but carries
+// a "You (clarification):" header to mark that the text was slipped into a turn
+// already in flight via Interject (issue #201) rather than sent as a fresh turn.
+func (sw *SessionWindow) addClarification(text string) {
+	sw.transcript.add(&transcriptRecord{
+		kind: kindUser, header: "You (clarification):", color: colorUser, role: roleUser,
+		lines: styledChildLines(text, roleUser),
+	})
+}
+
 // addNote appends a one-line system note to the transcript, used to echo
 // client-side command feedback.
 func (sw *SessionWindow) addNote(text string) {
@@ -1563,8 +1696,49 @@ func (sw *SessionWindow) handleSlashCommand(text string) bool {
 	case "/markdown":
 		sw.handleMarkdownCommand(fields[1:])
 		return true
+	case "/thinking":
+		sw.handleThinkingCommand(fields[1:])
+		return true
 	}
 	return false
+}
+
+// handleThinkingCommand implements /thinking (issue #217): it toggles live
+// streaming of the model's chain-of-thought into the transcript, or sets it
+// explicitly with on/off. The change is applied to this session's backend via the
+// StreamThinking handler and takes effect on the next turn.
+func (sw *SessionWindow) handleThinkingCommand(args []string) {
+	if sw.wb == nil || sw.wb.handlers.StreamThinking == nil {
+		sw.addNote("streaming thinking is unavailable")
+		return
+	}
+	var set *bool
+	if len(args) > 0 {
+		var v bool
+		switch strings.ToLower(args[0]) {
+		case "on", "true", "1":
+			v = true
+		case "off", "false", "0":
+			v = false
+		default:
+			sw.addNote("usage: /thinking [on|off]")
+			return
+		}
+		set = &v
+	} else {
+		// No argument: flip the current state.
+		cur := sw.wb.handlers.StreamThinking(sw.id, nil)
+		v := !cur
+		set = &v
+	}
+	if sw.wb.handlers.StreamThinking(sw.id, set) {
+		// Flag that turning it on changes failure semantics: the streaming path
+		// cannot be replayed mid-stream, so a transient model error (e.g. a 429)
+		// surfaces immediately instead of being retried with backoff (issue #217).
+		sw.addNote("streaming thinking on (transient model errors are not retried while on)")
+	} else {
+		sw.addNote("streaming thinking off")
+	}
 }
 
 // handleMarkdownCommand implements /markdown (issue #184): it toggles rich
@@ -1854,7 +2028,14 @@ func (sw *SessionWindow) addAssistant(text string) {
 	if strings.TrimSpace(text) == "" {
 		return
 	}
-	sw.transcript.add(&transcriptRecord{
+	// The final answer is what the user asked for, so re-anchor the transcript on it
+	// (addAndReveal) even when the user had scrolled up to read earlier output
+	// mid-turn. Without the re-anchor the answer is appended (it is in AllText, the
+	// session file and the model) but never scrolled into view, which read as the
+	// agent silently dropping its reply (issue #227). Streaming events (thoughts,
+	// tool calls/results) intentionally do not re-anchor, so reading scrolled-up
+	// history during a turn is undisturbed until the answer lands.
+	sw.transcript.addAndReveal(&transcriptRecord{
 		kind: kindAssistant, header: "Gogent:", color: colorAgent, role: roleAgent,
 		lines: styledChildLines(text, roleAgent),
 		rich:  true,
@@ -1870,6 +2051,54 @@ func (sw *SessionWindow) addThought(text string) {
 		kind: kindThinking, header: "thought", color: colorNote, role: roleNote, collapsed: true,
 		lines: styledChildLines(text, roleNote),
 	})
+}
+
+// appendThinkingDelta streams a chunk of the model's chain-of-thought into a
+// live, expanded "thinking…" entry under the current turn (issue #217). The
+// entry is created lazily on the first non-empty delta so a turn that streams no
+// reasoning never shows one. Deltas are token fragments, so they are line
+// buffered: only complete lines (terminated by a newline) are committed to the
+// entry as they arrive; the trailing partial is held until the entry folds (see
+// foldLiveThought). The entry starts expanded so the user watches the thinking
+// build up.
+func (sw *SessionWindow) appendThinkingDelta(delta string) {
+	if delta == "" {
+		return
+	}
+	if sw.liveThought == nil {
+		sw.liveThought = sw.transcript.add(&transcriptRecord{
+			kind: kindThinking, header: "thinking…", color: colorNote, role: roleNote,
+		})
+		sw.liveThoughtBuf = ""
+	}
+	sw.liveThoughtBuf += delta
+	for {
+		i := strings.IndexByte(sw.liveThoughtBuf, '\n')
+		if i < 0 {
+			break
+		}
+		line := sw.liveThoughtBuf[:i]
+		sw.liveThoughtBuf = sw.liveThoughtBuf[i+1:]
+		sw.transcript.appendLine(sw.liveThought, styledLine{text: line, color: roleColor(roleNote), role: roleNote})
+	}
+}
+
+// foldLiveThought finishes the live streamed thinking entry: it flushes any
+// trailing partial line, relabels the header from "thinking…" to "thought", and
+// collapses the entry so the completed reasoning folds away (issue #217). It is a
+// no-op when no thinking is streaming, so it is safe to call on the
+// thinking-done event and again on the busy→idle safety net.
+func (sw *SessionWindow) foldLiveThought() {
+	if sw.liveThought == nil {
+		return
+	}
+	if sw.liveThoughtBuf != "" {
+		sw.transcript.appendLine(sw.liveThought, styledLine{text: sw.liveThoughtBuf, color: roleColor(roleNote), role: roleNote})
+		sw.liveThoughtBuf = ""
+	}
+	sw.transcript.setHeader(sw.liveThought, "thought")
+	sw.transcript.setCollapsed(sw.liveThought, true)
+	sw.liveThought = nil
 }
 
 // addCompaction appends a collapsed note recording a context-compression pass;
@@ -1961,13 +2190,21 @@ func toolHeaderName(rec *transcriptRecord) string {
 	return name
 }
 
-// addError appends a red error line.
+// addError appends a red error line. It is raised on the turn-ending error event,
+// so it re-anchors the transcript on the message the same way addAssistant does
+// (issue #227): a user who scrolled up mid-turn must still see why the turn ended.
+// An empty/whitespace message is skipped (mirroring addAssistant) so a degenerate
+// error never appends a bare "error:" header or perturbs the scroll position; the
+// failure is still surfaced via maybeNotify, which fires independently of this.
 func (sw *SessionWindow) addError(text string) {
+	if strings.TrimSpace(text) == "" {
+		return
+	}
 	lines := make([]styledLine, 0)
 	for _, line := range childLines(text) {
 		lines = append(lines, styledLine{text: "  " + line, color: colorError, role: roleError})
 	}
-	sw.transcript.add(&transcriptRecord{
+	sw.transcript.addAndReveal(&transcriptRecord{
 		kind: kindError, header: "error:", color: colorError, role: roleError, lines: lines,
 	})
 }

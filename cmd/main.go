@@ -426,6 +426,18 @@ func main() {
 				}
 				return s.GoalSatisfied(goal)
 			},
+			// Live thinking-token streaming toggle (issue #217): query with set==nil,
+			// apply otherwise, returning the resulting per-session state.
+			StreamThinking: func(sessionID string, set *bool) bool {
+				s := g.GetUserSession(sessionID)
+				if s == nil {
+					return false
+				}
+				if set != nil {
+					s.SetStreamThinking(*set)
+				}
+				return s.StreamThinking()
+			},
 			// @-file mention bridge (issue #46): the completer lists workspace files
 			// and expansion reads the chosen ones, both confined to the workspace via
 			// the existing FileSystem service.

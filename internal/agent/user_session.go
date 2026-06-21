@@ -21,6 +21,17 @@ type SessionEventType string
 const (
 	// SessionEventThinking signals the agent has started a model turn.
 	SessionEventThinking SessionEventType = "thinking"
+	// SessionEventThinkingDelta carries a chunk of the model's chain-of-thought
+	// (reasoning) as it streams, for live display under the current turn (issue
+	// #217). Text holds the delta; Step identifies the turn. Emitted only when the
+	// streaming-thinking option is enabled and the backend streams reasoning, so it
+	// is absent (a no-op) otherwise.
+	SessionEventThinkingDelta SessionEventType = "thinking_delta"
+	// SessionEventThinkingDone signals that the current turn's streamed thinking is
+	// complete, so a UI can fold (collapse) the live thinking entry (issue #217).
+	// Emitted after each streamed model round-trip when the option is enabled; a UI
+	// with no live thinking entry treats it as a no-op.
+	SessionEventThinkingDone SessionEventType = "thinking_done"
 	// SessionEventAssistantStep carries intermediate reasoning text the model
 	// produced alongside (or instead of) a tool call.
 	SessionEventAssistantStep SessionEventType = "assistant_step"
@@ -123,6 +134,15 @@ type UserSession struct {
 
 	// Sub-agent execution-model settings (one-shot vs interactive, recursion).
 	subAgentCfg config.SubAgentConfig
+	// maxSteps caps how many model round-trips (steps/turns) runLoop may take per
+	// task before it stops (issue #249). It holds the resolved value: a positive N
+	// caps at N, while <= 0 means UNLIMITED — the loop is then bounded only by its
+	// other stop conditions. It is shared by every runLoop on this session: the
+	// root task loop and every one-shot / interactive sub-agent loop spawned from
+	// it (which all run against this same receiver), so the cap applies uniformly,
+	// just as the historical fixed bound did. Defaults to config.DefaultMaxSteps so
+	// an unwired session keeps gogent's historical fixed bound.
+	maxSteps int
 	// subAgentTimeoutMs bounds how long a spawned sub-agent may run. Zero leaves
 	// the agent's built-in default in place.
 	subAgentTimeoutMs int64
@@ -174,6 +194,12 @@ type UserSession struct {
 	// Interject button (issue #201), which replaced the removed
 	// experimental.inject_queued_input flag. Guarded by mu.
 	injectQueuedInput bool
+	// streamThinking, when true, streams the model's chain-of-thought (reasoning)
+	// tokens live into the transcript and folds them once each turn's thinking
+	// completes (issue #217). It is opt-in (off by default) and only affects the
+	// root agent's turns; with it off the loop uses the blocking model path exactly
+	// as before. Guarded by mu.
+	streamThinking bool
 	// pendingNote holds a user note (a queued message or a future supervisor nudge,
 	// issue #172) to splice into the running loop at the next turn boundary. It is
 	// a single latest-wins slot — the same edit-in-place semantics as the UI queue
@@ -238,6 +264,7 @@ func NewUserSession(id string, agent *Agent) *UserSession {
 		CreatedAt:      time.Now().Unix(),
 		ToolCallback:   nil,
 		subAgentCfg:    config.DefaultSubAgentConfig(),
+		maxSteps:       config.DefaultMaxSteps,
 		interactive:    make(map[string]*InteractiveAgent),
 		agentEvents:    make(chan AgentEvent, 64),
 		currentTask:    nil,
@@ -272,6 +299,24 @@ func (s *UserSession) InjectQueuedInput() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.injectQueuedInput
+}
+
+// SetStreamThinking toggles live streaming of the model's chain-of-thought into
+// the transcript (issue #217). Off by default; enabling it routes the root
+// agent's model round-trips through the streaming backend so reasoning deltas are
+// surfaced as SessionEventThinkingDelta and folded on SessionEventThinkingDone.
+func (s *UserSession) SetStreamThinking(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.streamThinking = on
+}
+
+// StreamThinking reports whether live thinking-token streaming is enabled (issue
+// #217).
+func (s *UserSession) StreamThinking() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.streamThinking
 }
 
 // InjectUserNote hands the running task loop a user note to splice into the
@@ -314,6 +359,27 @@ func (s *UserSession) SetSubAgentConfig(cfg config.SubAgentConfig) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.subAgentCfg = cfg
+}
+
+// SetMaxSteps sets the per-task step (model round-trip) cap used by runLoop. A
+// positive value caps the loop at that many steps; a value of 0 (or any
+// non-positive value) means UNLIMITED — the loop runs until one of its other
+// stop conditions fires (final answer, token budget, cancellation). The cap is
+// shared by the root task loop and every sub-agent / interactive loop spawned on
+// this session, so 0 unbounds those nested loops too. The value is read once at
+// each loop's start, so a change takes effect on the next task, not mid-run. See
+// issue #249 and Config.MaxStepsOrDefault.
+func (s *UserSession) SetMaxSteps(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.maxSteps = n
+}
+
+// MaxSteps returns the current per-task step cap (<= 0 means unlimited).
+func (s *UserSession) MaxSteps() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.maxSteps
 }
 
 // SubAgentConfig returns the current sub-agent execution-model settings.
@@ -675,11 +741,16 @@ func (s *UserSession) waitRateLimit(ctx context.Context) error {
 // rate limiter, sends, and folds the reported usage into the agent's per-agent
 // token total so the loop can enforce its budget. It centralizes the three call
 // sites in runLoop so rate limiting and token accounting cannot drift apart.
-func (s *UserSession) modelRoundTrip(ctx context.Context, sess *model.ModelSession, agent *Agent, messages []model.Message, tools []model.ToolDef) (*model.CompletionResponse, error) {
+//
+// onReasoning, when non-nil, receives the model's chain-of-thought deltas as
+// they stream (issue #217); nil selects the blocking model path unchanged.
+func (s *UserSession) modelRoundTrip(ctx context.Context, sess *model.ModelSession, agent *Agent, messages []model.Message, tools []model.ToolDef, onReasoning model.ReasoningSink) (*model.CompletionResponse, error) {
 	if err := s.waitRateLimit(ctx); err != nil {
 		return nil, err
 	}
-	resp, err := sess.SendWithToolsCtx(ctx, messages, tools)
+	// A non-nil sink routes the request through the streaming backend so reasoning
+	// deltas surface live; nil keeps the byte-identical blocking path (issue #217).
+	resp, err := sess.SendWithToolsStreamCtx(ctx, messages, tools, onReasoning)
 	// Fold this round-trip's connector activity into the stable per-model
 	// accumulator (issue #191), reading the snapshot once as a delta. Done even on
 	// error: the connector records error/timeout outcomes on its own counters, so
@@ -794,6 +865,27 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 		emit = func(SessionEvent) {}
 	}
 
+	// Live thinking (issue #217): only the root agent streams its reasoning into
+	// the session window, and only when the option is enabled. reasoningSink builds
+	// the per-step sink that turns each streamed reasoning delta into a
+	// SessionEventThinkingDelta; it returns nil when streaming is off so
+	// modelRoundTrip takes the blocking path unchanged. After each round-trip the
+	// loop emits SessionEventThinkingDone so the UI folds the live entry.
+	streamThinking := s.StreamThinking() && agent.Kind == KindRoot
+	reasoningSink := func(step int) model.ReasoningSink {
+		if !streamThinking {
+			return nil
+		}
+		return func(delta string) {
+			emit(SessionEvent{Type: SessionEventThinkingDelta, Step: step, Text: delta})
+		}
+	}
+	thinkingDone := func(step int) {
+		if streamThinking {
+			emit(SessionEvent{Type: SessionEventThinkingDone, Step: step})
+		}
+	}
+
 	// Contain a panic anywhere in the model/tool loop (tool-call parsing, a
 	// slice index, a type assertion) so it fails this one agent instead of
 	// crashing the whole multi-session process. Every loop-driven goroutine —
@@ -817,7 +909,9 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 	resp, err := s.modelRoundTrip(ctx, sess, agent,
 		[]model.Message{{Role: model.RoleUser, Content: initialMessage}},
 		tools,
+		reasoningSink(0),
 	)
+	thinkingDone(0)
 	if err != nil {
 		emit(SessionEvent{Type: SessionEventError, Err: err})
 		return responses, err
@@ -831,8 +925,11 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 	// empty terminal message) can still surface an answer instead of silently
 	// dropping it (#171).
 	var lastAssistant string
-	const maxSteps = 25
-	for step := 0; step < maxSteps; step++ {
+	// Per-task step cap (issue #249). A positive value bounds the loop; maxSteps
+	// <= 0 means UNLIMITED, so the loop relies entirely on its other exit
+	// conditions (final answer, budget, cancellation) to terminate.
+	maxSteps := s.MaxSteps()
+	for step := 0; maxSteps <= 0 || step < maxSteps; step++ {
 		// Bail out promptly if the loop was stopped or the session closed; the
 		// in-flight request (if any) has already been cancelled via ctx.
 		if err := ctx.Err(); err != nil {
@@ -906,13 +1003,18 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 			if note := s.takePendingNote(); note != "" {
 				injected := fmt.Sprintf(injectedNoteTemplate, note)
 				nextMessages = []model.Message{{Role: model.RoleUser, Content: injected}}
-				emit(SessionEvent{Type: SessionEventAssistantStep, Step: step + 1, Text: injected})
+				// Deliver only — do not re-emit the note as a SessionEventAssistantStep
+				// "thought". The injection is the user's clarification, not the model's
+				// reasoning, so the UI already shows it as a "You (clarification):" record
+				// at Interject-press; re-emitting it here would duplicate it as a model
+				// thought (issue #242).
 			}
 		}
 
 		emit(SessionEvent{Type: SessionEventThinking, Step: step + 1})
 		s.compactIfNeeded(sess, emit)
-		resp, err = s.modelRoundTrip(ctx, sess, agent, nextMessages, tools)
+		resp, err = s.modelRoundTrip(ctx, sess, agent, nextMessages, tools, reasoningSink(step+1))
+		thinkingDone(step + 1)
 		if err != nil {
 			emit(SessionEvent{Type: SessionEventError, Err: err})
 			return responses, err

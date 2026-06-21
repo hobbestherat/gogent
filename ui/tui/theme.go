@@ -92,6 +92,16 @@ func applyMenuBarShadow(m *tv.MenuBar) {
 	}
 }
 
+// applySelectShadow seeds a Select's dropdown-popup drop shadow from the active
+// NoShadow preference. newSelect applies it at construction and reseedSelect on
+// the live theme-apply path, so the #215 toggle reaches Select popups too — they
+// were previously the one chrome element that always cast a shadow (issue #231).
+func applySelectShadow(s *tv.Select) {
+	if s != nil {
+		s.Shadow = shadowsEnabled
+	}
+}
+
 // newButton constructs a turbotui button and seeds its drop shadow from the
 // active NoShadow preference (issue #215). gogent builds every button through
 // this wrapper so the shadow toggle reaches dialog and session buttons alike
@@ -100,6 +110,16 @@ func newButton(label string, bounds tv.Rect, onPress func()) *tv.Button {
 	b := tv.NewButton(label, bounds, onPress)
 	applyButtonShadow(b)
 	return b
+}
+
+// newSelect constructs a turbotui Select and seeds its dropdown-popup drop shadow
+// from the active NoShadow preference (issue #231). gogent builds every selector
+// through this wrapper so the shadow toggle reaches dropdown popups without
+// touching each construction site, mirroring newButton.
+func newSelect(desktop *tv.Desktop, options []string, bounds tv.Rect) *tv.Select {
+	s := tv.NewSelect(desktop, options, bounds)
+	applySelectShadow(s)
+	return s
 }
 
 // ColorLevel describes the colour fidelity of the output terminal. A resolved
@@ -150,6 +170,15 @@ type Theme struct {
 	Title     tui.Color
 	Divider   tui.Color
 	Accent    tui.Color
+
+	// Menu bar colours (issue #243). The always-on-top menu bar is a surface the
+	// user can see but, before #243, could not recolour: the default preset
+	// inherited turbotui's stock grey bar and the black-canvas presets derived the
+	// bar from PanelFG/PanelBG inside blackCanvasTVTheme. They are now first-class
+	// roles so the bar is overridable like any other colour; ApplyTheme installs
+	// them onto tv.DefaultTheme's MenuBar* slots.
+	MenuBarFG tui.Color
+	MenuBarBG tui.Color
 
 	// CodeBG is the background painted behind fenced/indented code blocks in the
 	// rich-Markdown transcript (issue #184). It is a theme role, not a hardcoded
@@ -227,6 +256,11 @@ func defaultPalette() Theme {
 		// are bumped to a visible 5.7:1 (issue #202).
 		Divider: tui.ANSIColor(7),
 		Accent:  tui.ANSIColor(11),
+		// Stock turbotui menu bar: black text on a light-grey bar (the values
+		// baseTVTheme carries), expressed as roles so the default preset's bar is
+		// editable too rather than silently inheriting the library default.
+		MenuBarFG: tui.ANSIColor(0),
+		MenuBarBG: tui.ANSIColor(7),
 		// Fenced-code panel: a dark navy inset — a subtle shade of the desktop blue
 		// (issue #200) so code reads as a distinct themed panel rather than the old
 		// black-on-blue island. It is the one RGB role in this otherwise 16-colour
@@ -273,6 +307,10 @@ func highContrastPalette() Theme {
 		Title:     okabeYellow,
 		Divider:   grey,
 		Accent:    okabeYellow,
+		// White-on-black menu bar, matching the black canvas (it equals PanelFG /
+		// PanelBG so the bar reads as part of the surrounding chrome).
+		MenuBarFG: white,
+		MenuBarBG: black,
 		// Unused: applyMarkdownPalette suppresses the code background for this
 		// pure-black preset (a black panel on black would vanish), but the role is
 		// set for completeness so the Theme is fully populated.
@@ -308,6 +346,9 @@ func darkPalette() Theme {
 		Title:     title,
 		Divider:   divider,
 		Accent:    tui.RGBColor(0xE0, 0xAF, 0x68), // amber, matching the tool tone
+		// Soft-white-on-black menu bar (PanelFG / PanelBG), cohesive with the canvas.
+		MenuBarFG: softWhite,
+		MenuBarBG: black,
 		// A subtle dark-grey panel lifts code blocks off the pure-black background
 		// so they read as a distinct region.
 		CodeBG: tui.RGBColor(0x26, 0x26, 0x26),
@@ -344,6 +385,8 @@ func ResolveTheme(cfg config.ThemeConfig, env func(string) string, noColorFlag b
 	t.Title = degrade(t.Title, level)
 	t.Divider = degrade(t.Divider, level)
 	t.Accent = degrade(t.Accent, level)
+	t.MenuBarFG = degrade(t.MenuBarFG, level)
+	t.MenuBarBG = degrade(t.MenuBarBG, level)
 	t.CodeBG = degrade(t.CodeBG, level)
 	return t
 }
@@ -410,6 +453,10 @@ func applyOverrides(t *Theme, overrides map[string]string) {
 			t.Divider = c
 		case "accent":
 			t.Accent = c
+		case "menu_bar_fg":
+			t.MenuBarFG = c
+		case "menu_bar_bg":
+			t.MenuBarBG = c
 		case "code_bg":
 			t.CodeBG = c
 		}
@@ -717,6 +764,16 @@ func ApplyTheme(t Theme) {
 		colorDialogHeader, colorDialogDetail = tui.ANSIColor(5), tui.ANSIColor(4)
 	}
 
+	// Menu bar colours are first-class theme roles (issue #243), so install them
+	// over whichever chrome the switch selected — including the stock light-grey
+	// chrome of the default preset, whose bar would otherwise stay on turbotui's
+	// library default and ignore an override. MenuHotBG follows the bar background
+	// so the hot-key cell stays flush with the bar. Under NO_COLOR both colours
+	// have degraded to the terminal default, leaving the neutral bar untouched.
+	tv.DefaultTheme.MenuBarFG = t.MenuBarFG
+	tv.DefaultTheme.MenuBarBG = t.MenuBarBG
+	tv.DefaultTheme.MenuHotBG = t.MenuBarBG
+
 	// Keep turbotui's active chrome theme in lockstep with the dialog chrome above.
 	// turbotui widgets (windows, the menu bar, labels, selects, buttons, inputs)
 	// seed their colours from tv.ActiveTheme() at construction, and the desktop and
@@ -760,10 +817,12 @@ func blackCanvasTVTheme(t Theme) tv.Theme {
 		MnemonicFG: accent, DialogMnemonicFG: accent, SelectionBG: accent, SelectionFG: black,
 		// Menu chrome: the menubar and dropdowns are drawn over the black canvas, so
 		// they need explicit colours too — otherwise they fall back to the terminal
-		// default and read as low-contrast/invisible (issue #200). White-on-black with
-		// the palette accent marking the hot key and the selected row.
-		MenuBarFG: white, MenuBarBG: black,
-		MenuHotFG: accent, MenuHotBG: black,
+		// default and read as low-contrast/invisible (issue #200). The bar colours come
+		// from the (overridable) MenuBar* roles (issue #243); for a pristine
+		// black-canvas preset they equal PanelFG/PanelBG. The accent marks the hot key
+		// and the selected row.
+		MenuBarFG: t.MenuBarFG, MenuBarBG: t.MenuBarBG,
+		MenuHotFG: accent, MenuHotBG: t.MenuBarBG,
 		MenuSelectFG: black, MenuSelectBG: accent, MenuShadow: divider,
 	}
 }

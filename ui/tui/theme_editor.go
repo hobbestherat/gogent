@@ -22,22 +22,27 @@ type themeRole struct {
 // themeRoles is the ordered list of roles the editor exposes: the seven semantic
 // transcript colours followed by the chrome colours. The keys must match the
 // names parsed in applyOverrides so a saved override round-trips on next launch.
+// The labels are screen-anchored descriptions (issue #243) — what the colour
+// actually paints on screen — rather than the struct field names, so a user can
+// tell each role apart at a glance.
 var themeRoles = []themeRole{
-	{"user", "User", func(t Theme) tui.Color { return t.User }},
-	{"agent", "Agent", func(t Theme) tui.Color { return t.Agent }},
-	{"note", "Note", func(t Theme) tui.Color { return t.Note }},
-	{"tool", "Tool", func(t Theme) tui.Color { return t.Tool }},
-	{"result", "Result", func(t Theme) tui.Color { return t.Result }},
-	{"info", "Info", func(t Theme) tui.Color { return t.Info }},
-	{"error", "Error", func(t Theme) tui.Color { return t.Error }},
-	{"desktop_fg", "Desktop FG", func(t Theme) tui.Color { return t.DesktopFG }},
-	{"desktop_bg", "Desktop BG", func(t Theme) tui.Color { return t.DesktopBG }},
-	{"panel_fg", "Panel FG", func(t Theme) tui.Color { return t.PanelFG }},
-	{"panel_bg", "Panel BG", func(t Theme) tui.Color { return t.PanelBG }},
-	{"title", "Title", func(t Theme) tui.Color { return t.Title }},
-	{"divider", "Divider", func(t Theme) tui.Color { return t.Divider }},
-	{"accent", "Accent", func(t Theme) tui.Color { return t.Accent }},
-	{"code_bg", "Code BG", func(t Theme) tui.Color { return t.CodeBG }},
+	{"user", "User messages", func(t Theme) tui.Color { return t.User }},
+	{"agent", "Agent replies", func(t Theme) tui.Color { return t.Agent }},
+	{"note", "Thoughts / idle", func(t Theme) tui.Color { return t.Note }},
+	{"tool", "Tool calls", func(t Theme) tui.Color { return t.Tool }},
+	{"result", "Tool results", func(t Theme) tui.Color { return t.Result }},
+	{"info", "System notes", func(t Theme) tui.Color { return t.Info }},
+	{"error", "Errors", func(t Theme) tui.Color { return t.Error }},
+	{"desktop_fg", "Desktop hint text", func(t Theme) tui.Color { return t.DesktopFG }},
+	{"desktop_bg", "Desktop background", func(t Theme) tui.Color { return t.DesktopBG }},
+	{"panel_fg", "Sidebar text", func(t Theme) tui.Color { return t.PanelFG }},
+	{"panel_bg", "Sidebar background", func(t Theme) tui.Color { return t.PanelBG }},
+	{"title", "Panel titles", func(t Theme) tui.Color { return t.Title }},
+	{"divider", "Borders / dividers", func(t Theme) tui.Color { return t.Divider }},
+	{"accent", "Indicators / badges", func(t Theme) tui.Color { return t.Accent }},
+	{"menu_bar_fg", "Menu bar text", func(t Theme) tui.Color { return t.MenuBarFG }},
+	{"menu_bar_bg", "Menu bar background", func(t Theme) tui.Color { return t.MenuBarBG }},
+	{"code_bg", "Code block background", func(t Theme) tui.Color { return t.CodeBG }},
 }
 
 // themePresets are the selectable built-in palettes shown in the editor's preset
@@ -62,6 +67,39 @@ func colorSpec(c tui.Color) string {
 		return strconv.Itoa(int(c.Value))
 	default:
 		return "default"
+	}
+}
+
+// swatchSample is the glyph string a colour swatch paints: two filled blocks and
+// a letter pair, so both a fill and text rendering of the colour are visible.
+const swatchSample = "▉▉ Aa"
+
+// themeEditorLabelW is the width of the widest role label cell in the editor (the
+// right column, which carries the longest labels). It must hold the longest
+// descriptive label (issue #243) plus its trailing ":" on a single row: the labels
+// live in 1-row Labels, so a cell narrower than the text makes the wrapped Label
+// drop the overflow and clip the label on screen (e.g. "Code block background" →
+// "Code block"). The longest label, "Code block background:", is 22 columns, so the
+// cell is 22 wide; keep it in step with the widest themeRoles label.
+const themeEditorLabelW = 22
+
+// swatchStyle computes a swatch's display from a spec field's current text and
+// the disable-colours toggle. It is the single source the live swatch is driven
+// from (issue #243): the editor recomputes it on every render from the field's
+// current value, so the swatch always tracks the field rather than a colour
+// cached when the dialog opened. Colours off → the neutral sample in the dialog
+// foreground; an unparseable spec → "invalid"; otherwise the sample in the
+// parsed colour.
+func swatchStyle(spec string, noColor bool) (text string, fg tui.Color) {
+	switch {
+	case noColor:
+		return swatchSample, tv.DefaultTheme.DialogFG
+	default:
+		c, ok := parseColor(spec)
+		if !ok {
+			return "invalid", tv.DefaultTheme.DialogFG
+		}
+		return swatchSample, c
 	}
 }
 
@@ -116,10 +154,12 @@ func presetIndex(name string) int {
 
 // showThemeEditor opens the modal theme editor (issue #103). A preset dropdown
 // picks a built-in palette; each colour role has a spec field (ANSI index,
-// #RRGGBB hex, or "default") and a live swatch that recolours when the field is
-// committed (Enter), the preset changes, or colour is toggled off. Save persists
-// the palette as the preferred theme and re-applies it to the live UI; Reset
-// restores the default palette.
+// #RRGGBB hex, or "default") and a live swatch. The swatch tracks the field as
+// the user types or moves away — it is recomputed from the field's current value
+// on every render via swatchStyle (issue #243), not cached when the dialog opens
+// — and also follows the preset and the disable-colours toggle. Save persists the
+// palette as the preferred theme and re-applies it to the live UI; Reset restores
+// the default palette.
 func (w *Workbench) showThemeEditor() {
 	if w.handlers.GetTheme == nil || w.handlers.SetTheme == nil {
 		w.showConfirm("Theme", "Theme editing is unavailable.", nil)
@@ -127,15 +167,18 @@ func (w *Workbench) showThemeEditor() {
 	}
 	cur := w.handlers.GetTheme()
 
-	const width = 72
-	const height = 15
+	// Roomier than the original 72×15 (issue #243): a wider label column for the
+	// descriptive role names and a blank separator row under the header so the two
+	// columns of rows are not cramped. The width stays at 80 so the dialog fits a
+	// standard 80-column terminal (centeredDialog only clamps the origin, it does
+	// not scale an oversized dialog).
+	const width = 80
+	const height = 18
 	x, y := centeredDialog(w, width, height)
 
 	dialog := tv.NewDialog("Theme", x, y, width, height)
 	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
 	dialog.Window.ShowClose = false
-
-	const sample = "▉▉ Aa"
 
 	// refresh is wired into the widgets below; it is assigned after they exist.
 	var refresh func()
@@ -145,7 +188,7 @@ func (w *Workbench) showThemeEditor() {
 	for i, p := range themePresets {
 		presetLabels[i] = p.label
 	}
-	preset := tv.NewSelect(w.desktop, presetLabels, tv.Rect{X: 10, Y: 1, W: 30, H: 1})
+	preset := newSelect(w.desktop, presetLabels, tv.Rect{X: 10, Y: 1, W: 30, H: 1})
 	dialog.Window.AddContent(preset)
 
 	noColor := tv.NewCheckbox("Disable &colours", tv.Rect{X: 44, Y: 1, W: width - 48, H: 1}, func(bool) { refresh() })
@@ -162,30 +205,65 @@ func (w *Workbench) showThemeEditor() {
 	dialog.Window.AddContent(noShadow)
 
 	// One row per role across two columns; fields[i] edits themeRoles[i] and
-	// swatches[i] previews it. The left column holds the seven semantic colours,
-	// the right column the seven chrome colours.
+	// swatches[i] previews it. The left column holds the first nine roles (the
+	// seven semantic transcript colours plus the desktop chrome), the right column
+	// the remaining chrome colours.
 	fields := make([]*tv.TextBox, len(themeRoles))
 	swatches := make([]*tv.Label, len(themeRoles))
+
+	// updateSwatch recomputes swatches[i] from fields[i]'s current text via
+	// swatchStyle (issue #243). It is the single place a swatch is derived, called
+	// both from refresh and from each swatch's per-render DrawFn, so the preview
+	// always reflects the field's current value rather than one cached at open.
+	updateSwatch := func(i int) {
+		text, fg := swatchStyle(fields[i].GetText(), noColor.IsChecked())
+		swatches[i].SetText(text)
+		swatches[i].FG = fg
+	}
+
+	// Two columns inside the width-80 dialog. turbotui insets window content by the
+	// border (one column each side), so the usable content area is 78 columns wide
+	// (relative cols 0..77) — a child running to relative col 78 lands on the right
+	// border and is clipped. Each column holds a label, a 7-wide spec field ("#RRGGBB"
+	// / "default") and a 7-wide swatch ("invalid"); the right column's swatch must end
+	// no later than relative col 77. The right column carries the longest labels so it
+	// gets the full themeEditorLabelW cell; the left column's labels top out at 19
+	// columns ("Desktop background:"), so a narrower cell there buys the gap the right
+	// column needs to keep its swatch (and the "invalid" marker) fully on screen.
+	const fieldW, swatchW = 7, 7
+	columns := [...]struct{ x, labelW int }{
+		{2, 19},                 // left column
+		{40, themeEditorLabelW}, // right column (longest labels)
+	}
 	half := (len(themeRoles) + 1) / 2
 	for i, role := range themeRoles {
-		col, row := 0, 3+i
+		col, row := 0, 4+i
 		if i >= half {
-			col, row = 1, 3+i-half
+			col, row = 1, 4+i-half
 		}
-		lx := 2 + col*34
-		dialog.Window.AddContent(dialogLabel(role.label+":", tv.Rect{X: lx, Y: row, W: 11, H: 1}))
-		box := tv.NewTextBox("", tv.Rect{X: lx + 11, Y: row, W: 10, H: 1})
+		lx, labelW := columns[col].x, columns[col].labelW
+		dialog.Window.AddContent(dialogLabel(role.label+":", tv.Rect{X: lx, Y: row, W: labelW, H: 1}))
+		box := tv.NewTextBox("", tv.Rect{X: lx + labelW + 1, Y: row, W: fieldW, H: 1})
 		box.OnSubmit = func() { refresh() }
 		dialog.Window.AddContent(box)
 		fields[i] = box
-		sw := tv.NewLabel(sample, tv.Rect{X: lx + 22, Y: row, W: 9, H: 1})
+		sw := tv.NewLabel(swatchSample, tv.Rect{X: lx + labelW + fieldW + 2, Y: row, W: swatchW, H: 1})
 		sw.BG = tv.DefaultTheme.DialogBG
+		// Drive the swatch from the field's current value on every render (issue
+		// #243) so it tracks the field as the user types or moves focus away, not
+		// only on Enter. baseDraw is the Label's own renderer, run after the recolour.
+		idx := i
+		baseDraw := sw.Component.DrawFn
+		sw.Component.DrawFn = func(c *tv.VisualComponent, surface tv.Surface) {
+			updateSwatch(idx)
+			baseDraw(c, surface)
+		}
 		dialog.Window.AddContent(sw)
 		swatches[i] = sw
 	}
 
 	dialog.Window.AddContent(dialogLabel(
-		"Spec: ANSI 0–255, #RRGGBB, or 'default'. Enter updates the swatch.",
+		"Spec: ANSI 0–255, #RRGGBB, or 'default'. Swatch tracks the field live.",
 		tv.Rect{X: 2, Y: height - 4, W: width - 4, H: 1}))
 
 	// loadFields seeds every spec field from a Theme.
@@ -196,21 +274,8 @@ func (w *Workbench) showThemeEditor() {
 	}
 
 	refresh = func() {
-		off := noColor.IsChecked()
 		for i := range themeRoles {
-			sw := swatches[i]
-			c, ok := parseColor(fields[i].GetText())
-			switch {
-			case off:
-				sw.SetText(sample)
-				sw.FG = tv.DefaultTheme.DialogFG
-			case !ok:
-				sw.SetText("invalid")
-				sw.FG = tv.DefaultTheme.DialogFG
-			default:
-				sw.SetText(sample)
-				sw.FG = c
-			}
+			updateSwatch(i)
 		}
 		w.desktop.Redraw()
 	}
