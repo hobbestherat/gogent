@@ -202,32 +202,31 @@ func TestIssue200InitGlobalsMatchDefaultPalette(t *testing.T) {
 // ----------------------------------------------------------------------------
 
 // TestIssue200CodeBGDiffersPerTheme asserts the fenced-code background is a theme
-// role, not a constant: the three built-in palettes each carry a distinct CodeBG,
-// and none is the legacy hardcoded ANSI 0.
+// role, not a constant: the default (blue) palette carries a distinct, non-black
+// CodeBG, while the two black-canvas presets (high-contrast and dark) both use
+// pure RGB black so the code panel is suppressed and fenced code renders directly
+// on the canvas. Every palette's CodeBG is explicitly set (never ColorDefault).
 func TestIssue200CodeBGDiffersPerTheme(t *testing.T) {
-	palettes := []struct {
-		name string
-		t    Theme
-	}{
-		{"default", defaultPalette()},
-		{"high-contrast", highContrastPalette()},
-		{"dark", darkPalette()},
-	}
-	black := tui.ANSIColor(0)
-	seen := make(map[tui.Color][]string, len(palettes))
-	for _, p := range palettes {
-		if p.t.CodeBG == black {
-			t.Errorf("%s palette CodeBG is the legacy hardcoded ANSI 0", p.name)
+	for _, name := range []string{themeDefault, themeHighContrast, themeDark} {
+		p := paletteByName(name)
+		if p.CodeBG.Mode == tui.ColorDefault {
+			t.Errorf("%s palette CodeBG is unset (default mode)", name)
 		}
-		if p.t.CodeBG.Mode == tui.ColorDefault {
-			t.Errorf("%s palette CodeBG is unset (default mode)", p.name)
-		}
-		seen[p.t.CodeBG] = append(seen[p.t.CodeBG], p.name)
 	}
-	// Every palette must own a distinct CodeBG — that is what "theme-derived" means.
-	for c, owners := range seen {
-		if len(owners) > 1 {
-			t.Errorf("CodeBG %+v shared by palettes %v; each palette should derive its own", c, owners)
+	blackRGB := tui.RGBColor(0, 0, 0)
+	// The default palette owns a distinct, non-black CodeBG (a themed panel).
+	if def := defaultPalette(); def.CodeBG == blackRGB {
+		t.Errorf("default CodeBG is pure black; the blue-canvas preset should carry a distinct code panel")
+	}
+	// The two black-canvas presets suppress the code panel: CodeBG is pure black,
+	// matching the canvas, so fenced code renders without a separate background.
+	for _, name := range []string{themeHighContrast, themeDark} {
+		p := paletteByName(name)
+		if p.CodeBG != blackRGB {
+			t.Errorf("%s CodeBG = %+v, want pure RGB black (code panel suppressed on the black canvas)", name, p.CodeBG)
+		}
+		if p.CodeBG != p.PanelBG {
+			t.Errorf("%s CodeBG (%+v) != PanelBG (%+v); the code panel must blend into the black canvas", name, p.CodeBG, p.PanelBG)
 		}
 	}
 }
@@ -275,7 +274,9 @@ func TestIssue200ApplyMarkdownPaletteUsesCodeBG(t *testing.T) {
 			theme: ResolveTheme(config.ThemeConfig{}, color16Env, false),
 		},
 		{
-			name: "dark", wantHasBG: true, wantRichOK: true, checkCodeBG: true,
+			// dark suppresses the code panel on its black canvas (CodeBG == PanelBG),
+			// exactly as high-contrast does.
+			name: "dark", wantHasBG: false, wantRichOK: true, checkCodeBG: true,
 			theme: ResolveTheme(config.ThemeConfig{Name: "dark"}, truecolorEnv, false),
 		},
 		{
@@ -328,17 +329,15 @@ func TestIssue200ApplyThemeMarkdownAndChrome(t *testing.T) {
 		t.Errorf("default: mdPalette.hasCodeBG = false, want true")
 	}
 
-	// Dark: pure-black panel but a distinct (dark-grey) code background.
+	// Dark: pure-black panel; the code background is suppressed (fenced code renders
+	// directly on the black canvas, as high-contrast does).
 	dark := ResolveTheme(config.ThemeConfig{Name: "dark"}, truecolorEnv, false)
 	ApplyTheme(dark)
 	if mdPalette.codeBG != dark.CodeBG {
 		t.Errorf("dark: mdPalette.codeBG (%+v) != CodeBG (%+v)", mdPalette.codeBG, dark.CodeBG)
 	}
-	if !mdPalette.hasCodeBG {
-		t.Errorf("dark: mdPalette.hasCodeBG = false; dark should paint a code background (unlike high-contrast)")
-	}
-	if mdPalette.codeBG == dark.DesktopBG {
-		t.Errorf("dark: code background (%+v) equals the black desktop; code blocks would be invisible", mdPalette.codeBG)
+	if mdPalette.hasCodeBG {
+		t.Errorf("dark: mdPalette.hasCodeBG = true; dark should suppress the code background on its black canvas (like high-contrast)")
 	}
 
 	// High-contrast: pure-black UI suppresses the code background.
@@ -385,10 +384,10 @@ func TestIssue200DarkPaletteComplete(t *testing.T) {
 			t.Errorf("dark %s = %+v, want an explicit RGB colour", r.label, r.c)
 		}
 	}
-	// The code background must lift code off the black background (issue goal:
-	// "a dark-grey CodeBG so code stands apart on black").
-	if d.CodeBG == black {
-		t.Errorf("dark CodeBG is black; code blocks would vanish on the black background")
+	// The dark theme renders fenced code directly on its black canvas (no separate
+	// code panel), so CodeBG is pure black, matching the background.
+	if d.CodeBG != black {
+		t.Errorf("dark CodeBG = %+v, want pure RGB black (code panel suppressed on the black canvas)", d.CodeBG)
 	}
 }
 
@@ -549,11 +548,12 @@ func TestIssue200DarkThemeMenuAndMnemonicChrome(t *testing.T) {
 			t.Errorf("dark %s is unset (ColorDefault); menu/mnemonic chrome would be invisible on the black canvas", f.label)
 		}
 	}
-	// Spot-check the intended mapping: white-on-black menubar with the accent
-	// marking the hot key and the selected row.
-	if tv.DefaultTheme.MenuBarFG != dark.PanelFG || tv.DefaultTheme.MenuBarBG != dark.PanelBG {
-		t.Errorf("dark MenuBar = (FG:%+v BG:%+v), want white-on-black (PanelFG/PanelBG)",
-			tv.DefaultTheme.MenuBarFG, tv.DefaultTheme.MenuBarBG)
+	// Spot-check the intended mapping: the menu bar carries the palette's menu
+	// roles (soft-white on a #262626 dark-grey panel, lifted off the black canvas),
+	// with the accent marking the hot key and the selected row.
+	if tv.DefaultTheme.MenuBarFG != dark.MenuBarFG || tv.DefaultTheme.MenuBarBG != dark.MenuBarBG {
+		t.Errorf("dark MenuBar = (FG:%+v BG:%+v), want (MenuBarFG:%+v MenuBarBG:%+v)",
+			tv.DefaultTheme.MenuBarFG, tv.DefaultTheme.MenuBarBG, dark.MenuBarFG, dark.MenuBarBG)
 	}
 	if tv.DefaultTheme.MenuSelectBG != dark.Accent {
 		t.Errorf("dark MenuSelectBG = %+v, want Accent %+v", tv.DefaultTheme.MenuSelectBG, dark.Accent)
@@ -753,33 +753,34 @@ func TestIssue200ResolveThemeNoColorFlattensCodeBG(t *testing.T) {
 	}
 }
 
-// TestIssue200DarkCodeBGColor16CollidesWithBackground documents a real degradation
-// edge: the dark theme's dark-grey CodeBG (0x262626) quantises to ANSI 0 (black)
-// on a 16-colour terminal — the same colour as its black panel background. So at
-// 16 colours the "code panel" is no longer visually distinct, the exact
-// invisibility the high-contrast preset avoids by suppressing the code background
-// (applyMarkdownPalette sets hasCodeBG=false only for high-contrast, not for dark).
-// At 256 colours and truecolor the code background stays distinct. This test
-// pins the current behaviour; if the driver makes dark suppress or recolour its
-// code background at low fidelity, the Color16 assertion below should flip.
-func TestIssue200DarkCodeBGColor16CollidesWithBackground(t *testing.T) {
-	// Truecolor and 256: the code background is distinct from the black panel —
-	// code blocks read as a separate region, as intended.
-	tc := ResolveTheme(config.ThemeConfig{Name: "dark"}, truecolorEnv, false)
-	if tc.CodeBG == tc.PanelBG {
-		t.Errorf("truecolor: dark CodeBG (%+v) == PanelBG; code must stand apart on black", tc.CodeBG)
+// TestIssue200DarkCodeBGSuppressedAtEveryLevel documents that the dark theme
+// suppresses the fenced-code background at every colour fidelity: CodeBG is pure
+// black, matching the black panel/canvas, so fenced code renders directly on the
+// background (the same approach the high-contrast preset takes). The earlier
+// #262626 value stayed distinct at truecolor/256 and only collided at 16 colours;
+// the pure-black value is uniformly suppressed, so there is no fidelity at which
+// a stale "code panel" edge shows.
+func TestIssue200DarkCodeBGSuppressedAtEveryLevel(t *testing.T) {
+	blackRGB := tui.RGBColor(0, 0, 0)
+	levels := []struct {
+		name string
+		env  func(string) string
+	}{
+		{"truecolor", truecolorEnv},
+		{"256", color256Env},
+		{"16", color16Env},
 	}
-	c256 := ResolveTheme(config.ThemeConfig{Name: "dark"}, color256Env, false)
-	if c256.CodeBG == c256.PanelBG {
-		t.Errorf("256: dark CodeBG (%+v) == PanelBG; code must stand apart on black", c256.CodeBG)
+	for _, l := range levels {
+		c := ResolveTheme(config.ThemeConfig{Name: "dark"}, l.env, false)
+		// CodeBG matches the black canvas at every fidelity → the code panel is
+		// suppressed and fenced code renders directly on the background.
+		if c.CodeBG != c.PanelBG {
+			t.Errorf("%s: dark CodeBG (%+v) != PanelBG (%+v); the code panel should be suppressed on the black canvas",
+				l.name, c.CodeBG, c.PanelBG)
+		}
 	}
-
-	// 16-colour: 0x262626 maps to ANSI 0, colliding with the black background.
-	c16 := ResolveTheme(config.ThemeConfig{Name: "dark"}, color16Env, false)
-	if c16.CodeBG != tui.ANSIColor(0) {
-		t.Fatalf("16: dark CodeBG = %+v, want ANSI 0 (quantised from 0x262626)", c16.CodeBG)
+	// At truecolor the raw value is pure RGB black.
+	if tc := ResolveTheme(config.ThemeConfig{Name: "dark"}, truecolorEnv, false); tc.CodeBG != blackRGB {
+		t.Errorf("truecolor: dark CodeBG = %+v, want pure RGB black", tc.CodeBG)
 	}
-	t.Logf("color-level note: at 16 colours the dark CodeBG (%+v) equals its black background; "+
-		"code blocks are invisible there though their token foregrounds still render. "+
-		"High-contrast avoids this by suppressing hasCodeBG; dark does not.", c16.CodeBG)
 }

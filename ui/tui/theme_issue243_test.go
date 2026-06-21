@@ -479,7 +479,7 @@ func TestIssue243PalettesPopulateMenuBar(t *testing.T) {
 		themeHighContrast: highContrastPalette,
 		themeDark:         darkPalette,
 	} {
-		t.Run(name+" bar matches its canvas and is legible", func(t *testing.T) {
+		t.Run(name+" bar is populated and legible", func(t *testing.T) {
 			p := pal()
 			// No palette leaves the bar unset.
 			if reflect.DeepEqual(p.MenuBarFG, tui.Color{}) || reflect.DeepEqual(p.MenuBarBG, tui.Color{}) {
@@ -489,13 +489,28 @@ func TestIssue243PalettesPopulateMenuBar(t *testing.T) {
 			if p.MenuBarFG == p.MenuBarBG {
 				t.Errorf("preset %q: MenuBarFG == MenuBarBG (%+v) — illegible bar", name, p.MenuBarFG)
 			}
-			if name != themeDefault {
-				// Black-canvas presets derive the bar from the panel chrome.
+			switch name {
+			case themeHighContrast:
+				// The pure-black high-contrast canvas blends the bar into the panel
+				// chrome (white-on-black, MenuBar == Panel).
 				if p.MenuBarFG != p.PanelFG {
 					t.Errorf("preset %q: MenuBarFG %+v != PanelFG %+v", name, p.MenuBarFG, p.PanelFG)
 				}
 				if p.MenuBarBG != p.PanelBG {
 					t.Errorf("preset %q: MenuBarBG %+v != PanelBG %+v", name, p.MenuBarBG, p.PanelBG)
+				}
+			case themeDark:
+				// The dark preset lifts the bar onto a distinct #262626 dark-grey
+				// panel off the pure-black canvas (the bar text still matches the
+				// panel foreground).
+				if p.MenuBarFG != p.PanelFG {
+					t.Errorf("preset %q: MenuBarFG %+v != PanelFG %+v", name, p.MenuBarFG, p.PanelFG)
+				}
+				if want := tui.RGBColor(0x26, 0x26, 0x26); p.MenuBarBG != want {
+					t.Errorf("preset %q: MenuBarBG = %+v, want %+v (distinct #262626 off the black canvas)", name, p.MenuBarBG, want)
+				}
+				if p.MenuBarBG == p.PanelBG {
+					t.Errorf("preset %q: MenuBarBG equals the black PanelBG; the bar should be lifted off the canvas", name)
 				}
 			}
 		})

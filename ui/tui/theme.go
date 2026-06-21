@@ -346,12 +346,12 @@ func darkPalette() Theme {
 		Title:     title,
 		Divider:   divider,
 		Accent:    tui.RGBColor(0xE0, 0xAF, 0x68), // amber, matching the tool tone
-		// Soft-white-on-black menu bar (PanelFG / PanelBG), cohesive with the canvas.
+		// Soft-white-on-dark-grey menu bar: a #262626 panel lifts the bar off the
+		// pure-black canvas while staying cohesive with it.
 		MenuBarFG: softWhite,
-		MenuBarBG: black,
-		// A subtle dark-grey panel lifts code blocks off the pure-black background
-		// so they read as a distinct region.
-		CodeBG: tui.RGBColor(0x26, 0x26, 0x26),
+		MenuBarBG: tui.RGBColor(0x26, 0x26, 0x26),
+		// Code blocks render directly on the pure-black canvas (no distinct panel).
+		CodeBG: black,
 	}
 }
 
