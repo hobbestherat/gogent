@@ -378,6 +378,16 @@ func (s *sidebar) removeSession(id string) {
 // from Workbench.Focus on the UI thread.
 func (s *sidebar) focusSession(id string) {
 	s.focused = id
+	// Move the tree highlight bar to the active session too (issue #206). The
+	// highlight is the Tree's own selection index, which only its key/mouse
+	// handlers used to touch — so before SelectNode (turbotui) any focus change
+	// driven from outside the tree (new session, Ctrl+] cycle, close, Session
+	// menu) left the bar stranded on the previous row. focusSession is the funnel
+	// every active-session change passes through (via refreshOverall), so setting
+	// it here keeps the bar in sync on all of those paths.
+	if node := s.sessions[id]; node != nil {
+		s.tree.SelectNode(node)
+	}
 }
 
 // setApproval toggles the "needs approval" badge on a session node (issue #55)
