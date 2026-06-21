@@ -287,3 +287,154 @@ func TestCloseableDialogAffordance(t *testing.T) {
 		t.Error("clicking [x] did not invoke the close function")
 	}
 }
+
+// TestRunningTurnCommandsInPalette verifies the discoverability half of issue
+// #201: /stop, /clearqueue, /goal and /markdown are present in the Session group
+// with their slash-command key hints, and carry actions that are always available
+// (no handler gate), so they show up in the palette even on a bare workbench.
+func TestRunningTurnCommandsInPalette(t *testing.T) {
+	cmds := (&Workbench{}).commands()
+	want := map[string]string{
+		"Stop turn":                    "/stop",
+		"Clear queued message":         "/clearqueue",
+		"Set / show goal (supervisor)": "/goal",
+		"Toggle Markdown rendering":    "/markdown",
+	}
+	for name, keys := range want {
+		c, ok := findCommand(cmds, name)
+		if !ok {
+			t.Errorf("expected command %q in the table for issue #201", name)
+			continue
+		}
+		if c.category != "Session" {
+			t.Errorf("%q category = %q, want Session", name, c.category)
+		}
+		if c.keys != keys {
+			t.Errorf("%q keys = %q, want %q", name, c.keys, keys)
+		}
+		if c.run == nil {
+			t.Errorf("%q has no run action", name)
+		}
+		// These are always available (no enabled predicate), unlike handler-gated
+		// commands such as "Statistics".
+		if !c.available() {
+			t.Errorf("%q should be available without backend wiring", name)
+		}
+	}
+}
+
+// TestRunningTurnCommandsNotHiddenFromHelp confirms the new commands surface in
+// the keybinding cheatsheet too (issue #201), since helpText lists every visible
+// command and they carry no availability gate.
+func TestRunningTurnCommandsNotHiddenFromHelp(t *testing.T) {
+	text := helpText((&Workbench{}).commands())
+	for _, name := range []string{"Stop turn", "Clear queued message", "Toggle Markdown rendering"} {
+		if !strings.Contains(text, name) {
+			t.Errorf("helpText missing %q\n%s", name, text)
+		}
+	}
+	// The /stop key hint is shown alongside the name.
+	if !strings.Contains(text, "/stop") {
+		t.Errorf("helpText should show the /stop key hint\n%s", text)
+	}
+}
+
+// TestPaletteStopCommandRunsAgainstActiveSession is an end-to-end check that the
+// "Stop turn" palette entry dispatches to the active session (issue #201): on a
+// workbench with a busy session holding a queued message, running the command
+// cancels the turn and clears the queue, exactly like /stop.
+func TestPaletteStopCommandRunsAgainstActiveSession(t *testing.T) {
+	w := newTestWorkbench(t)
+	stopped := recordStop(w)
+	sw := w.openWindow("s", "S")
+	sw.busy = true
+	sw.enqueue("queued")
+	if w.ActiveID() != "s" {
+		t.Fatalf("active session = %q, want s", w.ActiveID())
+	}
+
+	c, ok := findCommand(w.commands(), "Stop turn")
+	if !ok {
+		t.Fatal("Stop turn command missing")
+	}
+	c.run()
+
+	if sw.pending != "" {
+		t.Errorf("palette Stop should clear the queue, pending = %q", sw.pending)
+	}
+	if id := waitStop(t, stopped); id != "s" {
+		t.Errorf("OnStop id = %q, want s", id)
+	}
+}
+
+// TestPaletteClearQueueCommandRunsAgainstActiveSession verifies the "Clear queued
+// message" palette entry clears the active session's queue (issue #201).
+func TestPaletteClearQueueCommandRunsAgainstActiveSession(t *testing.T) {
+	w := newTestWorkbench(t)
+	sw := w.openWindow("s", "S")
+	sw.busy = true
+	sw.enqueue("to be cleared")
+
+	c, ok := findCommand(w.commands(), "Clear queued message")
+	if !ok {
+		t.Fatal("Clear queued message command missing")
+	}
+	c.run()
+
+	if sw.pending != "" {
+		t.Errorf("palette Clear queued message should clear the queue, pending = %q", sw.pending)
+	}
+	if !noteContains(sw, "cleared") {
+		t.Error("expected a 'cleared' note after clearing via the palette")
+	}
+}
+
+// TestPaletteCommandNoOpWithoutActiveSession verifies the running-turn palette
+// commands are safe when no session is open: withActiveTranscript is a no-op, so
+// running them neither panics nor dispatches (issue #201).
+func TestPaletteCommandNoOpWithoutActiveSession(t *testing.T) {
+	w := newTestWorkbench(t) // no sessions opened
+	for _, name := range []string{"Stop turn", "Clear queued message", "Set / show goal (supervisor)"} {
+		c, ok := findCommand(w.commands(), name)
+		if !ok {
+			t.Fatalf("%s command missing", name)
+		}
+		// Must not panic with no active session.
+		c.run()
+	}
+}
+
+// TestPaletteGoalCommandOpensEditor verifies the "/goal" palette entry actually
+// lets the user set the goal (issue #201): it opens an input dialog seeded with
+// the current goal (editActiveGoal), not the read-only inline show that a bare
+// sessionCmd("/goal") would produce. The three no-arg commands still act inline.
+func TestPaletteGoalCommandOpensEditor(t *testing.T) {
+	w := newTestWorkbench(t)
+	sw := w.openWindow("s", "S")
+	sw.goal = "ship it"
+
+	c, ok := findCommand(w.commands(), "Set / show goal (supervisor)")
+	if !ok {
+		t.Fatal("Set / show goal (supervisor) command missing")
+	}
+	c.run()
+
+	top := w.desktop.TopLayer()
+	if top == nil || top.Name != "input-dialog" {
+		t.Fatalf("top layer = %v, want an input-dialog to edit the goal", top)
+	}
+}
+
+// TestPaletteGoalCommandNoOpWithoutSession verifies editActiveGoal is a safe
+// no-op (no dialog, no panic) when no session is open (issue #201).
+func TestPaletteGoalCommandNoOpWithoutSession(t *testing.T) {
+	w := newTestWorkbench(t) // no sessions opened
+	c, ok := findCommand(w.commands(), "Set / show goal (supervisor)")
+	if !ok {
+		t.Fatal("Set / show goal (supervisor) command missing")
+	}
+	c.run()
+	if top := w.desktop.TopLayer(); top != nil && top.Name == "input-dialog" {
+		t.Error("goal editor should not open with no active session")
+	}
+}
