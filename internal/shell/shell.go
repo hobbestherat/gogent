@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os/exec"
-	"syscall"
 	"time"
 )
 
@@ -35,17 +33,12 @@ func Execute(command string, config ShellConfig) (*ExecuteResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	// newShellCommand wires up the platform shell invocation plus the
+	// cancellation strategy (process-group kill on Unix, default process kill
+	// on Windows) so a timeout tears down the command and its children.
+	cmd := newShellCommand(ctx, command)
 	if config.Dir != "" {
 		cmd.Dir = config.Dir
-	}
-	// Run the command in its own process group so that, on timeout, we can kill
-	// the whole group (sh -c and all of its children) rather than orphaning the
-	// grandchildren spawned by the shell.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		// Negative PID targets the process group led by the child.
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 
 	var stdout, stderr bytes.Buffer

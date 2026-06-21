@@ -462,8 +462,12 @@ func main() {
 		}
 	}()
 
-	sig := <-sigChan
-	fmt.Printf("\nReceived signal %v, shutting down...\n", sig)
+	select {
+	case sig := <-sigChan:
+		fmt.Printf("\nReceived signal %v, shutting down...\n", sig)
+	case <-httpShutdownCh:
+		fmt.Printf("\nShutdown requested via /exit, shutting down...\n")
+	}
 
 	// Release any MCP servers (terminates stdio subprocesses).
 	g.CloseMCPServers()
@@ -811,9 +815,19 @@ func newHTTPHandler(backend httpBackend, exitToken string, shutdown func()) http
 	return mux
 }
 
+// httpShutdownCh lets the authorized /exit endpoint trigger the same graceful
+// shutdown path as an OS interrupt, portably. Using a channel avoids a
+// self-directed syscall.Kill, which is unavailable on Windows.
+var httpShutdownCh = make(chan struct{}, 1)
+
 func startHTTPServer(host string, port int, g *gogent.Gogent) {
 	handler := newHTTPHandler(newGogentBackend(g), os.Getenv("GOGENT_HTTP_TOKEN"), func() {
-		_ = syscall.Kill(syscall.Getpid(), syscall.SIGINT) // best-effort self-signal to trigger shutdown
+		// Best-effort, non-blocking: a single buffered slot is enough since one
+		// shutdown request is all that matters.
+		select {
+		case httpShutdownCh <- struct{}{}:
+		default:
+		}
 	})
 
 	server := &http.Server{
