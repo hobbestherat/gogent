@@ -388,6 +388,72 @@ func TestRunningButtonsHiddenViaVisibleWhenIdle(t *testing.T) {
 	}
 }
 
+// TestBusyToIdleRestoresInputFocus is the regression guard for the focus-recovery
+// fix (issue #201): when a turn ends while a running-turn button holds keyboard
+// focus, focus must move back to the prompt. turbotv only re-homes a stale focus
+// on layer add/remove/raise — not when a button's Visible flag flips during layout
+// — so without this restore a focused-but-hidden button would swallow keystrokes
+// until the user tabbed or clicked. The test drives the real desktop focus and the
+// real busy→idle event path (apply → setBusy(false) → restoreInputFocusFromButtons).
+func TestBusyToIdleRestoresInputFocus(t *testing.T) {
+	w := newTestWorkbench(t)
+	sw := w.openWindow("s", "S")
+
+	for _, tc := range []struct {
+		name string
+		btn  *tv.Button
+	}{
+		{"interject", sw.interjectButton},
+		{"queue", sw.queueButton},
+		{"stop", sw.stopButton},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A turn is running and the user has Tab-focused a running button.
+			sw.busy = true
+			layout(sw, 80, 24, 3)
+			w.desktop.SetFocus(tc.btn)
+			if !tc.btn.Component.Focused() {
+				t.Fatalf("setup failed: %s button should hold focus after SetFocus", tc.name)
+			}
+
+			// The terminal event ends the turn (the real busy→idle edge).
+			sw.apply(agent.SessionEvent{Type: agent.SessionEventFinal, Text: "done"})
+
+			if !sw.input.Component.Focused() {
+				t.Errorf("input should regain focus on busy→idle (focus was on %s button)", tc.name)
+			}
+			if tc.btn.Component.Focused() {
+				t.Errorf("%s button should release focus on busy→idle", tc.name)
+			}
+		})
+	}
+}
+
+// TestBusyToIdleDoesNotStealFocusFromOtherWidgets verifies the focus restore is
+// targeted (issue #201): it only fires when a running button held focus, so a user
+// interacting with the model selector mid-turn is not yanked back to the prompt
+// when the turn ends.
+func TestBusyToIdleDoesNotStealFocusFromOtherWidgets(t *testing.T) {
+	w := newTestWorkbench(t)
+	sw := w.openWindow("s", "S")
+	sw.busy = true
+	layout(sw, 80, 24, 3)
+
+	w.desktop.SetFocus(sw.modelSelect)
+	if !sw.modelSelect.Component.Focused() {
+		t.Fatal("setup failed: model selector should hold focus after SetFocus")
+	}
+
+	sw.apply(agent.SessionEvent{Type: agent.SessionEventFinal, Text: "done"})
+
+	if !sw.modelSelect.Component.Focused() {
+		t.Error("focus should remain on the model selector, not be moved to the input")
+	}
+	if sw.input.Component.Focused() {
+		t.Error("input should not steal focus when a non-button widget held it")
+	}
+}
+
 // TestEnterWhileBusyQueuesDoesNotInject is the core flag-removal behaviour (issue
 // #201): Enter while busy always takes the drain-on-idle queue path — it stows the
 // pending slot and never hands the text to OnInject, no matter what. With the old
