@@ -36,14 +36,21 @@ type overallStats struct {
 // band height.
 const overallMetricLines = 9
 
-// overallSelectorLines is the height of the model-selector dropdown rendered at the
-// very top of the Overall band (issue #191): one row, above the separator/title, so
-// every metric below it can be scoped to the selected model.
+// overallSeparatorLines is the height of the thin horizontal rule drawn at the very
+// top of the Overall band (issue #233): one row, above the model selector, that
+// visually divides the bottom stats region from the content above it. It is drawn in
+// the theme divider colour by drawOverall.
+const overallSeparatorLines = 1
+
+// overallSelectorLines is the height of the model-selector dropdown rendered just
+// below the top separator (issue #191): one row, above the title, so every metric
+// below it can be scoped to the selected model.
 const overallSelectorLines = 1
 
-// overallBandHeight is the number of sidebar rows the Overall panel reserves at
-// the bottom: the model selector, one separator, one title and the metric rows.
-const overallBandHeight = overallSelectorLines + overallMetricLines + 2
+// overallBandHeight is the number of sidebar rows the Overall panel reserves at the
+// bottom, top to bottom: one separator (issue #233), the model selector, one title
+// and the metric rows (the trailing +1 is the title row).
+const overallBandHeight = overallSeparatorLines + overallSelectorLines + overallMetricLines + 1
 
 // overallAllModelsOption is the model-selector label for the aggregate view: every
 // metric below it shows the cluster-wide grand total across all models, reproducing
