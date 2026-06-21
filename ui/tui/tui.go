@@ -1592,7 +1592,6 @@ func (w *Workbench) deliverSessionEvent(id string, ev agent.SessionEvent) bool {
 				delete(w.clarifyWaiting, key)
 			}
 			w.sidebar.setClarify(id, title, pinned, waiting)
-			w.sidebar.setGlobalClarify(len(w.sidebar.clarify))
 		}
 	}
 	if ev.Type == agent.SessionEventTodo && w.sidebar != nil {
@@ -1601,6 +1600,18 @@ func (w *Workbench) deliverSessionEvent(id string, ev agent.SessionEvent) bool {
 	delivered := sw != nil
 	if delivered {
 		sw.apply(ev)
+		// Push the per-session idle/active marker (issue #236) on the event that
+		// actually flips sw.busy, so the ●/○ updates at the transition instead of
+		// waiting up to one statusTickInterval for the next tickBusyStatuses sweep:
+		// a final/error clears it here the instant the turn ends, and the turn's first
+		// streamed event confirms it set. sw.apply has just settled sw.busy for this
+		// event, and sw.busy is UI-thread-only like the rest of this method, so the read
+		// needs no lock. Relabel only on a real transition so the per-token event stream
+		// does not rebuild the label each time; tickBusyStatuses stays the backstop and
+		// still reconciles the all-idle edge.
+		if w.sidebar != nil && w.sidebar.busy[id] != sw.busy {
+			w.sidebar.setBusy(id, title, pinned, sw.busy)
+		}
 	} else if eventNeedsWindow(ev.Type) {
 		// Only count a missing window as a dropped event when the window was actually
 		// needed: sub-agent and todo events are fully serviced by the sidebar above,
@@ -1899,12 +1910,21 @@ func (w *Workbench) runStatusTicker(ctx context.Context) {
 func (w *Workbench) tickBusyStatuses() {
 	w.mu.Lock()
 	busy := make([]*SessionWindow, 0, len(w.sessions))
-	for _, sw := range w.sessions {
+	busyIDs := make(map[string]bool, len(w.sessions))
+	for id, sw := range w.sessions {
 		if sw.busy {
 			busy = append(busy, sw)
+			busyIDs[id] = true
 		}
 	}
 	w.mu.Unlock()
+	// Reconcile the sidebar's per-session idle/active markers (issue #236) before the
+	// all-idle early return, so the busy→idle transition that empties the set still
+	// clears the last ● — and redraw once if any marker moved, since an otherwise
+	// idle tick does no other work.
+	if w.sidebar != nil && w.sidebar.syncBusy(busyIDs) {
+		w.desktop.Redraw()
+	}
 	if len(busy) == 0 {
 		return
 	}

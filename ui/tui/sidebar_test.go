@@ -3,8 +3,6 @@ package ui
 import (
 	"strings"
 	"testing"
-
-	"gogent/internal/agent"
 )
 
 // newTestSidebar builds a sidebar detached from any live desktop. The workbench
@@ -30,7 +28,8 @@ func TestSessionLabelBadge(t *testing.T) {
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			label := sessionLabel("Session 1", agent.StatusIdle, tc.pinned, tc.pending, false)
+			// Idle (busy=false): the leading glyph is the ○ session marker (issue #236).
+			label := sessionLabel("Session 1", false, tc.pinned, tc.pending, false)
 			if got := strings.Contains(label, approvalBadge); got != tc.wantBadge {
 				t.Fatalf("badge presence = %v, want %v (label %q)", got, tc.wantBadge, label)
 			}
@@ -88,16 +87,7 @@ func TestSidebarRemoveClearsApproval(t *testing.T) {
 	}
 }
 
-// TestSidebarGlobalApprovals checks the header indicator count is clamped to a
-// non-negative value.
-func TestSidebarGlobalApprovals(t *testing.T) {
-	s := newTestSidebar()
-	s.setGlobalApprovals(3)
-	if s.globalApprovals != 3 {
-		t.Fatalf("globalApprovals = %d, want 3", s.globalApprovals)
-	}
-	s.setGlobalApprovals(-1)
-	if s.globalApprovals != 0 {
-		t.Fatalf("globalApprovals = %d, want 0 (clamped)", s.globalApprovals)
-	}
-}
+// TestSidebarGlobalApprovals was removed: it exercised setGlobalApprovals /
+// globalApprovals, which issue #230 deleted (the phantom glyph-less header counter
+// is gone — attention is shown only per row). The #230 regression coverage now lives
+// in sidebar_busy_test.go (headerHasNoGlobalCount / TestHeaderNoGlobalCount*).
