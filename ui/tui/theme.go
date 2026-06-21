@@ -584,6 +584,13 @@ func (f contrastFinding) OK() bool { return f.Ratio >= f.Min }
 // desktop background. Pass the live window/content background for windowBG — for
 // the default theme that is tv.DefaultTheme.WindowBG (ANSI 4, blue); the
 // black-canvas presets render the transcript on their PanelBG, so pass that.
+//
+// Audit a theme already degraded to the terminal's ColorLevel (the ResolveTheme
+// output), not a raw palette: the default palette is authored entirely in 16-colour
+// ANSI indices and so is fidelity-invariant, but an RGB preset can quantise to a
+// different, lower-contrast index at 16 or 256 colours, so auditing its raw
+// truecolor form over-reports the contrast a real terminal renders.
+//
 // Body-text roles are held to minContrastText; the gamut-limited error role and
 // the non-text border and indicator roles to minContrastLarge. Asserting every
 // finding's OK() guarantees no role has regressed below its threshold.
