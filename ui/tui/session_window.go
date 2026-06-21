@@ -130,6 +130,17 @@ type SessionWindow struct {
 	// the exact same send path (mention expansion, busy/transcript handling) as a
 	// hand-typed message rather than duplicating it.
 	submitFn func()
+	// promptHistory is the per-session, in-memory list of prompts the user actually
+	// submitted this session, oldest→newest, driving the Up/Down recall in the input
+	// (issue #203). Only user-typed submissions are captured (slash commands included,
+	// supervisor nudges excluded); a consecutive duplicate is skipped. historyNav is
+	// the recall cursor: historyNav == len(promptHistory) means "not navigating", at
+	// the in-progress draft; len-1 is the newest entry and 0 the oldest. historyDraft
+	// stashes whatever the user had typed when navigation began so Down past the
+	// newest restores it (shell-style). All three are touched only on the UI thread.
+	promptHistory []string
+	historyNav    int
+	historyDraft  string
 	// goal is the session's supervisor objective set via /goal (issue #172) — the
 	// definition of "done" the idle watchdog re-checks on each busy→idle edge.
 	// Empty means no goal. nudgeCount is how many consecutive supervisor nudges
@@ -326,6 +337,13 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 		if sw.completer.handleKey(event) {
 			return true
 		}
+		// Up/Down recall older/newer submitted prompts (issue #203), but only at the
+		// edges of the buffer so interior multi-line editing still moves the caret.
+		// The completer above keeps priority while its popup is open.
+		if sw.handleHistoryKey(event) {
+			sw.completer.update()
+			return true
+		}
 		handled := false
 		if baseType != nil {
 			handled = baseType(c, event)
@@ -337,6 +355,15 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 		text := strings.TrimSpace(input.GetText())
 		if text == "" {
 			return
+		}
+		// Record the prompt for Up/Down history recall (issue #203). Only user-typed
+		// submissions enter history: supervisor nudges (nudgingSend) are skipped, and
+		// the drain re-entry (draining) is skipped so a message queued while busy is
+		// recorded once — when the user pressed Enter — not again when it drains. The
+		// raw typed text is stored (before mention expansion); slash commands count as
+		// prompts and are included.
+		if !sw.nudgingSend && !sw.draining {
+			sw.recordHistory(text)
 		}
 		// Busy: don't drop the input (issue #170). Queue it as the next turn instead
 		// — the drain-on-idle path re-submits it when the agent finishes, and (with
@@ -1026,6 +1053,147 @@ func (sw *SessionWindow) drainQueue() {
 	sw.submitFn()
 	sw.input.Clear()
 	sw.draining = false
+}
+
+// recordHistory appends a just-submitted prompt to the per-session recall history
+// and resets navigation to the newest (issue #203). A prompt identical to the most
+// recent one is not duplicated. Resetting historyNav to len means the next Up
+// starts from the newest entry again, and the stashed draft is cleared (the input
+// is cleared on submit, so there is no in-progress text to preserve).
+func (sw *SessionWindow) recordHistory(text string) {
+	if n := len(sw.promptHistory); n == 0 || sw.promptHistory[n-1] != text {
+		sw.promptHistory = append(sw.promptHistory, text)
+	}
+	sw.historyNav = len(sw.promptHistory)
+	sw.historyDraft = ""
+}
+
+// handleHistoryKey applies Up/Down prompt-history recall, returning true when it
+// consumed the event (issue #203). Up recalls an older prompt only when the caret
+// sits on the first visual line; Down recalls a newer one only on the last visual
+// line — so single-line prompts (the common case) always recall, while interior
+// multi-line editing keeps moving the caret between lines. With no history, or off
+// the relevant edge, it returns false so the input handles the key as usual.
+func (sw *SessionWindow) handleHistoryKey(event tui.TypeEvent) bool {
+	if len(sw.promptHistory) == 0 {
+		return false
+	}
+	switch event.Key {
+	case tui.KeyUp:
+		if !sw.caretOnFirstVisualLine() {
+			return false
+		}
+		return sw.historyPrev()
+	case tui.KeyDown:
+		if !sw.caretOnLastVisualLine() {
+			return false
+		}
+		return sw.historyNext()
+	}
+	return false
+}
+
+// historyPrev recalls the previous (older) prompt, caret at end. The first Up
+// stashes the in-progress draft and jumps to the newest entry; subsequent Ups step
+// older. At the oldest entry it stops (no wrap) but still consumes the key. It
+// returns true whenever history is in play (non-empty), so the caret does not also
+// move.
+func (sw *SessionWindow) historyPrev() bool {
+	n := len(sw.promptHistory)
+	switch {
+	case sw.historyNav >= n:
+		sw.historyDraft = sw.input.GetText()
+		sw.historyNav = n - 1
+	case sw.historyNav > 0:
+		sw.historyNav--
+	default:
+		return true // already at the oldest entry: stop, no wrap
+	}
+	sw.input.SetText(sw.promptHistory[sw.historyNav])
+	return true
+}
+
+// historyNext recalls the next (newer) prompt, caret at end. Stepping past the
+// newest entry restores the stashed in-progress draft and leaves navigation mode.
+// When not navigating there is nothing newer to recall, so it returns false and
+// lets the input move the caret instead.
+func (sw *SessionWindow) historyNext() bool {
+	n := len(sw.promptHistory)
+	if sw.historyNav >= n {
+		return false // not navigating: nothing newer
+	}
+	if sw.historyNav < n-1 {
+		sw.historyNav++
+		sw.input.SetText(sw.promptHistory[sw.historyNav])
+		return true
+	}
+	sw.historyNav = n
+	sw.input.SetText(sw.historyDraft)
+	return true
+}
+
+// caretOnFirstVisualLine reports whether the input caret sits on the topmost
+// visual row, where Up recalls older history rather than moving up a line. A caret
+// on a wrapped continuation of the first logical line is not on the first visual
+// line. See visualRowInLine for the char-wrap assumption.
+func (sw *SessionWindow) caretOnFirstVisualLine() bool {
+	in := sw.input
+	if in == nil || in.CursorY != 0 {
+		return false
+	}
+	return visualRowInLine(in, 0, in.CursorX) == 0
+}
+
+// caretOnLastVisualLine reports whether the input caret sits on the bottommost
+// visual row, where Down recalls newer history rather than moving down a line.
+func (sw *SessionWindow) caretOnLastVisualLine() bool {
+	in := sw.input
+	if in == nil {
+		return false
+	}
+	last := len(in.Lines) - 1
+	if in.CursorY != last {
+		return false
+	}
+	return visualRowInLine(in, last, in.CursorX) == lineVisualRows(in, last)-1
+}
+
+// inputVisualWidth is the text width the input wraps at: one column narrower than
+// the widget for the scrollbar, matching MultiLineInput.contentWidth. A width
+// below 2 (unset bounds before layout, e.g. under test) yields 0, which the
+// callers treat as "do not wrap" so each logical line is a single visual row.
+func inputVisualWidth(in *tv.MultiLineInput) int {
+	if w := in.Component.Bounds.W; w > 1 {
+		return w - 1
+	}
+	return 0
+}
+
+// lineVisualRows is the number of visual rows the given logical line occupies at
+// the input's current width, assuming the input's default character wrapping
+// (WordWrap is off for the session input). An empty line, or an unwrapped width,
+// is one row.
+func lineVisualRows(in *tv.MultiLineInput, lineIdx int) int {
+	width := inputVisualWidth(in)
+	length := len([]rune(in.Lines[lineIdx]))
+	if width < 1 || length == 0 {
+		return 1
+	}
+	return (length + width - 1) / width
+}
+
+// visualRowInLine is the zero-based visual row of cursorX within its logical line,
+// clamped to the line's last row. With an unwrapped width it is always 0.
+func visualRowInLine(in *tv.MultiLineInput, lineIdx, cursorX int) int {
+	width := inputVisualWidth(in)
+	if width < 1 {
+		return 0
+	}
+	row := cursorX / width
+	if last := lineVisualRows(in, lineIdx) - 1; row > last {
+		row = last
+	}
+	return row
 }
 
 // setBusy updates the status line and busy flag, anchoring the live elapsed
