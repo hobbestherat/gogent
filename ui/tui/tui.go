@@ -963,6 +963,22 @@ func (w *Workbench) CloseActive() {
 }
 
 // CloseSession removes a session window and notifies the backend.
+//
+// Teardown is a sequence of toolkit mutations (window layer, menu, sidebar
+// node), and each one synchronously flushes a full frame to the terminal. To
+// avoid the one-frame flash of a wrong session (issue #209), the session that
+// becomes active after the close is decided up front and raised to the top of
+// the z-stack *before* the closing layer is removed.
+//
+// The post-close active session is the tail of w.order (the last entry in the
+// sidebar order) — the same session the close has always settled on; only when
+// and how it is shown changes here. Raising it first (via Focus) makes it the
+// top-most window for every subsequent frame, so removing the closed layer can
+// only ever reveal the target — never the arbitrary z-stack neighbour that
+// happened to sit directly beneath the closed window, whose ordering diverges
+// from w.order as soon as the user clicks/cycles between sessions. The general
+// "sidebar highlight follows focus" fix is the sibling issue #206; here Focus
+// also moves the sidebar's Overall/TODO focus onto the target via refreshOverall.
 func (w *Workbench) CloseSession(id string) {
 	w.mu.Lock()
 	sw := w.sessions[id]
@@ -979,11 +995,25 @@ func (w *Workbench) CloseSession(id string) {
 		}
 	}
 	w.order = next
+	// Decide the post-close active session now, before any teardown, so the
+	// choice never depends on the transient z-stack state the removal would
+	// otherwise expose (issue #209).
+	target := ""
+	if len(w.order) > 0 {
+		target = w.order[len(w.order)-1]
+	}
 	w.mu.Unlock()
 	// Dismiss a still-open @-mention popup so closing mid-completion leaves no
 	// orphaned layer (issue #46).
 	if sw.completer != nil {
 		sw.completer.hide()
+	}
+	// Raise the intended next session to the top *before* removing the closing
+	// layer. From here target is the top-most window, so the RemoveLayer below
+	// can only reveal target rather than the z-stack neighbour beneath the closed
+	// window — eliminating the wrong-session flash (issue #209).
+	if target != "" {
+		w.Focus(target)
 	}
 	w.desktop.RemoveLayer(sw.layer)
 	if w.sidebar != nil {
@@ -1001,15 +1031,6 @@ func (w *Workbench) CloseSession(id string) {
 		w.persistLayout()
 	}
 	w.rebuildMenu()
-	w.mu.Lock()
-	last := ""
-	if len(w.order) > 0 {
-		last = w.order[len(w.order)-1]
-	}
-	w.mu.Unlock()
-	if last != "" {
-		w.Focus(last)
-	}
 }
 
 // RenameSession opens a modal that lets the user edit a session's title. The
