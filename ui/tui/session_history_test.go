@@ -646,6 +646,103 @@ func TestPromptHistoryDedupContract(t *testing.T) {
 	}
 }
 
+// TestPromptHistoryModifiersDoNotRecall is the regression guard for the
+// modifier-handling fix: a modifier turns an arrow into a gesture the input owns
+// (Shift+arrow extends the selection), so history must NOT intercept it even at a
+// buffer edge where plain Up/Down would recall. The plain-Up case is included as
+// a control to prove the setup would otherwise recall.
+func TestPromptHistoryModifiersDoNotRecall(t *testing.T) {
+	w := newTestWorkbench(t)
+	sw := w.openWindow("s", "S")
+	submitText(sw, "HIST")
+
+	// Control: plain Up at the first visual line DOES recall.
+	sw.input.SetText("abc")
+	typeKey(sw, tui.KeyUp)
+	if got := sw.input.GetText(); got != "HIST" {
+		t.Fatalf("control: plain Up should recall, got %q", got)
+	}
+
+	// Every modifier + arrow must leave the buffer untouched (no recall).
+	for _, tc := range []struct {
+		name string
+		ev   tui.TypeEvent
+	}{
+		{"Shift+Up", tui.TypeEvent{Key: tui.KeyUp, Shift: true}},
+		{"Shift+Down", tui.TypeEvent{Key: tui.KeyDown, Shift: true}},
+		{"Ctrl+Up", tui.TypeEvent{Key: tui.KeyUp, Ctrl: true}},
+		{"Ctrl+Down", tui.TypeEvent{Key: tui.KeyDown, Ctrl: true}},
+		{"Alt+Up", tui.TypeEvent{Key: tui.KeyUp, Alt: true}},
+		{"Alt+Down", tui.TypeEvent{Key: tui.KeyDown, Alt: true}},
+	} {
+		sw.input.SetText("abc")
+		consumed := sw.input.Component.OnTypeFn(sw.input.Component, tc.ev)
+		if got := sw.input.GetText(); got != "abc" {
+			t.Errorf("%s recalled history (%q); modifier+arrow must not trigger recall", tc.name, got)
+		}
+		// And history itself must report it did not handle the event.
+		if sw.handleHistoryKey(tc.ev) {
+			t.Errorf("%s: handleHistoryKey should return false for a modifier+arrow", tc.name)
+		}
+		// 'consumed' is intentionally not asserted: Shift+Up may be handled by the
+		// input's selection logic (true) while Ctrl+Up is unhandled (false); the
+		// contract under test is only "history did not recall".
+		_ = consumed
+	}
+}
+
+// TestPromptHistoryRecallDoesNotReopenMentionPopup is the regression guard for the
+// post-recall popup fix: recalling a prompt that itself ends in an @mention token
+// (caret lands inside it) must NOT reopen the completer popup. History stores the
+// raw typed text, so this is a realistic recall.
+func TestPromptHistoryRecallDoesNotReopenMentionPopup(t *testing.T) {
+	w := newTestWorkbench(t)
+	sw := w.openWindow("s", "S")
+	layout(sw, 80, 24, 3)
+	w.handlers.ListWorkspaceFiles = func() []string { return []string{"main.go"} }
+
+	submitText(sw, "see @main.go")
+	sw.input.SetText("")
+
+	typeKey(sw, tui.KeyUp) // recall "see @main.go"; caret lands after "@main.go"
+	if got := sw.input.GetText(); got != "see @main.go" {
+		t.Fatalf("recall = %q, want the mention prompt", got)
+	}
+	if sw.completer.active() {
+		t.Errorf("recalling an @mention prompt should not reopen the completer popup")
+	}
+
+	// Sanity: typing at the same position DOES still open the popup (the fix only
+	// suppresses the recall side-effect, not normal mention completion).
+	sw.input.SetText("see @main.go")
+	sw.input.CursorX = len([]rune("see @main.go")) // caret at end, inside the token
+	sw.completer.update()
+	if !sw.completer.active() {
+		t.Error("typing into a mention token should still open the popup (control)")
+	}
+}
+
+// TestPromptHistoryNavHelpersSafeOnEmpty pins the empty-history safety of the
+// navigation helpers directly: calling them with no history must return false and
+// not panic, even though handleHistoryKey is the only production caller (which
+// already guards). This guards the latent footgun where historyPrev indexed
+// promptHistory[-1].
+func TestPromptHistoryNavHelpersSafeOnEmpty(t *testing.T) {
+	w := newTestWorkbench(t)
+	sw := w.openWindow("s", "S")
+
+	if sw.historyPrev() {
+		t.Error("historyPrev() on empty history should return false")
+	}
+	if sw.historyNext() {
+		t.Error("historyNext() on empty history should return false")
+	}
+	// Buffer and nav state untouched.
+	if got := sw.input.GetText(); got != "" {
+		t.Errorf("empty-history nav changed the buffer: %q", got)
+	}
+}
+
 // --- Visual-line math unit tests -------------------------------------------
 //
 // These pin the pure helpers that decide when Up/Down recall vs. move the caret,
