@@ -969,7 +969,11 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 			if note := s.takePendingNote(); note != "" {
 				injected := fmt.Sprintf(injectedNoteTemplate, note)
 				nextMessages = []model.Message{{Role: model.RoleUser, Content: injected}}
-				emit(SessionEvent{Type: SessionEventAssistantStep, Step: step + 1, Text: injected})
+				// Deliver only — do not re-emit the note as a SessionEventAssistantStep
+				// "thought". The injection is the user's clarification, not the model's
+				// reasoning, so the UI already shows it as a "You (clarification):" record
+				// at Interject-press; re-emitting it here would duplicate it as a model
+				// thought (issue #242).
 			}
 		}
 
