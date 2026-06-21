@@ -851,12 +851,32 @@ const (
 // frame. It matches the 8-wide idle Send button (4-cell "Send" + 4-cell frame).
 func buttonWidth(label string) int { return tui.StringWidth(label) + 4 }
 
+// uniformButtonWidth is the common cell width the three running-turn buttons share
+// so they read as one set rather than three differently sized boxes (issue #214):
+// the widest of the given labels' individual buttonWidths. In full-label mode that
+// is Interject (the longest label); in glyph mode all three are equal, so it
+// collapses to the single glyph width. turbotui's Button centres its "[ … ]"
+// caption within its bounds, so widening a shorter label's box just pads it.
+func uniformButtonWidth(labels ...string) int {
+	w := 0
+	for _, label := range labels {
+		if bw := buttonWidth(label); bw > w {
+			w = bw
+		}
+	}
+	return w
+}
+
+// buttonRowY centres a 1-row input-row button against the multi-row prompt box so
+// it sits on the prompt's middle line rather than floating at its top edge (issue
+// #214). top is the input area's first row; inputH its height.
+func buttonRowY(top, inputH int) int { return top + (inputH-1)/2 }
+
 // runningButtonsWidth is the total width the three running-turn buttons occupy on
-// the input row: the three frames, the gaps between them and the right margin
-// (issue #201).
+// the input row once sized to a common (uniform) width: three equal frames, the
+// gaps between them and the right margin (issue #201; uniform sizing, issue #214).
 func runningButtonsWidth(interject, queue, stop string) int {
-	return buttonWidth(interject) + buttonWidth(queue) + buttonWidth(stop) +
-		2*inputRowGap + inputRowMargin
+	return 3*uniformButtonWidth(interject, queue, stop) + 2*inputRowGap + inputRowMargin
 }
 
 // controlsSeparatorRune is the box-drawing glyph repeated across the divider rule
@@ -886,7 +906,10 @@ func (sw *SessionWindow) layoutControlsSeparator(wd, y int) {
 // left of them. On a window too narrow to show the full labels beside a usable
 // input the labels degrade to single glyphs before the input overflows.
 func (sw *SessionWindow) layoutInputRow(wd, ht, inputH int) {
-	y := ht - inputH
+	top := ht - inputH
+	// The buttons are one row tall; centre them on the prompt box's middle line so
+	// they line up with it instead of floating at its top edge (issue #214).
+	rowY := buttonRowY(top, inputH)
 	if !sw.busy {
 		// Hide via Visible, not just zero bounds: turbotv's focus traversal
 		// (collectFocusable) skips !Visible/!Enabled but not zero-bounds widgets, so
@@ -896,8 +919,8 @@ func (sw *SessionWindow) layoutInputRow(wd, ht, inputH int) {
 		sw.hideRunningButton(sw.queueButton)
 		sw.hideRunningButton(sw.stopButton)
 		sw.sendButton.Component.Visible = true
-		sw.input.Component.SetBounds(tv.Rect{X: 0, Y: y, W: wd - 10, H: inputH})
-		sw.sendButton.Component.SetBounds(tv.Rect{X: wd - 9, Y: y, W: 8, H: 1})
+		sw.input.Component.SetBounds(tv.Rect{X: 0, Y: top, W: wd - 10, H: inputH})
+		sw.sendButton.Component.SetBounds(tv.Rect{X: wd - 9, Y: rowY, W: 8, H: 1})
 		return
 	}
 	sw.hideRunningButton(sw.sendButton)
@@ -916,18 +939,20 @@ func (sw *SessionWindow) layoutInputRow(wd, ht, inputH int) {
 	sw.interjectButton.SetLabel(il)
 	sw.queueButton.SetLabel(ql)
 	sw.stopButton.SetLabel(sl)
-	interjectW, queueW, stopW := buttonWidth(il), buttonWidth(ql), buttonWidth(sl)
-	stopX := wd - inputRowMargin - stopW
-	queueX := stopX - inputRowGap - queueW
-	interjectX := queueX - inputRowGap - interjectW
+	// One uniform width for all three so they read as a consistent set; turbotui
+	// centres each button's caption within its box (issue #214).
+	btnW := uniformButtonWidth(il, ql, sl)
+	stopX := wd - inputRowMargin - btnW
+	queueX := stopX - inputRowGap - btnW
+	interjectX := queueX - inputRowGap - btnW
 	inputW := interjectX - inputRowGap
 	if inputW < 1 {
 		inputW = 1
 	}
-	sw.input.Component.SetBounds(tv.Rect{X: 0, Y: y, W: inputW, H: inputH})
-	sw.interjectButton.Component.SetBounds(tv.Rect{X: interjectX, Y: y, W: interjectW, H: 1})
-	sw.queueButton.Component.SetBounds(tv.Rect{X: queueX, Y: y, W: queueW, H: 1})
-	sw.stopButton.Component.SetBounds(tv.Rect{X: stopX, Y: y, W: stopW, H: 1})
+	sw.input.Component.SetBounds(tv.Rect{X: 0, Y: top, W: inputW, H: inputH})
+	sw.interjectButton.Component.SetBounds(tv.Rect{X: interjectX, Y: rowY, W: btnW, H: 1})
+	sw.queueButton.Component.SetBounds(tv.Rect{X: queueX, Y: rowY, W: btnW, H: 1})
+	sw.stopButton.Component.SetBounds(tv.Rect{X: stopX, Y: rowY, W: btnW, H: 1})
 }
 
 // hideRunningButton removes an input-row button from view and, crucially, from the
@@ -959,25 +984,64 @@ func (sw *SessionWindow) restoreInputFocusFromButtons() {
 	}
 }
 
-// guardInterjectButton greys the Interject button while it is disabled — the input
-// is empty, so there is nothing to slip into the running turn (issue #201). It
-// wraps the button's draw to swap its colour, mirroring guardEffortSelect; the
-// interject() action enforces the same guard, so a stray activation is inert too.
+// guardInterjectButton recolours the Interject button per draw to track its
+// enabled/disabled state — the input is empty, so there is nothing to slip into the
+// running turn (issue #201). It wraps the button's draw to swap its foreground via
+// interjectButtonFG, mirroring guardEffortSelect; the interject() action enforces
+// the same guard, so a stray activation is inert too.
 func (sw *SessionWindow) guardInterjectButton() {
 	b := sw.interjectButton
 	baseDraw := b.Component.DrawFn
-	// The enabled colour is read live from the active turbotui theme (not captured
-	// at construction) so a live theme change recolours it without a restart (#204).
+	// The colour is read live from the active turbotui theme (not captured at
+	// construction) so a live theme change recolours it without a restart (#204).
 	b.Component.DrawFn = func(vc *tv.VisualComponent, surface tv.Surface) {
-		if sw.interjectEnabled() {
-			b.FG = tv.ActiveTheme().ButtonFG
-		} else {
-			b.FG = colorNote
-		}
+		b.FG = interjectButtonFG(sw.interjectEnabled())
 		if baseDraw != nil {
 			baseDraw(vc, surface)
 		}
 	}
+}
+
+// interjectButtonFG is the Interject button's foreground for the given enabled
+// state, read live from the active theme so a live theme switch recolours it
+// (issues #214, #204). Enabled, it matches Queue (the theme's ButtonFG) and stays
+// distinct from Stop's error red. Disabled (empty input), it de-emphasises the
+// label without dropping it to the illegible ~1.3:1 the old colorNote reached on the
+// default theme's green button: colorNote is kept where it still clears the 3:1
+// large-text floor against the button background (the dark button canvas of the
+// dark/high-contrast presets) or where that background is the terminal default
+// (NO_COLOR — contrast is undeterminable and colorNote is itself the default);
+// otherwise it falls back to the higher-contrast of black/white, which on the green
+// button is black: clearly readable yet visibly recessed from the bright-white
+// enabled label. Coordinates with the #202 contrast audit (contrastRatio,
+// minContrastLarge) rather than re-introducing a one-off low-contrast colour.
+//
+// This drives only the resting foreground (b.FG). On keyboard focus turbotui paints
+// the button with the theme's ButtonFocusFG/ButtonFocusBG instead, so a focused
+// Interject deliberately follows the default button focus colours — matching a
+// focused Queue (the "consistent with Queue" ask) and staying legible — rather than
+// pinning a focus FG the way Stop pins colorError, whose red is a semantic identity
+// Interject does not share.
+func interjectButtonFG(enabled bool) tui.Color {
+	th := tv.ActiveTheme()
+	if enabled {
+		return th.ButtonFG
+	}
+	if c := contrastRatio(colorNote, th.ButtonBG); c == 0 || c >= minContrastLarge {
+		return colorNote
+	}
+	return mostReadableOn(th.ButtonBG)
+}
+
+// mostReadableOn returns whichever of black/white has the greater WCAG contrast
+// against bg — the most legible monochrome foreground for an arbitrary button
+// background (issue #214).
+func mostReadableOn(bg tui.Color) tui.Color {
+	black, white := tui.ANSIColor(0), tui.ANSIColor(15)
+	if contrastRatio(white, bg) >= contrastRatio(black, bg) {
+		return white
+	}
+	return black
 }
 
 // refreshTheme re-applies the active palette to a live session window after a
