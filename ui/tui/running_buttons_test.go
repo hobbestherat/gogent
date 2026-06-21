@@ -173,7 +173,7 @@ func TestBusyRowShowsRunningButtonsHidesSend(t *testing.T) {
 		}
 	}
 	// Button order left-to-right: interject, queue, stop (Stop far right).
-	if !(interject.X < queue.X && queue.X < stop.X) {
+	if interject.X >= queue.X || queue.X >= stop.X {
 		t.Errorf("buttons not in [Interject][Queue][Stop] order: i=%+v q=%+v s=%+v", interject, queue, stop)
 	}
 	// Widths match the chosen (full, on a wide window) labels.
