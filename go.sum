@@ -8,8 +8,8 @@ github.com/dlclark/regexp2/v2 v2.2.1 h1:mf4KkFUj0gJuarK8P+LgiS+Lit7m9N1yAwEfPbee
 github.com/dlclark/regexp2/v2 v2.2.1/go.mod h1:avUrQvPaLz2DrFNHJF0taWAFFX2C1GMSSoeiqFjcBmU=
 github.com/hexops/gotextdiff v1.0.3 h1:gitA9+qJrrTCsiCl7+kh75nPqQt1cx4ZkudSTLoUqJM=
 github.com/hexops/gotextdiff v1.0.3/go.mod h1:pSWU5MAI3yDq+fZBTazCSJysOMbxWL1BSow5/V2vxeg=
-github.com/hobbestherat/turbotui v0.3.1-0.20260621140853-707be8bfa212 h1:rs44+nwM5MnnKbeKNvkH5bKZdQ0QUe+lhVwg1LNrSDU=
-github.com/hobbestherat/turbotui v0.3.1-0.20260621140853-707be8bfa212/go.mod h1:+cXzY+fhI8sBSN3k2L1Rb7mp1psKGT+D8R3qcCT+2d0=
+github.com/hobbestherat/turbotui v0.3.1-0.20260621171729-932c20dc9c0a h1:GRSl9+dOTz53J7C73QqNQPoxWG9mcBNg87BxDH7ELy0=
+github.com/hobbestherat/turbotui v0.3.1-0.20260621171729-932c20dc9c0a/go.mod h1:+cXzY+fhI8sBSN3k2L1Rb7mp1psKGT+D8R3qcCT+2d0=
 github.com/yuin/goldmark v1.8.2 h1:kEGpgqJXdgbkhcOgBxkC0X0PmoPG1ZyoZ117rDVp4zE=
 github.com/yuin/goldmark v1.8.2/go.mod h1:ip/1k0VRfGynBgxOz0yCqHrbZXhcjxyuS66Brc7iBKg=
 golang.org/x/sys v0.46.0 h1:noSf2Fq6F8DBgS+LysIkx7rIExoNHJsxOAtPp4rthXw=

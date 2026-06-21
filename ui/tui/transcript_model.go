@@ -298,19 +298,18 @@ func (m *transcriptModel) trim() {
 // renderOne appends a single record's entry (and its children) to the view,
 // recording the live entry on the record.
 //
-// An expanded rich record (an assistant answer, when rich Markdown is enabled)
-// renders its header as a plain entry and its body as top-level styled lines
-// derived from the raw text — turbotui styles only top-level entries, so a styled
-// body cannot be a foldable child of its header. A collapsed rich record instead
-// uses the flat children path so it can actually fold (fold-all re-renders, see
-// setFold); since the body is hidden when collapsed, losing the styling there is
-// invisible. Every other record always uses the flat children path, which keeps
-// folding and is the fallback in plain/no-colour mode.
+// A rich record (an assistant answer, when rich Markdown is enabled) renders its
+// body as styled children of the header via entry.AddStyled — turbotui styles
+// entries uniformly at every nesting depth, so a styled body is a foldable,
+// indented child of its header just like a plain one. Folding the header hides
+// those children and unfolding restores their styling; the styling survives a
+// fold for free. Every other record renders its body as flat colored children,
+// which is also the fallback in plain/no-colour mode.
 func (m *transcriptModel) renderOne(r *transcriptRecord) {
 	entry := m.view.AddColored(r.header, r.headerColor())
-	if r.rich && richMarkdownEnabled() && !r.collapsed {
+	if r.rich && richMarkdownEnabled() {
 		for _, spans := range r.markdownSpans() {
-			m.view.AddStyled(spans)
+			entry.AddStyled(spans) // foldable, indented child of the header
 		}
 	} else {
 		for _, ln := range r.lines {
@@ -365,11 +364,13 @@ func (m *transcriptModel) render() {
 }
 
 // appendLine grows a record's children, mirroring the change into the live entry
-// when it is currently rendered. A rich record's body is not made of children of
-// r.entry (it renders as styled top-level entries), so appending live would
-// attach an orphan child under the header; rich records are added whole and never
-// streamed, but invalidate the styled cache and re-render defensively to stay
-// correct if that ever changes.
+// when it is currently rendered. A rich record's body renders as styled children
+// derived from the raw text (via markdownSpans), so a new line cannot just be
+// appended as a plain child — the styled cache must be invalidated and the record
+// re-rendered so the Markdown is re-parsed over the grown body. No rich record is
+// ever appendLine'd today — only thinking and tool records stream — so this branch
+// is currently unreachable defensive code; it keeps the live entry correct if a
+// streaming rich path is ever added.
 func (m *transcriptModel) appendLine(r *transcriptRecord, ln styledLine) {
 	r.lines = append(r.lines, ln)
 	if r.rich {
@@ -419,28 +420,18 @@ func (m *transcriptModel) showAll() {
 	m.render()
 }
 
-// setFold collapses or expands every record (fold/unfold all). A rich record
-// renders its body as styled top-level entries when expanded but as foldable
-// children when collapsed (see renderOne), so toggling one needs a full re-render
-// to switch forms; the cheap in-place path is kept when no rich record is
-// affected (plain mode, or no assistant answers).
+// setFold collapses or expands every record (fold/unfold all). Every record —
+// rich or plain — renders its body as foldable children of the header (see
+// renderOne), so folding is a plain collapsed flip handled in place by
+// setCollapsed; no full re-render is needed.
+//
+// Folding is purely in place: it does not re-anchor the view, so a user who has
+// scrolled up keeps their position. The old rich path went through render() and
+// so snapped to the bottom, but only when a rich record's state actually changed —
+// an incidental side effect of that re-render, never a designed behaviour, and
+// inconsistent with plain mode (which already preserved position). Preserving
+// scroll uniformly is the intended, consistent behaviour.
 func (m *transcriptModel) setFold(collapsed bool) {
-	needRender := false
-	if richMarkdownEnabled() {
-		for _, r := range m.records {
-			if r.rich && r.collapsed != collapsed {
-				needRender = true
-				break
-			}
-		}
-	}
-	if needRender {
-		for _, r := range m.records {
-			r.collapsed = collapsed
-		}
-		m.render()
-		return
-	}
 	for _, r := range m.records {
 		m.setCollapsed(r, collapsed)
 	}
