@@ -1015,6 +1015,13 @@ func (sw *SessionWindow) guardInterjectButton() {
 // button is black: clearly readable yet visibly recessed from the bright-white
 // enabled label. Coordinates with the #202 contrast audit (contrastRatio,
 // minContrastLarge) rather than re-introducing a one-off low-contrast colour.
+//
+// This drives only the resting foreground (b.FG). On keyboard focus turbotui paints
+// the button with the theme's ButtonFocusFG/ButtonFocusBG instead, so a focused
+// Interject deliberately follows the default button focus colours — matching a
+// focused Queue (the "consistent with Queue" ask) and staying legible — rather than
+// pinning a focus FG the way Stop pins colorError, whose red is a semantic identity
+// Interject does not share.
 func interjectButtonFG(enabled bool) tui.Color {
 	th := tv.ActiveTheme()
 	if enabled {
