@@ -178,6 +178,14 @@ func newSidebar(wb *Workbench) *sidebar {
 		if len(indicators) > 0 {
 			ind := strings.Join(indicators, " ")
 			x := abs.X + abs.W - len([]rune(ind)) - 1
+			if x < abs.X+20 && len(indicators) > 1 {
+				// Too narrow for a separator between both indicators (the degenerate
+				// minimum-width case): drop the space before letting the right-edge clip
+				// eat a count digit, so "❓1⏳1" keeps both glyphs AND both counts (issue
+				// #207). A count-less badge is the least useful cell to surface.
+				ind = strings.Join(indicators, "")
+				x = abs.X + abs.W - len([]rune(ind)) - 1
+			}
 			if x < abs.X+20 {
 				x = abs.X + 20
 			}
@@ -328,6 +336,17 @@ func (s *sidebar) removeSession(id string) {
 	for _, child := range node.Children {
 		if ref, ok := child.Data.(nodeRef); ok {
 			delete(s.agents, ref.agentID)
+			// Prune the Workbench's clarify dedup entry for this sub-agent: one still
+			// in StatusWaiting at close emits no terminal event, so without this its
+			// key would linger (issue #207). The key is reconstructed exactly as
+			// EmitSessionEvent derives it (agent id, else session/name).
+			if s.wb != nil && s.wb.clarifyWaiting != nil {
+				key := ref.agentID
+				if key == "" {
+					key = id + "/" + ref.name
+				}
+				delete(s.wb.clarifyWaiting, key)
+			}
 		}
 	}
 	roots := s.tree.Roots[:0]

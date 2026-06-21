@@ -281,8 +281,10 @@ type Workbench struct {
 	// but does not emit the resume in between — into balanced per-sub-agent
 	// transitions, so the sidebar's per-session clarify reference count is bumped
 	// once per waiting sub-agent and dropped once when it resolves (issue #207).
-	// Touched only on the UI thread (from EmitSessionEvent), like the sidebar's own
-	// clarify state, so it needs no lock.
+	// Entries are removed on a sub-agent's terminal event; sidebar.removeSession
+	// also prunes a closed session's still-waiting sub-agents so none linger.
+	// Touched only on the UI thread (from EmitSessionEvent / removeSession), like
+	// the sidebar's own clarify state, so it needs no lock.
 	clarifyWaiting map[string]bool
 	windowConfig   config.WindowConfig
 	// budget holds the per-session token-budget configuration used by every
