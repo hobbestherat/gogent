@@ -586,12 +586,27 @@ func (w *Workbench) settingsItems() []*tv.MenuItem {
 	return items
 }
 
-// RefreshTheme re-applies the active palette to the long-lived UI chrome after a
-// theme change: the desktop background, sidebar and menu bar all read the
-// package-level colour variables at draw time, so rebuilding the menu and
-// repainting is enough to recolour them without a restart (issue #103).
+// RefreshTheme re-applies the active palette to the whole live UI after a theme
+// change, so the change takes effect without a restart (issues #103, #204). The
+// desktop background, sidebar and (rebuilt) menu bar read the active palette at
+// draw time, so rebuilding the menu recolours the chrome; but the open session
+// windows froze their colours at construction, so each is re-skinned in turn —
+// its transcript re-rendered in the new palette and its window/widget chrome
+// re-seeded (see SessionWindow.refreshTheme) — before a full desktop redraw. This
+// covers the same regions a restart fixes, where ApplyTheme runs before the
+// windows are built.
 func (w *Workbench) RefreshTheme() {
-	w.rebuildMenu() // also repaints the desktop
+	w.rebuildMenu() // rebuilds the menu bar from the new palette and repaints the desktop
+	w.mu.Lock()
+	windows := make([]*SessionWindow, 0, len(w.sessions))
+	for _, sw := range w.sessions {
+		windows = append(windows, sw)
+	}
+	w.mu.Unlock()
+	for _, sw := range windows {
+		sw.refreshTheme()
+	}
+	w.desktop.Redraw()
 }
 
 // viewItems builds the View submenu: find-in-transcript, the event-type filter

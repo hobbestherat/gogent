@@ -50,10 +50,68 @@ func (k eventKind) label() string {
 	return "?"
 }
 
-// styledLine is one foldable child line with its own colour.
+// colorRole names a semantic palette slot a transcript record or child line is
+// drawn from. Records and lines remember a role (not just a frozen tui.Color) so
+// a live theme change can recolour the existing transcript when it is re-rendered:
+// effectiveColor/headerColor resolve the role against the *current* package
+// palette at render time (issue #204). roleNone means "no semantic role — use the
+// stored color verbatim", for the few lines that carry an explicit, non-palette
+// colour (e.g. permission-dialog body text).
+type colorRole uint8
+
+const (
+	roleNone colorRole = iota
+	roleUser
+	roleAgent
+	roleNote
+	roleTool
+	roleResult
+	roleInfo
+	roleError
+)
+
+// roleColor resolves a colorRole to the live package palette variable for that
+// role. It is the single point that maps the stable semantic roles onto the
+// colours ApplyTheme installs, so a re-render after a theme change paints every
+// record in the new palette (issue #204).
+func roleColor(role colorRole) tui.Color {
+	switch role {
+	case roleUser:
+		return colorUser
+	case roleAgent:
+		return colorAgent
+	case roleNote:
+		return colorNote
+	case roleTool:
+		return colorTool
+	case roleResult:
+		return colorResult
+	case roleInfo:
+		return colorInfo
+	case roleError:
+		return colorError
+	}
+	return tui.Color{}
+}
+
+// styledLine is one foldable child line with its own colour. role is the semantic
+// palette slot the line draws from (issue #204); color is the snapshot taken when
+// the line was built and is used only when role is roleNone.
 type styledLine struct {
 	text  string
 	color tui.Color
+	role  colorRole
+}
+
+// effectiveColor is the colour the line is painted in: the live colour for its
+// semantic role, or the stored snapshot when it carries no role. Resolving by
+// role at render time is what lets a live theme change recolour existing lines
+// (issue #204).
+func (ln styledLine) effectiveColor() tui.Color {
+	if ln.role != roleNone {
+		return roleColor(ln.role)
+	}
+	return ln.color
 }
 
 // transcriptRecord is the model-side view of one transcript entry: a header
@@ -62,9 +120,14 @@ type styledLine struct {
 // it is filtered out), so in-place updates (e.g. a tool result arriving) and
 // fold/unfold can mutate the view without a full rebuild.
 type transcriptRecord struct {
-	kind      eventKind
-	header    string
+	kind   eventKind
+	header string
+	// color is the header colour snapshot taken when the record was built; role is
+	// its semantic palette slot (issue #204). headerColor prefers role so a live
+	// theme change recolours the existing header on re-render, falling back to color
+	// for a record with no role.
 	color     tui.Color
+	role      colorRole
 	lines     []styledLine
 	collapsed bool
 	entry     *tv.TextEntry
@@ -84,6 +147,16 @@ type transcriptRecord struct {
 	// spans.
 	styled    [][]tv.StyledSpan
 	styledGen uint64
+}
+
+// headerColor is the colour the record's header is painted in: the live colour
+// for its semantic role, or the stored snapshot when it carries no role (issue
+// #204).
+func (r *transcriptRecord) headerColor() tui.Color {
+	if r.role != roleNone {
+		return roleColor(r.role)
+	}
+	return r.color
 }
 
 // markdownSpans returns the record's rendered Markdown lines, computing and
@@ -234,14 +307,14 @@ func (m *transcriptModel) trim() {
 // invisible. Every other record always uses the flat children path, which keeps
 // folding and is the fallback in plain/no-colour mode.
 func (m *transcriptModel) renderOne(r *transcriptRecord) {
-	entry := m.view.AddColored(r.header, r.color)
+	entry := m.view.AddColored(r.header, r.headerColor())
 	if r.rich && richMarkdownEnabled() && !r.collapsed {
 		for _, spans := range r.markdownSpans() {
 			m.view.AddStyled(spans)
 		}
 	} else {
 		for _, ln := range r.lines {
-			entry.AddColored(ln.text, ln.color)
+			entry.AddColored(ln.text, ln.effectiveColor())
 		}
 	}
 	entry.SetCollapsed(r.collapsed)
@@ -282,7 +355,7 @@ func (m *transcriptModel) appendLine(r *transcriptRecord, ln styledLine) {
 		return
 	}
 	if r.entry != nil {
-		r.entry.AddColored(ln.text, ln.color)
+		r.entry.AddColored(ln.text, ln.effectiveColor())
 	}
 }
 
