@@ -32,7 +32,7 @@ var (
 	chromeDesktopFG = tui.ANSIColor(7)  // hint text on the desktop
 	chromeDesktopBG = tui.ANSIColor(4)  // desktop background (blue)
 	chromePanelFG   = tui.ANSIColor(7)  // sidebar body text
-	chromePanelBG   = tui.ANSIColor(0)  // sidebar background
+	chromePanelBG   = tui.ANSIColor(4)  // sidebar background (matches the desktop chrome)
 	chromeTitle     = tui.ANSIColor(15) // panel titles (bright white)
 	chromeDivider   = tui.ANSIColor(8)  // separators / borders
 	chromeAccent    = tui.ANSIColor(11) // indicators / badges
@@ -98,13 +98,22 @@ type Theme struct {
 	Title     tui.Color
 	Divider   tui.Color
 	Accent    tui.Color
+
+	// CodeBG is the background painted behind fenced/indented code blocks in the
+	// rich-Markdown transcript (issue #184). It is a theme role, not a hardcoded
+	// black, so code blocks read as part of the active theme rather than a black
+	// island (issue #200). Whether it is painted at all is decided per palette in
+	// applyMarkdownPalette (the pure-black high-contrast preset suppresses it).
+	CodeBG tui.Color
 }
 
 // Built-in palette names accepted in config (case-insensitive). The
-// high-contrast aliases map to the same Okabe–Ito-based colourblind-safe preset.
+// high-contrast aliases map to the same Okabe–Ito-based colourblind-safe preset;
+// the dark aliases map to the plain black-background "dark" preset (issue #200).
 const (
 	themeDefault      = "default"
 	themeHighContrast = "high-contrast"
+	themeDark         = "dark"
 )
 
 // canonicalThemeName maps the configured palette name (and its accepted
@@ -113,18 +122,22 @@ func canonicalThemeName(name string) string {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "high-contrast", "high_contrast", "highcontrast", "contrast", "colorblind", "colourblind":
 		return themeHighContrast
+	case "dark", "midnight", "black":
+		return themeDark
 	default:
 		return themeDefault
 	}
 }
 
 // paletteByName returns the raw (un-degraded) built-in palette for a name. The
-// default palette uses 16-colour ANSI indices; the high-contrast palette uses
-// the Okabe–Ito colourblind-safe colours as truecolor RGB, degraded later.
+// default palette uses 16-colour ANSI indices; the high-contrast and dark
+// palettes use truecolor RGB (degraded later) for their black backgrounds.
 func paletteByName(name string) Theme {
 	switch canonicalThemeName(name) {
 	case themeHighContrast:
 		return highContrastPalette()
+	case themeDark:
+		return darkPalette()
 	default:
 		return defaultPalette()
 	}
@@ -144,10 +157,15 @@ func defaultPalette() Theme {
 		DesktopFG: tui.ANSIColor(7),
 		DesktopBG: tui.ANSIColor(4),
 		PanelFG:   tui.ANSIColor(7),
-		PanelBG:   tui.ANSIColor(0),
-		Title:     tui.ANSIColor(15),
-		Divider:   tui.ANSIColor(8),
-		Accent:    tui.ANSIColor(11),
+		// The sidebar shares the blue desktop chrome rather than being a black
+		// island (issue #200); the divider glyph and title still delineate it.
+		PanelBG: tui.ANSIColor(4),
+		Title:   tui.ANSIColor(15),
+		Divider: tui.ANSIColor(8),
+		Accent:  tui.ANSIColor(11),
+		// Fenced-code panel: the desktop blue, so code blocks belong to the theme
+		// instead of painting black-on-blue (issue #200).
+		CodeBG: tui.ANSIColor(4),
 	}
 }
 
@@ -186,6 +204,44 @@ func highContrastPalette() Theme {
 		Title:     okabeYellow,
 		Divider:   grey,
 		Accent:    okabeYellow,
+		// Unused: applyMarkdownPalette suppresses the code background for this
+		// pure-black preset (a black panel on black would vanish), but the role is
+		// set for completeness so the Theme is fully populated.
+		CodeBG: black,
+	}
+}
+
+// darkPalette is a plain black-background dark theme (issue #200): an easy-on-the
+// -eye look with a cohesive, muted palette — cool blues and greens for prose and
+// the semantic roles, a warm amber accent, and soft whites for chrome. Unlike the
+// high-contrast preset it prioritises aesthetic cohesion over accessibility-max,
+// so the colours are desaturated rather than maximally bright. Expressed as
+// truecolor RGB and degraded to the terminal's fidelity by ResolveTheme.
+func darkPalette() Theme {
+	black := tui.RGBColor(0x00, 0x00, 0x00)
+	softWhite := tui.RGBColor(0xD6, 0xD6, 0xD6)
+	title := tui.RGBColor(0xEC, 0xEC, 0xEC)
+	dimGrey := tui.RGBColor(0x80, 0x80, 0x80)
+	divider := tui.RGBColor(0x5A, 0x5A, 0x5A)
+	return Theme{
+		Name:      themeDark,
+		User:      tui.RGBColor(0x7D, 0xCF, 0xE6), // soft cyan
+		Agent:     tui.RGBColor(0x9E, 0xCE, 0x6A), // muted green
+		Note:      dimGrey,                        // thoughts
+		Tool:      tui.RGBColor(0xE0, 0xAF, 0x68), // warm amber
+		Result:    tui.RGBColor(0xC6, 0x8F, 0xD6), // soft mauve
+		Info:      tui.RGBColor(0x7A, 0xA2, 0xF7), // muted periwinkle
+		Error:     tui.RGBColor(0xE0, 0x6C, 0x75), // muted red
+		DesktopFG: softWhite,
+		DesktopBG: black,
+		PanelFG:   softWhite,
+		PanelBG:   black,
+		Title:     title,
+		Divider:   divider,
+		Accent:    tui.RGBColor(0xE0, 0xAF, 0x68), // amber, matching the tool tone
+		// A subtle dark-grey panel lifts code blocks off the pure-black background
+		// so they read as a distinct region.
+		CodeBG: tui.RGBColor(0x26, 0x26, 0x26),
 	}
 }
 
@@ -218,6 +274,7 @@ func ResolveTheme(cfg config.ThemeConfig, env func(string) string, noColorFlag b
 	t.Title = degrade(t.Title, level)
 	t.Divider = degrade(t.Divider, level)
 	t.Accent = degrade(t.Accent, level)
+	t.CodeBG = degrade(t.CodeBG, level)
 	return t
 }
 
@@ -283,6 +340,8 @@ func applyOverrides(t *Theme, overrides map[string]string) {
 			t.Divider = c
 		case "accent":
 			t.Accent = c
+		case "code_bg":
+			t.CodeBG = c
 		}
 	}
 }
@@ -435,10 +494,11 @@ func ApplyTheme(t Theme) {
 		// lines must be too (no ANSI colour is emitted).
 		tv.DefaultTheme = neutralTVTheme()
 		colorDialogHeader, colorDialogDetail = tui.DefaultColor(), tui.DefaultColor()
-	case t.Name == themeHighContrast:
-		// High-contrast chrome is a black dialog, so the bright palette accents
-		// (which would wash out on light grey) read well here.
-		tv.DefaultTheme = highContrastTVTheme(t)
+	case t.Name == themeHighContrast || t.Name == themeDark:
+		// The high-contrast and dark presets both have a black canvas, so they use a
+		// black dialog chrome where the palette accents (which would wash out on the
+		// stock light grey) read well.
+		tv.DefaultTheme = blackCanvasTVTheme(t)
 		colorDialogHeader, colorDialogDetail = t.User, t.Tool
 	default:
 		// Stock light-grey dialog: use the dark, high-contrast accents.
@@ -463,10 +523,10 @@ func neutralTVTheme() tv.Theme {
 	}
 }
 
-// highContrastTVTheme derives the window/dialog chrome for the high-contrast
-// preset from t: a black canvas with white text and the palette's accent colour
-// marking focus, titles and selection.
-func highContrastTVTheme(t Theme) tv.Theme {
+// blackCanvasTVTheme derives the window/dialog chrome for a black-background
+// preset (high-contrast or dark) from t: a black canvas with the palette's
+// foreground text and its accent colour marking focus, titles and selection.
+func blackCanvasTVTheme(t Theme) tv.Theme {
 	black, white, accent, divider, err := t.PanelBG, t.PanelFG, t.Accent, t.Divider, t.Error
 	return tv.Theme{
 		DesktopBG: black, DesktopFG: white,

@@ -63,7 +63,7 @@ var mdPalette = markdownPalette{
 	quote:      tui.ANSIColor(8),  // dim grey
 	listMarker: tui.ANSIColor(11), // bright yellow
 	rule:       tui.ANSIColor(8),  // dim grey
-	codeBG:     tui.ANSIColor(0),  // black
+	codeBG:     tui.ANSIColor(4),  // desktop blue (matches the default palette CodeBG)
 	hasCodeBG:  true,
 	keyword:    tui.ANSIColor(12), // blue
 	str:        tui.ANSIColor(11), // yellow
@@ -105,10 +105,11 @@ func applyMarkdownPalette(t Theme) {
 		builtin:    t.User,
 	}
 	if t.Level != ColorNone {
-		// A subtle background sets fenced code apart. The high-contrast preset is
-		// already pure black, so a black code background would vanish — rely on its
-		// bright token foregrounds instead.
-		mdPalette.codeBG = tui.ANSIColor(0)
+		// A subtle background sets fenced code apart, derived from the active theme
+		// (issue #200) so it belongs to the palette instead of always being black.
+		// The high-contrast preset is already pure black, so a code background would
+		// vanish — rely on its bright token foregrounds instead.
+		mdPalette.codeBG = t.CodeBG
 		mdPalette.hasCodeBG = t.Name != themeHighContrast
 	}
 	richMarkdownColorOK = t.Level != ColorNone

@@ -399,16 +399,18 @@ type MCPServerConfig struct {
 // config.json without a "theme" key is unaffected. Colour is still disabled at
 // runtime by the NO_COLOR env var or the --no-color flag regardless of this.
 type ThemeConfig struct {
-	// Name selects a built-in palette: "default" (the original colours) or
+	// Name selects a built-in palette: "default" (the original colours),
 	// "high-contrast" (a colourblind-safe, high-contrast preset; aliases:
-	// "colorblind", "high_contrast"). Empty means "default".
+	// "colorblind", "high_contrast"), or "dark" (a plain black-background dark
+	// theme; aliases: "midnight", "black"). Empty means "default".
 	Name string `json:"name,omitempty"`
 	// NoColor disables all colour (terminal defaults only), the config-file
 	// equivalent of the NO_COLOR env var / --no-color flag.
 	NoColor bool `json:"no_color,omitempty"`
 	// Overrides recolours individual roles on top of the selected palette. Keys
-	// are role names — user, agent, note, tool, result, info, error, and the
-	// chrome roles desktop_fg/desktop_bg/panel_fg/panel_bg/title/divider/accent.
+	// are role names — user, agent, note, tool, result, info, error, the chrome
+	// roles desktop_fg/desktop_bg/panel_fg/panel_bg/title/divider/accent, and
+	// code_bg (the fenced-code block background).
 	// Values are "#RRGGBB" hex, a decimal ANSI index ("0".."255"), or
 	// "default"/"none" for the terminal default. Unknown keys/values are ignored.
 	Overrides map[string]string `json:"overrides,omitempty"`
