@@ -1828,6 +1828,7 @@ func (g *Gogent) Statistics() stats.Report {
 		snap := it.s.Snapshot()
 		primary := stats.FromSnapshot(it.s.ConnectorStats())
 		fast := stats.FromSnapshot(it.s.FastConnectorStats())
+		primaryModel := it.s.PrimaryModel()
 		rep.Sessions = append(rep.Sessions, stats.SessionRow{
 			ID:            it.id,
 			Turns:         snap.Turns,
@@ -1837,6 +1838,7 @@ func (g *Gogent) Statistics() stats.Report {
 			ContextTokens: snap.ContextTokens,
 			ContextWindow: snap.ContextWindow,
 			Compactions:   it.s.CompactionCount(),
+			PrimaryModel:  primaryModel,
 			Primary:       primary,
 			Fast:          fast,
 		})
@@ -1848,12 +1850,25 @@ func (g *Gogent) Statistics() stats.Report {
 		rep.Totals.Compactions += it.s.CompactionCount()
 		rep.Totals.Primary = rep.Totals.Primary.Add(primary)
 		rep.Totals.Fast = rep.Totals.Fast.Add(fast)
-		for _, m := range it.s.ModelTokens() {
+		// Per-model breakdown (issue #191): tokens and connector metrics are
+		// attributed to the model that actually incurred them (a session that
+		// switched models contributes to several entries), while the session and
+		// sub-agent counts are keyed by the session's current primary model — that is
+		// the model the panel scopes "sessions/sub-agents using this model" to.
+		for _, m := range it.s.PerModelStats() {
 			mt := modelTotals[m.Name]
 			mt.Name = m.Name
 			mt.TokensIn += m.TokensIn
 			mt.TokensOut += m.TokensOut
+			mt.Connector = mt.Connector.Add(stats.FromSnapshot(m.Connector))
 			modelTotals[m.Name] = mt
+		}
+		if primaryModel != "" {
+			mt := modelTotals[primaryModel]
+			mt.Name = primaryModel
+			mt.Sessions++
+			mt.SubAgents += it.s.SubAgentCount()
+			modelTotals[primaryModel] = mt
 		}
 	}
 

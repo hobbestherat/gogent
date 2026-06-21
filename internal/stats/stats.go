@@ -55,16 +55,21 @@ type Totals struct {
 
 // SessionRow is the per-session slice of the totals.
 type SessionRow struct {
-	ID            string        `json:"id"`
-	Turns         int           `json:"turns"`
-	TokensIn      int           `json:"tokens_in"`
-	TokensOut     int           `json:"tokens_out"`
-	ToolCalls     int           `json:"tool_calls"`
-	ContextTokens int           `json:"context_tokens"`
-	ContextWindow int           `json:"context_window"`
-	Compactions   int           `json:"compactions"`
-	Primary       ConnectorStat `json:"primary"`
-	Fast          ConnectorStat `json:"fast"`
+	ID            string `json:"id"`
+	Turns         int    `json:"turns"`
+	TokensIn      int    `json:"tokens_in"`
+	TokensOut     int    `json:"tokens_out"`
+	ToolCalls     int    `json:"tool_calls"`
+	ContextTokens int    `json:"context_tokens"`
+	ContextWindow int    `json:"context_window"`
+	Compactions   int    `json:"compactions"`
+	// PrimaryModel is the config name of the model the session currently routes its
+	// primary turns through. It lets the Overall panel attribute a session (and its
+	// sub-agents) to a model when scoping metrics per model (issue #191). Empty when
+	// no model has been selected yet.
+	PrimaryModel string        `json:"primary_model,omitempty"`
+	Primary      ConnectorStat `json:"primary"`
+	Fast         ConnectorStat `json:"fast"`
 }
 
 // ConnectorStat mirrors the low-level model connector counters (see
@@ -166,11 +171,33 @@ type SkillStat struct {
 	TotalCalls int    `json:"total_calls"`
 }
 
-// ModelStat is the per-model token attribution aggregated across sessions.
+// ModelStat is the per-model usage aggregated across sessions (issue #191). It
+// carries the session-layer token attribution (TokensIn/TokensOut) joined with the
+// per-model connector metrics (Connector) and the count of sessions / sub-agents
+// currently using the model, so the Overall panel can scope every metric below its
+// selector to one model. Sessions and SubAgents are keyed by each session's current
+// primary model; tokens and Connector are attributed to the model that actually
+// incurred them (a session that switched models contributes to several entries).
 type ModelStat struct {
-	Name      string `json:"name"`
-	TokensIn  int    `json:"tokens_in"`
-	TokensOut int    `json:"tokens_out"`
+	Name      string        `json:"name"`
+	TokensIn  int           `json:"tokens_in"`
+	TokensOut int           `json:"tokens_out"`
+	Sessions  int           `json:"sessions,omitempty"`
+	SubAgents int           `json:"sub_agents,omitempty"`
+	Connector ConnectorStat `json:"connector"`
+}
+
+// ModelByName returns the aggregated breakdown for a model (by config name) and
+// whether it was found, so the Overall panel can scope its metrics to the selected
+// model. An empty name (the "all models" option) never matches a real entry; the
+// caller uses the report's grand totals for the aggregate view instead.
+func (r Report) ModelByName(name string) (ModelStat, bool) {
+	for _, m := range r.Models {
+		if m.Name == name {
+			return m, true
+		}
+	}
+	return ModelStat{}, false
 }
 
 // JSON returns the report as pretty-printed JSON. It is the structured export
@@ -234,6 +261,9 @@ func (r Report) CSV() (string, error) {
 	for _, m := range r.Models {
 		row("model", m.Name, "tokens_in", int64(m.TokensIn))
 		row("model", m.Name, "tokens_out", int64(m.TokensOut))
+		row("model", m.Name, "sessions", int64(m.Sessions))
+		row("model", m.Name, "sub_agents", int64(m.SubAgents))
+		writeConnectorCSV(w, "model:"+m.Name, "connector", m.Connector)
 	}
 
 	w.Flush()

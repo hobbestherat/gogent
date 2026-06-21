@@ -144,6 +144,42 @@ func (s StatsSnapshot) Add(other StatsSnapshot) StatsSnapshot {
 	}
 }
 
+// Sub returns the element-wise difference s-other. It is how a stable per-model
+// accumulator folds in the *delta* of a connector snapshot since it was last read
+// (see UserSession.recordConnectorUsage): the connector counters grow within a
+// turn, so subtracting the previously-read snapshot yields just the new activity
+// to attribute to the active model. The result can be negative if the connector
+// was rebuilt/zeroed between reads; callers that require monotonicity guard for it.
+func (s StatsSnapshot) Sub(other StatsSnapshot) StatsSnapshot {
+	return StatsSnapshot{
+		RequestCount:               s.RequestCount - other.RequestCount,
+		SuccessCount:               s.SuccessCount - other.SuccessCount,
+		ErrorCount:                 s.ErrorCount - other.ErrorCount,
+		TotalTokensIn:              s.TotalTokensIn - other.TotalTokensIn,
+		TotalCachedTokensIn:        s.TotalCachedTokensIn - other.TotalCachedTokensIn,
+		TotalTokensOut:             s.TotalTokensOut - other.TotalTokensOut,
+		TotalTimeMs:                s.TotalTimeMs - other.TotalTimeMs,
+		TimeoutCount:               s.TimeoutCount - other.TimeoutCount,
+		ContextWindowOverflowCount: s.ContextWindowOverflowCount - other.ContextWindowOverflowCount,
+		RefusalCount:               s.RefusalCount - other.RefusalCount,
+		GenericErrorCount:          s.GenericErrorCount - other.GenericErrorCount,
+	}
+}
+
+// IsReset reports whether s — a delta produced by Sub — indicates the underlying
+// connector was rebuilt/zeroed between the two reads: a monotonic counter going
+// backwards. A live connector's counters only ever grow, so ANY negative component
+// means the previous baseline no longer applies and the current snapshot should be
+// treated as a fresh start. Checking every field (not just RequestCount) is what
+// keeps the per-model accumulator monotonic even when a rebuild's request count
+// happens to recover to its prior level while token counters drop.
+func (s StatsSnapshot) IsReset() bool {
+	return s.RequestCount < 0 || s.SuccessCount < 0 || s.ErrorCount < 0 ||
+		s.TotalTokensIn < 0 || s.TotalCachedTokensIn < 0 || s.TotalTokensOut < 0 ||
+		s.TotalTimeMs < 0 || s.TimeoutCount < 0 || s.ContextWindowOverflowCount < 0 ||
+		s.RefusalCount < 0 || s.GenericErrorCount < 0
+}
+
 // Snapshot returns a mutex-free copy of the current counters.
 func (s *ModelStats) Snapshot() StatsSnapshot {
 	s.Mutex.Lock()

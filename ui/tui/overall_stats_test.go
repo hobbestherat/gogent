@@ -23,7 +23,7 @@ func TestBuildOverallStats(t *testing.T) {
 		Fast: stats.ConnectorStat{Requests: 9, TokensIn: 9999, TokensOut: 9999},
 	}}
 	got := buildOverallStats(report, 3, 5,
-		&config.ModelConfig{Name: "groq-free", DisplayName: "Groq", Endpoint: "https://api.groq.com/openai/v1/chat/completions"})
+		&config.ModelConfig{Name: "groq-free", DisplayName: "Groq", Endpoint: "https://api.groq.com/openai/v1/chat/completions"}, "")
 	want := overallStats{Sessions: 3, SubAgents: 5, TokensIn: 1000, TokensOut: 500,
 		Requests: 42, Errors: 3, CacheHitPct: 25, Model: "Groq", APIEndpoint: "api.groq.com"}
 	if got != want {
@@ -35,7 +35,7 @@ func TestBuildOverallStats(t *testing.T) {
 // safe zero view (the panel's first frame before any traffic / session, and the
 // "no statistics handler" path).
 func TestBuildOverallStatsEmpty(t *testing.T) {
-	got := buildOverallStats(stats.Report{}, 0, 0, nil)
+	got := buildOverallStats(stats.Report{}, 0, 0, nil, "")
 	if got != (overallStats{}) {
 		t.Fatalf("empty report should yield zero view, got %+v", got)
 	}
@@ -66,7 +66,7 @@ func TestBuildOverallStatsModel(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildOverallStats(stats.Report{}, 0, 0, tc.model)
+			got := buildOverallStats(stats.Report{}, 0, 0, tc.model, "")
 			if got.Model != tc.wantModel {
 				t.Errorf("Model = %q, want %q", got.Model, tc.wantModel)
 			}
@@ -158,8 +158,10 @@ func TestOverallBandHeightInvariant(t *testing.T) {
 		t.Fatalf("formatOverallStats line count = %d, want overallMetricLines %d",
 			len(lines), overallMetricLines)
 	}
-	if got := overallBandHeight - 2; got != overallMetricLines {
-		t.Fatalf("overallBandHeight-2 = %d, want overallMetricLines %d", got, overallMetricLines)
+	// The band reserves the metric rows plus a separator, a title and the model
+	// selector row at the top (issue #191).
+	if got := overallBandHeight - overallSelectorLines - 2; got != overallMetricLines {
+		t.Fatalf("overallBandHeight-overallSelectorLines-2 = %d, want overallMetricLines %d", got, overallMetricLines)
 	}
 	if overallErrLineIdx >= len(lines) {
 		t.Fatalf("overallErrLineIdx %d out of range (%d lines)", overallErrLineIdx, len(lines))
@@ -183,7 +185,7 @@ func TestSidebarRefreshOverallStats(t *testing.T) {
 	report := stats.Report{Totals: stats.Totals{Primary: stats.ConnectorStat{
 		Requests: 10, Errors: 1, TokensIn: 500, TokensOut: 50, CachedTokensIn: 100,
 	}}}
-	s.refreshOverallStats(report, &config.ModelConfig{Name: "groq-free", DisplayName: "Groq", Endpoint: "https://api.groq.com/openai/v1/chat/completions"})
+	s.refreshOverallStats(report, &config.ModelConfig{Name: "groq-free", DisplayName: "Groq", Endpoint: "https://api.groq.com/openai/v1/chat/completions"}, "")
 
 	if s.overall.Sessions != 2 {
 		t.Errorf("Sessions = %d, want 2", s.overall.Sessions)
@@ -253,8 +255,8 @@ func TestSidebarTodosRegionReservation(t *testing.T) {
 		wantTreeH int
 	}{
 		{"tall keeps band and todos", 30, overallBandHeight, todosH, 30 - 1 - overallBandHeight - todosH},
-		{"just enough for both regions + min tree", 20, overallBandHeight, todosH, minSidebarTreeHeight},
-		{"one short drops todos, keeps band", 19, overallBandHeight, 0, 19 - 1 - overallBandHeight},
+		{"just enough for both regions + min tree", 21, overallBandHeight, todosH, minSidebarTreeHeight},
+		{"one short drops todos, keeps band", 20, overallBandHeight, 0, 20 - 1 - overallBandHeight},
 		{"very short drops both regions", 8, 0, 0, 8 - 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -338,10 +340,10 @@ func TestSidebarRegionDropMonotonic(t *testing.T) {
 		wantTodos int
 		note      string
 	}{
-		{20, overallBandHeight, todoRegionTitleLines + 3, "both regions shown"},
-		{19, overallBandHeight, 0, "todos dropped, band kept"},
-		{16, overallBandHeight, 0, "todos dropped, band still kept at the edge"},
-		{15, 0, 0, "both dropped once the band no longer fits"},
+		{21, overallBandHeight, todoRegionTitleLines + 3, "both regions shown"},
+		{20, overallBandHeight, 0, "todos dropped, band kept"},
+		{17, overallBandHeight, 0, "todos dropped, band still kept at the edge"},
+		{16, 0, 0, "both dropped once the band no longer fits"},
 		{12, 0, 0, "both dropped (no todos-without-band inversion)"},
 		{8, 0, 0, "both dropped on a short sidebar"},
 	} {
@@ -384,7 +386,7 @@ func TestSidebarOverallCountExcludesTodos(t *testing.T) {
 	})
 	s.applyTodo("s1", threeTodos())
 
-	s.refreshOverallStats(stats.Report{}, nil)
+	s.refreshOverallStats(stats.Report{}, nil, "")
 
 	if s.overall.Sessions != 1 {
 		t.Errorf("Sessions = %d, want 1", s.overall.Sessions)
@@ -402,7 +404,7 @@ func TestSidebarOverallCountExcludesTodos(t *testing.T) {
 	// A second session with its own todos must not move the sub-agent count.
 	s.addSession("s2", "Session 2", false)
 	s.applyTodo("s2", threeTodos())
-	s.refreshOverallStats(stats.Report{}, nil)
+	s.refreshOverallStats(stats.Report{}, nil, "")
 	if s.overall.Sessions != 2 {
 		t.Errorf("Sessions = %d, want 2", s.overall.Sessions)
 	}

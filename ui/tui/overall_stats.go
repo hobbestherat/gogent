@@ -35,9 +35,19 @@ type overallStats struct {
 // band height.
 const overallMetricLines = 9
 
+// overallSelectorLines is the height of the model-selector dropdown rendered at the
+// very top of the Overall band (issue #191): one row, above the separator/title, so
+// every metric below it can be scoped to the selected model.
+const overallSelectorLines = 1
+
 // overallBandHeight is the number of sidebar rows the Overall panel reserves at
-// the bottom: one separator, one title and the metric rows.
-const overallBandHeight = overallMetricLines + 2
+// the bottom: the model selector, one separator, one title and the metric rows.
+const overallBandHeight = overallSelectorLines + overallMetricLines + 2
+
+// overallAllModelsOption is the model-selector label for the aggregate view: every
+// metric below it shows the cluster-wide grand total across all models, reproducing
+// the pre-#191 behaviour. It maps to an empty model key.
+const overallAllModelsOption = "all models"
 
 // overallErrLineIdx is the metric-row index of the "errors" line, used to colour
 // a non-zero error count red in the rendered band. Pinned by a test so a
@@ -47,11 +57,17 @@ const overallErrLineIdx = 5
 // overallLabelWidth is the label column width; values align one space after it.
 const overallLabelWidth = 10
 
-// buildOverallStats assembles the panel's view from the Statistics report's grand
-// totals plus the sidebar's own session / sub-agent node counts (the
-// authoritative "what is on screen" counts) and the focused session's active
-// model config (issue #107). It is pure and unit tested.
-func buildOverallStats(report stats.Report, sessions, subAgents int, model *config.ModelConfig) overallStats {
+// buildOverallStats assembles the panel's view from the Statistics report joined
+// with the focused/selected model config (issue #107). It is pure and unit tested.
+//
+// selectedModel scopes the metrics (issue #191). When empty (the "all models"
+// option) the panel shows the cluster-wide grand total: the report's primary-backend
+// connector totals plus the sidebar's own session / sub-agent node counts (the
+// authoritative "what is on screen" counts). When a model config name is given,
+// every metric below the selector is scoped to that model from the report's
+// per-model breakdown — tokens, requests, errors and cache-hit from its connector
+// stats, and the session / sub-agent counts attributed to it.
+func buildOverallStats(report stats.Report, sessions, subAgents int, model *config.ModelConfig, selectedModel string) overallStats {
 	// The headline traffic figures come from the primary model backend's
 	// connector snapshot so tokens / requests / errors / cache-hit are all drawn
 	// from one consistent source. The auxiliary (fast/compression) backend is
@@ -66,6 +82,18 @@ func buildOverallStats(report stats.Report, sessions, subAgents int, model *conf
 		Requests:    prim.Requests,
 		Errors:      prim.Errors,
 		CacheHitPct: prim.CacheHitPercent(),
+	}
+	if selectedModel != "" {
+		// Scope every metric to the selected model. A model with no recorded usage
+		// yet simply shows zeros (ok=false leaves the zero-valued struct).
+		ms, _ := report.ModelByName(selectedModel)
+		o.Sessions = ms.Sessions
+		o.SubAgents = ms.SubAgents
+		o.TokensIn = ms.Connector.TokensIn
+		o.TokensOut = ms.Connector.TokensOut
+		o.Requests = ms.Connector.Requests
+		o.Errors = ms.Connector.Errors
+		o.CacheHitPct = ms.Connector.CacheHitPercent()
 	}
 	if model != nil {
 		// Prefer the human-friendly display name, falling back to the stable

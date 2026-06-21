@@ -43,6 +43,11 @@ type LayoutEntry struct {
 type Layout struct {
 	Entries      []LayoutEntry `json:"entries"`
 	SidebarWidth int           `json:"sidebar_width,omitempty"`
+	// OverallModel is the model config name the Overall band's selector is scoped to
+	// (issue #191); empty (the default, "all models") shows the cluster-wide grand
+	// total. Persisted alongside SidebarWidth so the choice survives a restart; a
+	// layout file written before the field existed loads cleanly as the aggregate.
+	OverallModel string `json:"overall_model,omitempty"`
 }
 
 // Entry returns the layout entry for id, or nil if none is recorded. It lets
