@@ -28,11 +28,12 @@ import (
 // live theme-apply path (#204's ApplyTheme; RefreshTheme chain) so a toggle takes
 // effect without a restart.
 
-// issue215RestoreTheme snapshots the theme globals AND the issue-215 shadowsEnabled
-// package var, restoring both on cleanup. withThemeRestore (used by
-// issue204RestoreTheme) covers the colour globals and tv themes but not
-// shadowsEnabled, so without this a test that enables NoShadow would leak
-// shadowsEnabled=false into later tests in the package.
+// issue215RestoreTheme snapshots the theme globals (including shadowsEnabled) for
+// the test and restores them on cleanup. The shared snapshot now covers
+// shadowsEnabled (see TestIssue215SnapshotRestoresShadowsEnabled), so
+// issue204RestoreTheme already restores it; this helper additionally pins it
+// explicitly as belt-and-suspenders so these tests stay hermetic even if the
+// shared snapshot regresses.
 func issue215RestoreTheme(t *testing.T) {
 	t.Helper()
 	issue204RestoreTheme(t)
@@ -58,6 +59,37 @@ func defaultShadowTheme() Theme { return resolve215(config.ThemeConfig{}) }
 func newTestMenuBar() *tv.MenuBar {
 	return tv.NewMenuBar(tv.Rect{X: 0, Y: 0, W: 40, H: 1},
 		tv.NewSubMenu("File", tv.NewMenuItem("x", nil)))
+}
+
+// --------------------------------------------------------------------------
+// Test isolation: the shared theme-global snapshot must cover shadowsEnabled.
+// --------------------------------------------------------------------------
+
+// TestIssue215SnapshotRestoresShadowsEnabled proves the SHARED theme-global
+// snapshot/restore (snapshotThemeGlobals/restoreThemeGlobals, the machinery
+// withThemeRestore wires up and the whole suite relies on) captures the issue-215
+// shadowsEnabled package var. Without it, any test that flips NoShadow via
+// ApplyTheme leaks shadowsEnabled=false into later tests — a latent cross-test
+// contamination defect that was present in the #215 PR's own test diff (the driver
+// added the global but did not extend the snapshot). This test fails against the
+// unextended snapshot and passes once shadowsEnabled is restored.
+func TestIssue215SnapshotRestoresShadowsEnabled(t *testing.T) {
+	ApplyTheme(defaultShadowTheme())
+	before := shadowsEnabled // true (default keeps shadows on)
+	if !before {
+		t.Fatalf("setup: shadowsEnabled = false under default theme, want true")
+	}
+
+	saved := snapshotThemeGlobals()
+	ApplyTheme(noShadowTheme()) // flips shadowsEnabled to false
+	if shadowsEnabled == before {
+		t.Fatalf("setup: ApplyTheme(NoShadow) did not flip shadowsEnabled (still %v)", shadowsEnabled)
+	}
+
+	restoreThemeGlobals(saved)
+	if shadowsEnabled != before {
+		t.Fatalf("restoreThemeGlobals did not restore shadowsEnabled: got %v, want %v — the shared snapshot leaks the #215 global across tests", shadowsEnabled, before)
+	}
 }
 
 // --------------------------------------------------------------------------

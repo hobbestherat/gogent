@@ -52,6 +52,7 @@ type savedThemeGlobals struct {
 	pal                  markdownPalette
 	palGen               uint64
 	richOK               bool
+	shadow               bool // issue #215: shadowsEnabled, so a NoShadow test can't leak it
 	tvTheme              tv.Theme
 }
 
@@ -68,6 +69,7 @@ func snapshotThemeGlobals() savedThemeGlobals {
 		pal:       mdPalette,
 		palGen:    mdPaletteGen,
 		richOK:    richMarkdownColorOK,
+		shadow:    shadowsEnabled,
 		tvTheme:   tv.DefaultTheme,
 	}
 }
@@ -78,6 +80,7 @@ func restoreThemeGlobals(g savedThemeGlobals) {
 	chromePanelFG, chromePanelBG = g.panelFG, g.panelBG
 	chromeTitle, chromeDivider, chromeAccent = g.title, g.divider, g.accent
 	mdPalette, mdPaletteGen, richMarkdownColorOK = g.pal, g.palGen, g.richOK
+	shadowsEnabled = g.shadow
 	tv.DefaultTheme = g.tvTheme
 }
 
