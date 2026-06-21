@@ -314,6 +314,13 @@ type Workbench struct {
 	// #22 / #53). Lazily created and only touched on the UI thread; its AfterFunc
 	// goroutine just Posts the refresh back to the UI thread.
 	statsRefresh *time.Timer
+	// overallLifetime accumulates the Overall panel's token/request/error/cache-hit
+	// figures over the whole gogent run (issue #232). The Statistics report sums only
+	// the currently-open sessions, so without this a closed session's counters would
+	// vanish from the panel; overallLifetime folds each fresh report and remembers
+	// every session's last-known tally so the totals only ever grow. Touched only on
+	// the UI thread (refreshOverall), like the rest of the Overall state.
+	overallLifetime *lifetimeStats
 	// undelivered counts window-needing session events (eventNeedsWindow) whose id
 	// had no open window when deliverSessionEvent ran, so their apply (transcript or
 	// status render) was lost. Sub-agent/todo events are excluded — the sidebar
@@ -350,6 +357,8 @@ func NewWorkbench(models []*config.ModelConfig) *Workbench {
 		// Clipboard writes OSC 52 to the same terminal (SSH-safe) and pipes to a
 		// native utility when one is available.
 		clipboard: clipboard.New(os.Stdout),
+		// Process-lifetime accumulator for the Overall panel (issue #232).
+		overallLifetime: newLifetimeStats(),
 	}
 	// Cancelled when the UI loop stops; see the shutdown field and Run.
 	w.shutdown, w.quit = context.WithCancel(context.Background())
@@ -1827,7 +1836,12 @@ func (w *Workbench) refreshOverall() {
 			modelCfg = m
 		}
 	}
-	w.sidebar.refreshOverallStats(w.handlers.GetStatistics(), modelCfg, selected)
+	// Fold the live (open-session-only) report through the process-lifetime
+	// accumulator so closing a session does not erase the tokens / requests / errors
+	// it already burned (issue #232). The full Statistics view still consumes the raw
+	// GetStatistics() report directly, so it keeps its per-active-session semantics.
+	report := w.overallLifetime.fold(w.handlers.GetStatistics())
+	w.sidebar.refreshOverallStats(report, modelCfg, selected)
 }
 
 // modelByName returns the model config with the given config Name, or nil. Unlike
