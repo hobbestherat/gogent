@@ -1976,17 +1976,14 @@ func (sw *SessionWindow) addAssistant(text string) {
 	if strings.TrimSpace(text) == "" {
 		return
 	}
-	// The final answer is what the user asked for, so re-anchor the transcript on
-	// it even when the user had scrolled up to read earlier output mid-turn:
-	// renderOne respects the current scroll position, and the view re-pins to the
-	// bottom on the append only while following, so follow must be re-enabled
-	// before the append. Without this the answer is appended (it is in AllText, the
+	// The final answer is what the user asked for, so re-anchor the transcript on it
+	// (addAndReveal) even when the user had scrolled up to read earlier output
+	// mid-turn. Without the re-anchor the answer is appended (it is in AllText, the
 	// session file and the model) but never scrolled into view, which read as the
 	// agent silently dropping its reply (issue #227). Streaming events (thoughts,
 	// tool calls/results) intentionally do not re-anchor, so reading scrolled-up
 	// history during a turn is undisturbed until the answer lands.
-	sw.transcript.scrollToBottom()
-	sw.transcript.add(&transcriptRecord{
+	sw.transcript.addAndReveal(&transcriptRecord{
 		kind: kindAssistant, header: "Gogent:", color: colorAgent, role: roleAgent,
 		lines: styledChildLines(text, roleAgent),
 		rich:  true,
@@ -2155,8 +2152,7 @@ func (sw *SessionWindow) addError(text string) {
 	for _, line := range childLines(text) {
 		lines = append(lines, styledLine{text: "  " + line, color: colorError, role: roleError})
 	}
-	sw.transcript.scrollToBottom()
-	sw.transcript.add(&transcriptRecord{
+	sw.transcript.addAndReveal(&transcriptRecord{
 		kind: kindError, header: "error:", color: colorError, role: roleError, lines: lines,
 	})
 }

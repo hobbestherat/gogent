@@ -328,8 +328,23 @@ func (m *transcriptModel) renderOne(r *transcriptRecord) {
 // waiting to see — the turn's final answer — calls this BEFORE the add. The
 // TextView re-pins to the bottom on the append's content change only while
 // following, so enabling follow first is what makes the new record visible even
-// when the user had scrolled up to read earlier output (issue #227).
+// when the user had scrolled up to read earlier output (issue #227). Prefer
+// addAndReveal, which bundles the correct order; call this directly only when the
+// add cannot go through it.
 func (m *transcriptModel) scrollToBottom() { m.view.ScrollToBottom() }
+
+// addAndReveal appends a record with the view re-anchored on it, so it is shown
+// even when the user had scrolled up to read earlier output. It enforces the
+// otherwise-implicit ordering contract — scrollToBottom MUST precede the add, since
+// the view re-pins to the bottom on the append's content change only while
+// following — by bundling the two. Records the user is waiting to see (the turn's
+// final answer, a turn-ending error) go through here rather than re-anchoring by
+// hand, so a future caller cannot reintroduce issue #227 by appending without first
+// re-anchoring.
+func (m *transcriptModel) addAndReveal(r *transcriptRecord) *transcriptRecord {
+	m.scrollToBottom()
+	return m.add(r)
+}
 
 // render rebuilds the whole view from the records, honouring the active filter
 // and search and prefixing a status line while either is active.

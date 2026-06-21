@@ -314,14 +314,14 @@ type Workbench struct {
 	// #22 / #53). Lazily created and only touched on the UI thread; its AfterFunc
 	// goroutine just Posts the refresh back to the UI thread.
 	statsRefresh *time.Timer
-	// undelivered counts session events whose id had no open window when
-	// deliverSessionEvent ran, so the apply (transcript-render) path was skipped. It
-	// counts every such event regardless of type — not only finals — as a tripwire on
-	// the invariant that a live session keeps its window for the whole turn; sidebar-
-	// routed effects (sub-agent/todo badges) still run before the check, so a counted
-	// event is "not rendered into a transcript", not necessarily "lost". It stays zero
-	// in normal operation; a non-zero value is the lifecycle regression that could let
-	// a final answer vanish with no trace (issue #227). Guarded by w.mu.
+	// undelivered counts window-needing session events (eventNeedsWindow) whose id
+	// had no open window when deliverSessionEvent ran, so their apply (transcript or
+	// status render) was lost. Sub-agent/todo events are excluded — the sidebar
+	// services them regardless of the window — so a non-zero value means a real
+	// render was dropped, a tripwire on the invariant that a live session keeps its
+	// window for the whole turn. It stays zero in normal operation; a non-zero value
+	// is the lifecycle regression that could let a final answer vanish with no trace
+	// (issue #227). Guarded by w.mu.
 	undelivered int
 }
 
@@ -1592,7 +1592,11 @@ func (w *Workbench) deliverSessionEvent(id string, ev agent.SessionEvent) bool {
 	delivered := sw != nil
 	if delivered {
 		sw.apply(ev)
-	} else {
+	} else if eventNeedsWindow(ev.Type) {
+		// Only count a missing window as a dropped event when the window was actually
+		// needed: sub-agent and todo events are fully serviced by the sidebar above,
+		// independent of the window, so a missing window loses nothing for them and
+		// counting them would cry wolf on legitimate windowless sidebar traffic.
 		w.noteUndeliveredEvent(id, ev)
 	}
 	w.maybeNotify(id, ev)
@@ -1601,6 +1605,22 @@ func (w *Workbench) deliverSessionEvent(id string, ev agent.SessionEvent) bool {
 	// for one per event (issue #53 / redraw note in #22).
 	w.scheduleOverallRefresh()
 	return delivered
+}
+
+// eventNeedsWindow reports whether a session event's effect requires the session
+// window — its transcript or status line, reached via SessionWindow.apply. Sub-agent
+// and todo events are serviced entirely by the sidebar in deliverSessionEvent,
+// independent of the window, so a missing window loses nothing for them; every other
+// type renders through apply, so a missing window drops it. This keeps the
+// undelivered tripwire precise (issue #227): a non-zero count means a render was
+// actually lost, not that a windowless sidebar update happened to pass through.
+func eventNeedsWindow(t agent.SessionEventType) bool {
+	switch t {
+	case agent.SessionEventSubAgent, agent.SessionEventTodo:
+		return false
+	default:
+		return true
+	}
 }
 
 // noteUndeliveredEvent records a session event that arrived for an id with no open
@@ -1613,11 +1633,12 @@ func (w *Workbench) noteUndeliveredEvent(id string, ev agent.SessionEvent) {
 	w.mu.Unlock()
 }
 
-// UndeliveredEventCount returns how many session events reached deliverSessionEvent
-// with no open window for their id, so the transcript-render (apply) path was
-// skipped. It counts every type, not only finals. It stays zero in normal operation
-// — a live session keeps its window for the whole turn — so a non-zero count signals
-// the lifecycle regression that issue #227 traced a dropped final answer to.
+// UndeliveredEventCount returns how many window-needing session events reached
+// deliverSessionEvent with no open window for their id, so their apply (transcript
+// or status render) was lost. Sub-agent/todo events are excluded (the sidebar
+// services them without a window). It stays zero in normal operation — a live
+// session keeps its window for the whole turn — so a non-zero count signals the
+// lifecycle regression that issue #227 traced a dropped final answer to.
 func (w *Workbench) UndeliveredEventCount() int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
