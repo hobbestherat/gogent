@@ -261,10 +261,10 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 	stopButton.FG = colorError
 	stopButton.FocusFG = colorError
 	modelLabel := tv.NewLabel("Model", tv.Rect{})
-	modelSelect := tv.NewSelect(wb.desktop, wb.modelNames, tv.Rect{})
+	modelSelect := newSelect(wb.desktop, wb.modelNames, tv.Rect{})
 	modelLabel.SetTarget(modelSelect)
 	effortLabel := tv.NewLabel("Effort", tv.Rect{})
-	effortSelect := tv.NewSelect(wb.desktop, []string{effortDefaultOption}, tv.Rect{})
+	effortSelect := newSelect(wb.desktop, []string{effortDefaultOption}, tv.Rect{})
 	effortLabel.SetTarget(effortSelect)
 	status := tv.NewLabel("idle", tv.Rect{})
 	status.FG = colorNote
@@ -1147,6 +1147,7 @@ func reseedSelect(s *tv.Select, th tv.Theme) {
 		return
 	}
 	s.FG, s.BG, s.FocusFG, s.FocusBG = th.InputFG, th.InputBG, th.InputFocusFG, th.InputFocusBG
+	applySelectShadow(s) // re-apply the NoShadow toggle live (issue #231)
 }
 
 // reseedButton re-applies a turbotui theme's button colours to a button whose

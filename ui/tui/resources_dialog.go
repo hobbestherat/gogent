@@ -74,7 +74,7 @@ func (w *Workbench) showResourcesDialog() {
 
 	// Category tabs + search box.
 	dialog.Window.AddContent(dialogLabel("Category:", tv.Rect{X: 2, Y: 1, W: 9, H: 1}))
-	catSel := tv.NewSelect(w.desktop, []string{"Tools", "MCP", "Skills"}, tv.Rect{X: 12, Y: 1, W: 14, H: 1})
+	catSel := newSelect(w.desktop, []string{"Tools", "MCP", "Skills"}, tv.Rect{X: 12, Y: 1, W: 14, H: 1})
 	dialog.Window.AddContent(catSel)
 	searchLabelX := 30
 	searchBoxX := 38
