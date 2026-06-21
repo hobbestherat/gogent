@@ -455,3 +455,34 @@ func TestIssue227_EmptyErrorAddsNoRecord(t *testing.T) {
 	}
 	_ = w
 }
+
+// TestIssue227_WindowlessSidebarEventsNotCountedUndelivered validates the
+// eventNeedsWindow precision introduced in fixes round 2: SubAgent and Todo events
+// are fully serviced by the sidebar regardless of whether the session has an open
+// window (applySubAgent/applyTodo early-return on an unknown id but lose nothing
+// meaningful), so delivering them for an unknown id must NOT increment the
+// undelivered tripwire. Without eventNeedsWindow these would cry wolf on legitimate
+// windowless sidebar traffic; a window-needing event (Final) on the same unknown id
+// is still a real drop and must count.
+func TestIssue227_WindowlessSidebarEventsNotCountedUndelivered(t *testing.T) {
+	w, _ := newIssue227Workbench(t) // window open for "s1" only
+
+	// Sidebar-serviced event types for an unknown id: not counted.
+	w.deliverSessionEvent("ghost", agent.SessionEvent{Type: agent.SessionEventSubAgent, AgentID: "a1", Name: "sub", Status: agent.StatusRunning})
+	w.deliverSessionEvent("ghost", agent.SessionEvent{Type: agent.SessionEventTodo, Todos: []agent.TodoItem{{Content: "do thing"}}})
+	if got := w.UndeliveredEventCount(); got != 0 {
+		t.Fatalf("sidebar-serviced events on unknown id counted as undelivered: %d, want 0 (cry wolf)", got)
+	}
+
+	// A window-needing event on the same unknown id IS a real drop — counted once.
+	w.deliverSessionEvent("ghost", agent.SessionEvent{Type: agent.SessionEventFinal, Text: "x"})
+	if got := w.UndeliveredEventCount(); got != 1 {
+		t.Fatalf("window-needing Final on unknown id not counted: %d, want 1", got)
+	}
+
+	// Another window-needing type (error) on an unknown id also counts.
+	w.deliverSessionEvent("ghost2", agent.SessionEvent{Type: agent.SessionEventError, Err: errors.New("boom")})
+	if got := w.UndeliveredEventCount(); got != 2 {
+		t.Fatalf("window-needing Error on unknown id not counted: %d, want 2", got)
+	}
+}
