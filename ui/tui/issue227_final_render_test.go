@@ -360,3 +360,98 @@ func TestIssue227_EmitSessionEventQueuesNotSynchronous(t *testing.T) {
 		t.Fatalf("queued (not dropped) event counted as undelivered: %d", got)
 	}
 }
+
+// countAssistantRecords returns how many transcript records are assistant answers.
+func countAssistantRecords(sw *SessionWindow) int {
+	n := 0
+	for _, r := range sw.transcript.records {
+		if r.kind == kindAssistant {
+			n++
+		}
+	}
+	return n
+}
+
+// TestIssue227_DeliveredFinalBecomesTranscriptEntry pins the deeper invariant the
+// visibility fix does NOT touch: a SessionEventFinal that reaches an open window
+// must always become a real transcript record/entry (the data path kloune proved
+// correct). The scroll fix only changes whether it is auto-scrolled into view, so
+// this passes with AND without the fix — it exists so a future regression that
+// fails to add the entry at all is caught independently of the on-screen check.
+func TestIssue227_DeliveredFinalBecomesTranscriptEntry(t *testing.T) {
+	w, sw := newIssue227Workbench(t)
+	before := countAssistantRecords(sw)
+
+	w.deliverSessionEvent("s1", agent.SessionEvent{Type: agent.SessionEventFinal, Text: issue227FinalSentinel})
+
+	if got := countAssistantRecords(sw); got != before+1 {
+		t.Fatalf("delivered final did not become a transcript record: assistant records %d -> %d, want +1", before, got)
+	}
+	last := sw.transcript.lastAssistantRecord()
+	if last == nil || !strings.Contains(last.body(), issue227FinalSentinel) {
+		t.Fatalf("last assistant record does not carry the final answer: %+v", last)
+	}
+	// And it is in the rendered view's entries (the copy/export surface), not only
+	// the model slice.
+	if !strings.Contains(sw.transcript.view.AllText(), issue227FinalSentinel) {
+		t.Fatalf("delivered final missing from the view's rendered entries (AllText)")
+	}
+	_ = w
+}
+
+// TestIssue227_FinalStaysVisibleThroughQueuedDrain exercises orchestrator suspect
+// #3: the busy->idle edge after a final re-enters drainQueue, which submits a
+// message queued during the turn and starts a new turn. The just-revealed final
+// must remain on screen through that re-entry (not be displaced or re-hidden).
+// It fails without the fix (neither the final nor the drained message reveals when
+// follow was off) and closes the drain-re-entry ordering gap.
+func TestIssue227_FinalStaysVisibleThroughQueuedDrain(t *testing.T) {
+	w, sw := newIssue227Workbench(t)
+	first, last := issue227FillOverflow(sw, 40)
+	sw.transcript.view.ScrollToTop()
+	requireScrolledUp(t, w, first, last)
+
+	// Simulate a turn in flight with a follow-up message queued during it.
+	const queued = "QQQ_DRAINED_FOLLOWUP"
+	sw.busy = true
+	sw.pending = queued
+
+	// The final ends the turn: addAssistant (reveal) then setBusy(false) drains the
+	// queued message, re-entering the submit path.
+	w.deliverSessionEvent("s1", agent.SessionEvent{Type: agent.SessionEventFinal, Text: issue227FinalSentinel})
+
+	screen := screenText(w)
+	if !containsOnScreen(screen, issue227FinalSentinel) {
+		t.Fatalf("final answer displaced off-screen by the drain re-entry\n%s", screen)
+	}
+	// The drained follow-up must also be visible: drainQueue ran and submitted it.
+	if !containsOnScreen(screen, queued) {
+		t.Fatalf("drained queued message %q not on screen after the busy->idle edge\n%s", queued, screen)
+	}
+}
+
+// TestIssue227_EmptyErrorAddsNoRecord is a regression guard: addError must guard
+// empty/whitespace text exactly as addAssistant does (return early BEFORE the
+// re-anchor), so a non-nil error that stringifies to "" (e.g. errors.New("")) —
+// reachable via apply(SessionEventError) — adds no bare "error:" record and does
+// not re-anchor the view. Keeps the two turn-ending reveal paths consistent.
+func TestIssue227_EmptyErrorAddsNoRecord(t *testing.T) {
+	w, sw := newIssue227Workbench(t)
+	first, last := issue227FillOverflow(sw, 40)
+	sw.transcript.view.ScrollToTop()
+	requireScrolledUp(t, w, first, last)
+	before := len(sw.transcript.records)
+
+	// errors.New("") is a non-nil error whose Error() is "".
+	w.deliverSessionEvent("s1", agent.SessionEvent{Type: agent.SessionEventError, Err: errors.New("")})
+
+	if got := len(sw.transcript.records); got != before {
+		t.Errorf("empty error message added a transcript record (%d -> %d); addError should guard empty text like addAssistant", before, got)
+	}
+	// An empty error must not re-anchor the view either.
+	screen := screenText(w)
+	if containsOnScreen(screen, last) {
+		t.Errorf("empty error re-anchored the view (bottom %q now on screen); addError re-anchored on an empty message\n%s", last, screen)
+	}
+	_ = w
+}
