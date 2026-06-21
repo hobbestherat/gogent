@@ -88,6 +88,7 @@ func (w *Workbench) showConfirm(title, message string, onResult func(bool)) {
 	x, y := centeredDialog(w, width, height)
 
 	dialog := tv.NewDialog(title, x, y, width, height)
+	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
 	dialog.Window.ShowClose = false
 
 	body := tv.NewTextView("", tv.Rect{X: 2, Y: 1, W: width - 4, H: bodyH})
@@ -114,13 +115,13 @@ func (w *Workbench) showConfirm(title, message string, onResult func(bool)) {
 	var focus *tv.Button
 	if onResult == nil {
 		// Informational message: a single OK button (Escape also dismisses).
-		ok := tv.NewButton("OK", centeredButton(width, btnY, "OK"), func() { dismiss(false) })
+		ok := newButton("OK", centeredButton(width, btnY, "OK"), func() { dismiss(false) })
 		dialog.Window.AddContent(ok)
 		focus = ok
 	} else {
 		yesRect, noRect := confirmButtonRow(width, btnY)
-		yes := tv.NewButton("Yes", yesRect, func() { dismiss(true) })
-		no := tv.NewButton("No", noRect, func() { dismiss(false) })
+		yes := newButton("Yes", yesRect, func() { dismiss(true) })
+		no := newButton("No", noRect, func() { dismiss(false) })
 		dialog.Window.AddContent(yes)
 		dialog.Window.AddContent(no)
 		focus = no // default to the safe choice

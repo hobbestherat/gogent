@@ -84,6 +84,7 @@ func (w *Workbench) showModelEditor() {
 	x, y := centeredDialog(w, width, height)
 
 	dialog := tv.NewDialog("Model Settings", x, y, width, height)
+	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
 	dialog.Window.ShowClose = false
 
 	// field builds a labelled text field, registers it on the dialog, and
@@ -120,7 +121,7 @@ func (w *Workbench) showModelEditor() {
 	modelSelect.Root().Visible = false
 	dialog.Window.AddContent(modelSelect)
 	var scanModels func()
-	scanBtn := tv.NewButton("Scan", tv.Rect{X: boxX + modelBoxW + 1, Y: 6, W: scanW, H: 1}, func() {
+	scanBtn := newButton("Scan", tv.Rect{X: boxX + modelBoxW + 1, Y: 6, W: scanW, H: 1}, func() {
 		if scanModels != nil {
 			scanModels()
 		}
@@ -232,8 +233,8 @@ func (w *Workbench) showModelEditor() {
 	}
 	cancel := func() { w.desktop.RemoveLayer(layer) }
 
-	dialog.Window.AddContent(tv.NewButton("Save", tv.Rect{X: width - 24, Y: height - 3, W: 9, H: 1}, save))
-	dialog.Window.AddContent(tv.NewButton("Cancel", tv.Rect{X: width - 13, Y: height - 3, W: 10, H: 1}, cancel))
+	dialog.Window.AddContent(newButton("Save", tv.Rect{X: width - 24, Y: height - 3, W: 9, H: 1}, save))
+	dialog.Window.AddContent(newButton("Cancel", tv.Rect{X: width - 13, Y: height - 3, W: 10, H: 1}, cancel))
 
 	dialog.Root().OnTypeFn = func(_ *tv.VisualComponent, event tui.TypeEvent) bool {
 		if event.Key == tui.KeyEscape {

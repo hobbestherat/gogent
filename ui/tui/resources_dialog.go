@@ -47,6 +47,7 @@ func (w *Workbench) showResourcesDialog() {
 	x, y := centeredDialog(w, width, height)
 
 	dialog := tv.NewDialog("Resources", x, y, width, height)
+	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
 	dialog.Window.ShowClose = false
 
 	listX := 2
@@ -115,7 +116,7 @@ func (w *Workbench) showResourcesDialog() {
 
 	var layer *tv.Layer
 	closeFn := func() { w.desktop.RemoveLayer(layer) }
-	dialog.Window.AddContent(tv.NewButton("Close",
+	dialog.Window.AddContent(newButton("Close",
 		tv.Rect{X: width - 11, Y: height - 3, W: 9, H: 1}, closeFn))
 
 	// --- browser state -----------------------------------------------------

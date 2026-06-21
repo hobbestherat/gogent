@@ -55,7 +55,7 @@ func TestBuildThemeConfig(t *testing.T) {
 	defaultSpecs := specsFor(paletteByName(themeDefault))
 
 	t.Run("pristine default has no overrides", func(t *testing.T) {
-		got := buildThemeConfig("default", false, defaultSpecs)
+		got := buildThemeConfig("default", false, false, defaultSpecs)
 		want := config.ThemeConfig{Name: themeDefault}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("got %+v, want %+v", got, want)
@@ -64,7 +64,7 @@ func TestBuildThemeConfig(t *testing.T) {
 
 	t.Run("pristine high-contrast has no overrides", func(t *testing.T) {
 		specs := specsFor(paletteByName(themeHighContrast))
-		got := buildThemeConfig("high-contrast", false, specs)
+		got := buildThemeConfig("high-contrast", false, false, specs)
 		want := config.ThemeConfig{Name: themeHighContrast}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("got %+v, want %+v", got, want)
@@ -74,7 +74,7 @@ func TestBuildThemeConfig(t *testing.T) {
 	t.Run("changed role becomes an override", func(t *testing.T) {
 		specs := cloneSpecs(defaultSpecs)
 		specs["user"] = "#FF0000"
-		got := buildThemeConfig("default", false, specs)
+		got := buildThemeConfig("default", false, false, specs)
 		want := config.ThemeConfig{Name: themeDefault, Overrides: map[string]string{"user": "#FF0000"}}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("got %+v, want %+v", got, want)
@@ -84,14 +84,14 @@ func TestBuildThemeConfig(t *testing.T) {
 	t.Run("default spec on a coloured role is recorded", func(t *testing.T) {
 		specs := cloneSpecs(defaultSpecs)
 		specs["error"] = "default"
-		got := buildThemeConfig("default", false, specs)
+		got := buildThemeConfig("default", false, false, specs)
 		if got.Overrides["error"] != "default" {
 			t.Fatalf("expected error override 'default', got %+v", got.Overrides)
 		}
 	})
 
 	t.Run("no-color flag is carried through", func(t *testing.T) {
-		got := buildThemeConfig("default", true, defaultSpecs)
+		got := buildThemeConfig("default", true, false, defaultSpecs)
 		if !got.NoColor {
 			t.Fatalf("expected NoColor=true, got %+v", got)
 		}
@@ -103,14 +103,14 @@ func TestBuildThemeConfig(t *testing.T) {
 	t.Run("invalid spec is ignored", func(t *testing.T) {
 		specs := cloneSpecs(defaultSpecs)
 		specs["tool"] = "not-a-colour"
-		got := buildThemeConfig("default", false, specs)
+		got := buildThemeConfig("default", false, false, specs)
 		if len(got.Overrides) != 0 {
 			t.Fatalf("expected invalid spec ignored, got %+v", got.Overrides)
 		}
 	})
 
 	t.Run("alias preset name is canonicalised", func(t *testing.T) {
-		got := buildThemeConfig("colorblind", false, specsFor(paletteByName(themeHighContrast)))
+		got := buildThemeConfig("colorblind", false, false, specsFor(paletteByName(themeHighContrast)))
 		if got.Name != themeHighContrast {
 			t.Fatalf("expected canonical %q, got %q", themeHighContrast, got.Name)
 		}
@@ -133,11 +133,11 @@ func TestBuildThemeConfigRoundTrip(t *testing.T) {
 	specs := specsFor(paletteByName(themeDefault))
 	specs["agent"] = "#00FF00"
 	specs["panel_bg"] = "16"
-	cfg := buildThemeConfig("default", false, specs)
+	cfg := buildThemeConfig("default", false, false, specs)
 
 	// Reopen: the editor seeds fields from editedTheme(cfg); rebuilding must
 	// yield the identical config.
-	reopened := buildThemeConfig(cfg.Name, cfg.NoColor, specsFor(editedTheme(cfg)))
+	reopened := buildThemeConfig(cfg.Name, cfg.NoColor, false, specsFor(editedTheme(cfg)))
 	if !reflect.DeepEqual(reopened, cfg) {
 		t.Fatalf("round-trip mismatch:\n got %+v\nwant %+v", reopened, cfg)
 	}

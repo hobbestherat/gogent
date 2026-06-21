@@ -277,6 +277,7 @@ func helpText(cmds []command) string {
 // Esc through the dialog root for keyboard parity.
 func newCloseableDialog(title string, x, y, width, height int, closeFn func()) *tv.Dialog {
 	dialog := tv.NewDialog(title, x, y, width, height)
+	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
 	dialog.Window.ShowClose = true
 	dialog.Window.OnClose = func(*tv.Window) { closeFn() }
 	return dialog
@@ -398,7 +399,7 @@ func (w *Workbench) showHelpOverlay() {
 	dialog.Window.AddContent(dialogLabel("↑↓/PgUp/PgDn scroll · Ctrl+K palette · Esc close",
 		tv.Rect{X: 2, Y: height - 2, W: width - 16, H: 1}))
 
-	dialog.Window.AddContent(tv.NewButton("Close",
+	dialog.Window.AddContent(newButton("Close",
 		tv.Rect{X: width - 11, Y: height - 2, W: 9, H: 1}, closeFn))
 
 	dialog.Root().OnTypeFn = func(_ *tv.VisualComponent, event tui.TypeEvent) bool {

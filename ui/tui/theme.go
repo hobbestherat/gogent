@@ -55,6 +55,53 @@ var (
 // replaced it (ApplyTheme mutates the shared tv.DefaultTheme).
 var baseTVTheme = tv.DefaultTheme
 
+// shadowsEnabled reports whether gogent's surfaces draw drop shadows. It tracks
+// the active theme's NoShadow setting (issue #215): ApplyTheme sets it from the
+// resolved Theme, and every surface gogent builds — session/monologue windows,
+// dialogs, the menu bar and buttons — seeds its turbotui Shadow flag from it via
+// the applyWindowShadow/applyButtonShadow/applyMenuBarShadow helpers and the
+// newButton wrapper. It defaults to true so shadows are on until a theme is
+// applied (matching the pre-#215 look and the existing tests).
+var shadowsEnabled = true
+
+// applyWindowShadow seeds a window's (or dialog window's) drop shadow from the
+// active NoShadow preference. Call it after tv.NewWindow/tv.NewDialog and from
+// the live theme-apply path (SessionWindow.refreshTheme) so a toggle re-applies
+// without a restart (issue #215).
+func applyWindowShadow(w *tv.Window) {
+	if w != nil {
+		w.Shadow = shadowsEnabled
+	}
+}
+
+// applyButtonShadow seeds a button's drop shadow from the active NoShadow
+// preference. newButton applies it at construction and reseedButton on the live
+// theme-apply path (issue #215).
+func applyButtonShadow(b *tv.Button) {
+	if b != nil {
+		b.Shadow = shadowsEnabled
+	}
+}
+
+// applyMenuBarShadow seeds the desktop menu bar's drop shadow from the active
+// NoShadow preference. The menu bar is rebuilt by RefreshTheme, so this also
+// covers the live theme-apply path (issue #215).
+func applyMenuBarShadow(m *tv.MenuBar) {
+	if m != nil {
+		m.Shadow = shadowsEnabled
+	}
+}
+
+// newButton constructs a turbotui button and seeds its drop shadow from the
+// active NoShadow preference (issue #215). gogent builds every button through
+// this wrapper so the shadow toggle reaches dialog and session buttons alike
+// without touching each construction site.
+func newButton(label string, bounds tv.Rect, onPress func()) *tv.Button {
+	b := tv.NewButton(label, bounds, onPress)
+	applyButtonShadow(b)
+	return b
+}
+
 // ColorLevel describes the colour fidelity of the output terminal. A resolved
 // Theme is degraded to its level so a truecolor palette still renders sensibly
 // on a 256- or 16-colour terminal, and not at all when colour is disabled.
@@ -81,6 +128,10 @@ type Theme struct {
 	Name string
 	// Level is the colour fidelity the palette has been degraded to.
 	Level ColorLevel
+	// NoShadow suppresses every drop shadow when true (issue #215). It is carried
+	// here (not just in config) so ApplyTheme can install it onto shadowsEnabled
+	// alongside the colours, keeping the live theme-apply path the single source.
+	NoShadow bool
 
 	// Semantic transcript colours.
 	User   tui.Color
@@ -277,6 +328,7 @@ func ResolveTheme(cfg config.ThemeConfig, env func(string) string, noColorFlag b
 	t := paletteByName(cfg.Name)
 	applyOverrides(&t, cfg.Overrides)
 
+	t.NoShadow = cfg.NoShadow
 	t.Level = level
 	t.User = degrade(t.User, level)
 	t.Agent = degrade(t.Agent, level)
@@ -630,6 +682,12 @@ func paletteContrast(t Theme, windowBG tui.Color) []contrastFinding {
 // switched to the high-contrast chrome for that preset. It must be called before
 // the workbench (and its desktop) are constructed.
 func ApplyTheme(t Theme) {
+	// Drop-shadow preference (issue #215): installed alongside the colours so the
+	// runtime theme-apply path is the single place the whole UI re-reads. Surfaces
+	// built afterwards (and re-skinned by RefreshTheme) seed their Shadow flag from
+	// this via the applyWindowShadow/applyButtonShadow/applyMenuBarShadow helpers.
+	shadowsEnabled = !t.NoShadow
+
 	colorUser, colorAgent, colorNote = t.User, t.Agent, t.Note
 	colorTool, colorResult, colorInfo, colorError = t.Tool, t.Result, t.Info, t.Error
 

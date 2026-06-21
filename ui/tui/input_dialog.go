@@ -16,6 +16,7 @@ func (w *Workbench) showInputDialog(title, label, initial string, onResult func(
 	x, y := centeredDialog(w, width, height)
 
 	dialog := tv.NewDialog(title, x, y, width, height)
+	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
 	dialog.Window.ShowClose = false
 
 	prompt := dialogLabel(label, tv.Rect{X: 2, Y: 1, W: width - 4, H: 1})
@@ -30,10 +31,10 @@ func (w *Workbench) showInputDialog(title, label, initial string, onResult func(
 	}
 	// Enter inside the field accepts; Tab/arrow-nav still work via the desktop.
 	box.OnSubmit = func() { finish(box.GetText(), true) }
-	ok := tv.NewButton("OK", tv.Rect{X: width - 24, Y: height - 3, W: 9, H: 1}, func() {
+	ok := newButton("OK", tv.Rect{X: width - 24, Y: height - 3, W: 9, H: 1}, func() {
 		finish(box.GetText(), true)
 	})
-	cancel := tv.NewButton("Cancel", tv.Rect{X: width - 13, Y: height - 3, W: 10, H: 1}, func() {
+	cancel := newButton("Cancel", tv.Rect{X: width - 13, Y: height - 3, W: 10, H: 1}, func() {
 		finish("", false)
 	})
 

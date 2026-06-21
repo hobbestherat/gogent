@@ -76,13 +76,13 @@ func editedTheme(cfg config.ThemeConfig) Theme {
 }
 
 // buildThemeConfig assembles a ThemeConfig from the editor's state: the chosen
-// preset, the NO_COLOR toggle, and the per-role spec strings. It records an
-// override only for roles whose spec parses to a colour different from the
-// preset's built-in value, so a pristine preset (or a field left at its default)
-// is saved without redundant overrides. Unparseable specs are ignored, leaving
-// the preset's colour for that role.
-func buildThemeConfig(preset string, noColor bool, specs map[string]string) config.ThemeConfig {
-	cfg := config.ThemeConfig{Name: canonicalThemeName(preset), NoColor: noColor}
+// preset, the NO_COLOR and NO_SHADOW toggles, and the per-role spec strings. It
+// records an override only for roles whose spec parses to a colour different from
+// the preset's built-in value, so a pristine preset (or a field left at its
+// default) is saved without redundant overrides. Unparseable specs are ignored,
+// leaving the preset's colour for that role.
+func buildThemeConfig(preset string, noColor, noShadow bool, specs map[string]string) config.ThemeConfig {
+	cfg := config.ThemeConfig{Name: canonicalThemeName(preset), NoColor: noColor, NoShadow: noShadow}
 	base := paletteByName(cfg.Name)
 	overrides := map[string]string{}
 	for _, role := range themeRoles {
@@ -132,6 +132,7 @@ func (w *Workbench) showThemeEditor() {
 	x, y := centeredDialog(w, width, height)
 
 	dialog := tv.NewDialog("Theme", x, y, width, height)
+	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
 	dialog.Window.ShowClose = false
 
 	const sample = "▉▉ Aa"
@@ -151,6 +152,14 @@ func (w *Workbench) showThemeEditor() {
 	noColor.FG = tv.DefaultTheme.DialogFG
 	noColor.BG = tv.DefaultTheme.DialogBG
 	dialog.Window.AddContent(noColor)
+
+	// Disable-shadows toggle (issue #215), stacked under the colour toggle. It does
+	// not affect the colour swatches, so it needs no refresh on change; its state is
+	// read at Save and persisted as ThemeConfig.NoShadow.
+	noShadow := tv.NewCheckbox("Disable &shadows", tv.Rect{X: 44, Y: 2, W: width - 48, H: 1}, nil)
+	noShadow.FG = tv.DefaultTheme.DialogFG
+	noShadow.BG = tv.DefaultTheme.DialogBG
+	dialog.Window.AddContent(noShadow)
 
 	// One row per role across two columns; fields[i] edits themeRoles[i] and
 	// swatches[i] previews it. The left column holds the seven semantic colours,
@@ -215,6 +224,7 @@ func (w *Workbench) showThemeEditor() {
 	// saved overrides applied so the fields show the user's real colours.
 	preset.SetSelected(presetIndex(cur.Name))
 	noColor.SetChecked(cur.NoColor)
+	noShadow.SetChecked(cur.NoShadow)
 	loadFields(editedTheme(cur))
 	refresh()
 
@@ -228,7 +238,7 @@ func (w *Workbench) showThemeEditor() {
 		if idx < 0 || idx >= len(themePresets) {
 			idx = 0
 		}
-		cfg := buildThemeConfig(themePresets[idx].name, noColor.IsChecked(), specs)
+		cfg := buildThemeConfig(themePresets[idx].name, noColor.IsChecked(), noShadow.IsChecked(), specs)
 		w.handlers.SetTheme(cfg) // persists + re-applies the live palette
 		w.desktop.RemoveLayer(layer)
 		w.rebuildMenu()
@@ -236,14 +246,15 @@ func (w *Workbench) showThemeEditor() {
 	reset := func() {
 		preset.SetSelected(0)
 		noColor.SetChecked(false)
+		noShadow.SetChecked(false)
 		loadFields(paletteByName(themeDefault))
 		refresh()
 	}
 	cancel := func() { w.desktop.RemoveLayer(layer) }
 
-	dialog.Window.AddContent(tv.NewButton("Reset", tv.Rect{X: 2, Y: height - 3, W: 9, H: 1}, reset))
-	dialog.Window.AddContent(tv.NewButton("Save", tv.Rect{X: width - 24, Y: height - 3, W: 9, H: 1}, save))
-	dialog.Window.AddContent(tv.NewButton("Cancel", tv.Rect{X: width - 13, Y: height - 3, W: 10, H: 1}, cancel))
+	dialog.Window.AddContent(newButton("Reset", tv.Rect{X: 2, Y: height - 3, W: 9, H: 1}, reset))
+	dialog.Window.AddContent(newButton("Save", tv.Rect{X: width - 24, Y: height - 3, W: 9, H: 1}, save))
+	dialog.Window.AddContent(newButton("Cancel", tv.Rect{X: width - 13, Y: height - 3, W: 10, H: 1}, cancel))
 
 	dialog.Root().OnTypeFn = func(_ *tv.VisualComponent, event tui.TypeEvent) bool {
 		if event.Key == tui.KeyEscape {
