@@ -1976,6 +1976,16 @@ func (sw *SessionWindow) addAssistant(text string) {
 	if strings.TrimSpace(text) == "" {
 		return
 	}
+	// The final answer is what the user asked for, so re-anchor the transcript on
+	// it even when the user had scrolled up to read earlier output mid-turn:
+	// renderOne respects the current scroll position, and the view re-pins to the
+	// bottom on the append only while following, so follow must be re-enabled
+	// before the append. Without this the answer is appended (it is in AllText, the
+	// session file and the model) but never scrolled into view, which read as the
+	// agent silently dropping its reply (issue #227). Streaming events (thoughts,
+	// tool calls/results) intentionally do not re-anchor, so reading scrolled-up
+	// history during a turn is undisturbed until the answer lands.
+	sw.transcript.scrollToBottom()
 	sw.transcript.add(&transcriptRecord{
 		kind: kindAssistant, header: "Gogent:", color: colorAgent, role: roleAgent,
 		lines: styledChildLines(text, roleAgent),
@@ -2131,12 +2141,15 @@ func toolHeaderName(rec *transcriptRecord) string {
 	return name
 }
 
-// addError appends a red error line.
+// addError appends a red error line. It is raised on the turn-ending error event,
+// so it re-anchors the transcript on the message the same way addAssistant does
+// (issue #227): a user who scrolled up mid-turn must still see why the turn ended.
 func (sw *SessionWindow) addError(text string) {
 	lines := make([]styledLine, 0)
 	for _, line := range childLines(text) {
 		lines = append(lines, styledLine{text: "  " + line, color: colorError, role: roleError})
 	}
+	sw.transcript.scrollToBottom()
 	sw.transcript.add(&transcriptRecord{
 		kind: kindError, header: "error:", color: colorError, role: roleError, lines: lines,
 	})

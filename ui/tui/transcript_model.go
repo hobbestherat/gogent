@@ -321,6 +321,16 @@ func (m *transcriptModel) renderOne(r *transcriptRecord) {
 	r.entry = entry
 }
 
+// scrollToBottom re-enables the backing view's follow so the next appended record
+// is pinned into view. It is the incremental counterpart to render()'s trailing
+// ScrollToBottom: renderOne() respects the current scroll position (so streaming
+// does not yank a user who scrolled up), so a caller adding a record the user is
+// waiting to see — the turn's final answer — calls this BEFORE the add. The
+// TextView re-pins to the bottom on the append's content change only while
+// following, so enabling follow first is what makes the new record visible even
+// when the user had scrolled up to read earlier output (issue #227).
+func (m *transcriptModel) scrollToBottom() { m.view.ScrollToBottom() }
+
 // render rebuilds the whole view from the records, honouring the active filter
 // and search and prefixing a status line while either is active.
 func (m *transcriptModel) render() {

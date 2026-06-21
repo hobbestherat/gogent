@@ -314,6 +314,12 @@ type Workbench struct {
 	// #22 / #53). Lazily created and only touched on the UI thread; its AfterFunc
 	// goroutine just Posts the refresh back to the UI thread.
 	statsRefresh *time.Timer
+	// undelivered counts session events that arrived for an id with no open window
+	// (deliverSessionEvent found a nil window). A live session keeps its window for
+	// the whole turn, so this should stay zero — counting it makes a violation of
+	// that invariant observable instead of silently dropping the event, which is how
+	// a final answer could vanish with no trace (issue #227). Guarded by w.mu.
+	undelivered int
 }
 
 // NewWorkbench creates the workbench and its desktop chrome.
@@ -1524,58 +1530,94 @@ func orderByLayout(restored []RestoredSession, layout gogent.Layout) []RestoredS
 }
 
 // EmitSessionEvent forwards a core session event to the matching window. It is
-// safe to call from any goroutine: the update is marshalled onto the UI thread.
+// safe to call from any goroutine: the update is marshalled onto the UI thread via
+// desktop.Post, where deliverSessionEvent applies it.
 func (w *Workbench) EmitSessionEvent(id string, ev agent.SessionEvent) {
-	w.desktop.Post(func() {
-		w.mu.Lock()
-		sw := w.sessions[id]
-		pinned := w.pinned[id]
-		title := ""
-		if sw != nil {
-			title = sw.title
+	w.desktop.Post(func() { w.deliverSessionEvent(id, ev) })
+}
+
+// deliverSessionEvent applies a core session event to the matching window and
+// refreshes the affected chrome. It is the body of the EmitSessionEvent post
+// callback, split out so the live delivery seam — window lookup, apply, notify and
+// the coalesced Overall refresh — can be driven directly under test: the desktop
+// post-queue has no headless drain, so this method is the seam a test targets to
+// assert that an event (notably a final answer) reaches the rendered transcript
+// (issue #227). It must run on the UI thread. It returns whether a window received
+// the event; a false result means the id had no open window — counted via
+// noteUndeliveredEvent so the drop is observable instead of silent.
+func (w *Workbench) deliverSessionEvent(id string, ev agent.SessionEvent) bool {
+	w.mu.Lock()
+	sw := w.sessions[id]
+	pinned := w.pinned[id]
+	title := ""
+	if sw != nil {
+		title = sw.title
+	}
+	w.mu.Unlock()
+	if ev.Type == agent.SessionEventSubAgent && w.sidebar != nil {
+		w.sidebar.applySubAgent(id, ev)
+		// Persistent "needs input" badge on the owning session row (issue #207).
+		// A sub-agent entering StatusWaiting has asked a CLARIFY question; leaving
+		// it (resumed/completed/failed) resolves it. A session can host several
+		// interactive sub-agents, so the badge is reference-counted per session
+		// (sidebar.setClarify) and clears only when the last waiting sub-agent
+		// resolves. The resume between two CLARIFY rounds is not emitted as a
+		// sub-agent event, so collapse repeated same-state events per sub-agent
+		// here, bumping the count once per waiting sub-agent and dropping it once
+		// when that sub-agent leaves StatusWaiting — keeping the count balanced.
+		key := ev.AgentID
+		if key == "" {
+			key = id + "/" + ev.Name
 		}
-		w.mu.Unlock()
-		if ev.Type == agent.SessionEventSubAgent && w.sidebar != nil {
-			w.sidebar.applySubAgent(id, ev)
-			// Persistent "needs input" badge on the owning session row (issue #207).
-			// A sub-agent entering StatusWaiting has asked a CLARIFY question; leaving
-			// it (resumed/completed/failed) resolves it. A session can host several
-			// interactive sub-agents, so the badge is reference-counted per session
-			// (sidebar.setClarify) and clears only when the last waiting sub-agent
-			// resolves. The resume between two CLARIFY rounds is not emitted as a
-			// sub-agent event, so collapse repeated same-state events per sub-agent
-			// here, bumping the count once per waiting sub-agent and dropping it once
-			// when that sub-agent leaves StatusWaiting — keeping the count balanced.
-			key := ev.AgentID
-			if key == "" {
-				key = id + "/" + ev.Name
+		waiting := ev.Status == agent.StatusWaiting
+		if w.clarifyWaiting == nil {
+			w.clarifyWaiting = make(map[string]bool)
+		}
+		if waiting != w.clarifyWaiting[key] {
+			if waiting {
+				w.clarifyWaiting[key] = true
+			} else {
+				delete(w.clarifyWaiting, key)
 			}
-			waiting := ev.Status == agent.StatusWaiting
-			if w.clarifyWaiting == nil {
-				w.clarifyWaiting = make(map[string]bool)
-			}
-			if waiting != w.clarifyWaiting[key] {
-				if waiting {
-					w.clarifyWaiting[key] = true
-				} else {
-					delete(w.clarifyWaiting, key)
-				}
-				w.sidebar.setClarify(id, title, pinned, waiting)
-				w.sidebar.setGlobalClarify(len(w.sidebar.clarify))
-			}
+			w.sidebar.setClarify(id, title, pinned, waiting)
+			w.sidebar.setGlobalClarify(len(w.sidebar.clarify))
 		}
-		if ev.Type == agent.SessionEventTodo && w.sidebar != nil {
-			w.sidebar.applyTodo(id, ev.Todos)
-		}
-		if sw != nil {
-			sw.apply(ev)
-		}
-		w.maybeNotify(id, ev)
-		// An event may have moved the aggregate (usage tokens/requests, a sub-agent
-		// spawn, an error); coalesce the Overall-panel refresh rather than paying
-		// for one per event (issue #53 / redraw note in #22).
-		w.scheduleOverallRefresh()
-	})
+	}
+	if ev.Type == agent.SessionEventTodo && w.sidebar != nil {
+		w.sidebar.applyTodo(id, ev.Todos)
+	}
+	delivered := sw != nil
+	if delivered {
+		sw.apply(ev)
+	} else {
+		w.noteUndeliveredEvent(id, ev)
+	}
+	w.maybeNotify(id, ev)
+	// An event may have moved the aggregate (usage tokens/requests, a sub-agent
+	// spawn, an error); coalesce the Overall-panel refresh rather than paying
+	// for one per event (issue #53 / redraw note in #22).
+	w.scheduleOverallRefresh()
+	return delivered
+}
+
+// noteUndeliveredEvent records a session event that arrived for an id with no open
+// window so the drop is observable instead of silent (issue #227). It is the one
+// place deliverSessionEvent funnels the nil-window case through, so a test can
+// assert on UndeliveredEventCount and a future log/metric has a single hook.
+func (w *Workbench) noteUndeliveredEvent(id string, ev agent.SessionEvent) {
+	w.mu.Lock()
+	w.undelivered++
+	w.mu.Unlock()
+}
+
+// UndeliveredEventCount returns how many session events were delivered for an id
+// with no open window. It stays zero in normal operation — a live session keeps
+// its window for the whole turn — so a non-zero count signals the lifecycle
+// regression that issue #227 traced a dropped final answer to.
+func (w *Workbench) UndeliveredEventCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.undelivered
 }
 
 // eventNotification maps a session event to a notification reason and body. It
