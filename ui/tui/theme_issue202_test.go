@@ -238,6 +238,11 @@ func TestIssue202DefaultPaletteFindingsContract(t *testing.T) {
 		{"panel-title", def.Title, def.PanelBG, minContrastText},
 		{"divider", def.Divider, def.PanelBG, minContrastLarge}, // non-text border
 		{"accent", def.Accent, def.PanelBG, minContrastLarge},   // non-text indicator
+		// Dropdown roles (issue #260) carry their own backgrounds, so each is audited
+		// against its actual fill (closed control, focused control, open-popup row).
+		{"dropdown", def.DropdownFG, def.DropdownBG, minContrastText},
+		{"dropdown-focus", def.DropdownFocusFG, def.DropdownFocusBG, minContrastText},
+		{"dropdown-select", def.DropdownSelectFG, def.DropdownSelectBG, minContrastText},
 	}
 	if len(findings) != len(want) {
 		t.Fatalf("paletteContrast returned %d findings, want %d", len(findings), len(want))

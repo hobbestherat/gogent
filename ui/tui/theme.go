@@ -39,6 +39,46 @@ var (
 	chromeAccent    = tui.ANSIColor(11) // indicators / badges
 )
 
+// Dropdown (tv.Select) closed-control colours (issue #260). turbotui's Select has
+// no theme slot of its own, so gogent carries the resolved closed-control colours
+// here — ApplyTheme installs them from the active Theme's Dropdown* roles, and
+// newSelect/reseedSelect seed every Select's FG/BG/FocusFG/FocusBG from them so a
+// live theme switch recolours closed dropdowns without a restart. The initial
+// values are the default palette (DropdownBG == MenuBarBG, a grey bar background),
+// so dropdowns are coloured before a theme is applied. The open popup's highlighted
+// row is driven separately, via tv.DefaultTheme.Selection* (see ApplyTheme).
+var (
+	dropdownFG         = tui.ANSIColor(0) // closed control text (black on the grey bar bg)
+	dropdownBG         = tui.ANSIColor(7) // closed control background (== MenuBarBG)
+	dropdownFocusFG    = tui.ANSIColor(0) // focused closed control text
+	dropdownFocusBG    = tui.ANSIColor(6) // focused closed control background (cyan highlight)
+	dropdownDisabledFG = tui.ANSIColor(0) // greyed value of a disabled dropdown, legible on dropdownBG
+)
+
+// dropdownDisabledColor picks the foreground for a disabled dropdown's value — the
+// greyed "(default)" of an effort selector whose model has no effort options
+// (issue #177), painted by guardEffortSelect. Before #260 the closed control sat on
+// the black InputBG, so the dim Note grey read as a legible "greyed out"; #260 moved
+// it onto DropdownBG (the menu-bar background), which in the default palette is the
+// same grey as Note — grey-on-grey, invisible. So the dim Note grey is used only
+// while it still clears the non-text/inactive contrast floor on the closed-control
+// background (the dark backgrounds of the black-canvas presets); on the light default
+// control it falls back to DropdownFG. The "disabled" cue is in any case also carried
+// by the greyed effort label, which sits on the window background where Note reads.
+//
+// The result is legible by construction, so it needs no separate paletteContrast
+// finding: the Note branch is taken only when it clears minContrastLarge here, and the
+// DropdownFG fallback is the foreground paletteContrast already audits as the
+// "dropdown" pair (DropdownFG on DropdownBG, minContrastText), so a palette change that
+// broke the disabled value would already trip that finding. Inactive controls are in
+// any case exempt from the AA body-text minimum (WCAG 1.4.3).
+func dropdownDisabledColor(t Theme) tui.Color {
+	if contrastRatio(t.Note, t.DropdownBG) >= minContrastLarge {
+		return t.Note
+	}
+	return t.DropdownFG
+}
+
 // Dialog body accent colours. Modal dialogs render on turbotui's light-grey
 // default chrome, where the bright transcript colours (yellow tool calls, cyan
 // user text) wash out badly — the very low-contrast "yellow on light-grey" of
@@ -112,12 +152,17 @@ func newButton(label string, bounds tv.Rect, onPress func()) *tv.Button {
 	return b
 }
 
-// newSelect constructs a turbotui Select and seeds its dropdown-popup drop shadow
-// from the active NoShadow preference (issue #231). gogent builds every selector
-// through this wrapper so the shadow toggle reaches dropdown popups without
-// touching each construction site, mirroring newButton.
+// newSelect constructs a turbotui Select, seeds its closed-control colours from the
+// active dropdown roles (issue #260) and its dropdown-popup drop shadow from the
+// active NoShadow preference (issue #231). gogent builds every selector through
+// this wrapper so the dropdown palette and the shadow toggle reach every combo box
+// — session selectors, dialog selects and the sidebar — without touching each
+// construction site, mirroring newButton. turbotui's NewSelect seeds the closed
+// control from the Input* slots; reseedSelect re-applies the same dropdown roles on
+// the live theme-apply path so a theme switch recolours an already-built Select.
 func newSelect(desktop *tv.Desktop, options []string, bounds tv.Rect) *tv.Select {
 	s := tv.NewSelect(desktop, options, bounds)
+	s.FG, s.BG, s.FocusFG, s.FocusBG = dropdownFG, dropdownBG, dropdownFocusFG, dropdownFocusBG
 	applySelectShadow(s)
 	return s
 }
@@ -179,6 +224,27 @@ type Theme struct {
 	// them onto tv.DefaultTheme's MenuBar* slots.
 	MenuBarFG tui.Color
 	MenuBarBG tui.Color
+
+	// Dropdown (tv.Select) colours (issue #260). The combo boxes — the per-session
+	// Model/Effort selectors and the selects in dialogs and the sidebar — had no
+	// dedicated roles before #260: the closed control borrowed the Input* colours
+	// (a dark ANSI-0 box) and the open popup the Dialog*/Selection* chrome, so a
+	// closed dropdown read as a quiet input rather than prominent chrome on par with
+	// the menu bar. They are now first-class roles, defaulting DropdownBG to MenuBarBG
+	// so a closed dropdown carries the bar's background.
+	//
+	// DropdownFG/DropdownBG colour the closed control and DropdownFocusFG/
+	// DropdownFocusBG the focused closed control; both are carried in package vars by
+	// ApplyTheme and seeded onto every Select by newSelect/reseedSelect (turbotui's
+	// Select has no theme slot of its own). DropdownSelectFG/DropdownSelectBG colour
+	// the highlighted row in the open popup; ApplyTheme installs them onto
+	// tv.DefaultTheme's Selection* slots, which drawPopup reads at draw time.
+	DropdownFG       tui.Color
+	DropdownBG       tui.Color
+	DropdownFocusFG  tui.Color
+	DropdownFocusBG  tui.Color
+	DropdownSelectFG tui.Color
+	DropdownSelectBG tui.Color
 
 	// CodeBG is the background painted behind fenced/indented code blocks in the
 	// rich-Markdown transcript (issue #184). It is a theme role, not a hardcoded
@@ -261,6 +327,19 @@ func defaultPalette() Theme {
 		// editable too rather than silently inheriting the library default.
 		MenuBarFG: tui.ANSIColor(0),
 		MenuBarBG: tui.ANSIColor(7),
+		// Dropdowns (issue #260): the closed control carries the menu bar's grey
+		// background (DropdownBG == MenuBarBG) with black text, so it reads as
+		// prominent chrome rather than the old dark ANSI-0 input box. The focused
+		// control and the open popup's highlighted row use cyan (ANSI 6) — the
+		// palette's existing focus colour (InputFocusBG/ButtonFocusBG) — so they stand
+		// out from the grey closed control, stay distinct from the ANSI-4 blue window,
+		// and match the rest of the theme's focus treatment.
+		DropdownFG:       tui.ANSIColor(0),
+		DropdownBG:       tui.ANSIColor(7),
+		DropdownFocusFG:  tui.ANSIColor(0),
+		DropdownFocusBG:  tui.ANSIColor(6),
+		DropdownSelectFG: tui.ANSIColor(0),
+		DropdownSelectBG: tui.ANSIColor(6),
 		// Fenced-code panel: a dark navy inset — a subtle shade of the desktop blue
 		// (issue #200) so code reads as a distinct themed panel rather than the old
 		// black-on-blue island. It is the one RGB role in this otherwise 16-colour
@@ -311,6 +390,17 @@ func highContrastPalette() Theme {
 		// PanelBG so the bar reads as part of the surrounding chrome).
 		MenuBarFG: white,
 		MenuBarBG: black,
+		// Dropdowns (issue #260): the closed control matches the menu bar (white on
+		// black, == MenuBar*/PanelFG/PanelBG) so it reads as part of the black canvas,
+		// and the focused control and open highlighted row use the bright yellow accent
+		// for an unmistakable high-contrast highlight (black on yellow). The accent
+		// equals the black-canvas SelectionBG, so the popup-highlight install is a no-op.
+		DropdownFG:       white,
+		DropdownBG:       black,
+		DropdownFocusFG:  black,
+		DropdownFocusBG:  okabeYellow,
+		DropdownSelectFG: black,
+		DropdownSelectBG: okabeYellow,
 		// Unused: applyMarkdownPalette suppresses the code background for this
 		// pure-black preset (a black panel on black would vanish), but the role is
 		// set for completeness so the Theme is fully populated.
@@ -330,6 +420,7 @@ func darkPalette() Theme {
 	title := tui.RGBColor(0xEC, 0xEC, 0xEC)
 	dimGrey := tui.RGBColor(0x80, 0x80, 0x80)
 	divider := tui.RGBColor(0x5A, 0x5A, 0x5A)
+	amber := tui.RGBColor(0xE0, 0xAF, 0x68) // accent tone, shared by Tool/Accent
 	return Theme{
 		Name:      themeDark,
 		User:      tui.RGBColor(0x7D, 0xCF, 0xE6), // soft cyan
@@ -350,6 +441,17 @@ func darkPalette() Theme {
 		// pure-black canvas while staying cohesive with it.
 		MenuBarFG: softWhite,
 		MenuBarBG: tui.RGBColor(0x26, 0x26, 0x26),
+		// Dropdowns (issue #260): the closed control matches the menu bar background
+		// (soft white on the #262626 bar) so it sits cohesively on the dark canvas; the
+		// focused control and open highlighted row use the amber accent (black on amber)
+		// for a warm, legible highlight. DropdownBG tracks MenuBarBG, which is #262626
+		// here (baked by the dark preset), not pure black.
+		DropdownFG:       softWhite,
+		DropdownBG:       tui.RGBColor(0x26, 0x26, 0x26), // == MenuBarBG
+		DropdownFocusFG:  black,
+		DropdownFocusBG:  amber,
+		DropdownSelectFG: black,
+		DropdownSelectBG: amber,
 		// Code blocks render directly on the pure-black canvas (no distinct panel).
 		CodeBG: black,
 	}
@@ -387,6 +489,12 @@ func ResolveTheme(cfg config.ThemeConfig, env func(string) string, noColorFlag b
 	t.Accent = degrade(t.Accent, level)
 	t.MenuBarFG = degrade(t.MenuBarFG, level)
 	t.MenuBarBG = degrade(t.MenuBarBG, level)
+	t.DropdownFG = degrade(t.DropdownFG, level)
+	t.DropdownBG = degrade(t.DropdownBG, level)
+	t.DropdownFocusFG = degrade(t.DropdownFocusFG, level)
+	t.DropdownFocusBG = degrade(t.DropdownFocusBG, level)
+	t.DropdownSelectFG = degrade(t.DropdownSelectFG, level)
+	t.DropdownSelectBG = degrade(t.DropdownSelectBG, level)
 	t.CodeBG = degrade(t.CodeBG, level)
 	return t
 }
@@ -457,6 +565,18 @@ func applyOverrides(t *Theme, overrides map[string]string) {
 			t.MenuBarFG = c
 		case "menu_bar_bg":
 			t.MenuBarBG = c
+		case "dropdown_fg":
+			t.DropdownFG = c
+		case "dropdown_bg":
+			t.DropdownBG = c
+		case "dropdown_focus_fg":
+			t.DropdownFocusFG = c
+		case "dropdown_focus_bg":
+			t.DropdownFocusBG = c
+		case "dropdown_select_fg":
+			t.DropdownSelectFG = c
+		case "dropdown_select_bg":
+			t.DropdownSelectBG = c
 		case "code_bg":
 			t.CodeBG = c
 		}
@@ -720,6 +840,15 @@ func paletteContrast(t Theme, windowBG tui.Color) []contrastFinding {
 		// Borders and indicators are non-text UI components (3:1 tier).
 		finding("divider", t.Divider, t.PanelBG, minContrastLarge),
 		finding("accent", t.Accent, t.PanelBG, minContrastLarge),
+		// Dropdown roles (issue #260) carry their own backgrounds, so each is audited
+		// against its actual fill rather than windowBG: the closed control's text on
+		// the menu-bar-background fill, the focused control's text on its highlight,
+		// and the open popup's highlighted-row text on the select highlight. They paint
+		// label text, so all three are held to the body-text tier — a palette change
+		// can't silently reintroduce a low-contrast dropdown pair (#202).
+		finding("dropdown", t.DropdownFG, t.DropdownBG, minContrastText),
+		finding("dropdown-focus", t.DropdownFocusFG, t.DropdownFocusBG, minContrastText),
+		finding("dropdown-select", t.DropdownSelectFG, t.DropdownSelectBG, minContrastText),
 	}
 }
 
@@ -773,6 +902,22 @@ func ApplyTheme(t Theme) {
 	tv.DefaultTheme.MenuBarFG = t.MenuBarFG
 	tv.DefaultTheme.MenuBarBG = t.MenuBarBG
 	tv.DefaultTheme.MenuHotBG = t.MenuBarBG
+
+	// Dropdown roles (issue #260). The closed-control colours have no slot in
+	// turbotui's Theme, so they are carried in package vars that newSelect and
+	// reseedSelect seed every Select from; install them here so freshly built and
+	// live-reseeded dropdowns follow the active palette. The open popup's highlighted
+	// row reads tv.DefaultTheme.Selection* at draw time (turbotui widget_select.go
+	// drawPopup), so install DropdownSelect* there — the popup body keeps the dialog
+	// chrome, but its highlight follows the dropdown palette. For the black-canvas
+	// presets DropdownSelectBG equals the accent the chrome already uses for Selection,
+	// so this is a no-op there; under NO_COLOR both have degraded to the terminal
+	// default, leaving the neutral selection untouched.
+	dropdownFG, dropdownBG = t.DropdownFG, t.DropdownBG
+	dropdownFocusFG, dropdownFocusBG = t.DropdownFocusFG, t.DropdownFocusBG
+	dropdownDisabledFG = dropdownDisabledColor(t)
+	tv.DefaultTheme.SelectionFG = t.DropdownSelectFG
+	tv.DefaultTheme.SelectionBG = t.DropdownSelectBG
 
 	// Keep turbotui's active chrome theme in lockstep with the dialog chrome above.
 	// turbotui widgets (windows, the menu bar, labels, selects, buttons, inputs)

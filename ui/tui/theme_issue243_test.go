@@ -251,7 +251,7 @@ func issue243RoleByKey(t *testing.T) map[string]themeRole {
 // out in two columns sized from len(themeRoles) (half := (len+1)/2), so a wrong count
 // either overflows the widened dialog or leaves empty rows — a layout regression.
 func TestIssue243ThemeRolesCount(t *testing.T) {
-	if got, want := len(themeRoles), 17; got != want {
+	if got, want := len(themeRoles), 23; got != want {
 		t.Fatalf("len(themeRoles) = %d, want %d (the two-column layout is sized from this)", got, want)
 	}
 }
@@ -670,23 +670,29 @@ func TestIssue243BlackCanvasThemeReadsMenuBarRoles(t *testing.T) {
 // issue243WantLabels is the exact set of descriptive labels the issue specifies,
 // keyed by role. Asserting the literal strings catches a typo or a missed rename.
 var issue243WantLabels = map[string]string{
-	"user":        "User messages",
-	"agent":       "Agent replies",
-	"note":        "Thoughts / idle",
-	"tool":        "Tool calls",
-	"result":      "Tool results",
-	"info":        "System notes",
-	"error":       "Errors",
-	"desktop_fg":  "Desktop hint text",
-	"desktop_bg":  "Desktop background",
-	"panel_fg":    "Sidebar text",
-	"panel_bg":    "Sidebar background",
-	"title":       "Panel titles",
-	"divider":     "Borders / dividers",
-	"accent":      "Indicators / badges",
-	"menu_bar_fg": "Menu bar text",
-	"menu_bar_bg": "Menu bar background",
-	"code_bg":     "Code block background",
+	"user":               "User messages",
+	"agent":              "Agent replies",
+	"note":               "Thoughts / idle",
+	"tool":               "Tool calls",
+	"result":             "Tool results",
+	"info":               "System notes",
+	"error":              "Errors",
+	"desktop_fg":         "Desktop hint text",
+	"desktop_bg":         "Desktop background",
+	"panel_fg":           "Sidebar text",
+	"panel_bg":           "Sidebar background",
+	"title":              "Panel titles",
+	"divider":            "Borders / dividers",
+	"accent":             "Indicators / badges",
+	"menu_bar_fg":        "Menu bar text",
+	"menu_bar_bg":        "Menu bar background",
+	"dropdown_fg":        "Dropdown text",
+	"dropdown_bg":        "Dropdown background",
+	"dropdown_focus_fg":  "Focused dropdown fg",
+	"dropdown_focus_bg":  "Focused dropdown bg",
+	"dropdown_select_fg": "Open row text",
+	"dropdown_select_bg": "Open row highlight",
+	"code_bg":            "Code block background",
 }
 
 // issue243CrypticLabels are the terse pre-#243 labels a rename must move away from.

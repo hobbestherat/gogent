@@ -42,6 +42,12 @@ var themeRoles = []themeRole{
 	{"accent", "Indicators / badges", func(t Theme) tui.Color { return t.Accent }},
 	{"menu_bar_fg", "Menu bar text", func(t Theme) tui.Color { return t.MenuBarFG }},
 	{"menu_bar_bg", "Menu bar background", func(t Theme) tui.Color { return t.MenuBarBG }},
+	{"dropdown_fg", "Dropdown text", func(t Theme) tui.Color { return t.DropdownFG }},
+	{"dropdown_bg", "Dropdown background", func(t Theme) tui.Color { return t.DropdownBG }},
+	{"dropdown_focus_fg", "Focused dropdown fg", func(t Theme) tui.Color { return t.DropdownFocusFG }},
+	{"dropdown_focus_bg", "Focused dropdown bg", func(t Theme) tui.Color { return t.DropdownFocusBG }},
+	{"dropdown_select_fg", "Open row text", func(t Theme) tui.Color { return t.DropdownSelectFG }},
+	{"dropdown_select_bg", "Open row highlight", func(t Theme) tui.Color { return t.DropdownSelectBG }},
 	{"code_bg", "Code block background", func(t Theme) tui.Color { return t.CodeBG }},
 }
 
@@ -171,9 +177,12 @@ func (w *Workbench) showThemeEditor() {
 	// descriptive role names and a blank separator row under the header so the two
 	// columns of rows are not cramped. The width stays at 80 so the dialog fits a
 	// standard 80-column terminal (centeredDialog only clamps the origin, it does
-	// not scale an oversized dialog).
+	// not scale an oversized dialog). The height grows with the role count: each
+	// column holds half the roles starting at Y=4, and the "Spec:" hint sits at
+	// height-4, so height must clear that last role row — the dropdown roles (#260)
+	// added three rows per column, lifting it from 18 to 21 (still within 24 rows).
 	const width = 80
-	const height = 18
+	const height = 21
 	x, y := centeredDialog(w, width, height)
 
 	dialog := tv.NewDialog("Theme", x, y, width, height)
@@ -205,9 +214,9 @@ func (w *Workbench) showThemeEditor() {
 	dialog.Window.AddContent(noShadow)
 
 	// One row per role across two columns; fields[i] edits themeRoles[i] and
-	// swatches[i] previews it. The left column holds the first nine roles (the
-	// seven semantic transcript colours plus the desktop chrome), the right column
-	// the remaining chrome colours.
+	// swatches[i] previews it. The roles split evenly: the first half fill the left
+	// column (the semantic transcript colours and the leading chrome roles), the
+	// remainder the right column (the menu-bar, dropdown and code-block roles).
 	fields := make([]*tv.TextBox, len(themeRoles))
 	swatches := make([]*tv.Label, len(themeRoles))
 

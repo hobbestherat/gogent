@@ -248,10 +248,18 @@ func TestApplyTheme(t *testing.T) {
 		t.Errorf("high-contrast: dialog accents = (header=%+v detail=%+v), want sky-blue/orange", colorDialogHeader, colorDialogDetail)
 	}
 
-	// Default palette restores turbotui's stock chrome.
-	ApplyTheme(ResolveTheme(config.ThemeConfig{}, envOf(map[string]string{"TERM": "xterm"}), false))
-	if tv.DefaultTheme != baseTVTheme {
-		t.Errorf("default: tv.DefaultTheme not restored to the stock palette")
+	// Default palette restores turbotui's stock chrome — except the dropdown popup
+	// highlight, which ApplyTheme now installs from the DropdownSelect roles onto
+	// tv.DefaultTheme.Selection* (issue #260). The default palette's cyan highlight
+	// lifts the previously bold-only popup highlight, so it intentionally diverges
+	// from the stock grey Selection.
+	resolved := ResolveTheme(config.ThemeConfig{}, envOf(map[string]string{"TERM": "xterm"}), false)
+	ApplyTheme(resolved)
+	wantDefault := baseTVTheme
+	wantDefault.SelectionFG = resolved.DropdownSelectFG
+	wantDefault.SelectionBG = resolved.DropdownSelectBG
+	if tv.DefaultTheme != wantDefault {
+		t.Errorf("default: tv.DefaultTheme = %+v, want the stock palette with the dropdown selection applied", tv.DefaultTheme)
 	}
 	// The stock light-grey dialog uses dark, high-contrast accents.
 	if colorDialogHeader != tui.ANSIColor(5) || colorDialogDetail != tui.ANSIColor(4) {
