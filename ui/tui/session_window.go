@@ -1680,7 +1680,10 @@ func (sw *SessionWindow) handleThinkingCommand(args []string) {
 		set = &v
 	}
 	if sw.wb.handlers.StreamThinking(sw.id, set) {
-		sw.addNote("streaming thinking on")
+		// Flag that turning it on changes failure semantics: the streaming path
+		// cannot be replayed mid-stream, so a transient model error (e.g. a 429)
+		// surfaces immediately instead of being retried with backoff (issue #217).
+		sw.addNote("streaming thinking on (transient model errors are not retried while on)")
 	} else {
 		sw.addNote("streaming thinking off")
 	}

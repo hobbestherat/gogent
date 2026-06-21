@@ -772,9 +772,22 @@ func (c *ModelConnection) CompleteWithToolsStreamCtx(ctx context.Context, messag
 	errCh := make(chan error, 1)
 
 	go func() {
+		// Mirror the loop-wide panic guard (issue #8): completeStream runs on this
+		// separate goroutine, OUTSIDE runLoop's recover, so a panic in stream
+		// parsing would otherwise crash the whole multi-session process instead of
+		// failing this one request. Contain it and surface it as an ordinary error.
+		// Both channels are closed the same way as the sibling CompleteStream so a
+		// future second reader cannot hang.
+		defer close(errCh)
 		defer close(streamCh)
-		_, err := c.completeStream(ctx, messages, tools, streamCh)
-		errCh <- err
+		defer func() {
+			if r := recover(); r != nil {
+				errCh <- &ModelError{Type: ErrorGeneric, Message: fmt.Sprintf("stream panicked: %v", r)}
+			}
+		}()
+		if _, err := c.completeStream(ctx, messages, tools, streamCh); err != nil {
+			errCh <- err
+		}
 	}()
 
 	var content strings.Builder
