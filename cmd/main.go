@@ -377,10 +377,8 @@ func main() {
 			},
 			// Input queue & interruptibility (issue #170). OnStop cancels the
 			// in-flight root turn (the window discards its queue on a manual stop);
-			// OnInject hands a queued message to the running session for mid-turn
-			// injection, acted on only when the experimental flag is enabled; the
-			// predicate lets the window know whether injection or drain-on-idle
-			// applies.
+			// OnInject splices the current input into the running turn now — the
+			// agent-side path behind the per-message Interject button (issue #201).
 			OnStop: func(sessionID string) {
 				if s := g.GetUserSession(sessionID); s != nil {
 					_ = s.StopAgent("root")
@@ -390,9 +388,6 @@ func main() {
 				if s := g.GetUserSession(sessionID); s != nil {
 					s.InjectUserNote(message)
 				}
-			},
-			InjectQueuedInputEnabled: func() bool {
-				return g.GetConfig().Experimental.InjectQueuedInput
 			},
 			// Harness-level supervisor (issue #172): the idle watchdog re-checks a
 			// session's /goal on each busy→idle edge and nudges it to continue while

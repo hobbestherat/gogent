@@ -46,6 +46,15 @@ func (w *Workbench) commands() []command {
 	toggle := func(k eventKind) func() {
 		return func() { w.transcriptDo(func(m *transcriptModel) { m.toggleKind(k) }) }
 	}
+	// sessionCmd runs a client-side slash command against the active session, then
+	// repaints so its transcript note shows (issue #201): the palette is how /stop,
+	// /clearqueue, /goal and /markdown become discoverable.
+	sessionCmd := func(cmd string) func() {
+		return func() {
+			w.withActiveTranscript(func(sw *SessionWindow) { sw.handleSlashCommand(cmd) })
+			w.desktop.Redraw()
+		}
+	}
 	return []command{
 		// Session lifecycle and arrangement.
 		{category: "Session", name: "New session", keys: "Ctrl+N", run: func() { w.NewSession() }},
@@ -59,6 +68,13 @@ func (w *Workbench) commands() []command {
 		{category: "Session", name: "Move session up", run: func() { w.MoveSession(w.ActiveID(), -1) }},
 		{category: "Session", name: "Move session down", run: func() { w.MoveSession(w.ActiveID(), 1) }},
 		{category: "Session", name: "Switch model", run: w.focusActiveModel},
+		// Running-turn / queue controls and per-session toggles (issue #201): the
+		// buttons cover the common path, but surfacing the commands here keeps the
+		// keyboard equivalents discoverable.
+		{category: "Session", name: "Stop turn", keys: "/stop", run: sessionCmd("/stop")},
+		{category: "Session", name: "Clear queued message", keys: "/clearqueue", run: sessionCmd("/clearqueue")},
+		{category: "Session", name: "Set / show goal (supervisor)", keys: "/goal", run: sessionCmd("/goal")},
+		{category: "Session", name: "Toggle Markdown rendering", keys: "/markdown", run: sessionCmd("/markdown")},
 		{category: "Session", name: "Export transcript (Markdown)", run: func() { w.exportActive("md") },
 			enabled: avail(h.GetTranscript != nil)},
 		{category: "Session", name: "Export transcript (JSON)", run: func() { w.exportActive("json") },

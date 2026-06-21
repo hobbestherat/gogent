@@ -481,13 +481,6 @@ type Config struct {
 // and easy to find; a missing "experimental" key resolves to the zero value
 // (everything off).
 type ExperimentalConfig struct {
-	// InjectQueuedInput, when true, splices a queued user message into a running
-	// turn at the next turn boundary (between a tool round and the next model
-	// call) as a clarification note, instead of waiting for the agent to go fully
-	// idle before sending it (issue #170, phase 2). The drain-on-idle queue
-	// (phase 1) is always on regardless of this flag; this only changes when a
-	// queued message fires for a turn that is still in flight.
-	InjectQueuedInput bool `json:"inject_queued_input,omitempty"`
 	// Supervisor, when true, enables the harness-level idle watchdog (issue #172):
 	// on each busy→idle transition, if a session has a /goal set, a cheap completion
 	// check decides whether the goal is met and, if not, nudges the session to

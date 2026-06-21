@@ -169,9 +169,10 @@ type UserSession struct {
 
 	// injectQueuedInput enables mid-turn injection of a queued user note at the
 	// next turn boundary in runLoop, instead of the UI waiting for full idle to
-	// drain its queue (issue #170, phase 2). Off by default; set from
-	// config.Experimental.InjectQueuedInput via SetInjectQueuedInput. Guarded by
-	// mu.
+	// drain its queue (issue #170, phase 2). It is now enabled for every session
+	// (SetInjectQueuedInput(true)) as the agent-side path behind the per-message
+	// Interject button (issue #201), which replaced the removed
+	// experimental.inject_queued_input flag. Guarded by mu.
 	injectQueuedInput bool
 	// pendingNote holds a user note (a queued message or a future supervisor nudge,
 	// issue #172) to splice into the running loop at the next turn boundary. It is
@@ -257,9 +258,9 @@ func NewUserSession(id string, agent *Agent) *UserSession {
 const injectedNoteTemplate = "[The user added a clarification: %s]"
 
 // SetInjectQueuedInput toggles mid-turn injection of queued user notes at the
-// next turn boundary (issue #170, phase 2). It is wired from
-// config.Experimental.InjectQueuedInput and is off by default, so an existing
-// setup keeps the drain-on-idle behaviour (phase 1) unless explicitly opted in.
+// next turn boundary (issue #170, phase 2). Production wiring enables it for every
+// session as the agent-side path behind the per-message Interject button (issue
+// #201); Enter/Queue still drain on idle (phase 1) regardless.
 func (s *UserSession) SetInjectQueuedInput(on bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

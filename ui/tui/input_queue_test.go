@@ -166,39 +166,3 @@ func TestStopClearsQueue(t *testing.T) {
 	sw.apply(agent.SessionEvent{Type: agent.SessionEventError, Err: fmt.Errorf("cancelled")})
 	noSend(t, sent)
 }
-
-// TestInjectModeDoesNotDrainOnIdle verifies that with mid-turn injection enabled
-// (issue #170, phase 2) a message typed while busy is handed to the backend for
-// injection and the local slot stays empty, so it does not also fire on idle.
-func TestInjectModeDoesNotDrainOnIdle(t *testing.T) {
-	w := newTestWorkbench(t)
-	sent := recordSends(w)
-	injected := make(chan string, 1)
-	w.handlers.InjectQueuedInputEnabled = func() bool { return true }
-	w.handlers.OnInject = func(_, message string) { injected <- message }
-	sw := w.openWindow("s", "S")
-
-	sw.input.SetText("first")
-	sw.submitFn()
-	if got := waitSend(t, sent); got != "first" {
-		t.Fatalf("first send = %q", got)
-	}
-	sw.input.SetText("clarify this")
-	sw.submitFn()
-
-	select {
-	case m := <-injected:
-		if m != "clarify this" {
-			t.Errorf("injected %q, want %q", m, "clarify this")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected the message to be handed to OnInject")
-	}
-	if sw.pending != "" {
-		t.Errorf("inject mode should leave the local slot empty, got %q", sw.pending)
-	}
-
-	// Idle must not re-send the already-injected message.
-	sw.apply(agent.SessionEvent{Type: agent.SessionEventFinal, Text: "done"})
-	noSend(t, sent)
-}

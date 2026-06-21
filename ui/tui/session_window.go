@@ -16,17 +16,27 @@ import (
 
 // SessionWindow is a single chat session rendered in its own window/layer.
 type SessionWindow struct {
-	wb          *Workbench
-	id          string
-	title       string
-	window      *tv.Window
-	layer       *tv.Layer
-	history     *tv.TextView
-	transcript  *transcriptModel
-	input       *tv.MultiLineInput
-	sendButton  *tv.Button
-	modelLabel  *tv.Label
-	modelSelect *tv.Select
+	wb         *Workbench
+	id         string
+	title      string
+	window     *tv.Window
+	layer      *tv.Layer
+	history    *tv.TextView
+	transcript *transcriptModel
+	input      *tv.MultiLineInput
+	sendButton *tv.Button
+	// interjectButton, queueButton and stopButton are the running-turn input
+	// controls (issue #201): while a turn is in flight they replace the single
+	// idle Send button next to the prompt box. Queue mirrors the Enter default
+	// (drain-on-idle), Interject splices the current input into the running turn
+	// now (disabled when the input is empty), and Stop cancels the turn and clears
+	// the queue. They carry zero bounds while idle, so only Send shows; the swap is
+	// driven by layoutInputRow from the busy flag.
+	interjectButton *tv.Button
+	queueButton     *tv.Button
+	stopButton      *tv.Button
+	modelLabel      *tv.Label
+	modelSelect     *tv.Select
 	// effortLabel / effortSelect are the per-session reasoning-effort control
 	// (issue #177), right-aligned on the model header row. The selector's options
 	// are ["(default)"] + the selected model's EffortOptions; "(default)" means
@@ -210,6 +220,13 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 
 	input := tv.NewMultiLineInput("", tv.Rect{})
 	sendButton := tv.NewButton("Send", tv.Rect{}, nil)
+	// Running-turn controls (issue #201). Labels carry the Enter affordance (Queue)
+	// and an error-coloured halt (Stop); their handlers are wired below, once the
+	// shared submit closure exists. They start hidden (zero bounds) until busy.
+	interjectButton := tv.NewButton(interjectLabel, tv.Rect{}, nil)
+	queueButton := tv.NewButton(queueLabel, tv.Rect{}, nil)
+	stopButton := tv.NewButton(stopLabel, tv.Rect{}, nil)
+	stopButton.FG = colorError
 	modelLabel := tv.NewLabel("Model", tv.Rect{})
 	modelSelect := tv.NewSelect(wb.desktop, wb.modelNames, tv.Rect{})
 	modelLabel.SetTarget(modelSelect)
@@ -220,6 +237,9 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 	status.FG = colorNote
 	sw.input = input
 	sw.sendButton = sendButton
+	sw.interjectButton = interjectButton
+	sw.queueButton = queueButton
+	sw.stopButton = stopButton
 	sw.modelLabel = modelLabel
 	sw.modelSelect = modelSelect
 	sw.effortLabel = effortLabel
@@ -243,6 +263,12 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 	window.AddContent(history)
 	window.AddContent(input)
 	window.AddContent(sendButton)
+	window.AddContent(interjectButton)
+	window.AddContent(queueButton)
+	window.AddContent(stopButton)
+	// Grey the Interject button while the input is empty so its disabled state
+	// (nothing to slip in) is visible, mirroring the effort control (issue #201).
+	sw.guardInterjectButton()
 	window.AddContent(modelLabel)
 	window.AddContent(modelSelect)
 	window.AddContent(effortLabel)
@@ -261,8 +287,10 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 		sw.layoutEffortControl(wd, 7+selW)
 		history.Component.SetBounds(tv.Rect{X: 0, Y: 1, W: wd, H: ht - inputH - 2})
 		status.Component.SetBounds(tv.Rect{X: 0, Y: ht - inputH - 1, W: wd, H: 1})
-		input.Component.SetBounds(tv.Rect{X: 0, Y: ht - inputH, W: wd - 10, H: inputH})
-		sendButton.Component.SetBounds(tv.Rect{X: wd - 9, Y: ht - inputH, W: 8, H: 1})
+		// The input row shows Send while idle and the three running-turn controls
+		// while busy (issue #201); layoutInputRow sizes the input box to the room
+		// left beside whichever set is shown.
+		sw.layoutInputRow(wd, ht, inputH)
 		// Reflow the status line to the new width so its stats truncate/expand
 		// with the window on resize.
 		sw.refreshStatus()
@@ -340,6 +368,11 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 	sendButton.OnPress = submit
 	input.OnSubmit = submit
 	sw.submitFn = submit
+	// Running-turn controls (issue #201): Queue mirrors Enter (drain-on-idle),
+	// Interject splices the current input into the live turn now, Stop cancels it.
+	queueButton.OnPress = submit
+	interjectButton.OnPress = sw.interject
+	stopButton.OnPress = sw.stopTurn
 	// Wire the supervisor's completion-check dispatcher (issue #172). The watchdog
 	// (maybeSupervise) calls it on the busy→idle edge; it runs the check off the UI
 	// thread and posts the verdict back. Tests override it to run synchronously.
@@ -737,22 +770,108 @@ func effortSelectWidth(windowWidth int) int {
 	return w
 }
 
+// Running-turn input controls (issue #201). The full labels carry their
+// affordances — Enter on Queue, an error-coloured halt on Stop — and degrade to
+// single-glyph forms on a window too narrow to show them beside a usable input.
+const (
+	interjectLabel = "Interject"
+	queueLabel     = "Queue ⏎"
+	stopLabel      = "■ Stop"
+
+	interjectGlyph = "»"
+	queueGlyph     = "⏎"
+	stopGlyph      = "■"
+)
+
+// inputRowGap is the one-cell gap between adjacent input-row buttons (and between
+// the input box and the first button); inputRowMargin is the right margin past the
+// last button; minInputWidth is the prompt width the full-label button set must
+// leave before the row degrades to glyph-only labels (issue #201).
+const (
+	inputRowGap    = 1
+	inputRowMargin = 1
+	minInputWidth  = 20
+)
+
+// buttonWidth is the cell width a button needs to show label inside its "[ … ]"
+// frame. It matches the 8-wide idle Send button (4-cell "Send" + 4-cell frame).
+func buttonWidth(label string) int { return tui.StringWidth(label) + 4 }
+
+// runningButtonsWidth is the total width the three running-turn buttons occupy on
+// the input row: the three frames, the gaps between them and the right margin
+// (issue #201).
+func runningButtonsWidth(interject, queue, stop string) int {
+	return buttonWidth(interject) + buttonWidth(queue) + buttonWidth(stop) +
+		2*inputRowGap + inputRowMargin
+}
+
+// layoutInputRow positions the prompt box and its buttons on the bottom input row
+// (issue #201). Idle shows the single Send button at the right with the three
+// running-turn controls hidden (zero bounds); busy hides Send and lays out
+// [ Interject ] [ Queue ⏎ ] [ ■ Stop ] right-aligned — the two send-actions
+// grouped, the destructive Stop on the far right — shrinking the input to the room
+// left of them. On a window too narrow to show the full labels beside a usable
+// input the labels degrade to single glyphs before the input overflows.
+func (sw *SessionWindow) layoutInputRow(wd, ht, inputH int) {
+	y := ht - inputH
+	if !sw.busy {
+		sw.interjectButton.Component.SetBounds(tv.Rect{})
+		sw.queueButton.Component.SetBounds(tv.Rect{})
+		sw.stopButton.Component.SetBounds(tv.Rect{})
+		sw.input.Component.SetBounds(tv.Rect{X: 0, Y: y, W: wd - 10, H: inputH})
+		sw.sendButton.Component.SetBounds(tv.Rect{X: wd - 9, Y: y, W: 8, H: 1})
+		return
+	}
+	sw.sendButton.Component.SetBounds(tv.Rect{})
+	il, ql, sl := interjectLabel, queueLabel, stopLabel
+	if runningButtonsWidth(il, ql, sl) > wd-minInputWidth {
+		il, ql, sl = interjectGlyph, queueGlyph, stopGlyph
+	}
+	sw.interjectButton.SetLabel(il)
+	sw.queueButton.SetLabel(ql)
+	sw.stopButton.SetLabel(sl)
+	interjectW, queueW, stopW := buttonWidth(il), buttonWidth(ql), buttonWidth(sl)
+	stopX := wd - inputRowMargin - stopW
+	queueX := stopX - inputRowGap - queueW
+	interjectX := queueX - inputRowGap - interjectW
+	inputW := interjectX - inputRowGap
+	if inputW < 1 {
+		inputW = 1
+	}
+	sw.input.Component.SetBounds(tv.Rect{X: 0, Y: y, W: inputW, H: inputH})
+	sw.interjectButton.Component.SetBounds(tv.Rect{X: interjectX, Y: y, W: interjectW, H: 1})
+	sw.queueButton.Component.SetBounds(tv.Rect{X: queueX, Y: y, W: queueW, H: 1})
+	sw.stopButton.Component.SetBounds(tv.Rect{X: stopX, Y: y, W: stopW, H: 1})
+}
+
+// guardInterjectButton greys the Interject button while it is disabled — the input
+// is empty, so there is nothing to slip into the running turn (issue #201). It
+// wraps the button's draw to swap its colour, mirroring guardEffortSelect; the
+// interject() action enforces the same guard, so a stray activation is inert too.
+func (sw *SessionWindow) guardInterjectButton() {
+	b := sw.interjectButton
+	enabledFG := b.FG
+	baseDraw := b.Component.DrawFn
+	b.Component.DrawFn = func(vc *tv.VisualComponent, surface tv.Surface) {
+		if sw.interjectEnabled() {
+			b.FG = enabledFG
+		} else {
+			b.FG = colorNote
+		}
+		if baseDraw != nil {
+			baseDraw(vc, surface)
+		}
+	}
+}
+
 // enqueue stows a message typed while the agent is busy as the session's single
 // pending slot (issue #170, phase 1). It is latest-wins: a new entry replaces an
 // undrained one (edit-in-place), so the user can correct a queued message before
-// it fires. When mid-turn injection is enabled (phase 2) the text is handed to
-// the backend to splice in at the next turn boundary and the local slot is left
-// empty so it does not also auto-fire on idle; otherwise it waits in pending for
-// the drain-on-idle path. Either way the queued text is echoed as a note and
-// surfaced in the status line so it is visible and editable before it fires.
+// it fires; the drain-on-idle path then sends it when the agent finishes. The
+// queued text is echoed as a note and surfaced in the status line so it is visible
+// and editable before it fires. This is the Enter/Queue path; mid-turn delivery is
+// the separate Interject button (issue #201).
 func (sw *SessionWindow) enqueue(text string) {
-	if sw.injectEnabled() && sw.wb.handlers.OnInject != nil {
-		sw.pending = ""
-		sw.addNote("queued for injection: " + text)
-		go sw.wb.handlers.OnInject(sw.id, text)
-		sw.refreshStatus()
-		return
-	}
 	replaced := sw.pending != ""
 	sw.pending = text
 	if replaced {
@@ -763,13 +882,32 @@ func (sw *SessionWindow) enqueue(text string) {
 	sw.refreshStatus()
 }
 
-// injectEnabled reports whether mid-turn injection (issue #170, phase 2) is on,
-// defaulting to false when the handler is not wired (drain-on-idle only).
-func (sw *SessionWindow) injectEnabled() bool {
-	if sw.wb.handlers.InjectQueuedInputEnabled == nil {
-		return false
+// interject splices the current input text into the running turn now (issue #201),
+// via OnInject → UserSession.InjectUserNote, then clears the box. It is the
+// button-only counterpart to Enter/Queue — a per-message action, not a global
+// mode — so the model sees the text as a clarification before its next step. It is
+// a no-op when the input is empty (nothing to say) or when no turn is in flight,
+// matching the button's disabled state.
+func (sw *SessionWindow) interject() {
+	text := strings.TrimSpace(sw.input.GetText())
+	if text == "" || !sw.busy {
+		return
 	}
-	return sw.wb.handlers.InjectQueuedInputEnabled()
+	sw.completer.hide()
+	sw.input.Clear()
+	if sw.wb.handlers.OnInject == nil {
+		sw.addNote("interject unavailable")
+		return
+	}
+	sw.addNote("interjected: " + text)
+	go sw.wb.handlers.OnInject(sw.id, text)
+}
+
+// interjectEnabled reports whether the Interject button is actionable: there is
+// non-blank input text to slip into the running turn (issue #201). It drives both
+// the button's greyed disabled state and the interject() guard.
+func (sw *SessionWindow) interjectEnabled() bool {
+	return strings.TrimSpace(sw.input.GetText()) != ""
 }
 
 // clearQueue discards any pending queued message, optionally noting why. It is
@@ -814,12 +952,12 @@ func (sw *SessionWindow) setBusy(busy bool) {
 	sw.busy = busy
 	if busy {
 		sw.statusState = "working..."
-		sw.sendButton.SetLabel("...")
+		// The Send button is hidden while busy (replaced by the running-turn
+		// controls, issue #201), so its label no longer needs a "..." state.
 		sw.turnStart = time.Now()
 		sw.turnStartOut = sw.statusStats.TokensOut
 	} else {
 		sw.statusState = "idle"
-		sw.sendButton.SetLabel("Send")
 		sw.turnStart = time.Time{}
 		sw.turnStartOut = 0
 		// The turn is over: any tool entry still marked "running" never got its

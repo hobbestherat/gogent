@@ -1043,10 +1043,11 @@ func (g *Gogent) CreateUserSession(id string, rootAgent *agent.Agent) *agent.Use
 
 	userSession := agent.NewUserSession(id, rootAgent)
 	userSession.SetSubAgentConfig(g.config.SubAgents)
-	// Opt-in mid-turn injection of queued input (issue #170, phase 2). Off unless
-	// the experimental flag is set; the UI's drain-on-idle queue (phase 1) works
-	// either way.
-	userSession.SetInjectQueuedInput(g.config.Experimental.InjectQueuedInput)
+	// Mid-turn injection of a queued user note (issue #170, phase 2) is now always
+	// on: it is the agent-side path behind the per-message Interject button (issue
+	// #201), which replaced the removed experimental.inject_queued_input flag. The
+	// UI's drain-on-idle queue (phase 1) still owns Enter/Queue.
+	userSession.SetInjectQueuedInput(true)
 	userSession.SetSubAgentTimeout(time.Duration(g.config.Timeouts.SubAgentSecondsOrDefault()) * time.Second)
 	// Share the process-wide concurrency limiter so sub-agent fan-out across all
 	// sessions is globally bounded (issue #23).
