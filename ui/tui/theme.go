@@ -163,9 +163,14 @@ func defaultPalette() Theme {
 		Title:   tui.ANSIColor(15),
 		Divider: tui.ANSIColor(8),
 		Accent:  tui.ANSIColor(11),
-		// Fenced-code panel: the desktop blue, so code blocks belong to the theme
-		// instead of painting black-on-blue (issue #200).
-		CodeBG: tui.ANSIColor(4),
+		// Fenced-code panel: a dark navy inset — a subtle shade of the desktop blue
+		// (issue #200) so code reads as a distinct themed panel rather than the old
+		// black-on-blue island. It is the one RGB role in this otherwise 16-colour
+		// palette: on truecolor/256 it is a dim blue distinct from the ANSI-4 window
+		// background, and on a 16-colour terminal it degrades to black (ANSI 0) —
+		// still distinct from the blue window and clear of the grey comment foreground
+		// (ANSI 8), so every token stays legible.
+		CodeBG: tui.RGBColor(0x10, 0x14, 0x50),
 	}
 }
 
@@ -536,6 +541,13 @@ func blackCanvasTVTheme(t Theme) tv.Theme {
 		DialogBG: black, DialogFG: white, DialogBorderFG: white, DialogBorderBG: black,
 		InputBG: black, InputFG: white, InputFocusBG: accent, InputFocusFG: black,
 		CloseButtonBG: err, CloseButtonFG: white,
-		MnemonicFG: accent, SelectionBG: accent, SelectionFG: black,
+		MnemonicFG: accent, DialogMnemonicFG: accent, SelectionBG: accent, SelectionFG: black,
+		// Menu chrome: the menubar and dropdowns are drawn over the black canvas, so
+		// they need explicit colours too — otherwise they fall back to the terminal
+		// default and read as low-contrast/invisible (issue #200). White-on-black with
+		// the palette accent marking the hot key and the selected row.
+		MenuBarFG: white, MenuBarBG: black,
+		MenuHotFG: accent, MenuHotBG: black,
+		MenuSelectFG: black, MenuSelectBG: accent, MenuShadow: divider,
 	}
 }

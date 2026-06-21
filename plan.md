@@ -44,6 +44,28 @@
 - `internal/config/config.go` — `ThemeConfig.Name` doc mentions `dark`.
 - `ui/tui/sidebar.go` — **no change** (already reads the themed `chromePanelBG`).
 
+## Round 2 — fixes after review/critique
+Verified against turbotui source that the default session-window background is
+`WindowBG = ANSIColor(4)` (blue), so the round-1 `CodeBG = ANSI(4)` painted code
+blocks blue-on-blue (invisible). Fixes applied:
+1. **Default `CodeBG` → `RGBColor(0x10,0x14,0x50)`** (dark navy): a subtle shade of
+   the desktop blue, distinct from the blue window. Degrades to a dark-blue 256 index
+   (ANSI 17) and to black (ANSI 0) at 16 colours — never to ANSI 8, so it never
+   collides with the grey comment foreground. Initial `mdPalette` literal mirrors it.
+2. **`hasCodeBG` predicate** → `t.CodeBG != t.PanelBG` (post-degrade), replacing the
+   `t.Name != themeHighContrast` special-case. Now suppression is principled: it fires
+   for any black-canvas palette where the code panel would vanish — covering both
+   high-contrast (always) and dark at 16 colours (where `0x262626`→ANSI 0 == black bg).
+3. **`blackCanvasTVTheme`** now populates `DialogMnemonicFG` and the menu chrome
+   (`MenuBarFG/BG`, `MenuHotFG/BG`, `MenuSelectFG/BG`, `MenuShadow`) so the dark (and
+   high-contrast) menu bar/dropdowns are styled, not terminal-default on black.
+
+Two tester-owned tests assert the old invisible-blue behaviour and now fail (left in
+place per the lane rule, flagged for the tester to update):
+- `TestIssue200DefaultPaletteNoHardcodedBlack` — asserts `CodeBG == DesktopBG`/`ANSI(4)`.
+- `TestIssue200CodeBGDegrade` (l.633) — asserts default 16-colour `CodeBG == ANSI(4)`.
+Both should instead assert `CodeBG != PanelBG/WindowBG`.
+
 ## Test targets (for GLM)
 - `defaultPalette().CodeBG` / `.PanelBG` are not `ANSIColor(0)` and differ across palettes.
 - `applyMarkdownPalette` sets `mdPalette.codeBG` from `t.CodeBG` (per-theme).
