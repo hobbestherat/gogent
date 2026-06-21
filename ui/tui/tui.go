@@ -1070,6 +1070,9 @@ func (w *Workbench) RenameSession(id string) {
 	if sw == nil {
 		return
 	}
+	// Select-on-open: the current name starts highlighted so the first keystroke
+	// replaces it; an arrow / Home / End collapses the selection to edit in place
+	// (issue #235).
 	w.showInputDialog("Rename Session", "&Title:", current, func(value string, ok bool) {
 		if !ok {
 			return
@@ -1077,7 +1080,7 @@ func (w *Workbench) RenameSession(id string) {
 		if title := strings.TrimSpace(value); title != "" {
 			w.SetSessionTitle(id, title)
 		}
-	})
+	}, withSelectAll())
 }
 
 // SetSessionTitle applies a new title to a session's window, sidebar node and
