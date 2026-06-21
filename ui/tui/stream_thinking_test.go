@@ -350,6 +350,41 @@ func TestThinkingCommandUnavailable(t *testing.T) {
 	}
 }
 
+// TestThinkingCommandOnNoteWarnsNoRetry pins the driver's round-1 UX fix: since
+// enabling live streaming changes failure semantics (transient errors are not
+// retried), the on-note must surface that trade-off so the user is not surprised
+// by a 429 that used to be retried. The off-note stays plain.
+func TestThinkingCommandOnNoteWarnsNoRetry(t *testing.T) {
+	state := false
+	sw := newThinkingCommandSession("s1", func(_ string, set *bool) bool {
+		if set != nil {
+			state = *set
+		}
+		return state
+	})
+
+	// Turning on warns about the retry trade-off.
+	sw.handleSlashCommand("/thinking on")
+	rec := lastRecord(sw)
+	if rec == nil {
+		t.Fatal("expected an on-note")
+	}
+	body := rec.body()
+	if !contains(body, "on") {
+		t.Errorf("on-note body = %q, want it to state streaming is on", body)
+	}
+	if !contains(body, "retr") { // matches "retry"/"retried"/"not retried"
+		t.Errorf("on-note body = %q, want it to warn that errors are not retried", body)
+	}
+
+	// Turning off is plain (no caveat needed).
+	sw.handleSlashCommand("/thinking off")
+	offRec := lastRecord(sw)
+	if offBody := offRec.body(); contains(offBody, "retr") {
+		t.Errorf("off-note body = %q, should not carry the no-retry caveat", offBody)
+	}
+}
+
 func contains(s, substr string) bool {
 	for i := 0; i+len(substr) <= len(s); i++ {
 		if s[i:i+len(substr)] == substr {

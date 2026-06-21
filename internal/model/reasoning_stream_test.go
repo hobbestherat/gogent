@@ -551,3 +551,129 @@ func TestAnthropicCompleteWithToolsStreamCtxThinkingDelta(t *testing.T) {
 		t.Errorf("resp.Content = %q, want Answer", resp.Content)
 	}
 }
+
+// --- Round 2: validate the driver's panic-recovery + errCh-close fix ---
+
+// TestCompleteWithToolsStreamCtxRequestShape pins the wire contract for the
+// thinking path against real backends (the round-1 SSE servers replay fixed
+// bodies and ignore the request, so without this a buildRequest change could
+// silently drop usage on the streaming path and no test would fail). It asserts
+// the streamed request asks to stream, asks for usage, and advertises the tool.
+func TestCompleteWithToolsStreamCtxRequestShape(t *testing.T) {
+	var captured []byte
+	server := reasoningServer(t, reasoningContentSSE, func(b []byte) { captured = b })
+	c := NewModelConnection()
+	c.SetURL(server.URL)
+
+	if _, err := c.CompleteWithToolsStreamCtx(context.Background(),
+		[]Message{{Role: RoleUser, Content: "hi"}},
+		[]ToolDef{{Type: "function", Function: FunctionDef{Name: "calc"}}},
+		func(string) {}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body := string(captured)
+	if !strings.Contains(body, `"stream":true`) {
+		t.Errorf("stream request missing stream:true: %s", body)
+	}
+	if !strings.Contains(body, `"include_usage":true`) {
+		t.Errorf("stream request missing include_usage (token stats would be lost on real backends): %s", body)
+	}
+	if !strings.Contains(body, `"calc"`) {
+		t.Errorf("stream request did not advertise the tool: %s", body)
+	}
+}
+
+// TestCompleteWithToolsStreamCtxRecoversPanic validates the driver's round-1
+// fix: completeStream runs on a separate goroutine outside runLoop's recover, so
+// a panic during stream parsing must be contained and surfaced as a *ModelError
+// rather than crashing the process. A nil Stats forces a nil-deref panic inside
+// completeStream (at Stats.Mutex.Lock), exercising the recover path.
+func TestCompleteWithToolsStreamCtxRecoversPanic(t *testing.T) {
+	server := sseServer(t, contentSSE)
+	c := NewModelConnection()
+	c.SetURL(server.URL)
+	c.Stats = nil // forces a panic inside completeStream
+
+	resp, err := c.CompleteWithToolsStreamCtx(context.Background(),
+		[]Message{{Role: RoleUser, Content: "hi"}}, nil, func(string) {})
+	if err == nil {
+		t.Fatal("expected the recovered panic to surface as an error, got nil")
+	}
+	if resp != nil {
+		t.Errorf("expected nil response on a recovered panic, got %+v", resp)
+	}
+	me, ok := err.(*ModelError)
+	if !ok {
+		t.Fatalf("expected *ModelError from a recovered panic, got %T: %v", err, err)
+	}
+	if !strings.Contains(me.Message, "stream panicked") {
+		t.Errorf("error message = %q, want it to mention the recovered panic", me.Message)
+	}
+}
+
+// TestCompleteWithToolsStreamCtxErrChClosedNoHang verifies the errCh is now
+// closed (the round-1 fix) so the single reader never blocks and a would-be
+// second reader terminates — the regression the close guards against.
+func TestCompleteWithToolsStreamCtxErrChClosedNoHang(t *testing.T) {
+	server := sseServer(t, contentSSE)
+	c := NewModelConnection()
+	c.SetURL(server.URL)
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = c.CompleteWithToolsStreamCtx(context.Background(),
+			[]Message{{Role: RoleUser, Content: "hi"}}, nil, func(string) {})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("CompleteWithToolsStreamCtx hung — errCh close / reader mismatch regressed")
+	}
+}
+
+// TestCompleteWithToolsStreamCtxPartialStreamDeliversDeltas covers the cut-mid-
+// stream edge: when the connection drops after some reasoning has streamed, the
+// deltas already received must reach the sink and the call must return (not hang)
+// — the invariant that lets the UI fold whatever partial thinking arrived.
+func TestCompleteWithToolsStreamCtxPartialStreamDeliversDeltas(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl, _ := w.(http.Flusher)
+		_, _ = w.Write([]byte(`data: {"choices":[{"delta":{"reasoning_content":"partial reasoning"},"index":0}]}` + "\n\n"))
+		if fl != nil {
+			fl.Flush()
+		}
+		// Abrupt close: no finish chunk, no [DONE].
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, err := hj.Hijack(); err == nil {
+				_ = conn.Close()
+			}
+		}
+	}))
+	defer server.Close()
+
+	c := NewModelConnection()
+	c.SetURL(server.URL)
+
+	var sink []string
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.CompleteWithToolsStreamCtx(context.Background(),
+			[]Message{{Role: RoleUser, Content: "hi"}}, nil,
+			func(d string) { sink = append(sink, d) })
+		done <- err
+	}()
+
+	select {
+	case <-done:
+		// Whether the cut surfaces as EOF-completion or a read error, the call must
+		// return, and the delta that did arrive must have reached the sink.
+	case <-time.After(5 * time.Second):
+		t.Fatal("CompleteWithToolsStreamCtx hung on a cut stream")
+	}
+	if len(sink) == 0 || sink[0] != "partial reasoning" {
+		t.Errorf("sink = %q, wanted the delta delivered before the cut", sink)
+	}
+}

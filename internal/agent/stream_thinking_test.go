@@ -434,3 +434,42 @@ func assertDeltaBeforeDone(events []SessionEvent, step int) string {
 	}
 	return ""
 }
+
+// TestStreamThinkingTrailingReasoning covers reasoning that streams AFTER the
+// visible answer (some models emit thinking post-content). The loop must still
+// surface it as a ThinkingDelta and fold on Done regardless of position, so the
+// live entry is not skipped for trailing reasoning.
+func TestStreamThinkingTrailingReasoning(t *testing.T) {
+	// content first, then reasoning, then finish — reasoning is trailing here.
+	const trailingSSE = `data: {"choices":[{"delta":{"content":"the answer"},"index":0}]}
+
+data: {"choices":[{"delta":{"reasoning_content":"afterthought"},"index":0}]}
+
+data: {"choices":[{"delta":{},"index":0,"finish_reason":"stop"}]}
+
+data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}
+
+data: [DONE]
+
+`
+	srv := &seqServer{bodies: []string{trailingSSE}}
+	server := httptest.NewServer(http.HandlerFunc(srv.handler))
+	defer server.Close()
+
+	us, _ := newStreamLoopSession(t, server.URL)
+	us.SetStreamThinking(true)
+
+	var mu sync.Mutex
+	events := collectEventsWith(&mu, us)
+
+	if _, err := us.ExecuteTaskLoop(context.Background(), "root", "hi"); err != nil {
+		t.Fatalf("loop error: %v", err)
+	}
+	deltas := eventsOf(events, &mu, SessionEventThinkingDelta)
+	if got := joinDeltas(deltas); got != "afterthought" {
+		t.Errorf("trailing reasoning delta = %q, want %q", got, "afterthought")
+	}
+	if len(eventsOf(events, &mu, SessionEventThinkingDone)) != 1 {
+		t.Error("expected a ThinkingDone to fold the trailing reasoning")
+	}
+}
