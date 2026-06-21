@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
-	"unsafe"
 )
 
 // buildBodyBytes is the test-only convenience for the buffer-writing buildBody:
@@ -97,21 +96,21 @@ func TestBuildBodyWritesToBuffer(t *testing.T) {
 	}
 }
 
-// The request-body buffer pool must hand back the same buffer across a
-// release/acquire pair (so a growing transcript is marshaled into one reused
-// buffer rather than a fresh allocation each turn). sync.Pool is allowed to drop
-// entries on GC, so GC is disabled for the round-trip to make this deterministic.
-func TestReqBodyPoolReusesBuffer(t *testing.T) {
+// A buffer taken from the request-body pool must be safe to reuse: when the pool
+// does hand a released buffer back, encodeJSON resets it first so stale bytes
+// from a prior turn can never leak into a new body. We do NOT assert pointer
+// identity across release/acquire — sync.Pool is explicitly allowed to drop
+// entries (it does so aggressively under the race detector), so that assertion
+// was flaky and tested an unguaranteed implementation detail rather than gogent
+// behaviour. The reset/no-leak guarantee below holds whether or not the pool
+// actually reused the buffer.
+func TestReqBodyPoolReuseResetsBuffer(t *testing.T) {
 	b1 := acquireReqBodyBuf()
 	b1.WriteString("payload-from-previous-turn")
-	want := unsafe.SliceData(b1.Bytes())
 	releaseReqBodyBuf(b1)
 
 	b2 := acquireReqBodyBuf()
 	defer releaseReqBodyBuf(b2)
-	if got := unsafe.SliceData(b2.Bytes()); got != want {
-		t.Fatalf("pool did not reuse the buffer: got %p, want %p", got, want)
-	}
 
 	// The reused buffer must still marshal correctly: encodeJSON resets it first,
 	// so stale bytes from the previous turn cannot leak into the new body.
