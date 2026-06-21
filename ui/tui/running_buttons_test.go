@@ -245,30 +245,34 @@ func TestBusyRowDegradesToGlyphsOnNarrowWindow(t *testing.T) {
 }
 
 // TestBusyRowLabelDegradationThreshold pins the exact width at which the labels
-// flip between glyph and full form: full labels once the window can leave at
-// least minInputWidth cells beside them, glyphs below that (issue #201).
-//
-// Note: the threshold compares runningButtonsWidth against wd-minInputWidth
-// without accounting for the one-cell gap between the prompt and the first
-// button, so at the boundary (wd=57) the prompt gets minInputWidth-1 cells. The
-// test asserts the actual threshold so a regression in the flip point is caught.
+// flip between glyph and full form, and — crucially — that at the flip point the
+// prompt gets exactly minInputWidth cells (issue #201). The threshold budget
+// includes the one-cell gap between the prompt and the first button
+// (runningButtonsWidth > wd-minInputWidth-inputRowGap); without that gap the
+// prompt ended up a cell short of the floor, so this guards against the off-by-one
+// regressing.
 func TestBusyRowLabelDegradationThreshold(t *testing.T) {
 	w := newTestWorkbench(t)
 	sw := w.openWindow("s", "S")
 	sw.busy = true
 
-	layout(sw, 56, 24, 3)
-	if sw.interjectButton.Label != interjectGlyph {
-		t.Errorf("wd=56 should use glyphs, got %q", sw.interjectButton.Label)
-	}
+	// One cell below the flip: still glyphs.
 	layout(sw, 57, 24, 3)
-	if sw.interjectButton.Label != interjectLabel {
-		t.Errorf("wd=57 should use full labels, got %q", sw.interjectButton.Label)
+	if sw.interjectButton.Label != interjectGlyph {
+		t.Errorf("wd=57 should use glyphs, got %q", sw.interjectButton.Label)
 	}
-	// At the boundary the prompt is one cell shy of minInputWidth (off-by-one in
-	// the threshold). Documented here so a "fix" updates both sides consistently.
-	if in := boundsOfInput(sw).W; in != minInputWidth-1 {
-		t.Errorf("boundary input width = %d, want %d (minInputWidth-1)", in, minInputWidth-1)
+	// At the flip (wd=58): full labels, and the prompt gets exactly minInputWidth.
+	layout(sw, 58, 24, 3)
+	if sw.interjectButton.Label != interjectLabel {
+		t.Errorf("wd=58 should use full labels, got %q", sw.interjectButton.Label)
+	}
+	if in := boundsOfInput(sw).W; in != minInputWidth {
+		t.Errorf("flip-point input width = %d, want exactly %d (minInputWidth)", in, minInputWidth)
+	}
+	// And the prompt only grows from there with the full labels.
+	layout(sw, 80, 24, 3)
+	if in := boundsOfInput(sw).W; in <= minInputWidth {
+		t.Errorf("wd=80 input width = %d, want > %d", in, minInputWidth)
 	}
 }
 
@@ -329,6 +333,58 @@ func TestBusyIdleSwapSwapsButtons(t *testing.T) {
 	layout(sw, 80, 24, 3)
 	if boundsOf(sw.sendButton).Empty() || !boundsOf(sw.stopButton).Empty() {
 		t.Fatal("back to idle: Send should show again, running buttons hidden")
+	}
+}
+
+// TestRunningButtonsHiddenViaVisibleWhenIdle is the regression guard for the
+// focus-trap fix (issue #201): a hidden input-row button must drop out of the
+// Tab-focus cycle, which turbotv's collectFocusable achieves by skipping
+// !Visible components (it does NOT skip zero-bounds ones). So hiding is done by
+// clearing Component.Visible, not merely zeroing the bounds. This test pins that
+// exact condition — if anyone reverts to a bounds-only hide, Visible stays true
+// and an invisible button would catch Tab and swallow Enter.
+func TestRunningButtonsHiddenViaVisibleWhenIdle(t *testing.T) {
+	w := newTestWorkbench(t)
+	sw := w.openWindow("s", "S")
+
+	layout(sw, 80, 24, 3)
+	if !sw.sendButton.Component.Visible {
+		t.Error("idle: Send should be Visible (focusable)")
+	}
+	for name, b := range map[string]*tv.Button{
+		"interject": sw.interjectButton,
+		"queue":     sw.queueButton,
+		"stop":      sw.stopButton,
+	} {
+		if b.Component.Visible {
+			t.Errorf("idle: %s button should be hidden (!Visible) so it leaves the focus cycle", name)
+		}
+		// Focusable stays true; the focus exclusion relies on Visible=false alone
+		// (collectFocusable skips !Visible), which is what we assert above.
+	}
+
+	// Busy: the inverse — Send hidden, the three running buttons shown/focusable.
+	sw.busy = true
+	layout(sw, 80, 24, 3)
+	if sw.sendButton.Component.Visible {
+		t.Error("busy: Send should be hidden (!Visible)")
+	}
+	for name, b := range map[string]*tv.Button{
+		"interject": sw.interjectButton,
+		"queue":     sw.queueButton,
+		"stop":      sw.stopButton,
+	} {
+		if !b.Component.Visible {
+			t.Errorf("busy: %s button should be Visible", name)
+		}
+	}
+
+	// Returning to idle flips Visible back, so the buttons re-enter/exit the focus
+	// cycle with the state.
+	sw.busy = false
+	layout(sw, 80, 24, 3)
+	if !sw.sendButton.Component.Visible || sw.stopButton.Component.Visible {
+		t.Error("idle-again: Visible flags should flip back with the busy state")
 	}
 }
 
@@ -518,7 +574,9 @@ func TestInterjectDoesNotQueue(t *testing.T) {
 
 // TestInterjectUnavailableWhenHandlerMissing verifies the OnInject-nil path
 // (issue #201): with no backend injection handler, interject reports the feature
-// unavailable rather than panicking, and does not dispatch.
+// unavailable rather than panicking, does not dispatch, and — because the handler
+// is checked before the box is cleared — leaves the typed text intact so an
+// unwired backend cannot destroy the user's input.
 func TestInterjectUnavailableWhenHandlerMissing(t *testing.T) {
 	w := newTestWorkbench(t)
 	w.handlers.OnInject = nil // unwired, as in a headless/test setup
@@ -529,6 +587,9 @@ func TestInterjectUnavailableWhenHandlerMissing(t *testing.T) {
 	sw.interject()
 	if !noteContains(sw, "interject unavailable") {
 		t.Error("expected an 'interject unavailable' note when OnInject is nil")
+	}
+	if got := sw.input.GetText(); got != "try to interject" {
+		t.Errorf("input should be preserved when interject is unavailable, got %q", got)
 	}
 }
 

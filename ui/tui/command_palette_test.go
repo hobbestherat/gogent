@@ -403,3 +403,38 @@ func TestPaletteCommandNoOpWithoutActiveSession(t *testing.T) {
 		c.run()
 	}
 }
+
+// TestPaletteGoalCommandOpensEditor verifies the "/goal" palette entry actually
+// lets the user set the goal (issue #201): it opens an input dialog seeded with
+// the current goal (editActiveGoal), not the read-only inline show that a bare
+// sessionCmd("/goal") would produce. The three no-arg commands still act inline.
+func TestPaletteGoalCommandOpensEditor(t *testing.T) {
+	w := newTestWorkbench(t)
+	sw := w.openWindow("s", "S")
+	sw.goal = "ship it"
+
+	c, ok := findCommand(w.commands(), "Set / show goal (supervisor)")
+	if !ok {
+		t.Fatal("Set / show goal (supervisor) command missing")
+	}
+	c.run()
+
+	top := w.desktop.TopLayer()
+	if top == nil || top.Name != "input-dialog" {
+		t.Fatalf("top layer = %v, want an input-dialog to edit the goal", top)
+	}
+}
+
+// TestPaletteGoalCommandNoOpWithoutSession verifies editActiveGoal is a safe
+// no-op (no dialog, no panic) when no session is open (issue #201).
+func TestPaletteGoalCommandNoOpWithoutSession(t *testing.T) {
+	w := newTestWorkbench(t) // no sessions opened
+	c, ok := findCommand(w.commands(), "Set / show goal (supervisor)")
+	if !ok {
+		t.Fatal("Set / show goal (supervisor) command missing")
+	}
+	c.run()
+	if top := w.desktop.TopLayer(); top != nil && top.Name == "input-dialog" {
+		t.Error("goal editor should not open with no active session")
+	}
+}
