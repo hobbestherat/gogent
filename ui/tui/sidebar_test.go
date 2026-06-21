@@ -30,7 +30,7 @@ func TestSessionLabelBadge(t *testing.T) {
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			label := sessionLabel("Session 1", agent.StatusIdle, tc.pinned, tc.pending)
+			label := sessionLabel("Session 1", agent.StatusIdle, tc.pinned, tc.pending, false)
 			if got := strings.Contains(label, approvalBadge); got != tc.wantBadge {
 				t.Fatalf("badge presence = %v, want %v (label %q)", got, tc.wantBadge, label)
 			}
