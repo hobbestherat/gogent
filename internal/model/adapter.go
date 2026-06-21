@@ -430,6 +430,7 @@ type anthropicStreamEvent struct {
 	Delta *struct {
 		Type        string `json:"type"`
 		Text        string `json:"text"`
+		Thinking    string `json:"thinking"`
 		PartialJSON string `json:"partial_json"`
 		StopReason  string `json:"stop_reason"`
 	} `json:"delta"`
@@ -477,6 +478,12 @@ func (anthropicAdapter) parseStream(body io.Reader, streamCh chan<- StreamRespon
 								if ev.Delta.Text != "" {
 									content.WriteString(ev.Delta.Text)
 									streamCh <- StreamResponse{Content: ev.Delta.Text, Role: RoleAssistant}
+								}
+							case "thinking_delta":
+								// Extended-thinking reasoning delta — surfaced as live
+								// thinking, kept out of the visible answer (issue #217).
+								if ev.Delta.Thinking != "" {
+									streamCh <- StreamResponse{Reasoning: ev.Delta.Thinking, Role: RoleAssistant}
 								}
 							case "input_json_delta":
 								if acc := toolsByBlock[ev.Index]; acc != nil {

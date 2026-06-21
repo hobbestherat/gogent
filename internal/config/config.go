@@ -492,6 +492,12 @@ type ExperimentalConfig struct {
 	// continue — bounded by Supervisor.MaxNudges. Off by default, so a config
 	// without the key keeps the previous (no-supervisor) behaviour exactly.
 	Supervisor bool `json:"supervisor,omitempty"`
+	// StreamThinking, when true, streams the model's chain-of-thought (reasoning)
+	// tokens live into the transcript and folds the thinking entry once each turn's
+	// thinking completes (issue #217). Off by default, so a config without the key
+	// keeps the previous behaviour (reasoning shown only as a post-turn foldable
+	// thought, if at all). It can also be toggled live with the /thinking command.
+	StreamThinking bool `json:"stream_thinking,omitempty"`
 }
 
 // SupervisorConfig tunes the harness-level supervisor (issue #172). It is only

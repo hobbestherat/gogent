@@ -177,6 +177,11 @@ type Handlers struct {
 	// the UI; an errored check is treated as "not done". May be nil, in which case
 	// the supervisor never fires.
 	OnSupervisorCheck func(sessionID, goal string) (done bool, err error)
+	// StreamThinking queries or sets live thinking-token streaming for a session
+	// (issue #217): set==nil queries the current state; otherwise it applies *set.
+	// It returns the resulting state. It backs the /thinking command's live toggle.
+	// May be nil, in which case the command reports the feature as unavailable.
+	StreamThinking func(sessionID string, set *bool) bool
 }
 
 // RestoredSession describes a session to be re-opened from persisted state.
