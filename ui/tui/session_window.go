@@ -341,7 +341,10 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 		// edges of the buffer so interior multi-line editing still moves the caret.
 		// The completer above keeps priority while its popup is open.
 		if sw.handleHistoryKey(event) {
-			sw.completer.update()
+			// A recall replaces the whole buffer, so there is no in-progress mention to
+			// complete; dismiss any popup rather than letting update() re-open one from
+			// an @-token that happens to sit at the end of the recalled text.
+			sw.completer.hide()
 			return true
 		}
 		handled := false
@@ -1078,6 +1081,12 @@ func (sw *SessionWindow) handleHistoryKey(event tui.TypeEvent) bool {
 	if len(sw.promptHistory) == 0 {
 		return false
 	}
+	// Plain Up/Down only. A modifier turns the arrow into a different gesture the
+	// input already owns — notably Shift+arrow extends the selection — so history
+	// must not intercept it, even at a buffer edge.
+	if event.Shift || event.Ctrl || event.Alt {
+		return false
+	}
 	switch event.Key {
 	case tui.KeyUp:
 		if !sw.caretOnFirstVisualLine() {
@@ -1100,6 +1109,9 @@ func (sw *SessionWindow) handleHistoryKey(event tui.TypeEvent) bool {
 // move.
 func (sw *SessionWindow) historyPrev() bool {
 	n := len(sw.promptHistory)
+	if n == 0 {
+		return false
+	}
 	switch {
 	case sw.historyNav >= n:
 		sw.historyDraft = sw.input.GetText()
