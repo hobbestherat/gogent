@@ -326,30 +326,44 @@ func TestIssue214InterjectEnabledMatchesQueueDistinctFromStop(t *testing.T) {
 	}
 }
 
-// TestIssue214InterjectDisabledReadableAcrossThemes is the core colour fix (issue
-// #214): the disabled (empty-input) Interject foreground must be legible — its
-// WCAG contrast against the button background clears the 3:1 large-text floor —
-// on every theme with a determinable background. Under NO_COLOR the background is
-// the unknowable terminal default, so the function takes the documented
-// undeterminable branch and returns colorNote (which is itself the default).
-func TestIssue214InterjectDisabledReadableAcrossThemes(t *testing.T) {
+// TestIssue214InterjectBothStatesReadableAcrossThemes is the core colour fix
+// (issue #214): the Interject foreground must be legible in BOTH states — its
+// WCAG contrast against the button background clears the 3:1 large-text floor for
+// the enabled colour (ButtonFG, the driver's choice) and the disabled colour
+// alike — on every theme with a determinable background. Under NO_COLOR the
+// background is the unknowable terminal default, so the disabled path takes the
+// documented undeterminable branch and returns colorNote (which is itself the
+// default); enabled is ButtonFG, likewise the default.
+func TestIssue214InterjectBothStatesReadableAcrossThemes(t *testing.T) {
 	for _, c := range issue214ThemeCases() {
 		t.Run(c.name, func(t *testing.T) {
 			withThemeRestore(t)
 			ApplyTheme(ResolveTheme(c.cfg, envOf(c.env), false))
 			bg := tv.ActiveTheme().ButtonBG
-			disabled := interjectButtonFG(false)
-			ratio := contrastRatio(disabled, bg)
-			if ratio == 0 {
-				// Undeterminable (NO_COLOR): the documented branch returns colorNote.
-				if disabled != colorNote {
-					t.Errorf("undeterminable bg: disabled = %+v, want colorNote (the NO_COLOR branch)", disabled)
+			if contrastRatio(bg, bg) == 0 && bg.Mode == tui.ColorDefault {
+				// Undeterminable (NO_COLOR): the disabled branch must return
+				// colorNote; enabled is ButtonFG. Both are the terminal default
+				// here, so no contrast can be measured — just pin the branch.
+				if interjectButtonFG(false) != colorNote {
+					t.Errorf("%s: undeterminable bg, disabled should be colorNote, got %+v", c.name, interjectButtonFG(false))
+				}
+				if interjectButtonFG(true) != tv.ActiveTheme().ButtonFG {
+					t.Errorf("%s: enabled should be ButtonFG", c.name)
 				}
 				return
 			}
-			if ratio < minContrastLarge {
-				t.Errorf("%s: disabled Interject contrast %.3f < minContrastLarge %.1f (fg %+v on bg %+v) — illegible",
-					c.name, ratio, minContrastLarge, disabled, bg)
+			for _, state := range []struct {
+				name string
+				fg   tui.Color
+			}{
+				{"enabled", interjectButtonFG(true)},
+				{"disabled", interjectButtonFG(false)},
+			} {
+				ratio := contrastRatio(state.fg, bg)
+				if ratio < minContrastLarge {
+					t.Errorf("%s: %s Interject contrast %.3f < minContrastLarge %.1f (fg %+v on bg %+v) — illegible",
+						c.name, state.name, ratio, minContrastLarge, state.fg, bg)
+				}
 			}
 		})
 	}
