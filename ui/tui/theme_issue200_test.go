@@ -93,10 +93,16 @@ func withThemeRestore(t *testing.T) {
 // Part 1a: the default palette's panel/code backgrounds are no longer ANSI 0.
 // ----------------------------------------------------------------------------
 
-// TestIssue200DefaultPaletteNoHardcodedBlack checks the core fix: under the
-// default (blue) theme neither the sidebar panel nor the fenced-code background
-// is the hardcoded black (ANSI 0) that produced a black-on-blue island. Both now
-// share the desktop blue so they belong to the chrome.
+// TestIssue200DefaultPaletteNoHardcodedBlack checks the core of part 1: under the
+// default (blue) theme neither the sidebar panel nor the fenced-code background is
+// the hardcoded black (ANSI 0) that produced a black-on-blue island, and the
+// sidebar is reconciled with the desktop chrome.
+//
+// It deliberately does NOT assert CodeBG equals the desktop/chrome colour: the
+// fenced-code background renders on top of the window content surface (whose
+// background is WindowBG, see turbotv/window.go), so a CodeBG equal to that
+// surface yields no visual separation. That gap is tracked separately in
+// TestIssue200DefaultCodeBGBlendsWithWindowBackground.
 func TestIssue200DefaultPaletteNoHardcodedBlack(t *testing.T) {
 	def := defaultPalette()
 	black := tui.ANSIColor(0)
@@ -107,19 +113,56 @@ func TestIssue200DefaultPaletteNoHardcodedBlack(t *testing.T) {
 	if def.CodeBG == black {
 		t.Errorf("default CodeBG is still hardcoded ANSI 0 (black-on-blue)")
 	}
-	// The sidebar is reconciled with the desktop chrome: same blue background.
+	if def.CodeBG.Mode == tui.ColorDefault {
+		t.Errorf("default CodeBG is unset (default mode)")
+	}
+	// The sidebar is reconciled with the desktop chrome: same blue background
+	// (issue #200 part 1 — the Overall/TODO panel must belong to the desktop).
 	if def.PanelBG != def.DesktopBG {
 		t.Errorf("default PanelBG (%+v) != DesktopBG (%+v); sidebar should share the desktop chrome",
 			def.PanelBG, def.DesktopBG)
 	}
-	// And the fenced-code panel matches that chrome too.
-	if def.CodeBG != def.DesktopBG {
-		t.Errorf("default CodeBG (%+v) != DesktopBG (%+v); code blocks should not stand out as a foreign colour",
-			def.CodeBG, def.DesktopBG)
+	// Pin the sidebar reconciliation value so a silent swap is caught.
+	if def.PanelBG != tui.ANSIColor(4) {
+		t.Errorf("default PanelBG = %+v, want ANSI 4 (desktop blue)", def.PanelBG)
 	}
-	// Pin the concrete value so a silent swap to another non-black colour is caught.
-	if def.PanelBG != tui.ANSIColor(4) || def.CodeBG != tui.ANSIColor(4) {
-		t.Errorf("default PanelBG/CodeBG = %+v/%+v, want ANSI 4 (desktop blue)", def.PanelBG, def.CodeBG)
+}
+
+// TestIssue200DefaultCodeBGBlendsWithWindowBackground documents a real defect in
+// the chosen default CodeBG value. The fenced-code background renders on the
+// session window's content surface, which turbotv paints with WindowBG
+// (turbotv/window.go: Content.UseBackground=true, Background=WindowBG). For the
+// default theme WindowBG is ANSI 4 (stock turbotui DefaultTheme), and the driver
+// set CodeBG to ANSI 4 as well — so a fenced-code block paints the very same
+// blue as the surface behind the surrounding prose. The code panel therefore has
+// NO visual separation under the default theme, contradicting both the issue
+// ("a subtle shade relative to the panel/desktop bg") and the markdown.go
+// comment ("A subtle background sets fenced code apart").
+//
+// This test pins the current behaviour (it passes today). When CodeBG is changed
+// to a distinct shade, flip the assertion below to require the difference.
+// TestIssue200DefaultCodeBGDistinctFromWindowBackground verifies the default
+// theme's fenced-code background is a DISTINCT shade (a dark navy), not the
+// ANSI-4 window/content surface it renders on. The session window fills its
+// content area with WindowBG (turbotv/window.go: Content.UseBackground=true), so
+// a CodeBG equal to WindowBG would make fenced code invisible against prose. On
+// truecolor/256 the navy is distinct; on 16-colour it degrades to black, which is
+// still distinct from the blue window (covered in TestIssue200CodeBGDegrade).
+func TestIssue200DefaultCodeBGDistinctFromWindowBackground(t *testing.T) {
+	def := defaultPalette()
+	windowBG := baseTVTheme.WindowBG // ANSI 4 — what ApplyTheme restores for the default theme
+
+	if def.CodeBG == windowBG {
+		t.Fatalf("default CodeBG (%+v) equals WindowBG (%+v); fenced code would have no separation",
+			def.CodeBG, windowBG)
+	}
+	// Resolved default CodeBG must stay distinct from the window surface at the
+	// colour levels a "default"-theme terminal realistically uses.
+	if c := ResolveTheme(config.ThemeConfig{}, truecolorEnv, false).CodeBG; c == windowBG {
+		t.Errorf("truecolor default CodeBG (%+v) == WindowBG; fenced code would be invisible", c)
+	}
+	if c := ResolveTheme(config.ThemeConfig{}, color256Env, false).CodeBG; c == windowBG {
+		t.Errorf("256 default CodeBG (%+v) == WindowBG; fenced code would be invisible", c)
 	}
 }
 
@@ -472,6 +515,48 @@ func TestIssue200ApplyThemeDarkBlackCanvas(t *testing.T) {
 	}
 }
 
+// TestIssue200DarkThemeMenuAndMnemonicChrome locks in the black-canvas chrome
+// being fully populated for the dark theme: the menubar, dropdown menus and
+// dialog mnemonics must carry explicit colours, otherwise they fall back to the
+// terminal default and render low-contrast/invisible on the black canvas. (This
+// regressed for high-contrast historically because blackCanvasTVTheme left the
+// Menu*/DialogMnemonicFG fields at their zero value; the dark theme must not.)
+func TestIssue200DarkThemeMenuAndMnemonicChrome(t *testing.T) {
+	withThemeRestore(t)
+
+	dark := ResolveTheme(config.ThemeConfig{Name: "dark"}, truecolorEnv, false)
+	ApplyTheme(dark)
+
+	// Every menu/mnemonic slot must be explicitly set (not the zero ColorDefault).
+	fields := []struct {
+		label string
+		c     tui.Color
+	}{
+		{"DialogMnemonicFG", tv.DefaultTheme.DialogMnemonicFG},
+		{"MenuBarFG", tv.DefaultTheme.MenuBarFG},
+		{"MenuBarBG", tv.DefaultTheme.MenuBarBG},
+		{"MenuHotFG", tv.DefaultTheme.MenuHotFG},
+		{"MenuHotBG", tv.DefaultTheme.MenuHotBG},
+		{"MenuSelectFG", tv.DefaultTheme.MenuSelectFG},
+		{"MenuSelectBG", tv.DefaultTheme.MenuSelectBG},
+		{"MenuShadow", tv.DefaultTheme.MenuShadow},
+	}
+	for _, f := range fields {
+		if f.c.Mode == tui.ColorDefault {
+			t.Errorf("dark %s is unset (ColorDefault); menu/mnemonic chrome would be invisible on the black canvas", f.label)
+		}
+	}
+	// Spot-check the intended mapping: white-on-black menubar with the accent
+	// marking the hot key and the selected row.
+	if tv.DefaultTheme.MenuBarFG != dark.PanelFG || tv.DefaultTheme.MenuBarBG != dark.PanelBG {
+		t.Errorf("dark MenuBar = (FG:%+v BG:%+v), want white-on-black (PanelFG/PanelBG)",
+			tv.DefaultTheme.MenuBarFG, tv.DefaultTheme.MenuBarBG)
+	}
+	if tv.DefaultTheme.MenuSelectBG != dark.Accent {
+		t.Errorf("dark MenuSelectBG = %+v, want Accent %+v", tv.DefaultTheme.MenuSelectBG, dark.Accent)
+	}
+}
+
 // TestIssue200PresetIndexDark checks the theme-editor dropdown maps the dark
 // aliases to their index, and that the default/high-contrast indices are stable.
 func TestIssue200PresetIndexDark(t *testing.T) {
@@ -617,8 +702,10 @@ func TestIssue200CodeBGEditorRoundTrip(t *testing.T) {
 // colour: RGB on truecolor, an ANSI index on 256/16, and the terminal default
 // under NO_COLOR. The default palette's ANSI CodeBG passes through unchanged.
 func TestIssue200CodeBGDegrade(t *testing.T) {
-	darkRaw := darkPalette().CodeBG // RGB
+	darkRaw := darkPalette().CodeBG       // RGB
+	defaultRaw := defaultPalette().CodeBG // RGB navy — the one RGB role in the default palette
 
+	// Dark palette.
 	if c := ResolveTheme(config.ThemeConfig{Name: "dark"}, truecolorEnv, false).CodeBG; c != darkRaw {
 		t.Errorf("truecolor dark CodeBG = %+v, want %+v", c, darkRaw)
 	}
@@ -628,9 +715,25 @@ func TestIssue200CodeBGDegrade(t *testing.T) {
 	if c := ResolveTheme(config.ThemeConfig{Name: "dark"}, color16Env, false).CodeBG; c.Mode != tui.ColorANSI {
 		t.Errorf("16 dark CodeBG = %+v, want ANSI mode", c)
 	}
-	// Default ANSI(4) stays ANSI(4) at 16/256 (it is already within the palette).
-	if c := ResolveTheme(config.ThemeConfig{}, color16Env, false).CodeBG; c != tui.ANSIColor(4) {
-		t.Errorf("16 default CodeBG = %+v, want ANSI 4 (pass-through)", c)
+
+	// Default palette — CodeBG is now an RGB role, so it degrades like dark's RGB
+	// colours rather than passing through as ANSI 4.
+	if c := ResolveTheme(config.ThemeConfig{}, truecolorEnv, false).CodeBG; c != defaultRaw {
+		t.Errorf("truecolor default CodeBG = %+v, want %+v", c, defaultRaw)
+	}
+	if c := ResolveTheme(config.ThemeConfig{}, color256Env, false).CodeBG; c.Mode != tui.ColorANSI || c.Value < 16 {
+		t.Errorf("256 default CodeBG = %+v, want an ANSI index >=16", c)
+	}
+	// At 16 colours the navy (0x101450) quantises to ANSI 0 (black). That is still
+	// distinct from the ANSI-4 window background so the code panel stays visible,
+	// but it means 16-colour terminals render code blocks black-on-blue — the look
+	// issue #200 objected to, just no longer hardcoded to it.
+	c16 := ResolveTheme(config.ThemeConfig{}, color16Env, false).CodeBG
+	if c16 != tui.ANSIColor(0) {
+		t.Errorf("16 default CodeBG = %+v, want ANSI 0 (navy degrades to black at 16 colours)", c16)
+	}
+	if c16 == baseTVTheme.WindowBG {
+		t.Errorf("16 default CodeBG collides with the window background; code panel would be invisible")
 	}
 }
 
