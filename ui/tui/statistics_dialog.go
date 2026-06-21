@@ -50,6 +50,7 @@ func (w *Workbench) showStatisticsDialog() {
 	x, y := centeredDialog(w, width, height)
 
 	dialog := tv.NewDialog("Statistics", x, y, width, height)
+	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
 	dialog.Window.ShowClose = false
 
 	listX := 2
@@ -116,9 +117,9 @@ func (w *Workbench) showStatisticsDialog() {
 	footer := footerButtonRects(
 		[]string{"Export &CSV", "Export &JSON", "Close"},
 		listX, width-3, buttonY, 2)
-	dialog.Window.AddContent(tv.NewButton("Export &CSV", footer[0], exportCSV))
-	dialog.Window.AddContent(tv.NewButton("Export &JSON", footer[1], exportJSON))
-	dialog.Window.AddContent(tv.NewButton("Close", footer[2], closeFn))
+	dialog.Window.AddContent(newButton("Export &CSV", footer[0], exportCSV))
+	dialog.Window.AddContent(newButton("Export &JSON", footer[1], exportJSON))
+	dialog.Window.AddContent(newButton("Close", footer[2], closeFn))
 
 	sel.OnChange = func(idx int) { render(statisticsSection(idx)) }
 

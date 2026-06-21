@@ -80,6 +80,7 @@ func showReviewDialog(desktop *tv.Desktop, req gogent.EditReviewRequest, request
 
 	title := fmt.Sprintf("Review %s: %s", req.Op, req.Path)
 	dialog := tv.NewDialog(truncate(title, width-4), x, y, width, height)
+	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
 	dialog.Window.ShowClose = false
 
 	// Optional "Requested by …" header for background sessions (issue #55).
@@ -111,13 +112,13 @@ func showReviewDialog(desktop *tv.Desktop, req gogent.EditReviewRequest, request
 
 	// Left-packed so the three buttons never overlap on a narrow terminal.
 	btnY := height - 3
-	accept := tv.NewButton("&Accept", tv.Rect{X: 2, Y: btnY, W: 10, H: 1}, func() {
+	accept := newButton("&Accept", tv.Rect{X: 2, Y: btnY, W: 10, H: 1}, func() {
 		finish(gogent.EditApprove)
 	})
-	acceptAll := tv.NewButton("Accept a&ll", tv.Rect{X: 13, Y: btnY, W: 15, H: 1}, func() {
+	acceptAll := newButton("Accept a&ll", tv.Rect{X: 13, Y: btnY, W: 15, H: 1}, func() {
 		finish(gogent.EditApproveAll)
 	})
-	reject := tv.NewButton("&Reject", tv.Rect{X: 29, Y: btnY, W: 10, H: 1}, func() {
+	reject := newButton("&Reject", tv.Rect{X: 29, Y: btnY, W: 10, H: 1}, func() {
 		finish(gogent.EditReject)
 	})
 	dialog.Window.AddContent(accept)

@@ -230,6 +230,7 @@ func showPermissionDialog(desktop *tv.Desktop, req permission.Request, requester
 		y = 0
 	}
 	dialog := tv.NewDialog(title, x, y, width, height)
+	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
 	dialog.Window.ShowClose = false
 
 	// Name the requesting session/agent so a prompt raised by an unfocused
@@ -275,13 +276,13 @@ func showPermissionDialog(desktop *tv.Desktop, req permission.Request, requester
 	// the space between (elided when the resource is long), so the row stays clean
 	// and in-bounds at any dialog width.
 	allowRect, alwaysRect, denyRect, alwaysText := permissionButtonRow(width, btnY, alwaysLabel)
-	allowOnce := tv.NewButton("Allow once", allowRect, func() {
+	allowOnce := newButton("Allow once", allowRect, func() {
 		finish(permission.DecisionAllow)
 	})
-	always := tv.NewButton(alwaysText, alwaysRect, func() {
+	always := newButton(alwaysText, alwaysRect, func() {
 		finish(permission.DecisionAlways)
 	})
-	deny := tv.NewButton("Deny", denyRect, func() {
+	deny := newButton("Deny", denyRect, func() {
 		finish(permission.DecisionDeny)
 	})
 	dialog.Window.AddContent(allowOnce)

@@ -28,6 +28,7 @@ func (w *Workbench) showSessionsDialog() {
 	x, y := centeredDialog(w, width, height)
 
 	dialog := tv.NewDialog("Saved Sessions", x, y, width, height)
+	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
 	dialog.Window.ShowClose = false
 
 	listX := 2
@@ -159,11 +160,11 @@ func (w *Workbench) showSessionsDialog() {
 	list.OnActivate = func(*tv.TreeNode) { openAnalysis() }
 	searchBox.OnSubmit = func() { render() }
 
-	dialog.Window.AddContent(tv.NewButton("&Open (analysis)",
+	dialog.Window.AddContent(newButton("&Open (analysis)",
 		tv.Rect{X: width - 38, Y: height - 3, W: 17, H: 1}, openAnalysis))
-	dialog.Window.AddContent(tv.NewButton("&Continue",
+	dialog.Window.AddContent(newButton("&Continue",
 		tv.Rect{X: width - 20, Y: height - 3, W: 10, H: 1}, continueSession))
-	dialog.Window.AddContent(tv.NewButton("Close",
+	dialog.Window.AddContent(newButton("Close",
 		tv.Rect{X: width - 9, Y: height - 3, W: 7, H: 1}, closeFn))
 
 	dialog.Root().OnTypeFn = func(_ *tv.VisualComponent, event tui.TypeEvent) bool {

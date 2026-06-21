@@ -43,6 +43,7 @@ func (w *Workbench) showAgentMonolog(sessionID, agentID, name string) {
 	}
 
 	window := tv.NewWindow("monologue: "+title, tv.Rect{X: x, Y: y, W: width, H: height}, tui.LineSingle)
+	applyWindowShadow(window) // honour the NoShadow theme setting (issue #215)
 	history := tv.NewTextView("", tv.Rect{})
 	history.Wrap = true
 	if len(msgs) == 0 {

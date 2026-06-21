@@ -407,6 +407,11 @@ type ThemeConfig struct {
 	// NoColor disables all colour (terminal defaults only), the config-file
 	// equivalent of the NO_COLOR env var / --no-color flag.
 	NoColor bool `json:"no_color,omitempty"`
+	// NoShadow fully disables drop shadows under windows, dialogs, menus and
+	// buttons (issue #215). Default false keeps today's shadows; setting it true
+	// renders a flat UI for terminals/fonts that draw the shadow cells poorly. It
+	// is applied live via the theme-apply path, so toggling it needs no restart.
+	NoShadow bool `json:"no_shadow,omitempty"`
 	// Overrides recolours individual roles on top of the selected palette. Keys
 	// are role names — user, agent, note, tool, result, info, error, the chrome
 	// roles desktop_fg/desktop_bg/panel_fg/panel_bg/title/divider/accent, and

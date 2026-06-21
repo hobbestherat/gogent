@@ -52,6 +52,7 @@ type savedThemeGlobals struct {
 	pal                  markdownPalette
 	palGen               uint64
 	richOK               bool
+	shadow               bool // issue #215: shadowsEnabled, so a NoShadow test can't leak it
 	tvTheme              tv.Theme
 }
 
@@ -68,6 +69,7 @@ func snapshotThemeGlobals() savedThemeGlobals {
 		pal:       mdPalette,
 		palGen:    mdPaletteGen,
 		richOK:    richMarkdownColorOK,
+		shadow:    shadowsEnabled,
 		tvTheme:   tv.DefaultTheme,
 	}
 }
@@ -78,6 +80,7 @@ func restoreThemeGlobals(g savedThemeGlobals) {
 	chromePanelFG, chromePanelBG = g.panelFG, g.panelBG
 	chromeTitle, chromeDivider, chromeAccent = g.title, g.divider, g.accent
 	mdPalette, mdPaletteGen, richMarkdownColorOK = g.pal, g.palGen, g.richOK
+	shadowsEnabled = g.shadow
 	tv.DefaultTheme = g.tvTheme
 }
 
@@ -665,7 +668,7 @@ func TestIssue200CodeBGEditorRoundTrip(t *testing.T) {
 	darkSpecs := specsFor(paletteByName(themeDark))
 
 	t.Run("pristine dark has no overrides", func(t *testing.T) {
-		got := buildThemeConfig("dark", false, darkSpecs)
+		got := buildThemeConfig("dark", false, false, darkSpecs)
 		want := config.ThemeConfig{Name: themeDark}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("pristine dark: got %+v, want %+v", got, want)
@@ -675,7 +678,7 @@ func TestIssue200CodeBGEditorRoundTrip(t *testing.T) {
 	t.Run("changed code_bg becomes an override", func(t *testing.T) {
 		specs := cloneSpecs(darkSpecs)
 		specs["code_bg"] = "#101010"
-		got := buildThemeConfig("dark", false, specs)
+		got := buildThemeConfig("dark", false, false, specs)
 		if got.Overrides["code_bg"] != "#101010" {
 			t.Fatalf("expected code_bg override, got %+v", got.Overrides)
 		}
@@ -685,9 +688,9 @@ func TestIssue200CodeBGEditorRoundTrip(t *testing.T) {
 		specs := cloneSpecs(darkSpecs)
 		specs["code_bg"] = "#101010"
 		specs["user"] = "#FFFFFF"
-		cfg := buildThemeConfig("dark", false, specs)
+		cfg := buildThemeConfig("dark", false, false, specs)
 		// Reopen: seed fields from the edited theme and rebuild — must match.
-		reopened := buildThemeConfig(cfg.Name, cfg.NoColor, specsFor(editedTheme(cfg)))
+		reopened := buildThemeConfig(cfg.Name, cfg.NoColor, false, specsFor(editedTheme(cfg)))
 		if !reflect.DeepEqual(reopened, cfg) {
 			t.Fatalf("round-trip mismatch:\n got %+v\nwant %+v", reopened, cfg)
 		}

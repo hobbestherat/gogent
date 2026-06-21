@@ -80,6 +80,7 @@ func (w *Workbench) showSettingsDialog() {
 	x, y := centeredDialog(w, width, height)
 
 	dialog := tv.NewDialog("Sub-agent Settings", x, y, width, height)
+	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
 	dialog.Window.ShowClose = false
 
 	styleCheck := func(cb *tv.Checkbox) *tv.Checkbox {
@@ -164,8 +165,8 @@ func (w *Workbench) showSettingsDialog() {
 	}
 	cancel := func() { w.desktop.RemoveLayer(layer) }
 
-	ok := tv.NewButton("OK", tv.Rect{X: width - 24, Y: height - 3, W: 9, H: 1}, apply)
-	cancelBtn := tv.NewButton("Cancel", tv.Rect{X: width - 13, Y: height - 3, W: 10, H: 1}, cancel)
+	ok := newButton("OK", tv.Rect{X: width - 24, Y: height - 3, W: 9, H: 1}, apply)
+	cancelBtn := newButton("Cancel", tv.Rect{X: width - 13, Y: height - 3, W: 10, H: 1}, cancel)
 	dialog.Window.AddContent(ok)
 	dialog.Window.AddContent(cancelBtn)
 

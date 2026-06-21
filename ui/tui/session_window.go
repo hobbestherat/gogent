@@ -180,6 +180,7 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 		displayTitle = title + " (analysis)"
 	}
 	window := tv.NewWindow(displayTitle, bounds, tui.LineSingle)
+	applyWindowShadow(window) // honour the NoShadow theme setting (issue #215)
 
 	// Enable scalable windows using turbotv options
 	window.Resizable = wb.windowConfig.Resizable
@@ -239,13 +240,13 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 	}
 
 	input := tv.NewMultiLineInput("", tv.Rect{})
-	sendButton := tv.NewButton("Send", tv.Rect{}, nil)
+	sendButton := newButton("Send", tv.Rect{}, nil)
 	// Running-turn controls (issue #201). Labels carry the Enter affordance (Queue)
 	// and an error-coloured halt (Stop); their handlers are wired below, once the
 	// shared submit closure exists. They start hidden (zero bounds) until busy.
-	interjectButton := tv.NewButton(interjectLabel, tv.Rect{}, nil)
-	queueButton := tv.NewButton(queueLabel, tv.Rect{}, nil)
-	stopButton := tv.NewButton(stopLabel, tv.Rect{}, nil)
+	interjectButton := newButton(interjectLabel, tv.Rect{}, nil)
+	queueButton := newButton(queueLabel, tv.Rect{}, nil)
+	stopButton := newButton(stopLabel, tv.Rect{}, nil)
 	// Error-coloured halt, kept red even when keyboard-focused (issue #201).
 	stopButton.FG = colorError
 	stopButton.FocusFG = colorError
@@ -999,6 +1000,7 @@ func (sw *SessionWindow) refreshTheme() {
 	w.BorderFG, w.BorderBG = th.WindowBorderFG, th.WindowBorderBG
 	w.CloseFG, w.CloseBG = th.CloseButtonFG, th.CloseButtonBG
 	w.ShadowColor = th.WindowShadow
+	applyWindowShadow(w) // re-apply the NoShadow toggle live (issue #215)
 	w.Content.Background = tui.Cell{Ch: ' ', FG: th.WindowFG, BG: th.WindowBG}
 
 	// Transcript view: the TextView fills its whole area with its own BG and paints
@@ -1082,6 +1084,7 @@ func reseedButton(b *tv.Button, th tv.Theme) {
 	b.FG, b.BG = th.ButtonFG, th.ButtonBG
 	b.FocusFG, b.FocusBG = th.ButtonFocusFG, th.ButtonFocusBG
 	b.ShadowColor = th.ButtonShadow
+	applyButtonShadow(b) // re-apply the NoShadow toggle live (issue #215)
 }
 
 // enqueue stows a message typed while the agent is busy as the session's single

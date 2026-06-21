@@ -537,6 +537,7 @@ func (w *Workbench) rebuildMenu() {
 			}),
 		),
 	)
+	applyMenuBarShadow(bar) // honour the NoShadow theme setting (issue #215)
 	w.desktop.SetMenuBar(bar)
 	w.desktop.Redraw()
 }
