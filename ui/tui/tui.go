@@ -675,6 +675,19 @@ func (w *Workbench) viewItems() []*tv.MenuItem {
 			w.withActiveTranscript((*SessionWindow).copyLastCode)
 		}),
 		tv.NewMenuItem("----------", nil),
+		// Window arrangement (issue #241): tile or maximize every open window across
+		// the work area in one action. Accelerators are Ctrl+Shift chords dispatched
+		// by the menu bar even when no menu is open (like Ctrl+N); they are also in
+		// the command palette / help cheatsheet via Workbench.commands().
+		tv.NewMenuItem("Tile &Vertically", func() { w.arrange(tv.TileRows) }).
+			WithShortcutMod("Ctrl+Shift+V", tui.KeyRune, 'v', true, true, false),
+		tv.NewMenuItem("Tile &Horizontally", func() { w.arrange(tv.TileColumns) }).
+			WithShortcutMod("Ctrl+Shift+H", tui.KeyRune, 'h', true, true, false),
+		tv.NewMenuItem("Tile &Grid", func() { w.arrange(tv.TileGrid) }).
+			WithShortcutMod("Ctrl+Shift+G", tui.KeyRune, 'g', true, true, false),
+		tv.NewMenuItem("Maximi&ze All", func() { w.maximizeAll() }).
+			WithShortcutMod("Ctrl+Shift+M", tui.KeyRune, 'm', true, true, false),
+		tv.NewMenuItem("----------", nil),
 		tv.NewMenuItem(pinLabel, func() { w.ToggleSidebarPin() }),
 		// Keyboard fallback for the draggable divider, for terminals that do not
 		// report mouse drags (issue #175).

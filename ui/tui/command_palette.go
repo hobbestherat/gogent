@@ -82,6 +82,17 @@ func (w *Workbench) commands() []command {
 		{category: "Session", name: "Saved sessions browser", run: w.showSessionsDialog,
 			enabled: avail(h.ListSavedSessions != nil)},
 
+		// Window arrangement (issue #241): tile or maximize every open window across
+		// the work area. Mirrored on the View menu with the same Ctrl+Shift chords.
+		{category: "Window", name: "Tile vertically", keys: "Ctrl+Shift+V",
+			run: func() { w.arrange(tv.TileRows) }},
+		{category: "Window", name: "Tile horizontally", keys: "Ctrl+Shift+H",
+			run: func() { w.arrange(tv.TileColumns) }},
+		{category: "Window", name: "Tile grid", keys: "Ctrl+Shift+G",
+			run: func() { w.arrange(tv.TileGrid) }},
+		{category: "Window", name: "Maximize all windows", keys: "Ctrl+Shift+M",
+			run: w.maximizeAll},
+
 		// Transcript view controls. The single-letter keys only fire while a
 		// transcript is focused; listing them here is exactly the cheatsheet the
 		// help overlay exists to provide.
