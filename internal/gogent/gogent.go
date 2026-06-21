@@ -1043,6 +1043,8 @@ func (g *Gogent) CreateUserSession(id string, rootAgent *agent.Agent) *agent.Use
 
 	userSession := agent.NewUserSession(id, rootAgent)
 	userSession.SetSubAgentConfig(g.config.SubAgents)
+	// Apply the configurable per-task step cap (issue #249); 0 means unlimited.
+	userSession.SetMaxSteps(g.config.MaxStepsOrDefault())
 	// Mid-turn injection of a queued user note (issue #170, phase 2) is now always
 	// on: it is the agent-side path behind the per-message Interject button (issue
 	// #201), which replaced the removed experimental.inject_queued_input flag. The

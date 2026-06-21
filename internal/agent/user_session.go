@@ -134,6 +134,15 @@ type UserSession struct {
 
 	// Sub-agent execution-model settings (one-shot vs interactive, recursion).
 	subAgentCfg config.SubAgentConfig
+	// maxSteps caps how many model round-trips (steps/turns) runLoop may take per
+	// task before it stops (issue #249). It holds the resolved value: a positive N
+	// caps at N, while <= 0 means UNLIMITED — the loop is then bounded only by its
+	// other stop conditions. It is shared by every runLoop on this session: the
+	// root task loop and every one-shot / interactive sub-agent loop spawned from
+	// it (which all run against this same receiver), so the cap applies uniformly,
+	// just as the historical fixed bound did. Defaults to config.DefaultMaxSteps so
+	// an unwired session keeps gogent's historical fixed bound.
+	maxSteps int
 	// subAgentTimeoutMs bounds how long a spawned sub-agent may run. Zero leaves
 	// the agent's built-in default in place.
 	subAgentTimeoutMs int64
@@ -255,6 +264,7 @@ func NewUserSession(id string, agent *Agent) *UserSession {
 		CreatedAt:      time.Now().Unix(),
 		ToolCallback:   nil,
 		subAgentCfg:    config.DefaultSubAgentConfig(),
+		maxSteps:       config.DefaultMaxSteps,
 		interactive:    make(map[string]*InteractiveAgent),
 		agentEvents:    make(chan AgentEvent, 64),
 		currentTask:    nil,
@@ -349,6 +359,27 @@ func (s *UserSession) SetSubAgentConfig(cfg config.SubAgentConfig) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.subAgentCfg = cfg
+}
+
+// SetMaxSteps sets the per-task step (model round-trip) cap used by runLoop. A
+// positive value caps the loop at that many steps; a value of 0 (or any
+// non-positive value) means UNLIMITED — the loop runs until one of its other
+// stop conditions fires (final answer, token budget, cancellation). The cap is
+// shared by the root task loop and every sub-agent / interactive loop spawned on
+// this session, so 0 unbounds those nested loops too. The value is read once at
+// each loop's start, so a change takes effect on the next task, not mid-run. See
+// issue #249 and Config.MaxStepsOrDefault.
+func (s *UserSession) SetMaxSteps(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.maxSteps = n
+}
+
+// MaxSteps returns the current per-task step cap (<= 0 means unlimited).
+func (s *UserSession) MaxSteps() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.maxSteps
 }
 
 // SubAgentConfig returns the current sub-agent execution-model settings.
@@ -894,8 +925,11 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 	// empty terminal message) can still surface an answer instead of silently
 	// dropping it (#171).
 	var lastAssistant string
-	const maxSteps = 25
-	for step := 0; step < maxSteps; step++ {
+	// Per-task step cap (issue #249). A positive value bounds the loop; maxSteps
+	// <= 0 means UNLIMITED, so the loop relies entirely on its other exit
+	// conditions (final answer, budget, cancellation) to terminate.
+	maxSteps := s.MaxSteps()
+	for step := 0; maxSteps <= 0 || step < maxSteps; step++ {
 		// Bail out promptly if the loop was stopped or the session closed; the
 		// in-flight request (if any) has already been cancelled via ctx.
 		if err := ctx.Err(); err != nil {

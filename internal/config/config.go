@@ -479,6 +479,44 @@ type Config struct {
 	// takes effect when Experimental.Supervisor is enabled; the zero value resolves
 	// to the built-in defaults via the *OrDefault accessors.
 	Supervisor SupervisorConfig `json:"supervisor,omitempty"`
+	// MaxSteps caps how many model round-trips (steps/turns) an agent loop may take
+	// before it stops, preventing runaway loops while still letting a session run
+	// longer than the historical fixed bound (issue #249). The single value governs
+	// every loop in the session — the root task loop AND every sub-agent /
+	// interactive-agent loop it spawns — so setting it to 0 makes those nested loops
+	// unbounded too, matching the pre-#249 behaviour where the same fixed cap applied
+	// everywhere. It is a pointer so an absent "max_steps" key is distinguishable
+	// from an explicit 0:
+	//   nil (unset) -> the built-in default (DefaultMaxSteps, 25), preserving prior
+	//                  behaviour;
+	//   0           -> UNLIMITED ("yolo") — the loop is bounded only by its other
+	//                  stop conditions (final answer, token budget, cancellation);
+	//   N > 0       -> cap at N steps.
+	// Any non-positive value (0 or, defensively, a negative typo) means unlimited.
+	// Resolve it through MaxStepsOrDefault rather than reading the pointer directly.
+	MaxSteps *int `json:"max_steps,omitempty"`
+}
+
+// DefaultMaxSteps is the built-in per-turn step (model round-trip) cap applied
+// when Config.MaxSteps is left unset (nil). It matches gogent's historical fixed
+// limit so an older config.json without a "max_steps" key behaves exactly as
+// before (issue #249).
+const DefaultMaxSteps = 25
+
+// intPtr returns a pointer to v. It exists because Go does not allow taking the
+// address of a constant/literal inline, so GetDefaultConfig cannot spell
+// &DefaultMaxSteps directly.
+func intPtr(v int) *int { return &v }
+
+// MaxStepsOrDefault returns the effective per-turn step cap. An unset value (nil)
+// yields the built-in DefaultMaxSteps; a configured value is returned verbatim,
+// where 0 (and any non-positive value) means UNLIMITED — callers must treat a
+// non-positive result as "no step cap" rather than "stop immediately".
+func (c *Config) MaxStepsOrDefault() int {
+	if c == nil || c.MaxSteps == nil {
+		return DefaultMaxSteps
+	}
+	return *c.MaxSteps
 }
 
 // ExperimentalConfig collects opt-in features that are off by default (issue
@@ -619,6 +657,10 @@ func GetDefaultConfig() *Config {
 		SubAgents:    DefaultSubAgentConfig(),
 		Timeouts:     DefaultTimeoutConfig(),
 		Notify:       notifyPtr(DefaultNotifyConfig()),
+		// Round-trip the default step cap explicitly so a freshly written
+		// config.json documents the setting (issue #249); 0 here would mean
+		// unlimited, so the default is the historical fixed bound.
+		MaxSteps: intPtr(DefaultMaxSteps),
 		Window: WindowConfig{
 			Resizable:   true,
 			Minimizable: true,
