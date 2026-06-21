@@ -12,7 +12,10 @@ import (
 // which is all the add*/transcript controls need. The backing TextView is
 // headless (no terminal required).
 func newTestSession() *SessionWindow {
-	return &SessionWindow{transcript: newTranscriptModel(tv.NewTextView("", tv.Rect{}))}
+	return &SessionWindow{
+		transcript:   newTranscriptModel(tv.NewTextView("", tv.Rect{})),
+		pendingTools: map[string]*transcriptRecord{},
+	}
 }
 
 // populate fills a session with one record of each interesting kind so search
@@ -20,8 +23,8 @@ func newTestSession() *SessionWindow {
 func populate(sw *SessionWindow) {
 	sw.addUser("hello world")
 	sw.addThought("considering the options")
-	sw.beginToolCall("Read", map[string]interface{}{"path": "main.go"})
-	sw.finishToolCall("Read", "package main")
+	sw.beginToolCall("call_read", "Read", map[string]interface{}{"path": "main.go"})
+	sw.finishToolCall("call_read", "Read", "package main")
 	sw.addAssistant("done reading the file")
 	sw.addError("disk on fire")
 }
@@ -150,13 +153,13 @@ func TestTranscriptFoldAll(t *testing.T) {
 // a "(done)" header and the result body, and that the pending pointer clears.
 func TestToolCallMerge(t *testing.T) {
 	sw := newTestSession()
-	sw.beginToolCall("Edit", map[string]interface{}{"file": "x.go"})
-	if sw.pendingTool == nil {
+	sw.beginToolCall("call_edit", "Edit", map[string]interface{}{"file": "x.go"})
+	if sw.pendingTools["call_edit"] == nil {
 		t.Fatal("expected a pending tool record after beginToolCall")
 	}
-	sw.finishToolCall("Edit", "ok")
-	if sw.pendingTool != nil {
-		t.Error("pendingTool should be cleared after finishToolCall")
+	sw.finishToolCall("call_edit", "Edit", "ok")
+	if sw.pendingTools["call_edit"] != nil {
+		t.Error("pending tool entry should be cleared after finishToolCall")
 	}
 	got := sw.transcript.view.AllText()
 	for _, want := range []string{"tool: Edit (done)", "file: x.go", "result:", "ok"} {
@@ -269,8 +272,8 @@ func TestTranscriptCapKeepsInFlightTool(t *testing.T) {
 	sw := newTestSession()
 	sw.transcript.limit = 5
 	addRecords(sw, 20) // fill well past the cap
-	sw.beginToolCall("Read", map[string]interface{}{"path": "x.go"})
-	sw.finishToolCall("Read", "the result body")
+	sw.beginToolCall("call_read", "Read", map[string]interface{}{"path": "x.go"})
+	sw.finishToolCall("call_read", "Read", "the result body")
 	got := sw.transcript.view.AllText()
 	for _, want := range []string{"tool: Read (done)", "result:", "the result body"} {
 		if !strings.Contains(got, want) {
