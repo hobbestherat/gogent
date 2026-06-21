@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"sort"
 	"time"
@@ -127,7 +128,7 @@ func (svc sessionsSvc) Stop(r *http.Request, id string) (interface{}, error) {
 		return nil, webapi.NewHTTPError(http.StatusNotFound, "session not found")
 	}
 	if err := us.StopAgent("root"); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("stop agent: %w", err)
 	}
 	return nil, nil
 }

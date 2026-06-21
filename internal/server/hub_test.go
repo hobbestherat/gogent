@@ -123,8 +123,8 @@ func TestHubTerminalEventDeliveredOnFullBuffer(t *testing.T) {
 // TestIsTerminal confirms the terminal classification used by the drop policy.
 func TestIsTerminal(t *testing.T) {
 	cases := []struct {
-		t     agent.SessionEventType
-		want  bool
+		t    agent.SessionEventType
+		want bool
 	}{
 		{agent.SessionEventFinal, true},
 		{agent.SessionEventError, true},

@@ -17,13 +17,13 @@ import (
 
 // sessionView is the wire representation of a live or saved session.
 type sessionView struct {
-	ID          string      `json:"id"`
-	Title       string      `json:"title,omitempty"`
-	CreatedAt   string      `json:"created_at,omitempty"`
-	State       string      `json:"state"`
-	PrimaryModel string     `json:"primary_model,omitempty"`
-	Persisted   bool        `json:"persisted"`
-	Agents      []agentView `json:"agents,omitempty"`
+	ID           string      `json:"id"`
+	Title        string      `json:"title,omitempty"`
+	CreatedAt    string      `json:"created_at,omitempty"`
+	State        string      `json:"state"`
+	PrimaryModel string      `json:"primary_model,omitempty"`
+	Persisted    bool        `json:"persisted"`
+	Agents       []agentView `json:"agents,omitempty"`
 }
 
 // agentView is one node in a session's agent tree.
@@ -44,12 +44,12 @@ type createSessionRequest struct {
 
 // sessionStatsView mirrors agent.SessionStats.
 type sessionStatsView struct {
-	Turns          int `json:"turns"`
-	TokensIn       int `json:"tokens_in"`
-	TokensOut      int `json:"tokens_out"`
-	ToolCalls      int `json:"tool_calls"`
-	ContextTokens  int `json:"context_tokens"`
-	ContextWindow  int `json:"context_window"`
+	Turns         int `json:"turns"`
+	TokensIn      int `json:"tokens_in"`
+	TokensOut     int `json:"tokens_out"`
+	ToolCalls     int `json:"tool_calls"`
+	ContextTokens int `json:"context_tokens"`
+	ContextWindow int `json:"context_window"`
 }
 
 // --- Messages ---------------------------------------------------------------
@@ -128,10 +128,10 @@ type todoItemView struct {
 
 // approvalView is a pending interactive gate (permission prompt or edit review).
 type approvalView struct {
-	ID        string             `json:"id"`
-	Kind      string             `json:"kind"` // "permission" | "edit_review"
-	SessionID string             `json:"session_id"`
-	AgentID   string             `json:"agent_id,omitempty"`
+	ID         string            `json:"id"`
+	Kind       string            `json:"kind"` // "permission" | "edit_review"
+	SessionID  string            `json:"session_id"`
+	AgentID    string            `json:"agent_id,omitempty"`
 	Permission *permissionDetail `json:"permission,omitempty"`
 	EditReview *editReviewDetail `json:"edit_review,omitempty"`
 	CreatedAt  string            `json:"created_at"`
@@ -158,9 +158,9 @@ type approvalDecisionRequest struct {
 
 type settingsView struct {
 	SubAgents   config.SubAgentConfig `json:"sub_agents"`
-	Timeouts    config.TimeoutConfig   `json:"timeouts"`
-	Budget      config.BudgetConfig    `json:"budget"`
-	ReviewEdits bool                   `json:"review_edits"`
+	Timeouts    config.TimeoutConfig  `json:"timeouts"`
+	Budget      config.BudgetConfig   `json:"budget"`
+	ReviewEdits bool                  `json:"review_edits"`
 }
 
 type reviewEditsView struct {
@@ -227,8 +227,8 @@ type healthView struct {
 }
 
 type workspaceView struct {
-	Root string    `json:"root"`
-	Git  *gitInfo  `json:"git,omitempty"`
+	Root string   `json:"root"`
+	Git  *gitInfo `json:"git,omitempty"`
 }
 
 type gitInfo struct {
@@ -301,18 +301,18 @@ func snapshotToView(s agent.SessionStats) sessionStatsView {
 
 func eventToView(ev agent.SessionEvent, sessionID string) eventView {
 	v := eventView{
-		Type:    string(ev.Type),
-		Step:    ev.Step,
-		Text:    ev.Text,
-		Tool:    ev.Tool,
-		Args:    ev.Args,
-		Result:  ev.Result,
-		CallID:  ev.CallID,
-		AgentID: ev.AgentID,
-		Name:    ev.Name,
-		Status:  string(ev.Status),
-		Kind:    string(ev.Kind),
-		Plan:    ev.Plan,
+		Type:      string(ev.Type),
+		Step:      ev.Step,
+		Text:      ev.Text,
+		Tool:      ev.Tool,
+		Args:      ev.Args,
+		Result:    ev.Result,
+		CallID:    ev.CallID,
+		AgentID:   ev.AgentID,
+		Name:      ev.Name,
+		Status:    string(ev.Status),
+		Kind:      string(ev.Kind),
+		Plan:      ev.Plan,
 		SessionID: sessionID,
 	}
 	if ev.Err != nil {

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/hobbestherat/webapi"
@@ -97,7 +98,7 @@ func (svc messagesSvc) Stream(r *http.Request, req sendMessageRequest, id string
 					return nil
 				case te := <-sub:
 					if err := stream.Send(sessionSSE(te.ev, id)); err != nil {
-						return err
+						return fmt.Errorf("send message event: %w", err)
 					}
 				}
 			}
@@ -117,5 +118,3 @@ func (svc messagesSvc) drainRemaining(sub <-chan taggedEvent, stream webapi.Even
 		}
 	}
 }
-
-
