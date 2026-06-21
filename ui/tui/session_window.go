@@ -808,15 +808,19 @@ func (sw *SessionWindow) guardEffortSelect() {
 		}
 		return false
 	}
-	// Grey out the value text when disabled by wrapping the draw. The enabled
-	// colour is read live from the active turbotui theme (not captured at
-	// construction) so a live theme change recolours it without a restart (#204).
+	// Grey out the value text when disabled by wrapping the draw. Both colours are
+	// read live from the active dropdown roles (not captured at construction) so a
+	// live theme change recolours them without a restart (#204, #260). The disabled
+	// colour is dropdownDisabledFG, not the raw Note grey: #260 moved the closed
+	// control onto the menu-bar background, which in the default palette equals Note,
+	// so a Note-grey value would be grey-on-grey; dropdownDisabledColor keeps the dim
+	// cue only where it still reads and falls back to a legible foreground otherwise.
 	baseDraw := c.DrawFn
 	c.DrawFn = func(vc *tv.VisualComponent, surface tv.Surface) {
 		if !sw.effortEnabled {
-			sw.effortSelect.FG = colorNote
+			sw.effortSelect.FG = dropdownDisabledFG
 		} else {
-			sw.effortSelect.FG = tv.ActiveTheme().InputFG
+			sw.effortSelect.FG = dropdownFG
 		}
 		if baseDraw != nil {
 			baseDraw(vc, surface)
@@ -1200,15 +1204,20 @@ func reseedLabel(l *tv.Label, th tv.Theme) {
 	l.FG, l.BG, l.HotFG = th.WindowFG, th.WindowBG, th.MnemonicFG
 }
 
-// reseedSelect re-applies a turbotui theme's input colours to a selector whose
-// colours were seeded at construction (issue #204). The enabled/disabled
-// foreground is driven per draw by guardEffortSelect, so only the background and
-// focus colours need restoring here.
-func reseedSelect(s *tv.Select, th tv.Theme) {
+// reseedSelect re-applies the active dropdown roles to a selector whose colours
+// were seeded at construction, so a live theme switch recolours an already-built
+// Select without a restart (issues #204, #260). The closed-control colours come
+// from the package dropdown vars ApplyTheme installs (turbotui's Select has no
+// theme slot of its own), not from th — which is retained for signature symmetry
+// with reseedLabel/reseedButton and the construction-time call sites. The
+// enabled/disabled foreground is driven per draw by guardEffortSelect, so only the
+// background and focus colours are restored here. The open popup's highlighted row
+// follows tv.DefaultTheme.Selection*, installed by ApplyTheme.
+func reseedSelect(s *tv.Select, _ tv.Theme) {
 	if s == nil {
 		return
 	}
-	s.FG, s.BG, s.FocusFG, s.FocusBG = th.InputFG, th.InputBG, th.InputFocusFG, th.InputFocusBG
+	s.FG, s.BG, s.FocusFG, s.FocusBG = dropdownFG, dropdownBG, dropdownFocusFG, dropdownFocusBG
 	applySelectShadow(s) // re-apply the NoShadow toggle live (issue #231)
 }
 

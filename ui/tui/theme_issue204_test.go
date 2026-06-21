@@ -415,10 +415,17 @@ func TestIssue204ApplyThemeUpdatesTVActiveTheme(t *testing.T) {
 		t.Errorf("tv.ActiveTheme().WindowBG = %+v, want the black-canvas chrome %+v", got, blackCanvasTVTheme(hc).WindowBG)
 	}
 
-	// Switching back to default restores the stock chrome theme.
+	// Switching back to default restores the stock chrome theme — except the dropdown
+	// popup highlight, which ApplyTheme now installs onto Selection* from the default
+	// palette's DropdownSelect roles (issue #260). That cyan highlight intentionally
+	// diverges from the stock grey Selection, so the comparison allows for it.
 	ApplyTheme(issue204Default())
-	if got := tv.ActiveTheme(); got != baseTVTheme {
-		t.Errorf("after ApplyTheme(default), tv.ActiveTheme() = %+v, want the stock baseTVTheme", got)
+	def := issue204Default()
+	wantDefault := baseTVTheme
+	wantDefault.SelectionFG = def.DropdownSelectFG
+	wantDefault.SelectionBG = def.DropdownSelectBG
+	if got := tv.ActiveTheme(); got != wantDefault {
+		t.Errorf("after ApplyTheme(default), tv.ActiveTheme() = %+v, want the stock baseTVTheme with the dropdown selection applied", got)
 	}
 }
 
@@ -995,9 +1002,14 @@ func TestIssue204SwitchbackToDefault(t *testing.T) {
 	w.RefreshTheme()
 	th := tv.ActiveTheme()
 
-	// Chrome is back on the stock turbotui theme.
-	if th != baseTVTheme {
-		t.Errorf("tv.ActiveTheme() = %+v, want the stock baseTVTheme after switchback", th)
+	// Chrome is back on the stock turbotui theme, with the dropdown popup highlight
+	// (Selection*) installed from the default palette's DropdownSelect roles (#260).
+	def := issue204Default()
+	wantDefault := baseTVTheme
+	wantDefault.SelectionFG = def.DropdownSelectFG
+	wantDefault.SelectionBG = def.DropdownSelectBG
+	if th != wantDefault {
+		t.Errorf("tv.ActiveTheme() = %+v, want the stock baseTVTheme (with dropdown selection) after switchback", th)
 	}
 	if sw.window.Content.Background.BG != th.WindowBG {
 		t.Errorf("content BG = %+v, want %+v", sw.window.Content.Background.BG, th.WindowBG)
