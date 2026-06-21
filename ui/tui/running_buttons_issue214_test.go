@@ -13,7 +13,7 @@ import (
 //
 //  1. UNIFORM SIZE — the three buttons share one width (the widest label's) in
 //     both full-label and degraded-glyph modes, instead of each sizing to its
-//     own label (uniformButtonWidth / runningButtonsWidth).
+//     own label (uniformButtonWidth / runningButtonsColumnWidth).
 //  2. ALIGNMENT — the 1-row buttons are centred on the prompt box's middle line
 //     instead of floating at the top edge of the 3-row input area (buttonRowY),
 //     and the idle Send button shares that row so nothing jumps on busy toggle.
@@ -76,22 +76,22 @@ func TestIssue214UniformButtonWidthEdges(t *testing.T) {
 	}
 }
 
-// TestIssue214RunningButtonsWidthUniformFormula pins runningButtonsWidth as three
-// copies of the uniform width plus the two inter-button gaps and the right
-// margin — the consequence of uniform sizing — for both label forms and for an
-// arbitrary label set where the widest is not the first.
+// TestIssue214RunningButtonsWidthUniformFormula pins runningButtonsColumnWidth as
+// ONE copy of the uniform width plus the prompt gap and the right margin — the
+// horizontal room the vertically-stacked column claims (issue #234) — for both
+// label forms and for an arbitrary label set where the widest is not the first.
 func TestIssue214RunningButtonsWidthUniformFormula(t *testing.T) {
 	check := func(interject, queue, stop string) {
 		t.Helper()
-		got := runningButtonsWidth(interject, queue, stop)
-		want := 3*uniformButtonWidth(interject, queue, stop) + 2*inputRowGap + inputRowMargin
+		got := runningButtonsColumnWidth(interject, queue, stop)
+		want := uniformButtonWidth(interject, queue, stop) + inputRowGap + inputRowMargin
 		if got != want {
-			t.Errorf("runningButtonsWidth(%q,%q,%q) = %d, want %d", interject, queue, stop, got, want)
+			t.Errorf("runningButtonsColumnWidth(%q,%q,%q) = %d, want %d", interject, queue, stop, got, want)
 		}
 	}
-	check(interjectLabel, queueLabel, stopLabel) // 42
-	check(interjectGlyph, queueGlyph, stopGlyph) // 18
-	// Widest label is the third one — the uniform width still drives all three slots.
+	check(interjectLabel, queueLabel, stopLabel) // 15
+	check(interjectGlyph, queueGlyph, stopGlyph) // 7
+	// Widest label is the third one — the uniform width still drives the column.
 	check("a", "bb", "cccccccccc")
 }
 
@@ -129,15 +129,17 @@ func TestIssue214ButtonsUniformWidthFullLabels(t *testing.T) {
 }
 
 // TestIssue214ButtonsUniformWidthGlyphs asserts uniformity holds in degraded-glyph
-// mode too (narrow window): all three share the glyph width.
+// mode too (narrow window): all three share the glyph width. The vertical column
+// (#234) narrowed the footprint, so the glyph flip moved from wd=58 to wd=35; a
+// wd=30 window is below that flip and renders glyphs.
 func TestIssue214ButtonsUniformWidthGlyphs(t *testing.T) {
 	w := newTestWorkbench(t)
 	sw := w.openWindow("s", "S")
 	sw.busy = true
-	layout(sw, 40, 24, 3) // narrow → glyphs
+	layout(sw, 30, 24, 3) // below the wd=35 flip → glyphs
 
 	if sw.interjectButton.Label != interjectGlyph {
-		t.Fatalf("expected glyph mode at wd=40, got interject label %q", sw.interjectButton.Label)
+		t.Fatalf("expected glyph mode at wd=30, got interject label %q", sw.interjectButton.Label)
 	}
 	i, q, s := runningButtonRects(sw)
 	want := uniformButtonWidth(interjectGlyph, queueGlyph, stopGlyph)
@@ -155,7 +157,7 @@ func TestIssue214ButtonsUniformWidthAcrossWidths(t *testing.T) {
 	sw := w.openWindow("s", "S")
 	sw.busy = true
 
-	for _, wd := range []int{40, 44, 50, 56, 60, 62, 63, 64, 70, 80, 100, 120} {
+	for _, wd := range []int{30, 34, 35, 40, 50, 60, 70, 80, 100, 120} {
 		layout(sw, wd, 24, 3)
 		i, q, s := runningButtonRects(sw)
 		if i.W != q.W || q.W != s.W {
@@ -191,10 +193,12 @@ func TestIssue214ButtonRowY(t *testing.T) {
 	}
 }
 
-// TestIssue214ButtonsAlignedWithPromptBox is the core alignment assertion (issue
-// #214): while busy, all three running buttons sit on the prompt box's vertical
-// centre row — not the top row — are 1 row tall, and share one Y so they line up
-// with each other and with the input.
+// TestIssue214ButtonsAlignedWithPromptBox is the core alignment assertion, updated
+// for the #234 vertical stack: while busy the three running buttons line up with
+// the prompt box by spanning its three rows — Queue on the prompt's top row,
+// Interject on the middle row, Stop on the bottom row — each 1 row tall and every
+// one inside the input area. (Pre-#234 they shared the prompt's centre row; #234
+// spreads them across all three rows so they stack beside the prompt.)
 func TestIssue214ButtonsAlignedWithPromptBox(t *testing.T) {
 	w := newTestWorkbench(t)
 	sw := w.openWindow("s", "S")
@@ -202,24 +206,35 @@ func TestIssue214ButtonsAlignedWithPromptBox(t *testing.T) {
 	layout(sw, 80, 24, 3)
 
 	in := boundsOfInput(sw)
-	centerY := in.Y + (in.H-1)/2
-	if centerY == in.Y {
-		t.Fatalf("test setup: expected a multi-row input (H=%d) so centre != top", in.H)
+	queue := boundsOf(sw.queueButton)
+	interject := boundsOf(sw.interjectButton)
+	stop := boundsOf(sw.stopButton)
+	// Each button sits on a distinct prompt row (top / middle / bottom).
+	if queue.Y != in.Y {
+		t.Errorf("Queue Y=%d, want the prompt top row %d", queue.Y, in.Y)
 	}
-	for name, r := range map[string]tv.Rect{"interject": boundsOf(sw.interjectButton), "queue": boundsOf(sw.queueButton), "stop": boundsOf(sw.stopButton)} {
-		if r.Y != centerY {
-			t.Errorf("%s button Y=%d, want prompt-centre Y=%d (not the input's top row %d)", name, r.Y, centerY, in.Y)
-		}
+	if interject.Y != in.Y+(in.H-1)/2 {
+		t.Errorf("Interject Y=%d, want the prompt centre row %d", interject.Y, in.Y+(in.H-1)/2)
+	}
+	if stop.Y != in.Y+in.H-1 {
+		t.Errorf("Stop Y=%d, want the prompt bottom row %d", stop.Y, in.Y+in.H-1)
+	}
+	// Every button stays within the prompt box's rows and is 1 row tall.
+	for name, r := range map[string]tv.Rect{"queue": queue, "interject": interject, "stop": stop} {
 		if r.H != 1 {
 			t.Errorf("%s button H=%d, want 1 (a single-row button)", name, r.H)
+		}
+		if r.Y < in.Y || r.Y >= in.Y+in.H {
+			t.Errorf("%s button Y=%d falls outside the input rows [%d,%d)", name, r.Y, in.Y, in.Y+in.H)
 		}
 	}
 }
 
-// TestIssue214ButtonsCentredNotFloatingAtTop is the direct regression guard for
-// the alignment fix: the button row must NOT sit on the input area's top row
-// (the pre-#214 "floats at the top" bug). With inputH=3 the centre is one row
-// below the top.
+// TestIssue214ButtonsCentredNotFloatingAtTop is the direct regression guard for the
+// alignment fix, updated for #234: the column must NOT clump at the input area's
+// top row (the pre-#214 "floats at the top" bug). Instead it spans the whole input
+// height — covering the top, middle AND bottom rows — so the stack fills the prompt
+// box rather than sitting at one edge.
 func TestIssue214ButtonsCentredNotFloatingAtTop(t *testing.T) {
 	w := newTestWorkbench(t)
 	sw := w.openWindow("s", "S")
@@ -228,18 +243,23 @@ func TestIssue214ButtonsCentredNotFloatingAtTop(t *testing.T) {
 	layout(sw, wd, ht, inputH)
 
 	top := ht - inputH
+	queue := boundsOf(sw.queueButton)
 	stop := boundsOf(sw.stopButton)
-	if stop.Y == top {
-		t.Errorf("Stop floats at the input top row Y=%d; want the centre row %d (issue #214)", stop.Y, buttonRowY(top, inputH))
+	// The column spans from the input top row to the input bottom row — it does
+	// not float at just the top edge.
+	if queue.Y != top {
+		t.Errorf("Queue Y=%d, want the input top row %d (column should start at the top)", queue.Y, top)
 	}
-	if stop.Y != buttonRowY(top, inputH) {
-		t.Errorf("Stop Y=%d, want centred row %d", stop.Y, buttonRowY(top, inputH))
+	if stop.Y != top+inputH-1 {
+		t.Errorf("Stop Y=%d, want the input bottom row %d (column should reach the bottom, not float at the top)",
+			stop.Y, top+inputH-1)
 	}
 }
 
 // TestIssue214IdleSendAlignedWithPromptBox asserts the idle Send button (which
-// occupies the same visual slot as the running buttons) is also centred on the
-// prompt box and 1 row tall, so the slot's vertical placement is consistent.
+// occupies the same visual slot as the running buttons) is centred on the prompt
+// box and 1 row tall, so the slot's vertical placement is consistent. The idle
+// Send placement is unchanged by #234 (only the busy column stacks).
 func TestIssue214IdleSendAlignedWithPromptBox(t *testing.T) {
 	w := newTestWorkbench(t)
 	sw := w.openWindow("s", "S")
@@ -256,23 +276,33 @@ func TestIssue214IdleSendAlignedWithPromptBox(t *testing.T) {
 	}
 }
 
-// TestIssue214NoVerticalJumpOnBusyToggle is the alignment invariant the issue
-// calls out: the idle Send and the busy running buttons sit on the same row, so
-// toggling busy does not make the controls jump vertically.
-func TestIssue214NoVerticalJumpOnBusyToggle(t *testing.T) {
+// TestIssue214NoControlLeavesInputAreaOnBusyToggle is the alignment invariant the
+// issue calls out, updated for #234: the idle Send button and the busy running
+// buttons all stay within the prompt box's rows across a busy toggle, so toggling
+// never pushes a control outside the input area. (Pre-#234 the invariant was
+// "same single row"; #234 spreads the busy column across the prompt's rows, so the
+// invariant is now "within the input area" rather than "same row".)
+func TestIssue214NoControlLeavesInputAreaOnBusyToggle(t *testing.T) {
 	w := newTestWorkbench(t)
 	sw := w.openWindow("s", "S")
 	const wd, ht, inputH = 80, 24, 3
 
+	// Idle: Send sits within the input area.
 	layout(sw, wd, ht, inputH)
-	idleY := boundsOf(sw.sendButton).Y
+	in := boundsOfInput(sw)
+	send := boundsOf(sw.sendButton)
+	if send.Y < in.Y || send.Y >= in.Y+in.H {
+		t.Fatalf("idle Send Y=%d outside the input area [%d,%d)", send.Y, in.Y, in.Y+in.H)
+	}
 
+	// Busy: every column button stays within the same input area's rows.
 	sw.busy = true
 	layout(sw, wd, ht, inputH)
-	busyY := boundsOf(sw.stopButton).Y
-
-	if idleY != busyY {
-		t.Errorf("vertical jump on busy toggle: idle Send Y=%d, busy Stop Y=%d (want equal)", idleY, busyY)
+	for name, b := range map[string]*tv.Button{"queue": sw.queueButton, "interject": sw.interjectButton, "stop": sw.stopButton} {
+		r := boundsOf(b)
+		if r.Y < in.Y || r.Y >= in.Y+in.H {
+			t.Errorf("busy %s Y=%d jumped outside the input area [%d,%d) on toggle", name, r.Y, in.Y, in.Y+in.H)
+		}
 	}
 }
 
@@ -530,31 +560,34 @@ func TestIssue214GuardInterjectHookRecoloursOnThemeSwitch(t *testing.T) {
 // ----------------------------------------------------------------------------
 
 // TestIssue214DegradeFlipAtUniformFootprint pins the exact glyph/full flip under
-// uniform sizing (wd=63, where the prompt gets exactly minInputWidth) and that the
-// flip width is runningButtonsWidth(full) + minInputWidth + the prompt-button gap.
+// the #234 vertical column (wd=35, where the prompt gets exactly minInputWidth) and
+// that the flip width is runningButtonsColumnWidth(full) + minInputWidth. The
+// column claims one frame + gap + margin (15), not three frames, so the flip moved
+// down from the pre-#234 wd=63 to wd=35.
 func TestIssue214DegradeFlipAtUniformFootprint(t *testing.T) {
 	w := newTestWorkbench(t)
 	sw := w.openWindow("s", "S")
 	sw.busy = true
 
 	// One below the flip: glyphs.
-	layout(sw, 62, 24, 3)
+	layout(sw, 34, 24, 3)
 	if sw.interjectButton.Label != interjectGlyph {
-		t.Errorf("wd=62 should use glyphs, got %q", sw.interjectButton.Label)
+		t.Errorf("wd=34 should use glyphs, got %q", sw.interjectButton.Label)
 	}
 	// At the flip: full labels and the prompt gets exactly minInputWidth.
-	layout(sw, 63, 24, 3)
+	layout(sw, 35, 24, 3)
 	if sw.interjectButton.Label != interjectLabel {
-		t.Errorf("wd=63 should use full labels, got %q", sw.interjectButton.Label)
+		t.Errorf("wd=35 should use full labels, got %q", sw.interjectButton.Label)
 	}
 	if got := boundsOfInput(sw).W; got != minInputWidth {
 		t.Errorf("flip-point input width = %d, want exactly minInputWidth %d", got, minInputWidth)
 	}
-	// The flip width is the full footprint + minInputWidth + the prompt-button gap.
-	wantFlip := runningButtonsWidth(interjectLabel, queueLabel, stopLabel) + minInputWidth + inputRowGap
-	if wantFlip != 63 {
-		t.Errorf("expected flip at 63 (footprint %d + minInput %d + gap %d), got formula %d",
-			runningButtonsWidth(interjectLabel, queueLabel, stopLabel), minInputWidth, inputRowGap, wantFlip)
+	// The flip width is the column footprint + minInputWidth (the gap and margin
+	// are already inside runningButtonsColumnWidth).
+	wantFlip := runningButtonsColumnWidth(interjectLabel, queueLabel, stopLabel) + minInputWidth
+	if wantFlip != 35 {
+		t.Errorf("expected flip at 35 (column %d + minInput %d), got formula %d",
+			runningButtonsColumnWidth(interjectLabel, queueLabel, stopLabel), minInputWidth, wantFlip)
 	}
 	// And the prompt only grows from the flip upward.
 	layout(sw, 80, 24, 3)
@@ -567,9 +600,11 @@ func TestIssue214DegradeFlipAtUniformFootprint(t *testing.T) {
 // Group 6 — edge cases / robustness.
 // ----------------------------------------------------------------------------
 
-// TestIssue214LayoutAtMinimumWindowWidth exercises the narrowest realistic window
-// (40, the window minimum): the buttons stay uniform, on-screen, non-overlapping,
-// and the prompt keeps at least one cell.
+// TestIssue214LayoutAtMinimumWindowWidth exercises a representative narrow window:
+// the buttons stay uniform, on-screen, non-overlapping (checked in 2D, since the
+// stacked column shares an X), form a vertical column, and the prompt keeps at
+// least one cell. Note the #234 column is narrow enough that wd=40 is now in
+// full-label mode (the glyph flip is at wd=35).
 func TestIssue214LayoutAtMinimumWindowWidth(t *testing.T) {
 	w := newTestWorkbench(t)
 	sw := w.openWindow("s", "S")
@@ -585,13 +620,19 @@ func TestIssue214LayoutAtMinimumWindowWidth(t *testing.T) {
 	if i.W != q.W || q.W != s.W {
 		t.Errorf("wd=%d: buttons not uniform (i=%d q=%d s=%d)", wd, i.W, q.W, s.W)
 	}
+	// Vertical column order (Queue→Interject→Stop, distinct increasing Y).
+	if q.Y >= i.Y || i.Y >= s.Y {
+		t.Errorf("wd=%d: not in vertical order (q.Y=%d i.Y=%d s.Y=%d)", wd, q.Y, i.Y, s.Y)
+	}
 	for name, r := range map[string]tv.Rect{"interject": i, "queue": q, "stop": s} {
 		if r.X < 0 {
 			t.Errorf("wd=%d: %s off-screen left at X=%d", wd, name, r.X)
 		}
 	}
-	for _, pair := range [][2]tv.Rect{{in, i}, {i, q}, {q, s}} {
-		if rectsMeet(pair[0], pair[1]) {
+	// 2D overlap check: the stacked buttons share an X, so an X-only check would
+	// wrongly flag them.
+	for _, pair := range [][2]tv.Rect{{in, i}, {in, q}, {in, s}, {i, q}, {q, s}, {i, s}} {
+		if rectsOverlap2D(pair[0], pair[1]) {
 			t.Errorf("wd=%d: input-row widgets overlap: %+v and %+v", wd, pair[0], pair[1])
 		}
 	}

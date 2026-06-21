@@ -320,6 +320,10 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 		if wd < 4 || ht < 7 {
 			return
 		}
+		// The prompt box is three rows tall. While a turn runs that height also hosts
+		// the running-turn controls, which stack one-per-row in a column beside the
+		// prompt (Queue / Interject / Stop, issue #234), so the three buttons line up
+		// against the three prompt rows — keep inputH >= 3 if this ever changes.
 		inputH := 3
 		selW := headerSelectWidth(sw.wb.longestModelNameWidth(), wd)
 		modelLabel.Component.SetBounds(tv.Rect{X: 0, Y: 0, W: 6, H: 1})
@@ -882,11 +886,14 @@ func uniformButtonWidth(labels ...string) int {
 // #214). top is the input area's first row; inputH its height.
 func buttonRowY(top, inputH int) int { return top + (inputH-1)/2 }
 
-// runningButtonsWidth is the total width the three running-turn buttons occupy on
-// the input row once sized to a common (uniform) width: three equal frames, the
-// gaps between them and the right margin (issue #201; uniform sizing, issue #214).
-func runningButtonsWidth(interject, queue, stop string) int {
-	return 3*uniformButtonWidth(interject, queue, stop) + 2*inputRowGap + inputRowMargin
+// runningButtonsColumnWidth is the horizontal room the vertically-stacked running-
+// turn buttons claim on the input row (issue #234): the three buttons share a single
+// right-aligned column, so it is one uniform button frame plus the one-cell gap to the
+// prompt box on its left and the right margin past it — not three frames summed side by
+// side as in the pre-#234 horizontal layout. It is the budget the glyph-degradation
+// check measures the prompt against (uniform sizing, issue #214).
+func runningButtonsColumnWidth(interject, queue, stop string) int {
+	return uniformButtonWidth(interject, queue, stop) + inputRowGap + inputRowMargin
 }
 
 // controlsSeparatorRune is the box-drawing glyph repeated across the divider rule
@@ -910,16 +917,14 @@ func (sw *SessionWindow) layoutControlsSeparator(wd, y int) {
 
 // layoutInputRow positions the prompt box and its buttons on the bottom input row
 // (issue #201). Idle shows the single Send button at the right with the three
-// running-turn controls hidden (zero bounds); busy hides Send and lays out
-// [ Interject ] [ Queue ⏎ ] [ ■ Stop ] right-aligned — the two send-actions
-// grouped, the destructive Stop on the far right — shrinking the input to the room
-// left of them. On a window too narrow to show the full labels beside a usable
-// input the labels degrade to single glyphs before the input overflows.
+// running-turn controls hidden (zero bounds). Busy hides Send and stacks the three
+// running-turn controls in a single right-aligned column, one per input row, top→
+// bottom Queue / Interject / Stop (issue #234) — the prompt box is inputH rows tall
+// and each button is one row, so the column lines up with it — shrinking the input to
+// the room left of the column. On a window too narrow to show the full labels beside a
+// usable input the labels degrade to single glyphs before the input overflows.
 func (sw *SessionWindow) layoutInputRow(wd, ht, inputH int) {
 	top := ht - inputH
-	// The buttons are one row tall; centre them on the prompt box's middle line so
-	// they line up with it instead of floating at its top edge (issue #214).
-	rowY := buttonRowY(top, inputH)
 	if !sw.busy {
 		// Hide via Visible, not just zero bounds: turbotv's focus traversal
 		// (collectFocusable) skips !Visible/!Enabled but not zero-bounds widgets, so
@@ -929,6 +934,10 @@ func (sw *SessionWindow) layoutInputRow(wd, ht, inputH int) {
 		sw.hideRunningButton(sw.queueButton)
 		sw.hideRunningButton(sw.stopButton)
 		sw.sendButton.Component.Visible = true
+		// The idle Send button is one row tall; centre it on the prompt box's middle
+		// line so it lines up with it instead of floating at its top edge (issue #214).
+		// The busy column instead spans every input row, so it does not use this.
+		rowY := buttonRowY(top, inputH)
 		sw.input.Component.SetBounds(tv.Rect{X: 0, Y: top, W: wd - 10, H: inputH})
 		sw.sendButton.Component.SetBounds(tv.Rect{X: wd - 9, Y: rowY, W: 8, H: 1})
 		return
@@ -938,31 +947,57 @@ func (sw *SessionWindow) layoutInputRow(wd, ht, inputH int) {
 	sw.queueButton.Component.Visible = true
 	sw.stopButton.Component.Visible = true
 	il, ql, sl := interjectLabel, queueLabel, stopLabel
-	// Degrade to glyphs once the full-label buttons would leave the prompt fewer
-	// than minInputWidth cells. The buttons consume runningButtonsWidth plus the
-	// one-cell gap between the prompt and the first button, so that gap is part of
-	// the budget too — without it the prompt ends up a cell short of the floor
-	// (issue #201).
-	if runningButtonsWidth(il, ql, sl) > wd-minInputWidth-inputRowGap {
+	// Degrade to glyphs once the full-label button column would leave the prompt fewer
+	// than minInputWidth cells. The column consumes runningButtonsColumnWidth — one
+	// uniform button frame plus the gap to the prompt on its left and the right margin —
+	// so the whole of that is the budget the prompt is measured against (issues #201,
+	// #234).
+	if runningButtonsColumnWidth(il, ql, sl) > wd-minInputWidth {
 		il, ql, sl = interjectGlyph, queueGlyph, stopGlyph
 	}
 	sw.interjectButton.SetLabel(il)
 	sw.queueButton.SetLabel(ql)
 	sw.stopButton.SetLabel(sl)
-	// One uniform width for all three so they read as a consistent set; turbotui
+	// One uniform width for all three so they read as a consistent column; turbotui
 	// centres each button's caption within its box (issue #214).
 	btnW := uniformButtonWidth(il, ql, sl)
-	stopX := wd - inputRowMargin - btnW
-	queueX := stopX - inputRowGap - btnW
-	interjectX := queueX - inputRowGap - btnW
-	inputW := interjectX - inputRowGap
+	// Stack the buttons in a single right-aligned column — they share one X and width,
+	// one button per input row, top→bottom Queue / Interject / Stop (issue #234). With
+	// inputH == 3 (the prompt box height) the rows are top, top+1, top+2: exactly the
+	// prompt's three rows, so the column lines up cleanly beside it. The prompt shrinks
+	// to the room left of the column (its left gap included).
+	btnX := wd - inputRowMargin - btnW
+	inputW := btnX - inputRowGap
 	if inputW < 1 {
 		inputW = 1
 	}
+	queueY, interjectY, stopY := runningButtonStackRows(top, inputH)
 	sw.input.Component.SetBounds(tv.Rect{X: 0, Y: top, W: inputW, H: inputH})
-	sw.interjectButton.Component.SetBounds(tv.Rect{X: interjectX, Y: rowY, W: btnW, H: 1})
-	sw.queueButton.Component.SetBounds(tv.Rect{X: queueX, Y: rowY, W: btnW, H: 1})
-	sw.stopButton.Component.SetBounds(tv.Rect{X: stopX, Y: rowY, W: btnW, H: 1})
+	sw.queueButton.Component.SetBounds(tv.Rect{X: btnX, Y: queueY, W: btnW, H: 1})
+	sw.interjectButton.Component.SetBounds(tv.Rect{X: btnX, Y: interjectY, W: btnW, H: 1})
+	sw.stopButton.Component.SetBounds(tv.Rect{X: btnX, Y: stopY, W: btnW, H: 1})
+}
+
+// runningButtonStackRows returns the Y rows of the three vertically-stacked running-
+// turn buttons (issue #234), top→bottom Queue / Interject / Stop, anchored to the top
+// of the input area at row top. With inputH >= 3 (the prompt box is three rows tall)
+// they take three consecutive rows — top, top+1, top+2 — so the column fills the prompt
+// box beside it. For a shorter input area each row is clamped to its last row
+// (top+inputH-1) so a button can never spill below the input area onto the status line
+// that sits directly under it — trading an out-of-bounds row for two buttons sharing
+// the bottom row (a visible overlap, the least-bad option once three single-row buttons
+// no longer fit). That clamp is only a safety net for a future inputH < 3, not a
+// configuration any current caller produces: the sole caller passes inputH == 3 (where
+// no clamping occurs), and the layout guard requires the window be tall enough for it.
+func runningButtonStackRows(top, inputH int) (queue, interject, stop int) {
+	last := top + inputH - 1
+	clamp := func(y int) int {
+		if y > last {
+			return last
+		}
+		return y
+	}
+	return clamp(top), clamp(top + 1), clamp(top + 2)
 }
 
 // hideRunningButton removes an input-row button from view and, crucially, from the
