@@ -14,11 +14,16 @@ result back to the call that started it. Two concrete gaps:
    create *fresh* entries. The N-1 earlier entries stay "(running...)" forever.
    Results are matched by nothing — not even tool name.
 
-2. **Backend serial-path panic.** `runToolCallsSerial` has no per-call panic
-   recovery. A tool that panics emits its `ToolCall`, then the panic unwinds to
-   the outer `runLoop` recover, which emits an Error and returns — the started
-   call never gets a `ToolResult`. (The concurrent path already recovers per
-   task; serial did not.)
+2. **Backend pairing / id propagation.** Neither `ToolCall` nor `ToolResult`
+   events carried a call id, so the only thing the UI could pair on was the
+   single-slot pointer above. Correction (per review): a panic *inside* a tool's
+   `Execute` is already recovered by `tool.ToolRegistry.ExecuteToolCall` (issue
+   #8), which returns an error response — so `runToolCall` always returns a string
+   and the serial result-emit always fired. A tool `Execute` panic therefore never
+   stranded a serial call. The per-call recover added in `runAndEmitResult` is
+   defense-in-depth for a panic that *escapes* the registry (e.g. a nil registry,
+   or a panic marshaling the result), not the load-bearing fix. The load-bearing
+   fix is the CallID threading + the TUI map and safety net.
 
 ## Design
 

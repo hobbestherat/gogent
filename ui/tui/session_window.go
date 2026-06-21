@@ -55,9 +55,16 @@ type SessionWindow struct {
 	// rather than a single slot because a concurrent tool batch has several calls
 	// running at once whose results may arrive in any order — keying by id is what
 	// lets every result flip the right entry from "running" to done, so none is
-	// left stuck "running" (issue #187).
+	// left stuck "running" (issue #187). The invariant the safety net relies on:
+	// every record still showing "(running...)" is reachable here until it reaches
+	// a terminal state, so failPendingTools can always sweep it. An id-less call is
+	// tracked under a synthetic key (see untrackedTools) to preserve that.
 	pendingTools map[string]*transcriptRecord
-	busy         bool
+	// untrackedTools counts id-less tool calls, used to mint a collision-free
+	// synthetic key so an id-less "(running...)" entry is still swept on busy→idle
+	// even though it can never be paired to a result by id (issue #187).
+	untrackedTools int
+	busy           bool
 	// statusState is the current left-hand status text (idle/working.../thinking
 	// ... (step N)); statusStats holds the latest per-session stats snapshot.
 	// refreshStatus composes the two into the single bottom status line.
@@ -1363,9 +1370,22 @@ func (sw *SessionWindow) beginToolCall(id, name string, args map[string]interfac
 		kind: kindTool, header: fmt.Sprintf("tool: %s (running...)", name),
 		color: colorTool, collapsed: true, lines: lines,
 	})
-	if id != "" {
-		sw.pendingTools[id] = rec
+	if id == "" {
+		// No stable id (legacy/stray event): track under a unique synthetic key so
+		// the busy→idle safety net can still sweep this "(running...)" entry. It
+		// just cannot be paired to a result by id, so its result (if any) falls back
+		// to a fresh entry in finishToolCall.
+		sw.untrackedTools++
+		sw.pendingTools[fmt.Sprintf("\x00untracked-%d", sw.untrackedTools)] = rec
+		return
 	}
+	// A misbehaving model can reuse a tool-call id within a turn. The displaced
+	// entry can no longer be matched to a result, so flip it terminal now instead
+	// of orphaning it "(running...)" beyond the safety net's reach (issue #187).
+	if old := sw.pendingTools[id]; old != nil {
+		sw.transcript.setHeader(old, fmt.Sprintf("tool: %s (superseded)", toolHeaderName(old)))
+	}
+	sw.pendingTools[id] = rec
 }
 
 // finishToolCall appends the result to the call's pending entry, matched by its
