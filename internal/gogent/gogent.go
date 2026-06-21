@@ -1048,6 +1048,9 @@ func (g *Gogent) CreateUserSession(id string, rootAgent *agent.Agent) *agent.Use
 	// #201), which replaced the removed experimental.inject_queued_input flag. The
 	// UI's drain-on-idle queue (phase 1) still owns Enter/Queue.
 	userSession.SetInjectQueuedInput(true)
+	// Live thinking-token streaming (issue #217) is opt-in via the experimental
+	// flag; the /thinking command can also toggle it per session at runtime.
+	userSession.SetStreamThinking(g.config.Experimental.StreamThinking)
 	userSession.SetSubAgentTimeout(time.Duration(g.config.Timeouts.SubAgentSecondsOrDefault()) * time.Second)
 	// Share the process-wide concurrency limiter so sub-agent fan-out across all
 	// sessions is globally bounded (issue #23).

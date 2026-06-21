@@ -423,6 +423,28 @@ func (s *ModelSession) SendWithTools(messages []Message, tools []ToolDef) (*Comp
 // request is abandoned the moment ctx is cancelled (issue #24). The transcript
 // and history are still updated for the messages we attempted to send.
 func (s *ModelSession) SendWithToolsCtx(ctx context.Context, messages []Message, tools []ToolDef) (*CompletionResponse, error) {
+	return s.sendCtx(ctx, messages, tools, nil)
+}
+
+// SendWithToolsStreamCtx is SendWithToolsCtx that additionally streams the
+// model's chain-of-thought (reasoning) deltas to onReasoning as they arrive, so
+// a caller can render live thinking and fold it when the turn completes (issue
+// #217). It uses the streaming backend only when the connector implements
+// StreamingToolCompleter AND onReasoning is non-nil; otherwise it falls back to
+// the identical blocking path, so a backend that cannot stream — or a caller
+// that does not want live thinking — is wholly unaffected. The assembled
+// response and all transcript/history/token bookkeeping are identical to the
+// blocking path either way.
+func (s *ModelSession) SendWithToolsStreamCtx(ctx context.Context, messages []Message, tools []ToolDef, onReasoning ReasoningSink) (*CompletionResponse, error) {
+	return s.sendCtx(ctx, messages, tools, onReasoning)
+}
+
+// sendCtx is the shared core of the blocking and streaming send paths. When
+// onReasoning is non-nil and the backend is a StreamingToolCompleter it streams
+// (forwarding reasoning deltas); otherwise it issues the blocking
+// CompleteWithToolsCtx. Transcript growth, history recording and token
+// accounting are the same regardless of which backend call is used.
+func (s *ModelSession) sendCtx(ctx context.Context, messages []Message, tools []ToolDef, onReasoning ReasoningSink) (*CompletionResponse, error) {
 	s.mu.Lock()
 	// Append the new messages to the transcript.
 	s.Transcript = append(s.Transcript, messages...)
@@ -450,7 +472,15 @@ func (s *ModelSession) SendWithToolsCtx(ctx context.Context, messages []Message,
 	s.History = append(s.History, Turn{Request: messages})
 	s.mu.Unlock()
 
-	resp, err := s.Model.CompleteWithToolsCtx(ctx, fullMessages, tools)
+	// Stream (surfacing reasoning) only when a sink is wanted and the backend can
+	// do it; otherwise the blocking call, which is byte-for-byte the prior path.
+	var resp *CompletionResponse
+	var err error
+	if sc, ok := s.Model.(StreamingToolCompleter); ok && onReasoning != nil {
+		resp, err = sc.CompleteWithToolsStreamCtx(ctx, fullMessages, tools, onReasoning)
+	} else {
+		resp, err = s.Model.CompleteWithToolsCtx(ctx, fullMessages, tools)
+	}
 	if err != nil {
 		s.mu.Lock()
 		s.History[len(s.History)-1].Error = &ModelError{Message: err.Error()}

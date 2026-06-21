@@ -35,6 +35,24 @@ type Streamer interface {
 	CompleteStream(messages []Message) (<-chan StreamResponse, <-chan error)
 }
 
+// ReasoningSink receives the model's chain-of-thought (reasoning) text as it
+// streams, one delta per call (issue #217). It is invoked from the streaming
+// read goroutine, potentially many times per turn, so implementations must be
+// cheap and non-blocking — typically just forwarding the delta onto a UI event
+// channel.
+type ReasoningSink func(delta string)
+
+// StreamingToolCompleter is an optional capability: a streaming tool-calling
+// completion that surfaces the model's reasoning/thinking deltas live via a
+// ReasoningSink while still returning the fully assembled response (content,
+// tool calls, usage) exactly like CompleteWithToolsCtx (issue #217). It is kept
+// out of the core Connector because not every backend can stream tool calls or
+// reasoning; callers type-assert to it and fall back to the blocking
+// CompleteWithToolsCtx when it is absent or when no live thinking is wanted.
+type StreamingToolCompleter interface {
+	CompleteWithToolsStreamCtx(ctx context.Context, messages []Message, tools []ToolDef, onReasoning ReasoningSink) (*CompletionResponse, error)
+}
+
 // StructuredCompleter additionally supports constraining the model's output to a
 // response format — typically a strict JSON schema (see JSONSchemaResponseFormat)
 // — so programmatic consumers get deterministically schema-valid output instead
@@ -104,9 +122,10 @@ type ModelLister interface {
 // Compile-time assertions that the concrete HTTP connection satisfies the full
 // Connector contract and the optional model-listing capability.
 var (
-	_ Connector           = (*ModelConnection)(nil)
-	_ ModelLister         = (*ModelConnection)(nil)
-	_ StructuredCompleter = (*ModelConnection)(nil)
+	_ Connector              = (*ModelConnection)(nil)
+	_ ModelLister            = (*ModelConnection)(nil)
+	_ StructuredCompleter    = (*ModelConnection)(nil)
+	_ StreamingToolCompleter = (*ModelConnection)(nil)
 )
 
 // StatsSnapshot is a mutex-free, copyable view of a connector's accumulated

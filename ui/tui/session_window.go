@@ -82,6 +82,16 @@ type SessionWindow struct {
 	// synthetic key so an id-less "(running...)" entry is still swept on busy→idle
 	// even though it can never be paired to a result by id (issue #187).
 	untrackedTools int
+	// liveThought is the in-flight streamed "thinking" record for the current turn,
+	// or nil when no reasoning is streaming (issue #217). Streamed reasoning deltas
+	// (SessionEventThinkingDelta) append to it expanded so the user watches it live;
+	// it is relabelled "thought", collapsed and cleared when the turn's thinking
+	// completes (SessionEventThinkingDone) or on the busy→idle safety net.
+	// liveThoughtBuf line-buffers partial deltas so only complete lines are
+	// committed to the entry (the trailing partial is flushed when the entry folds).
+	// Touched only on the UI thread.
+	liveThought    *transcriptRecord
+	liveThoughtBuf string
 	busy           bool
 	// statusState is the current left-hand status text (idle/working.../thinking
 	// ... (step N)); statusStats holds the latest per-session stats snapshot.
@@ -1405,6 +1415,9 @@ func (sw *SessionWindow) setBusy(busy bool) {
 		// terminal state so nothing is left stuck "running" (issue #187). A clean
 		// turn leaves the map empty, so this is a no-op then.
 		sw.failPendingTools("interrupted")
+		// Likewise fold any live streamed thinking entry left open by a cancelled or
+		// crashed turn so it doesn't stay expanded "thinking…" forever (issue #217).
+		sw.foldLiveThought()
 	}
 	sw.refreshStatus()
 	// On the busy→idle edge the running-turn buttons are about to be hidden by the
@@ -1499,6 +1512,10 @@ func (sw *SessionWindow) apply(ev agent.SessionEvent) {
 	case agent.SessionEventThinking:
 		sw.statusState = fmt.Sprintf("thinking... (step %d)", ev.Step)
 		sw.refreshStatus()
+	case agent.SessionEventThinkingDelta:
+		sw.appendThinkingDelta(ev.Text)
+	case agent.SessionEventThinkingDone:
+		sw.foldLiveThought()
 	case agent.SessionEventUsage:
 		sw.statusStats = ev.Stats
 		sw.refreshStatus()
@@ -1627,8 +1644,46 @@ func (sw *SessionWindow) handleSlashCommand(text string) bool {
 	case "/markdown":
 		sw.handleMarkdownCommand(fields[1:])
 		return true
+	case "/thinking":
+		sw.handleThinkingCommand(fields[1:])
+		return true
 	}
 	return false
+}
+
+// handleThinkingCommand implements /thinking (issue #217): it toggles live
+// streaming of the model's chain-of-thought into the transcript, or sets it
+// explicitly with on/off. The change is applied to this session's backend via the
+// StreamThinking handler and takes effect on the next turn.
+func (sw *SessionWindow) handleThinkingCommand(args []string) {
+	if sw.wb == nil || sw.wb.handlers.StreamThinking == nil {
+		sw.addNote("streaming thinking is unavailable")
+		return
+	}
+	var set *bool
+	if len(args) > 0 {
+		var v bool
+		switch strings.ToLower(args[0]) {
+		case "on", "true", "1":
+			v = true
+		case "off", "false", "0":
+			v = false
+		default:
+			sw.addNote("usage: /thinking [on|off]")
+			return
+		}
+		set = &v
+	} else {
+		// No argument: flip the current state.
+		cur := sw.wb.handlers.StreamThinking(sw.id, nil)
+		v := !cur
+		set = &v
+	}
+	if sw.wb.handlers.StreamThinking(sw.id, set) {
+		sw.addNote("streaming thinking on")
+	} else {
+		sw.addNote("streaming thinking off")
+	}
 }
 
 // handleMarkdownCommand implements /markdown (issue #184): it toggles rich
@@ -1934,6 +1989,54 @@ func (sw *SessionWindow) addThought(text string) {
 		kind: kindThinking, header: "thought", color: colorNote, role: roleNote, collapsed: true,
 		lines: styledChildLines(text, roleNote),
 	})
+}
+
+// appendThinkingDelta streams a chunk of the model's chain-of-thought into a
+// live, expanded "thinking…" entry under the current turn (issue #217). The
+// entry is created lazily on the first non-empty delta so a turn that streams no
+// reasoning never shows one. Deltas are token fragments, so they are line
+// buffered: only complete lines (terminated by a newline) are committed to the
+// entry as they arrive; the trailing partial is held until the entry folds (see
+// foldLiveThought). The entry starts expanded so the user watches the thinking
+// build up.
+func (sw *SessionWindow) appendThinkingDelta(delta string) {
+	if delta == "" {
+		return
+	}
+	if sw.liveThought == nil {
+		sw.liveThought = sw.transcript.add(&transcriptRecord{
+			kind: kindThinking, header: "thinking…", color: colorNote, role: roleNote,
+		})
+		sw.liveThoughtBuf = ""
+	}
+	sw.liveThoughtBuf += delta
+	for {
+		i := strings.IndexByte(sw.liveThoughtBuf, '\n')
+		if i < 0 {
+			break
+		}
+		line := sw.liveThoughtBuf[:i]
+		sw.liveThoughtBuf = sw.liveThoughtBuf[i+1:]
+		sw.transcript.appendLine(sw.liveThought, styledLine{text: line, color: roleColor(roleNote), role: roleNote})
+	}
+}
+
+// foldLiveThought finishes the live streamed thinking entry: it flushes any
+// trailing partial line, relabels the header from "thinking…" to "thought", and
+// collapses the entry so the completed reasoning folds away (issue #217). It is a
+// no-op when no thinking is streaming, so it is safe to call on the
+// thinking-done event and again on the busy→idle safety net.
+func (sw *SessionWindow) foldLiveThought() {
+	if sw.liveThought == nil {
+		return
+	}
+	if sw.liveThoughtBuf != "" {
+		sw.transcript.appendLine(sw.liveThought, styledLine{text: sw.liveThoughtBuf, color: roleColor(roleNote), role: roleNote})
+		sw.liveThoughtBuf = ""
+	}
+	sw.transcript.setHeader(sw.liveThought, "thought")
+	sw.transcript.setCollapsed(sw.liveThought, true)
+	sw.liveThought = nil
 }
 
 // addCompaction appends a collapsed note recording a context-compression pass;
