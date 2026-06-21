@@ -18,10 +18,14 @@ dep; mirrors `approvals`/`setApproval`/`setGlobalApprovals`/`approvalBadge`.
    - `setApproval`  → `sessionLabel(title, …, pending,         s.clarify[id])`
    - `relabelSession` → `sessionLabel(title, …, s.approvals[id], s.clarify[id])`
 5. **New methods** mirroring the approval ones:
-   - `setClarify(id, title string, pinned, waiting bool)` — toggles `clarify[id]`
-     and relabels the node (preserving the live `approvals[id]` flag).
+   - `setClarify(id, title string, pinned, waiting bool)` — a per-session
+     reference count (`clarifyCount[id]`), since a session can host several
+     interactive sub-agents: `waiting` bumps it, `!waiting` drops it, and the
+     `clarify[id]` membership / badge persists until the LAST waiting sub-agent
+     resolves. Preserves the live `approvals[id]` flag on relabel.
    - `setGlobalClarify(n int)` — clamps `<0` to 0, stores `globalClarify`.
-   - `removeSession` also `delete(s.clarify, id)` so closed sessions don't leak.
+   - `removeSession` also `delete`s `clarify`/`clarifyCount` and resyncs
+     `globalClarify = len(clarify)` so a closed waiting session leaves no phantom.
 6. **Header**: in `panel.DrawFn`, when `globalClarify > 0` draw `❓N`
    right-aligned just left of the existing `⏳N`, sharing the `abs.X+20` clamp.
 
@@ -31,10 +35,13 @@ When a `SessionEventSubAgent` arrives (UI thread, inside the existing
 `desktop.Post`):
 - `waiting := ev.Status == agent.StatusWaiting` (the same predicate
   `eventNotification` keys CLARIFY on).
-- `setClarify(id, title, pinned, waiting)` — set on enter-waiting, clear on the
-  next non-waiting lifecycle event (running/resumed/completed/failed).
-- `setGlobalClarify(len(sidebar.clarify))` — count of sessions currently
-  flagged (a session shows at most one clarify badge).
+- **Per-sub-agent dedup.** The interactive loop re-emits `StatusWaiting` on every
+  CLARIFY round but does NOT emit the resume in between (only launch-running and
+  the terminal event), so a raw per-event count would drift. `w.clarifyWaiting`
+  (keyed by the sub-agent key `applySubAgent` uses) collapses repeated same-state
+  events into balanced transitions: only an actual `waiting` flip calls
+  `setClarify(id, title, pinned, waiting)` + `setGlobalClarify(len(sidebar.clarify))`.
+  → one increment per waiting sub-agent, one decrement when it resolves.
 
 Grab `title`/`pinned` under `w.mu` next to the existing `sw` lookup.
 

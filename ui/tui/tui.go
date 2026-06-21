@@ -273,8 +273,18 @@ type Workbench struct {
 	// requesting session's sidebar node shows a "needs approval" badge and the
 	// sidebar header shows a global indicator while any prompt is waiting (issue
 	// #55). Guarded by w.mu; the badge refresh is marshalled onto the UI thread.
-	approvals    map[string]int
-	windowConfig config.WindowConfig
+	approvals map[string]int
+	// clarifyWaiting records which interactive sub-agents are currently blocked on
+	// a CLARIFY question, keyed by the same sub-agent key applySubAgent uses
+	// (agent id, or session/name when the id is empty). It collapses the raw
+	// sub-agent event stream — which re-emits StatusWaiting on each CLARIFY round
+	// but does not emit the resume in between — into balanced per-sub-agent
+	// transitions, so the sidebar's per-session clarify reference count is bumped
+	// once per waiting sub-agent and dropped once when it resolves (issue #207).
+	// Touched only on the UI thread (from EmitSessionEvent), like the sidebar's own
+	// clarify state, so it needs no lock.
+	clarifyWaiting map[string]bool
+	windowConfig   config.WindowConfig
 	// budget holds the per-session token-budget configuration used by every
 	// session window's status line for budget alerting (issue #63). It is an
 	// atomic.Value (storing config.BudgetConfig) so the read path refreshStatus
@@ -1498,12 +1508,32 @@ func (w *Workbench) EmitSessionEvent(id string, ev agent.SessionEvent) {
 		w.mu.Unlock()
 		if ev.Type == agent.SessionEventSubAgent && w.sidebar != nil {
 			w.sidebar.applySubAgent(id, ev)
-			// Persistent "needs input" badge on the owning session row (issue #207):
-			// a sub-agent entering StatusWaiting has asked a CLARIFY question; any
-			// other lifecycle status (running/resumed/completed/failed) clears it.
-			// globalClarify counts the sessions currently flagged.
-			w.sidebar.setClarify(id, title, pinned, ev.Status == agent.StatusWaiting)
-			w.sidebar.setGlobalClarify(len(w.sidebar.clarify))
+			// Persistent "needs input" badge on the owning session row (issue #207).
+			// A sub-agent entering StatusWaiting has asked a CLARIFY question; leaving
+			// it (resumed/completed/failed) resolves it. A session can host several
+			// interactive sub-agents, so the badge is reference-counted per session
+			// (sidebar.setClarify) and clears only when the last waiting sub-agent
+			// resolves. The resume between two CLARIFY rounds is not emitted as a
+			// sub-agent event, so collapse repeated same-state events per sub-agent
+			// here, bumping the count once per waiting sub-agent and dropping it once
+			// when that sub-agent leaves StatusWaiting — keeping the count balanced.
+			key := ev.AgentID
+			if key == "" {
+				key = id + "/" + ev.Name
+			}
+			waiting := ev.Status == agent.StatusWaiting
+			if w.clarifyWaiting == nil {
+				w.clarifyWaiting = make(map[string]bool)
+			}
+			if waiting != w.clarifyWaiting[key] {
+				if waiting {
+					w.clarifyWaiting[key] = true
+				} else {
+					delete(w.clarifyWaiting, key)
+				}
+				w.sidebar.setClarify(id, title, pinned, waiting)
+				w.sidebar.setGlobalClarify(len(w.sidebar.clarify))
+			}
 		}
 		if ev.Type == agent.SessionEventTodo && w.sidebar != nil {
 			w.sidebar.applyTodo(id, ev.Todos)

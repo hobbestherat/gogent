@@ -82,13 +82,17 @@ type sidebar struct {
 	approvals       map[string]bool
 	globalApprovals int
 
-	// clarify tracks which sessions currently have a sub-agent blocked waiting for
-	// the user (a CLARIFY question, issue #207), so their node keeps the "needs
-	// input" badge across unrelated relabels (rename/pin). globalClarify is the
-	// number of sessions currently flagged, rendered as a second header indicator
-	// next to globalApprovals. Both are read/written on the UI thread, mirroring
-	// the approvals / globalApprovals plumbing for permission prompts (issue #55).
+	// clarify tracks which sessions currently have at least one sub-agent blocked
+	// waiting for the user (a CLARIFY question, issue #207), so their node keeps the
+	// "needs input" badge across unrelated relabels (rename/pin). A session can host
+	// several interactive sub-agents, so clarifyCount holds the number currently
+	// waiting and clarify[id] is the derived "count > 0" membership the row/header
+	// read: the badge persists until the LAST waiting sub-agent resolves, not the
+	// first. globalClarify is the number of sessions currently flagged, rendered as
+	// a second header indicator next to globalApprovals. All are read/written on the
+	// UI thread, mirroring the approvals / globalApprovals plumbing (issue #55).
 	clarify       map[string]bool
+	clarifyCount  map[string]int
 	globalClarify int
 
 	// overall is the bottom "Overall" aggregate-stats panel's current data (issue
@@ -136,6 +140,7 @@ func newSidebar(wb *Workbench) *sidebar {
 		todos:        make(map[string][]agent.TodoItem),
 		approvals:    make(map[string]bool),
 		clarify:      make(map[string]bool),
+		clarifyCount: make(map[string]int),
 		overallBandH: overallBandHeight,
 	}
 
@@ -150,27 +155,24 @@ func newSidebar(wb *Workbench) *sidebar {
 			surface.SetCell(abs.X, abs.Y+y, tui.Cell{Ch: '│', FG: chromeDivider, BG: chromePanelBG})
 		}
 		surface.WriteString(abs.X+2, abs.Y, "Sessions & Agents", tui.Cell{FG: chromeTitle, BG: chromePanelBG})
-		// Global "needs attention" indicators: bright badge + count, drawn right-
-		// aligned on the title row so a wide glyph cannot shift the title. The
-		// permission-prompt count (⏳N, issue #55) sits at the far right; the clarify
-		// count (❓N, issue #207) is drawn just to its left. Both share the abs.X+20
-		// floor so they never overrun the "Sessions & Agents" title.
-		rightX := abs.X + abs.W - 1
-		minX := abs.X + 20
-		if s.globalApprovals > 0 {
-			ind := fmt.Sprintf("%s%d", approvalBadge, s.globalApprovals)
-			x := rightX - len([]rune(ind))
-			if x < minX {
-				x = minX
-			}
-			surface.WriteString(x, abs.Y, ind, tui.Cell{FG: chromeAccent, BG: chromePanelBG})
-			rightX = x - 1
-		}
+		// Global "needs attention" indicators: bright badge + count, right-aligned on
+		// the title row so a wide glyph cannot shift the title. The clarify count
+		// (❓N, issue #207) sits just left of the permission-prompt count (⏳N, issue
+		// #55). They are composed into one right-aligned string so the two can never
+		// overlap (even when both clamp against the abs.X+20 floor that keeps them
+		// clear of the "Sessions & Agents" title at the minimum sidebar width).
+		var indicators []string
 		if s.globalClarify > 0 {
-			ind := fmt.Sprintf("%s%d", clarifyBadge, s.globalClarify)
-			x := rightX - len([]rune(ind))
-			if x < minX {
-				x = minX
+			indicators = append(indicators, fmt.Sprintf("%s%d", clarifyBadge, s.globalClarify))
+		}
+		if s.globalApprovals > 0 {
+			indicators = append(indicators, fmt.Sprintf("%s%d", approvalBadge, s.globalApprovals))
+		}
+		if len(indicators) > 0 {
+			ind := strings.Join(indicators, " ")
+			x := abs.X + abs.W - len([]rune(ind)) - 1
+			if x < abs.X+20 {
+				x = abs.X + 20
 			}
 			surface.WriteString(x, abs.Y, ind, tui.Cell{FG: chromeAccent, BG: chromePanelBG})
 		}
@@ -331,6 +333,11 @@ func (s *sidebar) removeSession(id string) {
 	delete(s.sessions, id)
 	delete(s.approvals, id)
 	delete(s.clarify, id)
+	delete(s.clarifyCount, id)
+	// Closing a session that was waiting for input must not leave a phantom count
+	// in the header: globalClarify mirrors len(clarify), so resync it here (issue
+	// #207). The approval count is owned/recomputed by the permission layer.
+	s.setGlobalClarify(len(s.clarify))
 	delete(s.todos, id)
 	// Drop the middle TODO region's focus when its session goes away, so it does
 	// not point at a removed session (the next Focus re-sets it).
@@ -370,19 +377,29 @@ func (s *sidebar) setGlobalApprovals(n int) {
 	s.globalApprovals = n
 }
 
-// setClarify toggles the "needs input" badge on a session node (issue #207) and
-// keeps the clarify set in sync so a later relabel preserves it. It mirrors
-// setApproval: waiting marks the session, !waiting clears it; the node's live
-// approval badge is preserved. It is a no-op on the node for unknown sessions
-// but still records intent so a node added later picks the badge up.
+// setClarify adjusts the "needs input" badge on a session node (issue #207). A
+// session may host several interactive sub-agents, so this is a reference count,
+// not a toggle: waiting=true records one more waiting sub-agent and waiting=false
+// records one resolving. The badge (and the clarify[id] membership a relabel
+// reads) is shown while the count is positive and cleared only when the last
+// waiting sub-agent resolves. The caller (EmitSessionEvent) collapses repeated
+// same-state events per sub-agent so the count stays balanced. The node's live
+// approval badge is preserved; it is a no-op on the node for unknown sessions but
+// still records intent so a node added later (out of order) picks the badge up.
 func (s *sidebar) setClarify(id, title string, pinned, waiting bool) {
 	if waiting {
+		s.clarifyCount[id]++
+	} else if s.clarifyCount[id] > 0 {
+		s.clarifyCount[id]--
+	}
+	if s.clarifyCount[id] > 0 {
 		s.clarify[id] = true
 	} else {
 		delete(s.clarify, id)
+		delete(s.clarifyCount, id)
 	}
 	if node := s.sessions[id]; node != nil {
-		node.Label = sessionLabel(title, agent.StatusIdle, pinned, s.approvals[id], waiting)
+		node.Label = sessionLabel(title, agent.StatusIdle, pinned, s.approvals[id], s.clarify[id])
 	}
 }
 
