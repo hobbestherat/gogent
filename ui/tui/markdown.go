@@ -57,13 +57,13 @@ type markdownPalette struct {
 // mdPalette is the active rich-Markdown palette. ApplyTheme overwrites it; the
 // initial literal matches the default 16-colour ANSI palette.
 var mdPalette = markdownPalette{
-	text:       tui.ANSIColor(10), // agent green
-	heading:    tui.ANSIColor(12), // bright blue
-	code:       tui.ANSIColor(13), // magenta
-	quote:      tui.ANSIColor(8),  // dim grey
-	listMarker: tui.ANSIColor(11), // bright yellow
-	rule:       tui.ANSIColor(8),  // dim grey
-	codeBG:     tui.ANSIColor(0),  // black
+	text:       tui.ANSIColor(10),              // agent green
+	heading:    tui.ANSIColor(12),              // bright blue
+	code:       tui.ANSIColor(13),              // magenta
+	quote:      tui.ANSIColor(8),               // dim grey
+	listMarker: tui.ANSIColor(11),              // bright yellow
+	rule:       tui.ANSIColor(8),               // dim grey
+	codeBG:     tui.RGBColor(0x10, 0x14, 0x50), // dark navy (matches defaultPalette CodeBG)
 	hasCodeBG:  true,
 	keyword:    tui.ANSIColor(12), // blue
 	str:        tui.ANSIColor(11), // yellow
@@ -105,11 +105,15 @@ func applyMarkdownPalette(t Theme) {
 		builtin:    t.User,
 	}
 	if t.Level != ColorNone {
-		// A subtle background sets fenced code apart. The high-contrast preset is
-		// already pure black, so a black code background would vanish — rely on its
-		// bright token foregrounds instead.
-		mdPalette.codeBG = tui.ANSIColor(0)
-		mdPalette.hasCodeBG = t.Name != themeHighContrast
+		// A subtle background sets fenced code apart, derived from the active theme
+		// (issue #200) so it belongs to the palette instead of always being black.
+		// Suppress it whenever the (degraded) code background would be the same colour
+		// as the panel/window background — it would simply vanish. This covers the
+		// pure-black high-contrast preset and the dark preset once its dark-grey code
+		// background quantises down to black on a 16-colour terminal; both then rely on
+		// their bright token foregrounds instead of an invisible panel.
+		mdPalette.codeBG = t.CodeBG
+		mdPalette.hasCodeBG = t.CodeBG != t.PanelBG
 	}
 	richMarkdownColorOK = t.Level != ColorNone
 }

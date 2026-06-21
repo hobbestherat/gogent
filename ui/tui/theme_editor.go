@@ -37,6 +37,7 @@ var themeRoles = []themeRole{
 	{"title", "Title", func(t Theme) tui.Color { return t.Title }},
 	{"divider", "Divider", func(t Theme) tui.Color { return t.Divider }},
 	{"accent", "Accent", func(t Theme) tui.Color { return t.Accent }},
+	{"code_bg", "Code BG", func(t Theme) tui.Color { return t.CodeBG }},
 }
 
 // themePresets are the selectable built-in palettes shown in the editor's preset
@@ -47,6 +48,7 @@ var themePresets = []struct {
 }{
 	{"Default", themeDefault},
 	{"High-contrast (Okabe–Ito)", themeHighContrast},
+	{"Dark (black background)", themeDark},
 }
 
 // colorSpec renders a colour as an editable spec string, the inverse of
