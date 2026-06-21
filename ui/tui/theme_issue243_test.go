@@ -859,8 +859,13 @@ func TestIssue243DialogFitsEightyColumnTerminal(t *testing.T) {
 	}
 
 	// The right-column code_bg row must show its full label, field and swatch inside the border.
+	// Button captions (not the bracketed literal): since turbotui#259 pins the [ ] brackets to
+	// the face bounds, a button whose bounds are wider than its label (e.g. Save's W:9 vs
+	// buttonWidth("Save")=8) renders the caption centred between flush brackets ("[ Save  ]"),
+	// so assert the caption is on screen rather than a contiguous "[ Save ]". Clipping/overflow
+	// is already guarded by the right-border integrity check above.
 	screen := screenText(w)
-	for _, needle := range []string{"Code block background", "Sidebar text", "[ Cancel ]", "[ Save ]"} {
+	for _, needle := range []string{"Code block background", "Sidebar text", "Cancel", "Save"} {
 		if !containsOnScreen(screen, needle) {
 			t.Errorf("expected %q to be visible inside the 80-col dialog; it was clipped or absent", needle)
 		}
