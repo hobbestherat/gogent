@@ -868,6 +868,26 @@ func (sw *SessionWindow) hideRunningButton(b *tv.Button) {
 	b.Component.SetBounds(tv.Rect{})
 }
 
+// restoreInputFocusFromButtons re-homes keyboard focus to the prompt when one of
+// the running-turn buttons holds it as the turn ends (issue #201). Those buttons
+// are hidden on the next layout via Visible=false, but turbotv clears a stale
+// d.focused only on layer add/remove/raise — never on a Visible flip — so the
+// focused-but-invisible button would otherwise swallow typed keys (key dispatch
+// requires the focused widget to be visible-in-tree) and the input would look dead
+// until the user tabbed or clicked. Scoped to the case where a running button is
+// actually focused, so it never steals focus from another window, an open dialog,
+// or a control the user deliberately moved to.
+func (sw *SessionWindow) restoreInputFocusFromButtons() {
+	if sw.input == nil {
+		return
+	}
+	if sw.interjectButton.Component.Focused() ||
+		sw.queueButton.Component.Focused() ||
+		sw.stopButton.Component.Focused() {
+		sw.wb.desktop.SetFocus(sw.input)
+	}
+}
+
 // guardInterjectButton greys the Interject button while it is disabled — the input
 // is empty, so there is nothing to slip into the running turn (issue #201). It
 // wraps the button's draw to swap its colour, mirroring guardEffortSelect; the
@@ -994,6 +1014,14 @@ func (sw *SessionWindow) setBusy(busy bool) {
 		sw.failPendingTools("interrupted")
 	}
 	sw.refreshStatus()
+	// On the busy→idle edge the running-turn buttons are about to be hidden by the
+	// next layout. If one of them currently holds keyboard focus, restore it to the
+	// prompt first (issue #201): turbotv only re-homes a stale focus on layer
+	// add/remove/raise, not on a Visible flip during layout, so a focused-but-hidden
+	// button would otherwise swallow keystrokes until the user tabbed or clicked.
+	if wasBusy && !busy {
+		sw.restoreInputFocusFromButtons()
+	}
 	// Auto-submit a queued message on the busy→idle transition. Guarded by the
 	// edge (wasBusy && !busy) so it fires once per turn, and skipped while
 	// draining so a drained message is not itself re-queued.

@@ -137,7 +137,9 @@ func (w *Workbench) editActiveGoal() {
 	w.mu.Lock()
 	sw := w.sessions[id]
 	w.mu.Unlock()
-	if sw == nil {
+	// A read-only analysis window has no backend session, so a supervisor goal is
+	// meaningless there (issue #201).
+	if sw == nil || sw.readOnly {
 		return
 	}
 	w.showInputDialog("Session Goal", "&Goal:", sw.goal, func(value string, ok bool) {
