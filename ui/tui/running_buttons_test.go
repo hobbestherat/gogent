@@ -104,11 +104,13 @@ func TestButtonWidthHelper(t *testing.T) {
 			t.Errorf("buttonWidth(%q) = %d, want %d", tc.label, got, tc.want)
 		}
 	}
-	// Full labels: 13 + 11 + 10 + two gaps + right margin.
-	if got := runningButtonsWidth(interjectLabel, queueLabel, stopLabel); got != 37 {
-		t.Errorf("runningButtonsWidth(full) = %d, want 37", got)
+	// Full labels, uniformly sized (issue #214): the three buttons share the
+	// widest label's width (Interject → 13), so the footprint is 3*13 + two gaps
+	// + right margin = 42 (was 37 when each button sized to its own label).
+	if got := runningButtonsWidth(interjectLabel, queueLabel, stopLabel); got != 42 {
+		t.Errorf("runningButtonsWidth(full) = %d, want 42 (3*uniformButtonWidth + gaps + margin)", got)
 	}
-	// Glyphs: 5 + 5 + 5 + two gaps + right margin.
+	// Glyphs: 5 + 5 + 5 + two gaps + right margin (all glyphs already equal).
 	if got := runningButtonsWidth(interjectGlyph, queueGlyph, stopGlyph); got != 18 {
 		t.Errorf("runningButtonsWidth(glyph) = %d, want 18", got)
 	}
@@ -176,9 +178,15 @@ func TestBusyRowShowsRunningButtonsHidesSend(t *testing.T) {
 	if interject.X >= queue.X || queue.X >= stop.X {
 		t.Errorf("buttons not in [Interject][Queue][Stop] order: i=%+v q=%+v s=%+v", interject, queue, stop)
 	}
-	// Widths match the chosen (full, on a wide window) labels.
-	if interject.W != buttonWidth(interjectLabel) || queue.W != buttonWidth(queueLabel) || stop.W != buttonWidth(stopLabel) {
-		t.Errorf("button widths mismatch labels: i=%+v q=%+v s=%+v", interject, queue, stop)
+	// Widths are uniform: all three share one width (the widest label's, issue
+	// #214) rather than each sizing to its own label. On a wide window that is the
+	// full-label uniform width (13); Queue/Stop are NOT their own (shorter) widths.
+	wantW := uniformButtonWidth(interjectLabel, queueLabel, stopLabel)
+	if interject.W != wantW || queue.W != wantW || stop.W != wantW {
+		t.Errorf("button widths not uniform: i.W=%d q.W=%d s.W=%d, want all %d", interject.W, queue.W, stop.W, wantW)
+	}
+	if queue.W == buttonWidth(queueLabel) || stop.W == buttonWidth(stopLabel) {
+		t.Errorf("a button reverted to per-label width: i=%+v q=%+v s=%+v", interject, queue, stop)
 	}
 	// Stop sits flush against the right margin.
 	if got := stop.X + stop.W; got != wd-inputRowMargin {
@@ -256,15 +264,16 @@ func TestBusyRowLabelDegradationThreshold(t *testing.T) {
 	sw := w.openWindow("s", "S")
 	sw.busy = true
 
-	// One cell below the flip: still glyphs.
-	layout(sw, 57, 24, 3)
+	// One cell below the flip: still glyphs. Uniform sizing (issue #214) widened
+	// the full footprint from 37 to 42, so the flip moved from wd=58 to wd=63.
+	layout(sw, 62, 24, 3)
 	if sw.interjectButton.Label != interjectGlyph {
-		t.Errorf("wd=57 should use glyphs, got %q", sw.interjectButton.Label)
+		t.Errorf("wd=62 should use glyphs, got %q", sw.interjectButton.Label)
 	}
-	// At the flip (wd=58): full labels, and the prompt gets exactly minInputWidth.
-	layout(sw, 58, 24, 3)
+	// At the flip (wd=63): full labels, and the prompt gets exactly minInputWidth.
+	layout(sw, 63, 24, 3)
 	if sw.interjectButton.Label != interjectLabel {
-		t.Errorf("wd=58 should use full labels, got %q", sw.interjectButton.Label)
+		t.Errorf("wd=63 should use full labels, got %q", sw.interjectButton.Label)
 	}
 	if in := boundsOfInput(sw).W; in != minInputWidth {
 		t.Errorf("flip-point input width = %d, want exactly %d (minInputWidth)", in, minInputWidth)
