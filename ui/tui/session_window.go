@@ -1234,7 +1234,11 @@ func (sw *SessionWindow) interject() {
 	}
 	sw.completer.hide()
 	sw.input.Clear()
-	sw.addNote("interjected: " + text)
+	// Echo the interjection as the user's own message — a "You (clarification):"
+	// record, not a [System] note — since it is the user's input, equally with a
+	// normally-sent message (issue #242). This is the one place the text is shown;
+	// the backend no longer re-emits it as an assistant "thought".
+	sw.addClarification(text)
 	go sw.wb.handlers.OnInject(sw.id, text)
 }
 
@@ -1615,6 +1619,18 @@ func styledChildLines(text string, role colorRole) []styledLine {
 func (sw *SessionWindow) addUser(text string) {
 	sw.transcript.add(&transcriptRecord{
 		kind: kindUser, header: "You:", color: colorUser, role: roleUser,
+		lines: styledChildLines(text, roleUser),
+	})
+}
+
+// addClarification appends an interjected message as the user's own input
+// (issue #242). It is the same kindUser/colorUser/roleUser record as addUser —
+// so it reads as "You", not as a [System] note or a model "thought" — but carries
+// a "You (clarification):" header to mark that the text was slipped into a turn
+// already in flight via Interject (issue #201) rather than sent as a fresh turn.
+func (sw *SessionWindow) addClarification(text string) {
+	sw.transcript.add(&transcriptRecord{
+		kind: kindUser, header: "You (clarification):", color: colorUser, role: roleUser,
 		lines: styledChildLines(text, roleUser),
 	})
 }

@@ -575,8 +575,17 @@ func TestInterjectInjectsCurrentInput(t *testing.T) {
 	if got := sw.input.GetText(); strings.TrimSpace(got) != "" {
 		t.Errorf("input should be cleared after interjecting, got %q", got)
 	}
-	if !noteContains(sw, "interjected") {
-		t.Error("expected an 'interjected' transcript note")
+	// Issue #242: the interjection renders as the user's own "You (clarification):"
+	// record (kindUser), not the old [System] "interjected:" note.
+	rec := lastClarification(sw)
+	if rec == nil {
+		t.Fatal("expected a 'You (clarification):' record after interjecting, found none")
+	}
+	if rec.kind != kindUser {
+		t.Errorf("interjection record kind = %v, want kindUser", rec.kind)
+	}
+	if rec.body() != "a quick clarification" {
+		t.Errorf("interjection body = %q, want %q", rec.body(), "a quick clarification")
 	}
 }
 
