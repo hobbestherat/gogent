@@ -54,24 +54,29 @@ type markdownPalette struct {
 	builtin  tui.Color // builtins
 }
 
-// mdPalette is the active rich-Markdown palette. ApplyTheme overwrites it; the
-// initial literal matches the default 16-colour ANSI palette.
+// mdPalette is the active rich-Markdown palette. ApplyTheme overwrites it from the
+// active Theme (via applyMarkdownPalette); this initial literal mirrors that
+// derivation for the default palette so the fallback is coloured before a theme is
+// applied. The token colours therefore track the recoloured default roles: heading/
+// keyword/type use the cyan info (ANSI 6, not the old bright-blue 12) and quote/rule/
+// comment the light-grey note (ANSI 7, not the old dim-grey 8) — keeping the fallback
+// legible on the blue window rather than carrying the low-contrast pairs #202 fixed.
 var mdPalette = markdownPalette{
 	text:       tui.ANSIColor(10),              // agent green
-	heading:    tui.ANSIColor(12),              // bright blue
-	code:       tui.ANSIColor(13),              // magenta
-	quote:      tui.ANSIColor(8),               // dim grey
-	listMarker: tui.ANSIColor(11),              // bright yellow
-	rule:       tui.ANSIColor(8),               // dim grey
+	heading:    tui.ANSIColor(6),               // info cyan
+	code:       tui.ANSIColor(13),              // result magenta
+	quote:      tui.ANSIColor(7),               // note light grey
+	listMarker: tui.ANSIColor(11),              // tool bright yellow
+	rule:       tui.ANSIColor(7),               // note light grey
 	codeBG:     tui.RGBColor(0x10, 0x14, 0x50), // dark navy (matches defaultPalette CodeBG)
 	hasCodeBG:  true,
-	keyword:    tui.ANSIColor(12), // blue
-	str:        tui.ANSIColor(11), // yellow
-	number:     tui.ANSIColor(13), // magenta
-	comment:    tui.ANSIColor(8),  // grey
-	function:   tui.ANSIColor(14), // cyan
-	typ:        tui.ANSIColor(12), // blue
-	builtin:    tui.ANSIColor(14), // cyan
+	keyword:    tui.ANSIColor(6),  // info cyan
+	str:        tui.ANSIColor(11), // tool yellow
+	number:     tui.ANSIColor(13), // result magenta
+	comment:    tui.ANSIColor(7),  // note light grey
+	function:   tui.ANSIColor(14), // user cyan
+	typ:        tui.ANSIColor(6),  // info cyan
+	builtin:    tui.ANSIColor(14), // user cyan
 }
 
 // richMarkdownColorOK reports whether the terminal can show colour at all. It is

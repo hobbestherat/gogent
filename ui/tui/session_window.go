@@ -1979,11 +1979,12 @@ func statusColor(idle bool, stats agent.SessionStats, budget config.BudgetConfig
 	if idle {
 		return colorNote
 	}
-	// Running: colorInfo (bright blue) is too low-contrast on the blue desktop
-	// background to read (issue #193). colorAgent (bright green / Okabe green in
-	// high-contrast) reads well on both the default blue and the high-contrast
-	// black backgrounds, and signals an active turn without colliding with the
-	// amber/red severity colours above.
+	// Running: colorInfo was bright blue (ANSI 12), too low-contrast on the blue
+	// window to read (issue #193); it is now cyan (issue #202), but colorAgent stays
+	// the right choice here. colorAgent (bright green / Okabe green in high-contrast)
+	// reads well on both the default blue and the high-contrast black backgrounds,
+	// and signals an active turn without colliding with the amber/red severity
+	// colours above.
 	return colorAgent
 }
 

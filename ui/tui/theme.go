@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"math"
 	"strconv"
 	"strings"
 
@@ -18,10 +19,10 @@ import (
 var (
 	colorUser   = tui.ANSIColor(14) // bright cyan
 	colorAgent  = tui.ANSIColor(10) // bright green
-	colorNote   = tui.ANSIColor(8)  // dim grey (thoughts)
+	colorNote   = tui.ANSIColor(7)  // light grey (thoughts/idle/disabled); see #202
 	colorTool   = tui.ANSIColor(11) // bright yellow (tool calls)
 	colorResult = tui.ANSIColor(13) // magenta (tool results)
-	colorInfo   = tui.ANSIColor(12) // bright blue
+	colorInfo   = tui.ANSIColor(6)  // cyan (system notes/banners); see #202
 	colorError  = tui.ANSIColor(9)  // bright red
 )
 
@@ -34,7 +35,7 @@ var (
 	chromePanelFG   = tui.ANSIColor(7)  // sidebar body text
 	chromePanelBG   = tui.ANSIColor(4)  // sidebar background (matches the desktop chrome)
 	chromeTitle     = tui.ANSIColor(15) // panel titles (bright white)
-	chromeDivider   = tui.ANSIColor(8)  // separators / borders
+	chromeDivider   = tui.ANSIColor(7)  // separators / borders (light grey; see #202)
 	chromeAccent    = tui.ANSIColor(11) // indicators / badges
 )
 
@@ -144,15 +145,25 @@ func paletteByName(name string) Theme {
 }
 
 // defaultPalette is the original hardcoded palette, now expressed as a Theme.
+// Every foreground is contrast-checked against the background it is actually drawn
+// on — the blue (ANSI 4) window/panel/desktop chrome — by paletteContrast, and the
+// roles below were chosen so each clears the documented minimum (issue #202). The
+// dim-grey note (ANSI 8) and bright-blue info (ANSI 12) of earlier revisions were
+// ~1.8:1 and ~2.6:1 on blue and have been recoloured to light grey and cyan.
 func defaultPalette() Theme {
 	return Theme{
-		Name:      themeDefault,
-		User:      tui.ANSIColor(14),
-		Agent:     tui.ANSIColor(10),
-		Note:      tui.ANSIColor(8),
-		Tool:      tui.ANSIColor(11),
-		Result:    tui.ANSIColor(13),
-		Info:      tui.ANSIColor(12),
+		Name:  themeDefault,
+		User:  tui.ANSIColor(14),
+		Agent: tui.ANSIColor(10),
+		// Light grey, not the old dim grey (ANSI 8): the dim/secondary/disabled role
+		// must still read on the blue window (1.78:1 → 5.7:1).
+		Note:   tui.ANSIColor(7),
+		Tool:   tui.ANSIColor(11),
+		Result: tui.ANSIColor(13),
+		// Cyan, not the old bright blue (ANSI 12): the nearest readable cool hue to
+		// the original blue, distinct from the grey note and the bright-cyan user
+		// (2.61:1 → 4.64:1 on the blue window). System notes/banners use it.
+		Info:      tui.ANSIColor(6),
 		Error:     tui.ANSIColor(9),
 		DesktopFG: tui.ANSIColor(7),
 		DesktopBG: tui.ANSIColor(4),
@@ -161,7 +172,9 @@ func defaultPalette() Theme {
 		// island (issue #200); the divider glyph and title still delineate it.
 		PanelBG: tui.ANSIColor(4),
 		Title:   tui.ANSIColor(15),
-		Divider: tui.ANSIColor(8),
+		// Light grey, not the old dim grey (ANSI 8): faint borders on blue (1.78:1)
+		// are bumped to a visible 5.7:1 (issue #202).
+		Divider: tui.ANSIColor(7),
 		Accent:  tui.ANSIColor(11),
 		// Fenced-code panel: a dark navy inset — a subtle shade of the desktop blue
 		// (issue #200) so code reads as a distinct themed panel rather than the old
@@ -474,6 +487,141 @@ func cubeChannel(n int) uint8 {
 		return 0
 	}
 	return uint8(55 + n*40) //nolint:gosec // cube channel result is within 95-255
+}
+
+// --- Contrast audit (issue #202) ---------------------------------------------
+//
+// Every transcript/chrome foreground is drawn on a concrete background (the blue
+// ANSI-4 window/panel/desktop chrome in the default palette). The helpers below
+// compute the WCAG 2.x contrast ratio of each pairing so a palette change cannot
+// silently reintroduce a low-contrast pair like the bright-blue-on-blue system
+// note this issue fixed.
+
+const (
+	// minContrastText is the WCAG 2.x AA contrast target for normal-weight body
+	// text (4.5:1). It is the bar transcript message and note text are held to.
+	minContrastText = 4.5
+	// minContrastLarge is the WCAG 2.x AA threshold for large or bold text and for
+	// non-text UI components such as borders and indicators (3:1). It is the floor
+	// every default-palette role must clear. It also bounds the one transcript role
+	// the 16-colour gamut cannot lift to minContrastText: the error red is ANSI 9,
+	// the reddest hue available, and reaches only 4.23:1 on the blue window — a
+	// purer or darker red scores worse, and a lighter salmon degrades straight back
+	// to ANSI 9 on a 16-colour terminal. That 4.23:1 falls short of the body-text
+	// target (error is painted on non-bold body lines, not only bold headers), but
+	// clears this floor comfortably, so it is accepted as the documented gamut limit
+	// rather than abandoning the red hue the role depends on.
+	minContrastLarge = 3.0
+)
+
+// colorRGB resolves a colour to 8-bit RGB for luminance maths, returning ok=false
+// for the terminal default (whose real value the program cannot know). ANSI
+// indices are mapped through the same canonical table degrade uses, so the audit
+// measures the colours a 16-/256-colour terminal actually shows.
+func colorRGB(c tui.Color) (r, g, b uint8, ok bool) {
+	switch c.Mode {
+	case tui.ColorRGB:
+		return uint8((c.Value >> 16) & 0xFF), uint8((c.Value >> 8) & 0xFF), uint8(c.Value & 0xFF), true
+	case tui.ColorANSI:
+		r, g, b = xterm256ToRGB(uint8(c.Value & 0xFF)) //nolint:gosec // ANSI index already in 0-255
+		return r, g, b, true
+	default:
+		return 0, 0, 0, false
+	}
+}
+
+// relativeLuminance returns the WCAG relative luminance (0..1) of an sRGB colour
+// (https://www.w3.org/TR/WCAG21/#dfn-relative-luminance).
+func relativeLuminance(r, g, b uint8) float64 {
+	lin := func(v uint8) float64 {
+		s := float64(v) / 255
+		if s <= 0.03928 {
+			return s / 12.92
+		}
+		return math.Pow((s+0.055)/1.055, 2.4)
+	}
+	return 0.2126*lin(r) + 0.7152*lin(g) + 0.0722*lin(b)
+}
+
+// contrastRatio returns the WCAG 2.x contrast ratio (1.0..21.0) between a
+// foreground and background colour (https://www.w3.org/TR/WCAG21/#dfn-contrast-ratio).
+// A pairing that involves the terminal default — whose true colour is unknowable —
+// returns 0, which no threshold accepts, so the audit never silently passes an
+// undeterminable pair.
+func contrastRatio(fg, bg tui.Color) float64 {
+	fr, fgc, fb, ok1 := colorRGB(fg)
+	br, bgc, bb, ok2 := colorRGB(bg)
+	if !ok1 || !ok2 {
+		return 0
+	}
+	l1 := relativeLuminance(fr, fgc, fb)
+	l2 := relativeLuminance(br, bgc, bb)
+	if l1 < l2 {
+		l1, l2 = l2, l1
+	}
+	return (l1 + 0.05) / (l2 + 0.05)
+}
+
+// contrastFinding is one (role → background) pairing produced by paletteContrast:
+// the foreground the UI paints for that role, the background it is drawn on, the
+// measured WCAG ratio and the minimum that pairing must meet.
+type contrastFinding struct {
+	Role  string
+	FG    tui.Color
+	BG    tui.Color
+	Ratio float64
+	Min   float64
+}
+
+// OK reports whether the pairing meets its required minimum contrast.
+func (f contrastFinding) OK() bool { return f.Ratio >= f.Min }
+
+// paletteContrast audits a resolved theme for legibility (issue #202). It returns
+// one finding per foreground the UI actually paints, each checked against the
+// background it is really rendered on: the transcript and status-line semantic
+// colours against windowBG, the sidebar body/title/divider/indicator chrome
+// against the theme's own panel background, and the desktop hint against the
+// desktop background. Pass the live window/content background for windowBG — for
+// the default theme that is tv.DefaultTheme.WindowBG (ANSI 4, blue); the
+// black-canvas presets render the transcript on their PanelBG, so pass that.
+//
+// Audit a theme already degraded to the terminal's ColorLevel (the ResolveTheme
+// output), not a raw palette: the default palette is authored entirely in 16-colour
+// ANSI indices and so is fidelity-invariant, but an RGB preset can quantise to a
+// different, lower-contrast index at 16 or 256 colours, so auditing its raw
+// truecolor form over-reports the contrast a real terminal renders.
+//
+// Body-text roles are held to minContrastText; the gamut-limited error role and
+// the non-text border and indicator roles to minContrastLarge. Asserting every
+// finding's OK() guarantees no role has regressed below its threshold.
+func paletteContrast(t Theme, windowBG tui.Color) []contrastFinding {
+	finding := func(role string, fg, bg tui.Color, min float64) contrastFinding {
+		return contrastFinding{Role: role, FG: fg, BG: bg, Ratio: contrastRatio(fg, bg), Min: min}
+	}
+	return []contrastFinding{
+		finding("user", t.User, windowBG, minContrastText),
+		finding("agent", t.Agent, windowBG, minContrastText),
+		finding("note", t.Note, windowBG, minContrastText),
+		finding("tool", t.Tool, windowBG, minContrastText),
+		finding("result", t.Result, windowBG, minContrastText),
+		finding("info", t.Info, windowBG, minContrastText),
+		// The error red is the one transcript role the 16-colour gamut pins below
+		// minContrastText: ANSI 9 is the reddest hue available and reaches 4.23:1 on
+		// the blue window, and nothing redder does better (a purer/darker red is
+		// worse; a lighter salmon degrades back to ANSI 9 on a 16-colour terminal).
+		// It is painted on non-bold body lines too (the budget note, error records),
+		// so this is a genuine sub-AA-body pairing — but keeping the red hue is worth
+		// more than the last 0.27 of ratio, and it stays well clear of the 3:1
+		// non-text/large floor. Held to minContrastLarge as the documented gamut
+		// limit, not silently certified at the body tier it cannot reach.
+		finding("error", t.Error, windowBG, minContrastLarge),
+		finding("desktop-hint", t.DesktopFG, t.DesktopBG, minContrastText),
+		finding("panel-body", t.PanelFG, t.PanelBG, minContrastText),
+		finding("panel-title", t.Title, t.PanelBG, minContrastText),
+		// Borders and indicators are non-text UI components (3:1 tier).
+		finding("divider", t.Divider, t.PanelBG, minContrastLarge),
+		finding("accent", t.Accent, t.PanelBG, minContrastLarge),
+	}
 }
 
 // ApplyTheme installs t as the active theme: it sets the package-level colour
