@@ -44,11 +44,13 @@ func (w *Workbench) AskPermission(req permission.Request) permission.Decision {
 }
 
 // markApproval adjusts the in-flight permission-prompt count for a session and
-// refreshes the requesting session's sidebar badge plus the global header
-// indicator (issue #55). delta is +1 when a prompt is raised and -1 when it
-// resolves. It is called from the agent goroutine, so the sidebar mutation is
-// marshalled onto the UI thread. A session id of "" (headless/unknown requester)
-// still moves the global counter but badges no node.
+// refreshes the requesting session's sidebar ⏳ badge (issue #55). delta is +1 when
+// a prompt is raised and -1 when it resolves. It is called from the agent
+// goroutine, so the sidebar mutation is marshalled onto the UI thread. A session id
+// of "" (headless/unknown requester) badges no node — and, since the phantom global
+// header counter was removed (issue #230), no longer leaves an attention count with
+// no matching row. The per-session count (w.approvals) is still tracked so a session
+// with several in-flight prompts keeps its badge until the last one resolves.
 func (w *Workbench) markApproval(sessionID string, delta int) {
 	w.mu.Lock()
 	if w.approvals == nil {
@@ -61,10 +63,6 @@ func (w *Workbench) markApproval(sessionID string, delta int) {
 	} else {
 		w.approvals[sessionID] = n
 	}
-	total := 0
-	for _, c := range w.approvals {
-		total += c
-	}
 	title := ""
 	pinned := w.pinned[sessionID]
 	if sw := w.sessions[sessionID]; sw != nil {
@@ -76,11 +74,13 @@ func (w *Workbench) markApproval(sessionID string, delta int) {
 		return
 	}
 	pending := n > 0
+	// A headless/unknown requester (sessionID == "") badges no node and, with the
+	// global header counter gone (issue #230), updates nothing in the sidebar.
+	if sessionID == "" {
+		return
+	}
 	w.desktop.Post(func() {
-		if sessionID != "" {
-			w.sidebar.setApproval(sessionID, title, pinned, pending)
-		}
-		w.sidebar.setGlobalApprovals(total)
+		w.sidebar.setApproval(sessionID, title, pinned, pending)
 		w.desktop.Redraw()
 	})
 }

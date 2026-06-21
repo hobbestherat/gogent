@@ -43,14 +43,15 @@ const maxTodoRegionItems = 8
 const todoRegionTitleLines = 1
 
 // approvalBadge marks a session that has a permission prompt waiting for the
-// user (issue #55). It is appended to the requesting session's node label and,
-// with a count, to the sidebar header as a global indicator.
+// user (issue #55). It is appended to the requesting session's node label only;
+// there is no global header counter (issue #230 removed the phantom aggregate).
 const approvalBadge = "⏳"
 
 // clarifyBadge marks a session whose interactive sub-agent is blocked waiting
 // for the user (a CLARIFY question, issue #207). It is the clarify counterpart
-// of approvalBadge: a distinct glyph appended to the owning session's node label
-// and, with a count, shown next to the approval count in the sidebar header.
+// of approvalBadge: a distinct glyph appended to the owning session's node label.
+// Like approvalBadge it has no global header counter (issue #230); it marks only
+// the owning row.
 const clarifyBadge = "❓"
 
 // sidebar is the right-hand panel that shows every open session and, nested
@@ -76,11 +77,17 @@ type sidebar struct {
 	focused string
 
 	// approvals tracks which sessions currently have a permission prompt waiting,
-	// so their node keeps the "needs approval" badge across unrelated relabels
-	// (rename/pin). globalApprovals is the total number of in-flight prompts,
-	// rendered as a header indicator. Both are read/written on the UI thread.
-	approvals       map[string]bool
-	globalApprovals int
+	// so their node keeps the "needs approval" ⏳ badge across unrelated relabels
+	// (rename/pin). Read/written on the UI thread. There is deliberately no global
+	// header counter for it (issue #230): a single aggregate digit could outlive or
+	// mis-count the per-session badges, so attention is shown only per row.
+	approvals map[string]bool
+
+	// busy tracks which sessions currently have a turn in flight (issue #236), so
+	// their node shows the active marker (● vs the idle ○) and keeps it across
+	// unrelated relabels (rename/pin/approval/clarify). It mirrors SessionWindow.busy
+	// and is reconciled on the UI thread by syncBusy from Workbench.tickBusyStatuses.
+	busy map[string]bool
 
 	// clarify tracks which sessions currently have at least one sub-agent blocked
 	// waiting for the user (a CLARIFY question, issue #207), so their node keeps the
@@ -94,13 +101,11 @@ type sidebar struct {
 	// before calling setClarify — see clarifyWaiting on Workbench. The raw stream is
 	// itself unbalanced (a multi-round CLARIFY re-emits StatusWaiting with no resume
 	// event between rounds), so feeding it to setClarify directly would drift; that
-	// dedup is the caller's contract, not setClarify's. globalClarify is the number of
-	// sessions currently flagged, rendered as a second header indicator next to
-	// globalApprovals. All are read/written on the UI thread, mirroring the approvals /
-	// globalApprovals plumbing (issue #55).
-	clarify       map[string]bool
-	clarifyCount  map[string]int
-	globalClarify int
+	// dedup is the caller's contract, not setClarify's. All are read/written on the UI
+	// thread, mirroring the approvals plumbing (issue #55). There is no global header
+	// counter (issue #230); the badge marks only the owning row.
+	clarify      map[string]bool
+	clarifyCount map[string]int
 
 	// overall is the bottom "Overall" aggregate-stats panel's current data (issue
 	// #53), refreshed from the Statistics report (coalesced) on the UI thread.
@@ -146,6 +151,7 @@ func newSidebar(wb *Workbench) *sidebar {
 		agents:       make(map[string]*tv.TreeNode),
 		todos:        make(map[string][]agent.TodoItem),
 		approvals:    make(map[string]bool),
+		busy:         make(map[string]bool),
 		clarify:      make(map[string]bool),
 		clarifyCount: make(map[string]int),
 		overallBandH: overallBandHeight,
@@ -162,35 +168,13 @@ func newSidebar(wb *Workbench) *sidebar {
 			surface.SetCell(abs.X, abs.Y+y, tui.Cell{Ch: '│', FG: chromeDivider, BG: chromePanelBG})
 		}
 		surface.WriteString(abs.X+2, abs.Y, "Sessions & Agents", tui.Cell{FG: chromeTitle, BG: chromePanelBG})
-		// Global "needs attention" indicators: bright badge + count, right-aligned on
-		// the title row so a wide glyph cannot shift the title. The clarify count
-		// (❓N, issue #207) sits just left of the permission-prompt count (⏳N, issue
-		// #55). They are composed into one right-aligned string so the two can never
-		// overlap (even when both clamp against the abs.X+20 floor that keeps them
-		// clear of the "Sessions & Agents" title at the minimum sidebar width).
-		var indicators []string
-		if s.globalClarify > 0 {
-			indicators = append(indicators, fmt.Sprintf("%s%d", clarifyBadge, s.globalClarify))
-		}
-		if s.globalApprovals > 0 {
-			indicators = append(indicators, fmt.Sprintf("%s%d", approvalBadge, s.globalApprovals))
-		}
-		if len(indicators) > 0 {
-			ind := strings.Join(indicators, " ")
-			x := abs.X + abs.W - len([]rune(ind)) - 1
-			if x < abs.X+20 && len(indicators) > 1 {
-				// Too narrow for a separator between both indicators (the degenerate
-				// minimum-width case): drop the space before letting the right-edge clip
-				// eat a count digit, so "❓1⏳1" keeps both glyphs AND both counts (issue
-				// #207). A count-less badge is the least useful cell to surface.
-				ind = strings.Join(indicators, "")
-				x = abs.X + abs.W - len([]rune(ind)) - 1
-			}
-			if x < abs.X+20 {
-				x = abs.X + 20
-			}
-			surface.WriteString(x, abs.Y, ind, tui.Cell{FG: chromeAccent, BG: chromePanelBG})
-		}
+		// No global "needs attention" counter on the title row (issue #230). A single
+		// right-aligned aggregate digit could outlive or mis-count the per-session
+		// badges (a closed session, a headless requester, or a font-blank glyph all
+		// left a lone phantom number with no matching row). Attention is now shown only
+		// per row: the ⏳/❓ badges in sessionLabel and the ○/● idle/active marker
+		// (issue #236) live on the session nodes themselves, where they always point at
+		// a real session.
 		// Middle per-session TODO region (issue #190), then the bottom "Overall"
 		// aggregate-stats panel (issue #53). Both read heights resolved by LayoutFn.
 		s.drawTodos(surface, abs)
@@ -320,7 +304,7 @@ func (s *sidebar) addSession(id, title string, pinned bool) {
 	if _, ok := s.sessions[id]; ok {
 		return
 	}
-	node := tv.NewTreeNode(sessionLabel(title, agent.StatusIdle, pinned, s.approvals[id], s.clarify[id]))
+	node := tv.NewTreeNode(sessionLabel(title, s.busy[id], pinned, s.approvals[id], s.clarify[id]))
 	node.Expanded = true
 	node.Data = nodeRef{sessionID: id, name: title}
 	s.sessions[id] = node
@@ -358,12 +342,13 @@ func (s *sidebar) removeSession(id string) {
 	s.tree.Roots = roots
 	delete(s.sessions, id)
 	delete(s.approvals, id)
+	delete(s.busy, id)
 	delete(s.clarify, id)
 	delete(s.clarifyCount, id)
-	// Closing a session that was waiting for input must not leave a phantom count
-	// in the header: globalClarify mirrors len(clarify), so resync it here (issue
-	// #207). The approval count is owned/recomputed by the permission layer.
-	s.setGlobalClarify(len(s.clarify))
+	// No global header counter to resync on close (issue #230): the per-session
+	// ⏳/❓ badges and the ○/● marker are dropped with the node above, so closing a
+	// session that was waiting for input or mid-turn can no longer strand a phantom
+	// aggregate digit with no matching row.
 	delete(s.todos, id)
 	// Drop the middle TODO region's focus when its session goes away, so it does
 	// not point at a removed session (the next Focus re-sets it).
@@ -401,16 +386,8 @@ func (s *sidebar) setApproval(id, title string, pinned, pending bool) {
 		delete(s.approvals, id)
 	}
 	if node := s.sessions[id]; node != nil {
-		node.Label = sessionLabel(title, agent.StatusIdle, pinned, pending, s.clarify[id])
+		node.Label = sessionLabel(title, s.busy[id], pinned, pending, s.clarify[id])
 	}
-}
-
-// setGlobalApprovals updates the header indicator's count of in-flight prompts.
-func (s *sidebar) setGlobalApprovals(n int) {
-	if n < 0 {
-		n = 0
-	}
-	s.globalApprovals = n
 }
 
 // setClarify adjusts the "needs input" badge on a session node (issue #207). A
@@ -435,17 +412,49 @@ func (s *sidebar) setClarify(id, title string, pinned, waiting bool) {
 		delete(s.clarifyCount, id)
 	}
 	if node := s.sessions[id]; node != nil {
-		node.Label = sessionLabel(title, agent.StatusIdle, pinned, s.approvals[id], s.clarify[id])
+		node.Label = sessionLabel(title, s.busy[id], pinned, s.approvals[id], s.clarify[id])
 	}
 }
 
-// setGlobalClarify updates the header indicator's count of sessions currently
-// waiting for input (issue #207), mirroring setGlobalApprovals.
-func (s *sidebar) setGlobalClarify(n int) {
-	if n < 0 {
-		n = 0
+// setBusy toggles the idle/active marker (○/●, issue #236) on a session node and
+// records the busy state so a later relabel (rename/pin/approval/clarify) keeps the
+// marker correct. It mirrors setApproval/setClarify: a no-op on the node for an
+// unknown session, but the intent is still recorded so a node added later (out of
+// order) picks up the marker. Runs on the UI thread.
+func (s *sidebar) setBusy(id, title string, pinned, busy bool) {
+	if busy {
+		s.busy[id] = true
+	} else {
+		delete(s.busy, id)
 	}
-	s.globalClarify = n
+	if node := s.sessions[id]; node != nil {
+		node.Label = sessionLabel(title, busy, pinned, s.approvals[id], s.clarify[id])
+	}
+}
+
+// syncBusy reconciles every session's idle/active marker against busyIDs (the set
+// of session ids with a turn in flight) and reports whether any marker moved. Only
+// nodes whose state actually changed are relabeled — the common all-idle tick
+// touches nothing. The current pin state is read from the workbench so a marker
+// flip never drops the ★. It is the funnel Workbench.tickBusyStatuses drives once
+// per tick; the returned bool lets the caller redraw exactly on a transition,
+// including the busy→idle edge that empties the set (which the tick's own
+// "anything busy?" check would otherwise skip). Runs on the UI thread.
+func (s *sidebar) syncBusy(busyIDs map[string]bool) bool {
+	changed := false
+	for id, node := range s.sessions {
+		want := busyIDs[id]
+		if want == s.busy[id] {
+			continue
+		}
+		title := id
+		if ref, ok := node.Data.(nodeRef); ok {
+			title = ref.name
+		}
+		s.setBusy(id, title, s.wb.IsPinned(id), want)
+		changed = true
+	}
+	return changed
 }
 
 // refreshOverallStats rebuilds the Overall panel's data from a Statistics report
@@ -679,7 +688,7 @@ func (s *sidebar) relabelSession(id, title string, pinned bool) {
 		ref.name = title
 		node.Data = ref
 	}
-	node.Label = sessionLabel(title, agent.StatusIdle, pinned, s.approvals[id], s.clarify[id])
+	node.Label = sessionLabel(title, s.busy[id], pinned, s.approvals[id], s.clarify[id])
 }
 
 // reorder reorders the tree's roots to match order. Sessions absent from order
@@ -706,18 +715,25 @@ func (s *sidebar) reorder(order []string) {
 	s.tree.Roots = roots
 }
 
-// sessionLabel renders a top-level session row. A pinned (favorite) session is
-// prefixed with a ★ marker so favorites are visible at a glance; a session with
-// a permission prompt waiting gets a trailing ⏳ badge (issue #55) and a session
-// whose sub-agent is waiting for input gets a trailing ❓ badge (issue #207).
-// Both badges are appended last (clarify after pending) so a wide glyph cannot
-// shift the status icon or title columns.
-func sessionLabel(title string, status agent.AgentStatus, pinned, pending, clarify bool) string {
+// sessionLabel renders a top-level session row. The leading glyph is the session's
+// own idle/active marker (○/●, issue #236) — never a sub-agent lifecycle glyph. A
+// pinned (favorite) session is prefixed with a ★ marker so favorites are visible at
+// a glance; a session with a permission prompt waiting gets a trailing ⏳ badge
+// (issue #55) and a session whose sub-agent is waiting for input gets a trailing ❓
+// badge (issue #207). Both badges are appended last (clarify after pending) so a
+// wide glyph cannot shift the status icon or title columns.
+//
+// Param order mirrors the rendered left-to-right layout: busy (leading ○/●), then
+// pinned (★), then the trailing pending/clarify badges. NOTE this deliberately puts
+// busy before pinned, which is the reverse of the setBusy/setApproval/setClarify
+// setters — those take (id, title, pinned, <feature flag>). Keep that in mind when
+// adding a call site so the two adjacent bools are not transposed.
+func sessionLabel(title string, busy, pinned, pending, clarify bool) string {
 	var label string
 	if pinned {
-		label = fmt.Sprintf("%s %s %s", statusIcon(status), "★", title)
+		label = fmt.Sprintf("%s %s %s", sessionStatusIcon(busy), "★", title)
 	} else {
-		label = fmt.Sprintf("%s %s", statusIcon(status), title)
+		label = fmt.Sprintf("%s %s", sessionStatusIcon(busy), title)
 	}
 	if pending {
 		label += " " + approvalBadge
@@ -726,6 +742,19 @@ func sessionLabel(title string, status agent.AgentStatus, pinned, pending, clari
 		label += " " + clarifyBadge
 	}
 	return label
+}
+
+// sessionStatusIcon maps a session's busy flag to its leading row glyph (issue
+// #236): ● when a turn is in flight (its own loop or a spawned sub-agent), ○ when
+// idle. These are deliberately distinct from statusIcon's sub-agent lifecycle set
+// (▶ ‖ ✓ ✗ •) so a session row — even one coordinating a working sub-agent — reads
+// as a session, never as a sub-agent. The sub-agent triangle (▶) therefore never
+// appears on a session row.
+func sessionStatusIcon(busy bool) string {
+	if busy {
+		return "●"
+	}
+	return "○"
 }
 
 // agentLabel renders a sub-agent row with a status icon and mode marker.
