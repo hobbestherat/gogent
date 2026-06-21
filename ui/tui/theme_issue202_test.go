@@ -2,8 +2,10 @@ package ui
 
 import (
 	"math"
+	"strings"
 	"testing"
 
+	"gogent/internal/agent"
 	"gogent/internal/config"
 
 	tui "github.com/hobbestherat/turbotui"
@@ -605,5 +607,168 @@ func TestIssue202OldBrightBlueLowContrastReproduced(t *testing.T) {
 	t.Logf("old colorInfo (ANSI 12) on blue window: ratio=%.3f", r)
 	if r >= minContrastLarge {
 		t.Errorf("ANSI 12 on blue = %.3f, expected the sub-3:1 unreadable pairing of the original bug", r)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Group 6: the end-to-end repro and the unaudited error/dialog surfaces.
+//
+// These close the gaps a self-review of the suite turned up: the issue's literal
+// repro (queue a message while busy) was only exercised at the addNote level, the
+// sub-AA error-body-text pairing was documented in prose but not encoded, and the
+// dialog-accent colours were never audited at all.
+// ----------------------------------------------------------------------------
+
+// recordContaining returns the first transcript record whose header or body
+// mentions sub, or nil if none does. It finds the note/error an action produced so
+// its painted colour can be asserted.
+func recordContaining(sw *SessionWindow, sub string) *transcriptRecord {
+	for _, r := range sw.transcript.records {
+		if strings.Contains(r.header, sub) {
+			return r
+		}
+		for _, l := range r.lines {
+			if strings.Contains(l.text, sub) {
+				return r
+			}
+		}
+	}
+	return nil
+}
+
+// TestIssue202QueuedNoteReproEndToEnd reproduces the issue's exact scenario
+// through the real submit path — send a turn, then type another while busy — and
+// asserts the echoed "queued (will send…)" note is painted colorInfo and reads on
+// the window background. This is the end-to-end counterpart of the group-4 addNote
+// test: it proves the busy→enqueue routing (with injection disabled) really reaches
+// addNote carrying the recoloured system-note colour, not just that addNote would
+// use it if called.
+func TestIssue202QueuedNoteReproEndToEnd(t *testing.T) {
+	withThemeRestore(t)
+
+	w := newTestWorkbench(t)
+	sent := recordSends(w)
+	sw := w.openWindow("s", "S")
+
+	// Step 1 of the repro: a first message dispatches and flips the window busy.
+	sw.input.SetText("first")
+	sw.submitFn()
+	if got := waitSend(t, sent); got != "first" {
+		t.Fatalf("first send = %q, want %q", got, "first")
+	}
+	if !sw.busy {
+		t.Fatal("window should be busy after the first submit (repro preconditions)")
+	}
+
+	// Steps 2–3: a second message while busy is queued, not sent, and echoed as a
+	// system note carrying the recoloured, readable system-note colour.
+	sw.input.SetText("queued-msg")
+	sw.submitFn()
+	noSend(t, sent)
+
+	rec := recordContaining(sw, "queued (will send")
+	if rec == nil {
+		t.Fatal("no 'queued (will send…)' note was echoed; the repro did not reach addNote")
+	}
+	if rec.color != colorInfo {
+		t.Errorf("queued note colour = %+v, want colorInfo (the recoloured system-note role)", rec.color)
+	}
+	if r := contrastRatio(rec.color, baseTVTheme.WindowBG); r < minContrastText {
+		t.Errorf("queued note colour ratio on window bg = %.3f, want >= %.1f (the #202 fix)", r, minContrastText)
+	}
+}
+
+// TestIssue202ErrorBodyTextBelowAABodyTier encodes the most material gap the audit
+// leaves open. colorError (ANSI 9) reaches only ~4.23:1 on the blue window, below
+// the 4.5:1 AA body-text target, yet paletteContrast holds the error role to the
+// 3:1 large/bold tier on the stated assumption that "error headers are bold". But
+// colorError is ALSO painted on non-bold body text: this test drives the real
+// budget-exceeded alert and shows its body line is colorError. So a genuine
+// sub-AA body-text pairing is certified as passing. The test pins that fact; when
+// error is recoloured or moved to the body-text tier, the ratio assertion flips.
+func TestIssue202ErrorBodyTextBelowAABodyTier(t *testing.T) {
+	withThemeRestore(t)
+
+	w := newTestWorkbench(t)
+	sw := w.openWindow("s", "S")
+
+	// Drive the budget-exceeded alert directly: cumulative tokens over the budget,
+	// latch unset. alertBudgetIfNewlyExceeded appends a kindSystem record whose
+	// header AND body lines are colorError (session_window.go).
+	sw.statusStats = agent.SessionStats{TokensIn: 600, TokensOut: 500}
+	sw.alertBudgetIfNewlyExceeded(config.BudgetConfig{TokenBudget: 1000})
+
+	rec := recordContaining(sw, "token budget exceeded")
+	if rec == nil {
+		t.Fatal("budget-exceeded note was not added by alertBudgetIfNewlyExceeded")
+	}
+	if rec.color != colorError {
+		t.Errorf("budget note header colour = %+v, want colorError", rec.color)
+	}
+	if len(rec.lines) == 0 {
+		t.Fatal("budget note has no body lines; the sub-AA body-text case is what this test targets")
+	}
+	if rec.lines[0].color != colorError {
+		t.Errorf("budget note body colour = %+v, want colorError (non-bold body text)", rec.lines[0].color)
+	}
+
+	// colorError on the window background is below AA body text — the gap this test
+	// exists to make visible. It still clears the 3:1 floor the audit holds it to.
+	r := contrastRatio(colorError, baseTVTheme.WindowBG)
+	t.Logf("colorError body text on window bg: ratio=%.3f (body target=%.1f, audit tier=%.1f)",
+		r, minContrastText, minContrastLarge)
+	if r >= minContrastText {
+		t.Errorf("colorError now meets AA body text (%.3f); the gap closed — update this characterisation test", r)
+	}
+	if r < minContrastLarge {
+		t.Errorf("colorError ratio %.3f is below even the 3:1 floor", r)
+	}
+}
+
+// TestIssue202DialogAccentsUnaudited documents that paletteContrast does not cover
+// the dialog-accent colours (colorDialogHeader / colorDialogDetail), even though
+// they are palette-level vars rendered on a distinct background — the light-grey
+// dialog chrome (DialogBG, ANSI 7) — from anything the audit checks, and it pins
+// the real defect that gap hides.
+//
+// colorDialogHeader (ANSI 5 magenta) is the permission-dialog requester line
+// (permission_dialog.go: r.FG = colorDialogHeader), painted on DialogBG. Magenta
+// on light grey reaches only ~2.75:1 — below even the 3:1 floor and well under AA
+// body text. That is precisely the low-contrast class #202 is about, and the audit
+// misses it because dialog accents are absent from paletteContrast. This test pins
+// the defect: it passes today and will flip (signalling a fix) when the header is
+// recoloured or the accents are brought into the audit.
+func TestIssue202DialogAccentsUnaudited(t *testing.T) {
+	withThemeRestore(t)
+
+	// The dialog accents are not among the audited roles.
+	findings := paletteContrast(defaultPalette(), baseTVTheme.WindowBG)
+	audited := make(map[string]bool, len(findings))
+	for _, f := range findings {
+		audited[f.Role] = true
+	}
+	if audited["dialog-header"] || audited["dialog-detail"] {
+		t.Errorf("dialog accents are now audited by paletteContrast — update this characterisation test")
+	}
+
+	// Stock turbotui paints dialogs on ANSI 7 (light grey); confirm that assumption.
+	if baseTVTheme.DialogBG != tui.ANSIColor(7) {
+		t.Fatalf("baseTVTheme.DialogBG = %+v, want ANSI 7 (the light-grey dialog chrome)", baseTVTheme.DialogBG)
+	}
+
+	// colorDialogDetail (blue on light grey) reads fine.
+	detail := contrastRatio(colorDialogDetail, baseTVTheme.DialogBG)
+	t.Logf("colorDialogDetail (%+v) on DialogBG: ratio=%.3f", colorDialogDetail, detail)
+	if detail < minContrastText {
+		t.Errorf("colorDialogDetail on DialogBG = %.3f, below AA body text", detail)
+	}
+
+	// colorDialogHeader (magenta on light grey) is the defect: ~2.75:1.
+	header := contrastRatio(colorDialogHeader, baseTVTheme.DialogBG)
+	t.Logf("colorDialogHeader (%+v) on DialogBG: ratio=%.3f  [DEFECT: below the 3:1 floor, unaudited]",
+		colorDialogHeader, header)
+	if header >= minContrastLarge {
+		t.Errorf("colorDialogHeader on DialogBG = %.3f; the low-contrast defect appears fixed — flip this characterisation test",
+			header)
 	}
 }
