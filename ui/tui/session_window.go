@@ -208,6 +208,7 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 		kind:   kindSystem,
 		header: "[System] " + title + " ready. Type a message and press Enter (Shift+Enter for newline).",
 		color:  colorInfo,
+		role:   roleInfo,
 	})
 	// Intercept transcript keys (search/filter/fold) before the TextView's own
 	// scroll handling, falling through to it for everything else.
@@ -745,8 +746,6 @@ func (sw *SessionWindow) applyEffort(effort string) {
 // handlers fall through to the base behaviour while the control is enabled.
 func (sw *SessionWindow) guardEffortSelect() {
 	c := sw.effortSelect.Component
-	// Remember the themed enabled colour so the disabled-grey draw can restore it.
-	enabledFG := sw.effortSelect.FG
 	baseClick := c.OnClickFn
 	c.OnClickFn = func(vc *tv.VisualComponent, event tui.ClickEvent) bool {
 		if !sw.effortEnabled {
@@ -767,13 +766,15 @@ func (sw *SessionWindow) guardEffortSelect() {
 		}
 		return false
 	}
-	// Grey out the value text when disabled by wrapping the draw.
+	// Grey out the value text when disabled by wrapping the draw. The enabled
+	// colour is read live from the active turbotui theme (not captured at
+	// construction) so a live theme change recolours it without a restart (#204).
 	baseDraw := c.DrawFn
 	c.DrawFn = func(vc *tv.VisualComponent, surface tv.Surface) {
 		if !sw.effortEnabled {
 			sw.effortSelect.FG = colorNote
 		} else {
-			sw.effortSelect.FG = enabledFG
+			sw.effortSelect.FG = tv.ActiveTheme().InputFG
 		}
 		if baseDraw != nil {
 			baseDraw(vc, surface)
@@ -963,11 +964,12 @@ func (sw *SessionWindow) restoreInputFocusFromButtons() {
 // interject() action enforces the same guard, so a stray activation is inert too.
 func (sw *SessionWindow) guardInterjectButton() {
 	b := sw.interjectButton
-	enabledFG := b.FG
 	baseDraw := b.Component.DrawFn
+	// The enabled colour is read live from the active turbotui theme (not captured
+	// at construction) so a live theme change recolours it without a restart (#204).
 	b.Component.DrawFn = func(vc *tv.VisualComponent, surface tv.Surface) {
 		if sw.interjectEnabled() {
-			b.FG = enabledFG
+			b.FG = tv.ActiveTheme().ButtonFG
 		} else {
 			b.FG = colorNote
 		}
@@ -975,6 +977,98 @@ func (sw *SessionWindow) guardInterjectButton() {
 			baseDraw(vc, surface)
 		}
 	}
+}
+
+// refreshTheme re-applies the active palette to a live session window after a
+// theme change, without a restart (issue #204). It mirrors what a fresh
+// construction does once ApplyTheme has installed the new palette: it re-renders
+// the transcript so every existing record and child line resolves its semantic
+// role to the new colours, re-seeds the turbotui widget chrome (the window frame
+// and content surface, the model/effort labels and selectors, the input box and
+// its buttons) from the freshly installed tv theme, and restores the gogent
+// accents the window sets itself — the error-red Stop button, the divider rule,
+// the cached effort-label colour and the severity-coloured status line. A
+// read-only analysis window has no input chrome, so only its transcript and frame
+// are refreshed.
+func (sw *SessionWindow) refreshTheme() {
+	th := tv.ActiveTheme()
+
+	// Window frame + content surface (turbotui seeds these once at construction).
+	w := sw.window
+	w.TitleFG, w.TitleBG = th.WindowTitleFG, th.WindowTitleBG
+	w.BorderFG, w.BorderBG = th.WindowBorderFG, th.WindowBorderBG
+	w.CloseFG, w.CloseBG = th.CloseButtonFG, th.CloseButtonBG
+	w.ShadowColor = th.WindowShadow
+	w.Content.Background = tui.Cell{Ch: ' ', FG: th.WindowFG, BG: th.WindowBG}
+
+	// Transcript: a full re-render so frozen header/line colours resolve to the new
+	// palette via their roles, and rich-Markdown bodies recompute from the bumped
+	// generation cache.
+	sw.transcript.render()
+
+	if sw.readOnly {
+		return
+	}
+
+	// Header labels and selectors.
+	reseedLabel(sw.modelLabel, th)
+	reseedLabel(sw.effortLabel, th)
+	reseedSelect(sw.modelSelect, th)
+	reseedSelect(sw.effortSelect, th)
+	// The remembered "enabled" effort-label colour is the themed window foreground;
+	// refresh it so the greyed→enabled restore (rebuildEffortOptions) uses the new
+	// palette, then re-apply the colour for the current enabled state.
+	sw.effortLabelEnabledFG = th.WindowFG
+	if sw.effortEnabled {
+		sw.effortLabel.FG = sw.effortLabelEnabledFG
+	} else {
+		sw.effortLabel.FG = colorNote
+	}
+
+	// Input box and its row buttons.
+	in := sw.input
+	in.FG, in.BG, in.FocusFG, in.FocusBG = th.InputFG, th.InputBG, th.InputFocusFG, th.InputFocusBG
+	reseedButton(sw.sendButton, th)
+	reseedButton(sw.queueButton, th)
+	reseedButton(sw.interjectButton, th)
+	reseedButton(sw.stopButton, th)
+	// Stop stays error-red, even when keyboard-focused (issue #201).
+	sw.stopButton.FG, sw.stopButton.FocusFG = colorError, colorError
+
+	// gogent-set chrome accents.
+	sw.separator.FG = chromeDivider
+	sw.refreshStatus()
+}
+
+// reseedLabel re-applies a turbotui theme's foreground colours to a label whose
+// colours were seeded at construction (issue #204).
+func reseedLabel(l *tv.Label, th tv.Theme) {
+	if l == nil {
+		return
+	}
+	l.FG, l.BG, l.HotFG = th.WindowFG, th.WindowBG, th.MnemonicFG
+}
+
+// reseedSelect re-applies a turbotui theme's input colours to a selector whose
+// colours were seeded at construction (issue #204). The enabled/disabled
+// foreground is driven per draw by guardEffortSelect, so only the background and
+// focus colours need restoring here.
+func reseedSelect(s *tv.Select, th tv.Theme) {
+	if s == nil {
+		return
+	}
+	s.FG, s.BG, s.FocusFG, s.FocusBG = th.InputFG, th.InputBG, th.InputFocusFG, th.InputFocusBG
+}
+
+// reseedButton re-applies a turbotui theme's button colours to a button whose
+// colours were seeded at construction (issue #204).
+func reseedButton(b *tv.Button, th tv.Theme) {
+	if b == nil {
+		return
+	}
+	b.FG, b.BG = th.ButtonFG, th.ButtonBG
+	b.FocusFG, b.FocusBG = th.ButtonFocusFG, th.ButtonFocusBG
+	b.ShadowColor = th.ButtonShadow
 }
 
 // enqueue stows a message typed while the agent is busy as the session's single
@@ -1309,9 +1403,10 @@ func (sw *SessionWindow) alertBudgetIfNewlyExceeded(budget config.BudgetConfig) 
 			kind:   kindSystem,
 			header: "[Budget] token budget exceeded",
 			color:  colorError,
+			role:   roleError,
 			lines: styledChildLines(
 				fmt.Sprintf("Cumulative usage %d tok reached the configured budget of %d tok.", used, budget.TokenBudget),
-				colorError),
+				roleError),
 		})
 	case !exceeded:
 		sw.budgetAlerted = false
@@ -1370,12 +1465,15 @@ func queuedPreview(text string) string {
 	return preview
 }
 
-// styledChildLines splits text into foldable child lines sharing one colour.
-func styledChildLines(text string, color tui.Color) []styledLine {
+// styledChildLines splits text into foldable child lines sharing one semantic
+// role. Each line records both the role and a snapshot of its current colour so a
+// later theme change recolours it on re-render (issue #204).
+func styledChildLines(text string, role colorRole) []styledLine {
+	color := roleColor(role)
 	lines := childLines(text)
 	out := make([]styledLine, len(lines))
 	for i, line := range lines {
-		out[i] = styledLine{text: line, color: color}
+		out[i] = styledLine{text: line, color: color, role: role}
 	}
 	return out
 }
@@ -1383,8 +1481,8 @@ func styledChildLines(text string, color tui.Color) []styledLine {
 // addUser appends the user's message.
 func (sw *SessionWindow) addUser(text string) {
 	sw.transcript.add(&transcriptRecord{
-		kind: kindUser, header: "You:", color: colorUser,
-		lines: styledChildLines(text, colorUser),
+		kind: kindUser, header: "You:", color: colorUser, role: roleUser,
+		lines: styledChildLines(text, roleUser),
 	})
 }
 
@@ -1395,7 +1493,8 @@ func (sw *SessionWindow) addNote(text string) {
 		kind:   kindSystem,
 		header: "[System]",
 		color:  colorInfo,
-		lines:  styledChildLines(text, colorInfo),
+		role:   roleInfo,
+		lines:  styledChildLines(text, roleInfo),
 	})
 }
 
@@ -1740,8 +1839,8 @@ func (sw *SessionWindow) addAssistant(text string) {
 		return
 	}
 	sw.transcript.add(&transcriptRecord{
-		kind: kindAssistant, header: "Gogent:", color: colorAgent,
-		lines: styledChildLines(text, colorAgent),
+		kind: kindAssistant, header: "Gogent:", color: colorAgent, role: roleAgent,
+		lines: styledChildLines(text, roleAgent),
 		rich:  true,
 	})
 }
@@ -1752,8 +1851,8 @@ func (sw *SessionWindow) addThought(text string) {
 		return
 	}
 	sw.transcript.add(&transcriptRecord{
-		kind: kindThinking, header: "thought", color: colorNote, collapsed: true,
-		lines: styledChildLines(text, colorNote),
+		kind: kindThinking, header: "thought", color: colorNote, role: roleNote, collapsed: true,
+		lines: styledChildLines(text, roleNote),
 	})
 }
 
@@ -1764,8 +1863,9 @@ func (sw *SessionWindow) addCompaction(estTokens int, digest string) {
 		kind:      kindCompaction,
 		header:    fmt.Sprintf("context compacted (~%d tokens)", estTokens),
 		color:     colorNote,
+		role:      roleNote,
 		collapsed: true,
-		lines:     styledChildLines(digest, colorNote),
+		lines:     styledChildLines(digest, roleNote),
 	})
 }
 
@@ -1774,13 +1874,13 @@ func (sw *SessionWindow) addCompaction(estTokens int, digest string) {
 // entry to "done" later — even when several calls run concurrently and their
 // results arrive out of order (issue #187).
 func (sw *SessionWindow) beginToolCall(id, name string, args map[string]interface{}) {
-	lines := []styledLine{{text: "args:", color: colorTool}}
+	lines := []styledLine{{text: "args:", color: colorTool, role: roleTool}}
 	for _, line := range formatArgs(args) {
-		lines = append(lines, styledLine{text: "  " + line, color: colorTool})
+		lines = append(lines, styledLine{text: "  " + line, color: colorTool, role: roleTool})
 	}
 	rec := sw.transcript.add(&transcriptRecord{
 		kind: kindTool, header: fmt.Sprintf("tool: %s (running...)", name),
-		color: colorTool, collapsed: true, lines: lines,
+		color: colorTool, role: roleTool, collapsed: true, lines: lines,
 	})
 	if id == "" {
 		// No stable id (legacy/stray event): track under a unique synthetic key so
@@ -1811,12 +1911,12 @@ func (sw *SessionWindow) finishToolCall(id, name, result string) {
 		sw.transcript.setHeader(rec, fmt.Sprintf("tool: %s (done)", name))
 	} else {
 		rec = sw.transcript.add(&transcriptRecord{
-			kind: kindTool, header: fmt.Sprintf("tool: %s", name), color: colorTool, collapsed: true,
+			kind: kindTool, header: fmt.Sprintf("tool: %s", name), color: colorTool, role: roleTool, collapsed: true,
 		})
 	}
-	sw.transcript.appendLine(rec, styledLine{text: "result:", color: colorResult})
+	sw.transcript.appendLine(rec, styledLine{text: "result:", color: colorResult, role: roleResult})
 	for _, line := range childLines(result) {
-		sw.transcript.appendLine(rec, styledLine{text: "  " + line, color: colorResult})
+		sw.transcript.appendLine(rec, styledLine{text: "  " + line, color: colorResult, role: roleResult})
 	}
 	sw.transcript.setCollapsed(rec, true)
 }
@@ -1849,10 +1949,10 @@ func toolHeaderName(rec *transcriptRecord) string {
 func (sw *SessionWindow) addError(text string) {
 	lines := make([]styledLine, 0)
 	for _, line := range childLines(text) {
-		lines = append(lines, styledLine{text: "  " + line, color: colorError})
+		lines = append(lines, styledLine{text: "  " + line, color: colorError, role: roleError})
 	}
 	sw.transcript.add(&transcriptRecord{
-		kind: kindError, header: "error:", color: colorError, lines: lines,
+		kind: kindError, header: "error:", color: colorError, role: roleError, lines: lines,
 	})
 }
 
@@ -1952,27 +2052,27 @@ func (sw *SessionWindow) restore(msgs []ChatMessage) {
 			if m.Tool != "" {
 				lines := make([]styledLine, 0)
 				for _, line := range childLines(m.Args) {
-					lines = append(lines, styledLine{text: "  " + line, color: colorTool})
+					lines = append(lines, styledLine{text: "  " + line, color: colorTool, role: roleTool})
 				}
 				sw.transcript.add(&transcriptRecord{
 					kind: kindTool, header: fmt.Sprintf("tool: %s", m.Tool),
-					color: colorTool, collapsed: true, lines: lines,
+					color: colorTool, role: roleTool, collapsed: true, lines: lines,
 				})
 			}
 		case "tool":
 			lines := make([]styledLine, 0)
 			for _, line := range childLines(m.Content) {
-				lines = append(lines, styledLine{text: "  " + line, color: colorResult})
+				lines = append(lines, styledLine{text: "  " + line, color: colorResult, role: roleResult})
 			}
 			sw.transcript.add(&transcriptRecord{
 				kind: kindTool, header: fmt.Sprintf("result: %s", m.Tool),
-				color: colorResult, collapsed: true, lines: lines,
+				color: colorResult, role: roleResult, collapsed: true, lines: lines,
 			})
 		default: // system / other
 			if strings.TrimSpace(m.Content) != "" {
 				sw.transcript.add(&transcriptRecord{
-					kind: kindSystem, header: "[System]", color: colorInfo, collapsed: true,
-					lines: styledChildLines(m.Content, colorInfo),
+					kind: kindSystem, header: "[System]", color: colorInfo, role: roleInfo, collapsed: true,
+					lines: styledChildLines(m.Content, roleInfo),
 				})
 			}
 		}

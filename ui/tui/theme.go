@@ -658,6 +658,16 @@ func ApplyTheme(t Theme) {
 		tv.DefaultTheme = baseTVTheme
 		colorDialogHeader, colorDialogDetail = tui.ANSIColor(5), tui.ANSIColor(4)
 	}
+
+	// Keep turbotui's active chrome theme in lockstep with the dialog chrome above.
+	// turbotui widgets (windows, the menu bar, labels, selects, buttons, inputs)
+	// seed their colours from tv.ActiveTheme() at construction, and the desktop and
+	// menu resolve it at draw time — but only tv.SetTheme updates it; assigning
+	// tv.DefaultTheme alone (which only gogent's own dialogs read) leaves the rest
+	// on the stock palette. Installing it here means freshly built widgets, the
+	// rebuilt menu bar and the re-seeded open session windows (RefreshTheme) all
+	// draw in the active palette, so a live theme switch matches a restart (#204).
+	tv.SetTheme(tv.DefaultTheme)
 }
 
 // neutralTVTheme is the window/dialog chrome under NO_COLOR: every slot uses the
