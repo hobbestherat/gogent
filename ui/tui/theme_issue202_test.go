@@ -772,3 +772,96 @@ func TestIssue202DialogAccentsUnaudited(t *testing.T) {
 			header)
 	}
 }
+
+// ----------------------------------------------------------------------------
+// Group 7: contrast at the terminal's actual colour fidelity (degradation).
+//
+// paletteContrast is colour-level-agnostic, so the readability guarantee must hold
+// at the fidelity a user's terminal really reports — not only truecolor. ResolveTheme
+// degrades the RGB high-contrast and dark palettes down to the 16-colour baseline
+// (the default for TERM=xterm, common over SSH and on basic terminals), and
+// quantisation can land a colour on a different, lower-contrast ANSI index. The
+// default palette is authored entirely in 16-colour ANSI indices, so it is
+// fidelity-invariant; the RGB presets are not, and at 16 colours several of their
+// roles drop below threshold.
+// ----------------------------------------------------------------------------
+
+// TestIssue202DefaultPalettePassesAtAllFidelities is the strong positive guarantee
+// for the in-scope palette: the default theme is all 16-colour ANSI, so degrading
+// to 256 or 16 colours leaves every role unchanged and the audit still passes at
+// every fidelity a terminal can report. (The contrast ratio of an ANSI index does
+// not change when it is "degraded" back to ANSI.)
+func TestIssue202DefaultPalettePassesAtAllFidelities(t *testing.T) {
+	for _, level := range []struct {
+		name string
+		env  func(string) string
+	}{
+		{"Color16", color16Env},
+		{"Color256", color256Env},
+		{"ColorTrue", truecolorEnv},
+	} {
+		t.Run(level.name, func(t *testing.T) {
+			th := ResolveTheme(config.ThemeConfig{}, level.env, false)
+			// The default window background is ANSI 4 and passes through degrade
+			// unchanged, so it is the same surface at every fidelity.
+			for _, f := range paletteContrast(th, baseTVTheme.WindowBG) {
+				if !f.OK() {
+					t.Errorf("%s: default role %q fails its minimum: ratio %.3f < min %.1f",
+						level.name, f.Role, f.Ratio, f.Min)
+				}
+			}
+		})
+	}
+}
+
+// TestIssue202HighContrastToolDegradesBelowAAAtColor16 documents a real defect: the
+// high-contrast (accessibility) tool colour (Okabe orange) reads at ~9.3:1 in
+// truecolor but quantises to ANSI 3 on a 16-colour terminal, dropping to ~4.0:1 on
+// black — below the 4.5 AA body-text target. paletteContrast on the raw palette
+// never sees this; only the degraded theme reveals it. Pinned as a characterisation
+// test: it passes today and flips when the HC palette is adjusted to survive
+// 16-colour degradation.
+func TestIssue202HighContrastToolDegradesBelowAAAtColor16(t *testing.T) {
+	hc16 := ResolveTheme(config.ThemeConfig{Name: "high-contrast"}, color16Env, false)
+	r := contrastRatio(hc16.Tool, hc16.PanelBG)
+	t.Logf("high-contrast tool at Color16: %+v on black, ratio=%.3f (body target=%.1f)", hc16.Tool, r, minContrastText)
+	if r >= minContrastText {
+		t.Errorf("HC tool now meets AA at Color16 (%.3f) — flip this characterisation test", r)
+	}
+	if r < minContrastLarge {
+		t.Errorf("HC tool ratio %.3f fell below the 3:1 floor at Color16", r)
+	}
+}
+
+// TestIssue202DarkInfoDegradesBelowAAAtColor16 documents that the dark theme's info
+// colour (a muted periwinkle) degrades to ANSI 12 (bright blue) at 16 colours —
+// ~4.1:1 on black, below AA body text, and the same bright-blue low-contrast class
+// issue #202 recoloured away in the default palette.
+func TestIssue202DarkInfoDegradesBelowAAAtColor16(t *testing.T) {
+	dark16 := ResolveTheme(config.ThemeConfig{Name: "dark"}, color16Env, false)
+	r := contrastRatio(dark16.Info, dark16.PanelBG)
+	t.Logf("dark info at Color16: %+v on black, ratio=%.3f (body target=%.1f)", dark16.Info, r, minContrastText)
+	if r >= minContrastText {
+		t.Errorf("dark info now meets AA at Color16 (%.3f) — flip this characterisation test", r)
+	}
+	if r < minContrastLarge {
+		t.Errorf("dark info ratio %.3f fell below the 3:1 floor at Color16", r)
+	}
+}
+
+// TestIssue202DarkDividerDegradesBelowFloorAtColor16 is the most severe degradation
+// finding: the dark divider (#5A5A5A) quantises to ANSI 8 (dim grey) at 16 colours,
+// ~2.8:1 on black — BELOW even the 3:1 large/bold floor it is held to. The raw RGB
+// divider passes at 3.045:1 (what TestIssue202DarkDividerNearFloor pins), but that
+// is not what a 16-colour terminal renders. Pinned; flips when fixed.
+func TestIssue202DarkDividerDegradesBelowFloorAtColor16(t *testing.T) {
+	dark16 := ResolveTheme(config.ThemeConfig{Name: "dark"}, color16Env, false)
+	if dark16.Divider != tui.ANSIColor(8) {
+		t.Logf("note: dark divider at Color16 = %+v (expected the dim-grey ANSI 8 quantisation)", dark16.Divider)
+	}
+	r := contrastRatio(dark16.Divider, dark16.PanelBG)
+	t.Logf("dark divider at Color16: %+v on black, ratio=%.3f (floor=%.1f)", dark16.Divider, r, minContrastLarge)
+	if r >= minContrastLarge {
+		t.Errorf("dark divider now clears the floor at Color16 (%.3f) — flip this characterisation test", r)
+	}
+}
