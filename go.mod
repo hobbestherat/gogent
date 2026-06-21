@@ -4,7 +4,7 @@ go 1.25.11
 
 require (
 	github.com/alecthomas/chroma/v2 v2.27.0
-	github.com/hobbestherat/turbotui v0.3.1-0.20260621003836-db398cc2617d
+	github.com/hobbestherat/turbotui v0.3.1-0.20260621113259-854148d2a808
 	github.com/yuin/goldmark v1.8.2
 )
 
