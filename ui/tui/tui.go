@@ -314,11 +314,14 @@ type Workbench struct {
 	// #22 / #53). Lazily created and only touched on the UI thread; its AfterFunc
 	// goroutine just Posts the refresh back to the UI thread.
 	statsRefresh *time.Timer
-	// undelivered counts session events that arrived for an id with no open window
-	// (deliverSessionEvent found a nil window). A live session keeps its window for
-	// the whole turn, so this should stay zero — counting it makes a violation of
-	// that invariant observable instead of silently dropping the event, which is how
-	// a final answer could vanish with no trace (issue #227). Guarded by w.mu.
+	// undelivered counts session events whose id had no open window when
+	// deliverSessionEvent ran, so the apply (transcript-render) path was skipped. It
+	// counts every such event regardless of type — not only finals — as a tripwire on
+	// the invariant that a live session keeps its window for the whole turn; sidebar-
+	// routed effects (sub-agent/todo badges) still run before the check, so a counted
+	// event is "not rendered into a transcript", not necessarily "lost". It stays zero
+	// in normal operation; a non-zero value is the lifecycle regression that could let
+	// a final answer vanish with no trace (issue #227). Guarded by w.mu.
 	undelivered int
 }
 
@@ -1610,10 +1613,11 @@ func (w *Workbench) noteUndeliveredEvent(id string, ev agent.SessionEvent) {
 	w.mu.Unlock()
 }
 
-// UndeliveredEventCount returns how many session events were delivered for an id
-// with no open window. It stays zero in normal operation — a live session keeps
-// its window for the whole turn — so a non-zero count signals the lifecycle
-// regression that issue #227 traced a dropped final answer to.
+// UndeliveredEventCount returns how many session events reached deliverSessionEvent
+// with no open window for their id, so the transcript-render (apply) path was
+// skipped. It counts every type, not only finals. It stays zero in normal operation
+// — a live session keeps its window for the whole turn — so a non-zero count signals
+// the lifecycle regression that issue #227 traced a dropped final answer to.
 func (w *Workbench) UndeliveredEventCount() int {
 	w.mu.Lock()
 	defer w.mu.Unlock()

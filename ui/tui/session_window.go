@@ -2144,7 +2144,13 @@ func toolHeaderName(rec *transcriptRecord) string {
 // addError appends a red error line. It is raised on the turn-ending error event,
 // so it re-anchors the transcript on the message the same way addAssistant does
 // (issue #227): a user who scrolled up mid-turn must still see why the turn ended.
+// An empty/whitespace message is skipped (mirroring addAssistant) so a degenerate
+// error never appends a bare "error:" header or perturbs the scroll position; the
+// failure is still surfaced via maybeNotify, which fires independently of this.
 func (sw *SessionWindow) addError(text string) {
+	if strings.TrimSpace(text) == "" {
+		return
+	}
 	lines := make([]styledLine, 0)
 	for _, line := range childLines(text) {
 		lines = append(lines, styledLine{text: "  " + line, color: colorError, role: roleError})
