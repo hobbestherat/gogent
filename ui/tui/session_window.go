@@ -1001,6 +1001,14 @@ func (sw *SessionWindow) refreshTheme() {
 	w.ShadowColor = th.WindowShadow
 	w.Content.Background = tui.Cell{Ch: ' ', FG: th.WindowFG, BG: th.WindowBG}
 
+	// Transcript view: the TextView fills its whole area with its own BG and paints
+	// glyphs/scrollbar with its FG/FocusFG, all seeded once at construction. Without
+	// reseeding them the transcript area keeps its old background — a blue panel in a
+	// dark frame after a default→dark switch — so reseed them from the same theme
+	// slots NewTextView uses (issue #204). Done before the read-only return so an
+	// analysis window's transcript is reskinned too.
+	sw.history.FG, sw.history.BG, sw.history.FocusFG = th.WindowFG, th.WindowBG, th.MnemonicFG
+
 	// Transcript: a full re-render so frozen header/line colours resolve to the new
 	// palette via their roles, and rich-Markdown bodies recompute from the bumped
 	// generation cache.
@@ -1035,7 +1043,12 @@ func (sw *SessionWindow) refreshTheme() {
 	// Stop stays error-red, even when keyboard-focused (issue #201).
 	sw.stopButton.FG, sw.stopButton.FocusFG = colorError, colorError
 
-	// gogent-set chrome accents.
+	// Status and divider labels: reseed their background/hot colours like the other
+	// labels (Label.draw fills its bounds with BG), then re-apply the gogent
+	// foregrounds they own — the divider rule's chrome colour and the status line's
+	// severity colour (set by refreshStatus) (issue #204).
+	reseedLabel(sw.status, th)
+	reseedLabel(sw.separator, th)
 	sw.separator.FG = chromeDivider
 	sw.refreshStatus()
 }
