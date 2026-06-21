@@ -52,6 +52,14 @@ type SessionWindow struct {
 	// state (a model with no effort options) can be restored to it.
 	effortLabelEnabledFG tui.Color
 	status               *tv.Label
+	// separator is the horizontal divider rule drawn on its own row directly above
+	// the status line (issue #195). It supplies the top edge of the controls region
+	// (status line + input row); together with the window frame's left/right/bottom
+	// borders it fences that region off from the transcript above, which previously
+	// ran flush into the status line. It is created only on live windows (nil on the
+	// read-only analysis window, which has no status/input chrome) and re-sized to
+	// the window width on every layout so it tracks resizes.
+	separator *tv.Label
 	// readOnly marks a static analysis window opened from the Sessions browser
 	// (issue #58): it renders a saved transcript with the full search/filter/
 	// fold/yank toolkit but has no input, model selector or live backend session,
@@ -237,6 +245,11 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 	effortLabel.SetTarget(effortSelect)
 	status := tv.NewLabel("idle", tv.Rect{})
 	status.FG = colorNote
+	// The divider rule above the controls region (issue #195). Its text is built per
+	// layout from the window width (layoutControlsSeparator); it carries the chrome
+	// divider colour so it matches the separators used elsewhere (e.g. the sidebar).
+	separator := tv.NewLabel("", tv.Rect{})
+	separator.FG = chromeDivider
 	sw.input = input
 	sw.sendButton = sendButton
 	sw.interjectButton = interjectButton
@@ -261,8 +274,10 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 	// Seed the effort options from the initially selected model.
 	sw.rebuildEffortOptions()
 	sw.status = status
+	sw.separator = separator
 	sw.statusState = "idle"
 	window.AddContent(history)
+	window.AddContent(separator)
 	window.AddContent(input)
 	window.AddContent(sendButton)
 	window.AddContent(interjectButton)
@@ -279,7 +294,7 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 	window.Content.LayoutFn = func(c *tv.VisualComponent) {
 		wd := c.Bounds.W
 		ht := c.Bounds.H
-		if wd < 4 || ht < 6 {
+		if wd < 4 || ht < 7 {
 			return
 		}
 		inputH := 3
@@ -287,7 +302,12 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 		modelLabel.Component.SetBounds(tv.Rect{X: 0, Y: 0, W: 6, H: 1})
 		modelSelect.Component.SetBounds(tv.Rect{X: 7, Y: 0, W: selW, H: 1})
 		sw.layoutEffortControl(wd, 7+selW)
-		history.Component.SetBounds(tv.Rect{X: 0, Y: 1, W: wd, H: ht - inputH - 2})
+		// The history loses one row to the divider rule that fences off the controls
+		// region below it (issue #195): the rule sits on the row between the
+		// transcript's last line and the status line, so the status no longer reads as
+		// a continuation of the transcript.
+		history.Component.SetBounds(tv.Rect{X: 0, Y: 1, W: wd, H: ht - inputH - 3})
+		sw.layoutControlsSeparator(wd, ht-inputH-2)
 		status.Component.SetBounds(tv.Rect{X: 0, Y: ht - inputH - 1, W: wd, H: 1})
 		// The input row shows Send while idle and the three running-turn controls
 		// while busy (issue #201); layoutInputRow sizes the input box to the room
@@ -805,6 +825,25 @@ func buttonWidth(label string) int { return tui.StringWidth(label) + 4 }
 func runningButtonsWidth(interject, queue, stop string) int {
 	return buttonWidth(interject) + buttonWidth(queue) + buttonWidth(stop) +
 		2*inputRowGap + inputRowMargin
+}
+
+// controlsSeparatorRune is the box-drawing glyph repeated across the divider rule
+// that fences the controls region (status line + input row) off from the transcript
+// above it (issue #195).
+const controlsSeparatorRune = "─"
+
+// layoutControlsSeparator positions and fills the horizontal divider rule on row y,
+// directly above the status line (issue #195). It spans the full inner width so
+// that, together with the window frame's left/right/bottom borders, it boxes the
+// controls region. The rule text is rebuilt from the current width on every layout
+// so it tracks window resizes. A no-op when there is no separator (the read-only
+// analysis window, which has no status/input chrome).
+func (sw *SessionWindow) layoutControlsSeparator(wd, y int) {
+	if sw.separator == nil {
+		return
+	}
+	sw.separator.Component.SetBounds(tv.Rect{X: 0, Y: y, W: wd, H: 1})
+	sw.separator.SetText(strings.Repeat(controlsSeparatorRune, wd))
 }
 
 // layoutInputRow positions the prompt box and its buttons on the bottom input row
