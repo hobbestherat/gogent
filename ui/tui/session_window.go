@@ -49,10 +49,15 @@ type SessionWindow struct {
 	// an "analysis-N" synthetic (never a backend session id), it is excluded from
 	// the persisted layout, and closing it tears down no backend session.
 	readOnly bool
-	// pendingTool tracks the record created for an in-flight tool call so its
-	// result can be appended to the same foldable entry when it returns.
-	pendingTool *transcriptRecord
-	busy        bool
+	// pendingTools tracks the transcript record of each in-flight tool call,
+	// keyed by the call's stable event id (SessionEvent.CallID), so its result
+	// can be appended to the same foldable entry when it returns. It is a map
+	// rather than a single slot because a concurrent tool batch has several calls
+	// running at once whose results may arrive in any order — keying by id is what
+	// lets every result flip the right entry from "running" to done, so none is
+	// left stuck "running" (issue #187).
+	pendingTools map[string]*transcriptRecord
+	busy         bool
 	// statusState is the current left-hand status text (idle/working.../thinking
 	// ... (step N)); statusStats holds the latest per-session stats snapshot.
 	// refreshStatus composes the two into the single bottom status line.
@@ -133,7 +138,7 @@ type SessionWindow struct {
 // model selector and status line and gives the transcript the full height; a
 // live window wires the full send/model/status chrome.
 func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly bool) *SessionWindow {
-	sw := &SessionWindow{wb: wb, id: id, title: title, readOnly: readOnly}
+	sw := &SessionWindow{wb: wb, id: id, title: title, readOnly: readOnly, pendingTools: map[string]*transcriptRecord{}}
 	displayTitle := title
 	if readOnly {
 		displayTitle = title + " (analysis)"
@@ -810,6 +815,11 @@ func (sw *SessionWindow) setBusy(busy bool) {
 		sw.sendButton.SetLabel("Send")
 		sw.turnStart = time.Time{}
 		sw.turnStartOut = 0
+		// The turn is over: any tool entry still marked "running" never got its
+		// result event (cancel, early loop exit, backend crash). Flip it to a
+		// terminal state so nothing is left stuck "running" (issue #187). A clean
+		// turn leaves the map empty, so this is a no-op then.
+		sw.failPendingTools("interrupted")
 	}
 	sw.refreshStatus()
 	// Auto-submit a queued message on the busy→idle transition. Guarded by the
@@ -901,9 +911,9 @@ func (sw *SessionWindow) apply(ev agent.SessionEvent) {
 	case agent.SessionEventAssistantStep:
 		sw.addThought(ev.Text)
 	case agent.SessionEventToolCall:
-		sw.beginToolCall(ev.Tool, ev.Args)
+		sw.beginToolCall(ev.CallID, ev.Tool, ev.Args)
 	case agent.SessionEventToolResult:
-		sw.finishToolCall(ev.Tool, ev.Result)
+		sw.finishToolCall(ev.CallID, ev.Tool, ev.Result)
 	case agent.SessionEventFinal:
 		sw.addAssistant(ev.Text)
 		sw.setBusy(false)
@@ -1340,34 +1350,67 @@ func (sw *SessionWindow) addCompaction(estTokens int, digest string) {
 	})
 }
 
-// beginToolCall creates a collapsed entry for a tool call, holding its args.
-func (sw *SessionWindow) beginToolCall(name string, args map[string]interface{}) {
+// beginToolCall creates a collapsed entry for a tool call, holding its args. The
+// entry is tracked under the call's stable id so its result can flip this exact
+// entry to "done" later — even when several calls run concurrently and their
+// results arrive out of order (issue #187).
+func (sw *SessionWindow) beginToolCall(id, name string, args map[string]interface{}) {
 	lines := []styledLine{{text: "args:", color: colorTool}}
 	for _, line := range formatArgs(args) {
 		lines = append(lines, styledLine{text: "  " + line, color: colorTool})
 	}
-	sw.pendingTool = sw.transcript.add(&transcriptRecord{
+	rec := sw.transcript.add(&transcriptRecord{
 		kind: kindTool, header: fmt.Sprintf("tool: %s (running...)", name),
 		color: colorTool, collapsed: true, lines: lines,
 	})
+	if id != "" {
+		sw.pendingTools[id] = rec
+	}
 }
 
-// finishToolCall appends the result to the pending tool entry (or a fresh one).
-func (sw *SessionWindow) finishToolCall(name, result string) {
-	rec := sw.pendingTool
-	if rec == nil {
+// finishToolCall appends the result to the call's pending entry, matched by its
+// stable id, and flips it from "running" to "done". An unknown or empty id (a
+// result with no recorded call — e.g. a legacy event) falls back to a fresh
+// entry so the result is never dropped (issue #187).
+func (sw *SessionWindow) finishToolCall(id, name, result string) {
+	rec := sw.pendingTools[id]
+	if id != "" && rec != nil {
+		delete(sw.pendingTools, id)
+		sw.transcript.setHeader(rec, fmt.Sprintf("tool: %s (done)", name))
+	} else {
 		rec = sw.transcript.add(&transcriptRecord{
 			kind: kindTool, header: fmt.Sprintf("tool: %s", name), color: colorTool, collapsed: true,
 		})
-	} else {
-		sw.transcript.setHeader(rec, fmt.Sprintf("tool: %s (done)", name))
 	}
 	sw.transcript.appendLine(rec, styledLine{text: "result:", color: colorResult})
 	for _, line := range childLines(result) {
 		sw.transcript.appendLine(rec, styledLine{text: "  " + line, color: colorResult})
 	}
 	sw.transcript.setCollapsed(rec, true)
-	sw.pendingTool = nil
+}
+
+// failPendingTools flips every still-running tool entry to a terminal state with
+// the given suffix (e.g. "interrupted"). It is the UI safety net for issue #187:
+// run on the busy→idle edge, it guarantees no tool entry is left showing
+// "(running...)" if its result event never arrived — a cancelled or early-broken
+// loop, a backend crash, or any path that skips a result. On a clean turn the
+// map is already empty, so this is a no-op.
+func (sw *SessionWindow) failPendingTools(state string) {
+	for id, rec := range sw.pendingTools {
+		sw.transcript.setHeader(rec, fmt.Sprintf("tool: %s (%s)", toolHeaderName(rec), state))
+		delete(sw.pendingTools, id)
+	}
+}
+
+// toolHeaderName recovers a tool entry's name from its "tool: NAME (running...)"
+// header so failPendingTools can rebuild the header with a terminal suffix
+// without threading the name separately.
+func toolHeaderName(rec *transcriptRecord) string {
+	name := strings.TrimPrefix(rec.header, "tool: ")
+	if i := strings.LastIndex(name, " ("); i >= 0 {
+		name = name[:i]
+	}
+	return name
 }
 
 // addError appends a red error line.

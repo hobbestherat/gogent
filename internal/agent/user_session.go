@@ -81,6 +81,16 @@ type SessionEvent struct {
 	Result string
 	Err    error
 
+	// CallID is the stable identifier pairing a SessionEventToolCall with its
+	// SessionEventToolResult (issue #187). A UI uses it to flip the right tool
+	// entry from "running" to a terminal state — essential for concurrent tool
+	// batches, where several calls are in flight at once and their results may
+	// arrive out of order. It is the model-supplied tool-call id when present
+	// and a turn-unique synthetic id (tool#step.index) otherwise, so the
+	// fallback JSON tool-call path and repeated tool names still pair one to
+	// one. Populated only on ToolCall/ToolResult events.
+	CallID string
+
 	// Sub-agent identity/status (populated on SessionEventSubAgent) so a UI can
 	// maintain a live session → sub-agent tree with per-agent status.
 	AgentID string
@@ -1016,22 +1026,56 @@ func (s *UserSession) runToolCallsConcurrent(ctx context.Context, agent *Agent, 
 	tasks := make([]func(), len(calls))
 	for i, call := range calls {
 		i, call := i, call
-		emit(SessionEvent{Type: SessionEventToolCall, Step: step, Tool: call.Tool, Args: call.Args})
+		// Announce every call up-front (in this goroutine, before any task runs)
+		// so the UI shows the whole batch as running immediately. Each call's
+		// terminal result is paired back to it by id (issue #187).
+		id := toolEventID(call, step, i)
+		emitToolCall(emit, call, step, id)
 		tasks[i] = func() {
-			defer func() {
-				if r := recover(); r != nil {
-					resultStr := fmt.Sprintf("error: tool %q panicked: %v", call.Tool, r)
-					emit(SessionEvent{Type: SessionEventToolResult, Step: step, Tool: call.Tool, Args: call.Args, Result: resultStr})
-					toolMsgs[i] = makeToolResultMessage(call, resultStr)
-				}
-			}()
-			resultStr := s.runToolCall(ctx, agent, agentID, call)
-			emit(SessionEvent{Type: SessionEventToolResult, Step: step, Tool: call.Tool, Args: call.Args, Result: resultStr})
-			toolMsgs[i] = makeToolResultMessage(call, resultStr)
+			toolMsgs[i] = s.runAndEmitResult(ctx, agent, agentID, call, step, id, emit)
 		}
 	}
 	run(tasks)
 	return toolMsgs
+}
+
+// toolEventID returns the stable id used to pair a call's ToolCall event with
+// its ToolResult event (issue #187). It prefers the model-supplied tool-call id
+// (native tool-calling) and otherwise synthesizes a turn-unique id from the tool
+// name, step and the call's index in its batch — so the fallback JSON path
+// (which carries no CallID) and repeated uses of the same tool in one turn still
+// pair one to one rather than colliding.
+func toolEventID(call tool.ToolCall, step, idx int) string {
+	if call.CallID != "" {
+		return call.CallID
+	}
+	return fmt.Sprintf("%s#%d.%d", call.Tool, step, idx)
+}
+
+// emitToolCall announces that a tool call is starting, carrying id so its later
+// ToolResult event can be matched back to it (issue #187).
+func emitToolCall(emit func(SessionEvent), call tool.ToolCall, step int, id string) {
+	emit(SessionEvent{Type: SessionEventToolCall, Step: step, Tool: call.Tool, Args: call.Args, CallID: id})
+}
+
+// runAndEmitResult executes a single already-announced tool call and emits its
+// terminal ToolResult event (carrying id), returning the message to feed back to
+// the model. A panic in the tool is contained and turned into a terminal error
+// result, so every call announced by emitToolCall always reaches a terminal
+// state — the started tool can never be left "running" (issue #187, building on
+// the loop-wide panic guard of issue #8). It is the single execute-and-report
+// path shared by the serial and concurrent runners.
+func (s *UserSession) runAndEmitResult(ctx context.Context, agent *Agent, agentID string, call tool.ToolCall, step int, id string, emit func(SessionEvent)) (msg model.Message) {
+	defer func() {
+		if r := recover(); r != nil {
+			resultStr := fmt.Sprintf("error: tool %q panicked: %v", call.Tool, r)
+			emit(SessionEvent{Type: SessionEventToolResult, Step: step, Tool: call.Tool, Args: call.Args, Result: resultStr, CallID: id})
+			msg = makeToolResultMessage(call, resultStr)
+		}
+	}()
+	resultStr := s.runToolCall(ctx, agent, agentID, call)
+	emit(SessionEvent{Type: SessionEventToolResult, Step: step, Tool: call.Tool, Args: call.Args, Result: resultStr, CallID: id})
+	return makeToolResultMessage(call, resultStr)
 }
 
 // runToolCallsSerial executes a turn's calls one at a time, in order. It is the
@@ -1039,9 +1083,11 @@ func (s *UserSession) runToolCallsConcurrent(ctx context.Context, agent *Agent, 
 // unknown tools). A terminal structured_output{final:true} call folds its text
 // into resp and stops the loop, reported via the returned finished flag.
 func (s *UserSession) runToolCallsSerial(ctx context.Context, agent *Agent, agentID string, calls []tool.ToolCall, step int, emit func(SessionEvent), resp *model.CompletionResponse) (toolMsgs []model.Message, finished bool) {
-	for _, call := range calls {
+	for idx, call := range calls {
 		if call.Tool == "structured_output" {
-			// Terminal tool: fold its response into the assistant content.
+			// Terminal tool: fold its response into the assistant content. No
+			// ToolCall event is emitted for it, so there is nothing to leave
+			// "running" when the loop breaks here.
 			if final, _ := call.Args["final"].(bool); final {
 				if text, ok := call.Args["response"].(string); ok && text != "" {
 					resp.Content = text
@@ -1050,10 +1096,12 @@ func (s *UserSession) runToolCallsSerial(ctx context.Context, agent *Agent, agen
 			}
 		}
 
-		emit(SessionEvent{Type: SessionEventToolCall, Step: step, Tool: call.Tool, Args: call.Args})
-		resultStr := s.runToolCall(ctx, agent, agentID, call)
-		emit(SessionEvent{Type: SessionEventToolResult, Step: step, Tool: call.Tool, Args: call.Args, Result: resultStr})
-		toolMsgs = append(toolMsgs, makeToolResultMessage(call, resultStr))
+		// Announce, then execute via the shared panic-safe path so a tool that
+		// panics still emits a terminal result instead of unwinding to the
+		// loop-wide recover and leaving this entry "running" (issue #187).
+		id := toolEventID(call, step, idx)
+		emitToolCall(emit, call, step, id)
+		toolMsgs = append(toolMsgs, s.runAndEmitResult(ctx, agent, agentID, call, step, id, emit))
 	}
 	return toolMsgs, false
 }
