@@ -503,10 +503,14 @@ const (
 	minContrastText = 4.5
 	// minContrastLarge is the WCAG 2.x AA threshold for large or bold text and for
 	// non-text UI components such as borders and indicators (3:1). It is the floor
-	// every default-palette role must clear: terminal cells render at the user's
-	// (large) font size and transcript headers are bold, so a role the 16-colour
-	// gamut pins just under minContrastText — the bright-red error role, 4.23:1 on
-	// the blue window — still reads clearly here.
+	// every default-palette role must clear. It also bounds the one transcript role
+	// the 16-colour gamut cannot lift to minContrastText: the error red is ANSI 9,
+	// the reddest hue available, and reaches only 4.23:1 on the blue window — a
+	// purer or darker red scores worse, and a lighter salmon degrades straight back
+	// to ANSI 9 on a 16-colour terminal. That 4.23:1 falls short of the body-text
+	// target (error is painted on non-bold body lines, not only bold headers), but
+	// clears this floor comfortably, so it is accepted as the documented gamut limit
+	// rather than abandoning the red hue the role depends on.
 	minContrastLarge = 3.0
 )
 
@@ -575,13 +579,14 @@ func (f contrastFinding) OK() bool { return f.Ratio >= f.Min }
 // paletteContrast audits a resolved theme for legibility (issue #202). It returns
 // one finding per foreground the UI actually paints, each checked against the
 // background it is really rendered on: the transcript and status-line semantic
-// colours against windowBG (turbotui's window/content background,
-// tv.DefaultTheme.WindowBG), the sidebar body/title/divider/indicator chrome
+// colours against windowBG, the sidebar body/title/divider/indicator chrome
 // against the theme's own panel background, and the desktop hint against the
-// desktop background. Body-text roles are held to minContrastText; bold/large and
-// non-text roles (the error header, borders and badge indicators) to
-// minContrastLarge. Asserting every finding's OK() guarantees no role has
-// regressed below its threshold.
+// desktop background. Pass the live window/content background for windowBG — for
+// the default theme that is tv.DefaultTheme.WindowBG (ANSI 4, blue); the
+// black-canvas presets render the transcript on their PanelBG, so pass that.
+// Body-text roles are held to minContrastText; the gamut-limited error role and
+// the non-text border and indicator roles to minContrastLarge. Asserting every
+// finding's OK() guarantees no role has regressed below its threshold.
 func paletteContrast(t Theme, windowBG tui.Color) []contrastFinding {
 	finding := func(role string, fg, bg tui.Color, min float64) contrastFinding {
 		return contrastFinding{Role: role, FG: fg, BG: bg, Ratio: contrastRatio(fg, bg), Min: min}
@@ -593,10 +598,15 @@ func paletteContrast(t Theme, windowBG tui.Color) []contrastFinding {
 		finding("tool", t.Tool, windowBG, minContrastText),
 		finding("result", t.Result, windowBG, minContrastText),
 		finding("info", t.Info, windowBG, minContrastText),
-		// Bright red is the reddest hue the 16-colour gamut offers; on the blue
-		// window it reaches 4.23:1 — short of the body target but clear of the
-		// bold/large floor (error headers are bold), and no redder red scores
-		// better. Held to the large/non-text tier to reflect that documented limit.
+		// The error red is the one transcript role the 16-colour gamut pins below
+		// minContrastText: ANSI 9 is the reddest hue available and reaches 4.23:1 on
+		// the blue window, and nothing redder does better (a purer/darker red is
+		// worse; a lighter salmon degrades back to ANSI 9 on a 16-colour terminal).
+		// It is painted on non-bold body lines too (the budget note, error records),
+		// so this is a genuine sub-AA-body pairing — but keeping the red hue is worth
+		// more than the last 0.27 of ratio, and it stays well clear of the 3:1
+		// non-text/large floor. Held to minContrastLarge as the documented gamut
+		// limit, not silently certified at the body tier it cannot reach.
 		finding("error", t.Error, windowBG, minContrastLarge),
 		finding("desktop-hint", t.DesktopFG, t.DesktopBG, minContrastText),
 		finding("panel-body", t.PanelFG, t.PanelBG, minContrastText),
