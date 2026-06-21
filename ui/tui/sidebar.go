@@ -47,6 +47,12 @@ const todoRegionTitleLines = 1
 // with a count, to the sidebar header as a global indicator.
 const approvalBadge = "⏳"
 
+// clarifyBadge marks a session whose interactive sub-agent is blocked waiting
+// for the user (a CLARIFY question, issue #207). It is the clarify counterpart
+// of approvalBadge: a distinct glyph appended to the owning session's node label
+// and, with a count, shown next to the approval count in the sidebar header.
+const clarifyBadge = "❓"
+
 // sidebar is the right-hand panel that shows every open session and, nested
 // underneath each one, its sub-agents and their live status. Selecting a node
 // brings the owning session's window to the front.
@@ -75,6 +81,15 @@ type sidebar struct {
 	// rendered as a header indicator. Both are read/written on the UI thread.
 	approvals       map[string]bool
 	globalApprovals int
+
+	// clarify tracks which sessions currently have a sub-agent blocked waiting for
+	// the user (a CLARIFY question, issue #207), so their node keeps the "needs
+	// input" badge across unrelated relabels (rename/pin). globalClarify is the
+	// number of sessions currently flagged, rendered as a second header indicator
+	// next to globalApprovals. Both are read/written on the UI thread, mirroring
+	// the approvals / globalApprovals plumbing for permission prompts (issue #55).
+	clarify       map[string]bool
+	globalClarify int
 
 	// overall is the bottom "Overall" aggregate-stats panel's current data (issue
 	// #53), refreshed from the Statistics report (coalesced) on the UI thread.
@@ -120,6 +135,7 @@ func newSidebar(wb *Workbench) *sidebar {
 		agents:       make(map[string]*tv.TreeNode),
 		todos:        make(map[string][]agent.TodoItem),
 		approvals:    make(map[string]bool),
+		clarify:      make(map[string]bool),
 		overallBandH: overallBandHeight,
 	}
 
@@ -134,13 +150,27 @@ func newSidebar(wb *Workbench) *sidebar {
 			surface.SetCell(abs.X, abs.Y+y, tui.Cell{Ch: '│', FG: chromeDivider, BG: chromePanelBG})
 		}
 		surface.WriteString(abs.X+2, abs.Y, "Sessions & Agents", tui.Cell{FG: chromeTitle, BG: chromePanelBG})
-		// Global "needs approval" indicator: a bright badge + count, drawn at the
-		// far right of the title row so a wide glyph cannot shift the title.
+		// Global "needs attention" indicators: bright badge + count, drawn right-
+		// aligned on the title row so a wide glyph cannot shift the title. The
+		// permission-prompt count (⏳N, issue #55) sits at the far right; the clarify
+		// count (❓N, issue #207) is drawn just to its left. Both share the abs.X+20
+		// floor so they never overrun the "Sessions & Agents" title.
+		rightX := abs.X + abs.W - 1
+		minX := abs.X + 20
 		if s.globalApprovals > 0 {
 			ind := fmt.Sprintf("%s%d", approvalBadge, s.globalApprovals)
-			x := abs.X + abs.W - len([]rune(ind)) - 1
-			if x < abs.X+20 {
-				x = abs.X + 20
+			x := rightX - len([]rune(ind))
+			if x < minX {
+				x = minX
+			}
+			surface.WriteString(x, abs.Y, ind, tui.Cell{FG: chromeAccent, BG: chromePanelBG})
+			rightX = x - 1
+		}
+		if s.globalClarify > 0 {
+			ind := fmt.Sprintf("%s%d", clarifyBadge, s.globalClarify)
+			x := rightX - len([]rune(ind))
+			if x < minX {
+				x = minX
 			}
 			surface.WriteString(x, abs.Y, ind, tui.Cell{FG: chromeAccent, BG: chromePanelBG})
 		}
@@ -273,7 +303,7 @@ func (s *sidebar) addSession(id, title string, pinned bool) {
 	if _, ok := s.sessions[id]; ok {
 		return
 	}
-	node := tv.NewTreeNode(sessionLabel(title, agent.StatusIdle, pinned, s.approvals[id]))
+	node := tv.NewTreeNode(sessionLabel(title, agent.StatusIdle, pinned, s.approvals[id], s.clarify[id]))
 	node.Expanded = true
 	node.Data = nodeRef{sessionID: id, name: title}
 	s.sessions[id] = node
@@ -300,6 +330,7 @@ func (s *sidebar) removeSession(id string) {
 	s.tree.Roots = roots
 	delete(s.sessions, id)
 	delete(s.approvals, id)
+	delete(s.clarify, id)
 	delete(s.todos, id)
 	// Drop the middle TODO region's focus when its session goes away, so it does
 	// not point at a removed session (the next Focus re-sets it).
@@ -327,7 +358,7 @@ func (s *sidebar) setApproval(id, title string, pinned, pending bool) {
 		delete(s.approvals, id)
 	}
 	if node := s.sessions[id]; node != nil {
-		node.Label = sessionLabel(title, agent.StatusIdle, pinned, pending)
+		node.Label = sessionLabel(title, agent.StatusIdle, pinned, pending, s.clarify[id])
 	}
 }
 
@@ -337,6 +368,31 @@ func (s *sidebar) setGlobalApprovals(n int) {
 		n = 0
 	}
 	s.globalApprovals = n
+}
+
+// setClarify toggles the "needs input" badge on a session node (issue #207) and
+// keeps the clarify set in sync so a later relabel preserves it. It mirrors
+// setApproval: waiting marks the session, !waiting clears it; the node's live
+// approval badge is preserved. It is a no-op on the node for unknown sessions
+// but still records intent so a node added later picks the badge up.
+func (s *sidebar) setClarify(id, title string, pinned, waiting bool) {
+	if waiting {
+		s.clarify[id] = true
+	} else {
+		delete(s.clarify, id)
+	}
+	if node := s.sessions[id]; node != nil {
+		node.Label = sessionLabel(title, agent.StatusIdle, pinned, s.approvals[id], waiting)
+	}
+}
+
+// setGlobalClarify updates the header indicator's count of sessions currently
+// waiting for input (issue #207), mirroring setGlobalApprovals.
+func (s *sidebar) setGlobalClarify(n int) {
+	if n < 0 {
+		n = 0
+	}
+	s.globalClarify = n
 }
 
 // refreshOverallStats rebuilds the Overall panel's data from a Statistics report
@@ -570,7 +626,7 @@ func (s *sidebar) relabelSession(id, title string, pinned bool) {
 		ref.name = title
 		node.Data = ref
 	}
-	node.Label = sessionLabel(title, agent.StatusIdle, pinned, s.approvals[id])
+	node.Label = sessionLabel(title, agent.StatusIdle, pinned, s.approvals[id], s.clarify[id])
 }
 
 // reorder reorders the tree's roots to match order. Sessions absent from order
@@ -599,9 +655,11 @@ func (s *sidebar) reorder(order []string) {
 
 // sessionLabel renders a top-level session row. A pinned (favorite) session is
 // prefixed with a ★ marker so favorites are visible at a glance; a session with
-// a permission prompt waiting gets a trailing ⏳ badge (issue #55), appended last
-// so a wide glyph cannot shift the status icon or title columns.
-func sessionLabel(title string, status agent.AgentStatus, pinned, pending bool) string {
+// a permission prompt waiting gets a trailing ⏳ badge (issue #55) and a session
+// whose sub-agent is waiting for input gets a trailing ❓ badge (issue #207).
+// Both badges are appended last (clarify after pending) so a wide glyph cannot
+// shift the status icon or title columns.
+func sessionLabel(title string, status agent.AgentStatus, pinned, pending, clarify bool) string {
 	var label string
 	if pinned {
 		label = fmt.Sprintf("%s %s %s", statusIcon(status), "★", title)
@@ -610,6 +668,9 @@ func sessionLabel(title string, status agent.AgentStatus, pinned, pending bool) 
 	}
 	if pending {
 		label += " " + approvalBadge
+	}
+	if clarify {
+		label += " " + clarifyBadge
 	}
 	return label
 }

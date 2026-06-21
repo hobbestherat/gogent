@@ -1490,9 +1490,20 @@ func (w *Workbench) EmitSessionEvent(id string, ev agent.SessionEvent) {
 	w.desktop.Post(func() {
 		w.mu.Lock()
 		sw := w.sessions[id]
+		pinned := w.pinned[id]
+		title := ""
+		if sw != nil {
+			title = sw.title
+		}
 		w.mu.Unlock()
 		if ev.Type == agent.SessionEventSubAgent && w.sidebar != nil {
 			w.sidebar.applySubAgent(id, ev)
+			// Persistent "needs input" badge on the owning session row (issue #207):
+			// a sub-agent entering StatusWaiting has asked a CLARIFY question; any
+			// other lifecycle status (running/resumed/completed/failed) clears it.
+			// globalClarify counts the sessions currently flagged.
+			w.sidebar.setClarify(id, title, pinned, ev.Status == agent.StatusWaiting)
+			w.sidebar.setGlobalClarify(len(w.sidebar.clarify))
 		}
 		if ev.Type == agent.SessionEventTodo && w.sidebar != nil {
 			w.sidebar.applyTodo(id, ev.Todos)
