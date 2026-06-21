@@ -211,13 +211,14 @@ func newSidebar(wb *Workbench) *sidebar {
 		if s.divider != nil {
 			s.divider.SetBounds(tv.Rect{X: 0, Y: 0, W: 1, H: h})
 		}
-		// Model selector on the band's top row (issue #191), or hidden when the band
-		// was dropped (sidebar too short). The band occupies the bottom bandH rows, so
-		// its top row is at panel-relative Y = h-bandH.
+		// Model selector just below the band's top separator (issues #191, #233), or
+		// hidden when the band was dropped (sidebar too short). The band occupies the
+		// bottom bandH rows; its top row holds the divider, so the selector sits one row
+		// down at panel-relative Y = h-bandH+overallSeparatorLines.
 		if s.overallSelect != nil {
 			if bandH > 0 {
 				s.overallSelect.Root().Visible = true
-				s.overallSelect.Root().SetBounds(tv.Rect{X: 2, Y: h - bandH, W: w - 3, H: 1})
+				s.overallSelect.Root().SetBounds(tv.Rect{X: 2, Y: h - bandH + overallSeparatorLines, W: w - 3, H: 1})
 			} else {
 				s.overallSelect.Root().Visible = false
 			}
@@ -266,9 +267,9 @@ func newSidebar(wb *Workbench) *sidebar {
 	}
 	panel.AddChild(divider)
 
-	// Model selector at the top of the Overall band (issue #191). It is a real,
-	// focusable/clickable component (its popup is desktop-owned so it is never
-	// clipped by the narrow panel), positioned by LayoutFn on the band's top row.
+	// Model selector near the top of the Overall band, just below its divider (issues
+	// #191, #233). It is a real, focusable/clickable component (its popup is
+	// desktop-owned so it is never clipped by the narrow panel), positioned by LayoutFn.
 	// Picking a model scopes the metrics below and persists the choice in the layout
 	// store (consistent with the sidebar width, issue #175).
 	overallSelect := newSelect(wb.desktop, []string{overallAllModelsOption}, tv.Rect{})
@@ -574,11 +575,12 @@ func (s *sidebar) drawTodos(surface tv.Surface, abs tv.Rect) {
 	}
 }
 
-// drawOverall renders the bottom aggregate-stats band: a separator under the
-// session tree, the "Overall" title and the formatted metric rows. It is a no-op
-// when LayoutFn resolved the band height to 0 (sidebar too short). Each metric
-// row is clipped to the content width so a wide value can never run into the
-// divider or the panel edge. Runs on the UI thread.
+// drawOverall renders the bottom aggregate-stats band, top to bottom: a thin
+// separator dividing it from the content above (issue #233), the model-selector
+// row (drawn by the framework over its reserved row), the "Overall" title and the
+// formatted metric rows. It is a no-op when LayoutFn resolved the band height to 0
+// (sidebar too short). Each metric row is clipped to the content width so a wide
+// value can never run into the divider or the panel edge. Runs on the UI thread.
 func (s *sidebar) drawOverall(surface tv.Surface, abs tv.Rect) {
 	bandH := s.overallBandH
 	if bandH <= 0 || bandH >= abs.H {
@@ -588,23 +590,25 @@ func (s *sidebar) drawOverall(surface tv.Surface, abs tv.Rect) {
 	if contentW < 1 {
 		return
 	}
-	// The band's top row holds the model selector (a real component drawn over this
-	// region by the framework, issue #191); the separator/title/metrics start one
-	// row below it.
-	top := abs.Y + abs.H - bandH + overallSelectorLines
-	// Separator under the session tree.
+	// Band layout, top to bottom (issues #191, #233): a thin divider on the band's
+	// top row, then the model selector (a real component drawn over its row by the
+	// framework), then the title and metric rows.
+	bandTop := abs.Y + abs.H - bandH
+	// Thin horizontal rule dividing the Overall band from the content above it
+	// (issue #233), in the theme divider colour.
 	for x := 1; x < abs.W-1; x++ {
-		surface.SetCell(abs.X+x, top, tui.Cell{Ch: '─', FG: chromeDivider, BG: chromePanelBG})
+		surface.SetCell(abs.X+x, bandTop, tui.Cell{Ch: '─', FG: chromeDivider, BG: chromePanelBG})
 	}
-	// Title.
-	surface.WriteString(abs.X+2, top+1, "Overall", tui.Cell{FG: chromeTitle, BG: chromePanelBG})
+	// Title sits below the divider and the selector row.
+	titleY := bandTop + overallSeparatorLines + overallSelectorLines
+	surface.WriteString(abs.X+2, titleY, "Overall", tui.Cell{FG: chromeTitle, BG: chromePanelBG})
 	// Metric rows. A non-zero error count is highlighted red so it stands out.
 	for i, line := range formatOverallStats(s.overall) {
 		fg := chromePanelFG
 		if s.overall.Errors > 0 && i == overallErrLineIdx {
 			fg = colorError
 		}
-		surface.WriteString(abs.X+2, top+2+i, truncateRunes(line, contentW),
+		surface.WriteString(abs.X+2, titleY+1+i, truncateRunes(line, contentW),
 			tui.Cell{FG: fg, BG: chromePanelBG})
 	}
 }
