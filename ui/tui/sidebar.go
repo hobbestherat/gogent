@@ -85,12 +85,19 @@ type sidebar struct {
 	// clarify tracks which sessions currently have at least one sub-agent blocked
 	// waiting for the user (a CLARIFY question, issue #207), so their node keeps the
 	// "needs input" badge across unrelated relabels (rename/pin). A session can host
-	// several interactive sub-agents, so clarifyCount holds the number currently
-	// waiting and clarify[id] is the derived "count > 0" membership the row/header
-	// read: the badge persists until the LAST waiting sub-agent resolves, not the
-	// first. globalClarify is the number of sessions currently flagged, rendered as
-	// a second header indicator next to globalApprovals. All are read/written on the
-	// UI thread, mirroring the approvals / globalApprovals plumbing (issue #55).
+	// several interactive sub-agents, so clarifyCount is a balanced reference count
+	// (setClarify does +1 on enter-waiting, -1 on resolve) and clarify[id] is the
+	// derived "count > 0" membership the row/header read: the badge persists until
+	// the LAST waiting sub-agent resolves, not the first. The count equals the number
+	// of waiting sub-agents only because EmitSessionEvent collapses the raw event
+	// stream into one balanced transition per sub-agent (keyed by SessionEvent.AgentID)
+	// before calling setClarify — see clarifyWaiting on Workbench. The raw stream is
+	// itself unbalanced (a multi-round CLARIFY re-emits StatusWaiting with no resume
+	// event between rounds), so feeding it to setClarify directly would drift; that
+	// dedup is the caller's contract, not setClarify's. globalClarify is the number of
+	// sessions currently flagged, rendered as a second header indicator next to
+	// globalApprovals. All are read/written on the UI thread, mirroring the approvals /
+	// globalApprovals plumbing (issue #55).
 	clarify       map[string]bool
 	clarifyCount  map[string]int
 	globalClarify int
