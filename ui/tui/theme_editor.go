@@ -145,7 +145,7 @@ func (w *Workbench) showThemeEditor() {
 	for i, p := range themePresets {
 		presetLabels[i] = p.label
 	}
-	preset := tv.NewSelect(w.desktop, presetLabels, tv.Rect{X: 10, Y: 1, W: 30, H: 1})
+	preset := newSelect(w.desktop, presetLabels, tv.Rect{X: 10, Y: 1, W: 30, H: 1})
 	dialog.Window.AddContent(preset)
 
 	noColor := tv.NewCheckbox("Disable &colours", tv.Rect{X: 44, Y: 1, W: width - 48, H: 1}, func(bool) { refresh() })

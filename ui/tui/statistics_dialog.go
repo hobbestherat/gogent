@@ -66,7 +66,7 @@ func (w *Workbench) showStatisticsDialog() {
 	}
 
 	dialog.Window.AddContent(dialogLabel("Section:", tv.Rect{X: 2, Y: 1, W: 8, H: 1}))
-	sel := tv.NewSelect(w.desktop, statisticsSectionNames, tv.Rect{X: 11, Y: 1, W: 14, H: 1})
+	sel := newSelect(w.desktop, statisticsSectionNames, tv.Rect{X: 11, Y: 1, W: 14, H: 1})
 	dialog.Window.AddContent(sel)
 
 	dialog.Window.AddContent(dialogLabel("Detail", tv.Rect{X: listX, Y: headerY, W: width - 4, H: 1}))

@@ -92,6 +92,16 @@ func applyMenuBarShadow(m *tv.MenuBar) {
 	}
 }
 
+// applySelectShadow seeds a Select's dropdown-popup drop shadow from the active
+// NoShadow preference. newSelect applies it at construction and reseedSelect on
+// the live theme-apply path, so the #215 toggle reaches Select popups too — they
+// were previously the one chrome element that always cast a shadow (issue #231).
+func applySelectShadow(s *tv.Select) {
+	if s != nil {
+		s.Shadow = shadowsEnabled
+	}
+}
+
 // newButton constructs a turbotui button and seeds its drop shadow from the
 // active NoShadow preference (issue #215). gogent builds every button through
 // this wrapper so the shadow toggle reaches dialog and session buttons alike
@@ -100,6 +110,16 @@ func newButton(label string, bounds tv.Rect, onPress func()) *tv.Button {
 	b := tv.NewButton(label, bounds, onPress)
 	applyButtonShadow(b)
 	return b
+}
+
+// newSelect constructs a turbotui Select and seeds its dropdown-popup drop shadow
+// from the active NoShadow preference (issue #231). gogent builds every selector
+// through this wrapper so the shadow toggle reaches dropdown popups without
+// touching each construction site, mirroring newButton.
+func newSelect(desktop *tv.Desktop, options []string, bounds tv.Rect) *tv.Select {
+	s := tv.NewSelect(desktop, options, bounds)
+	applySelectShadow(s)
+	return s
 }
 
 // ColorLevel describes the colour fidelity of the output terminal. A resolved

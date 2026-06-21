@@ -97,14 +97,14 @@ func (w *Workbench) showModelEditor() {
 	}
 
 	dialog.Window.AddContent(dialogLabel("Model:", tv.Rect{X: 2, Y: 1, W: labelW, H: 1}))
-	sel := tv.NewSelect(w.desktop, names, tv.Rect{X: boxX, Y: 1, W: boxW, H: 1})
+	sel := newSelect(w.desktop, names, tv.Rect{X: boxX, Y: 1, W: boxW, H: 1})
 	dialog.Window.AddContent(sel)
 
 	display := field("Display name:", 3)
 
 	dialog.Window.AddContent(dialogLabel("API type:", tv.Rect{X: 2, Y: 4, W: labelW, H: 1}))
 	apiTypeOpts := model.APITypeIDs()
-	apiType := tv.NewSelect(w.desktop, apiTypeOpts, tv.Rect{X: boxX, Y: 4, W: boxW, H: 1})
+	apiType := newSelect(w.desktop, apiTypeOpts, tv.Rect{X: boxX, Y: 4, W: boxW, H: 1})
 	dialog.Window.AddContent(apiType)
 
 	endpoint := field("Endpoint:", 5)
@@ -117,7 +117,7 @@ func (w *Workbench) showModelEditor() {
 	modelRect := tv.Rect{X: boxX, Y: 6, W: modelBoxW, H: 1}
 	modelID := tv.NewTextBox("", modelRect)
 	dialog.Window.AddContent(modelID)
-	modelSelect := tv.NewSelect(w.desktop, nil, modelRect)
+	modelSelect := newSelect(w.desktop, nil, modelRect)
 	modelSelect.Root().Visible = false
 	dialog.Window.AddContent(modelSelect)
 	var scanModels func()
@@ -138,7 +138,7 @@ func (w *Workbench) showModelEditor() {
 	// send it (see buildRequest), so it is safe to show for every model.
 	dialog.Window.AddContent(dialogLabel("Thinking:", tv.Rect{X: 2, Y: 11, W: labelW, H: 1}))
 	thinkingOpts := []string{"default", "on", "off"}
-	thinking := tv.NewSelect(w.desktop, thinkingOpts, tv.Rect{X: boxX, Y: 11, W: boxW, H: 1})
+	thinking := newSelect(w.desktop, thinkingOpts, tv.Rect{X: boxX, Y: 11, W: boxW, H: 1})
 	dialog.Window.AddContent(thinking)
 
 	// currentModelID reads the model id from whichever model widget is active.

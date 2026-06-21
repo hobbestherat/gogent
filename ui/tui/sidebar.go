@@ -287,7 +287,7 @@ func newSidebar(wb *Workbench) *sidebar {
 	// clipped by the narrow panel), positioned by LayoutFn on the band's top row.
 	// Picking a model scopes the metrics below and persists the choice in the layout
 	// store (consistent with the sidebar width, issue #175).
-	overallSelect := tv.NewSelect(wb.desktop, []string{overallAllModelsOption}, tv.Rect{})
+	overallSelect := newSelect(wb.desktop, []string{overallAllModelsOption}, tv.Rect{})
 	overallSelect.OnChange = func(int) {
 		s.wb.persistLayout()
 		s.wb.scheduleOverallRefresh()
