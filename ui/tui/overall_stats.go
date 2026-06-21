@@ -2,6 +2,7 @@ package ui
 
 import (
 	"net/url"
+	"sort"
 	"strconv"
 
 	"gogent/internal/config"
@@ -56,6 +57,157 @@ const overallErrLineIdx = 5
 
 // overallLabelWidth is the label column width; values align one space after it.
 const overallLabelWidth = 10
+
+// lifetimeStats accumulates the Overall panel's traffic figures over the entire
+// gogent process lifetime (issue #232). The Statistics report sums only the
+// currently-open sessions (it is rebuilt each refresh by iterating the live
+// session map), so closing a session would otherwise erase the tokens, requests,
+// errors and cache-hits it had already burned — the panel's totals would shrink.
+// lifetimeStats remembers each session's most recent cumulative tally, keyed by
+// session ID, and keeps it in the grand total after the session drops out of the
+// live report, so the lifetime figures only ever grow over the run.
+//
+// It is owned by the Workbench and folded on the UI thread before each Overall
+// refresh, so it needs no locking.
+type lifetimeStats struct {
+	// sessions is the last-known cumulative tally for every session ID ever seen,
+	// open or closed. Per-session counters are monotonic for the life of a session,
+	// so storing the latest snapshot (rather than diffing) is enough: the lifetime
+	// total is just the sum of every session's last-known tally.
+	//
+	// It grows by one entry per session ID for the life of the process and is never
+	// evicted. That is bounded by the number of sessions a user opens in one run
+	// (tens to low hundreds, ~tens of bytes each), so no eviction policy is needed;
+	// revisit only if sessions become cheap and unbounded (e.g. programmatic spawn).
+	sessions map[string]sessionTally
+}
+
+// sessionTally is the most recent cumulative snapshot seen for one session: its
+// primary/auxiliary connector counters plus the session-layer totals the Overall
+// and Statistics views surface.
+type sessionTally struct {
+	primaryModel string
+	turns        int
+	tokensIn     int
+	tokensOut    int
+	toolCalls    int
+	compactions  int
+	primary      stats.ConnectorStat
+	fast         stats.ConnectorStat
+}
+
+// newLifetimeStats returns an empty process-lifetime accumulator.
+func newLifetimeStats() *lifetimeStats {
+	return &lifetimeStats{sessions: make(map[string]sessionTally)}
+}
+
+// fold records the live report's open-session tallies into the lifetime store and
+// returns a copy of the report whose grand totals and per-model connector stats are
+// augmented with the contributions of sessions that have since closed.
+//
+// The live report already sums the currently-open sessions correctly, so fold takes
+// it as the baseline and only adds back the last-known tally of every session that
+// is remembered but no longer present (i.e. closed). The result: a still-open
+// session keeps updating live; closing a session keeps its tokens / requests /
+// errors / cache-hits in the totals instead of erasing them; a new session simply
+// adds on top of the accumulated figure.
+//
+// Only the lifetime-sensitive aggregates are touched — Totals' connector/token
+// counters and each model's Connector. The per-session rows, tool and skill
+// breakdowns, and the live "what's on screen" node counts (Totals.Sessions, and each
+// model's Sessions/SubAgents) pass through unchanged: those track the currently-open
+// set and are meant to drop when a session closes.
+//
+// Because it only augments the report's own totals (never recomputes them from the
+// per-session rows), fold is robust to reports whose totals are not a strict sum of
+// their session rows, and is a no-op until the first session closes.
+//
+// Must be called on the UI thread: it reads and writes the unguarded sessions map.
+// Its sole caller, Workbench.refreshOverall, runs on the UI thread (the stats ticker
+// marshals via desktop.Post), so no locking is needed.
+func (l *lifetimeStats) fold(report stats.Report) stats.Report {
+	open := make(map[string]bool, len(report.Sessions))
+	for _, s := range report.Sessions {
+		open[s.ID] = true
+		l.sessions[s.ID] = sessionTally{
+			primaryModel: s.PrimaryModel,
+			turns:        s.Turns,
+			tokensIn:     s.TokensIn,
+			tokensOut:    s.TokensOut,
+			toolCalls:    s.ToolCalls,
+			compactions:  s.Compactions,
+			primary:      s.Primary,
+			fast:         s.Fast,
+		}
+	}
+
+	// Add back every closed session — remembered but absent from the live report — so
+	// its counters persist in the grand totals and per-model breakdown.
+	totals := report.Totals
+	perModel := make(map[string]stats.ConnectorStat)
+	for id, t := range l.sessions {
+		if open[id] {
+			continue
+		}
+		totals.Turns += t.turns
+		totals.TokensIn += t.tokensIn
+		totals.TokensOut += t.tokensOut
+		totals.ToolCalls += t.toolCalls
+		totals.Compactions += t.compactions
+		totals.Primary = totals.Primary.Add(t.primary)
+		totals.Fast = totals.Fast.Add(t.fast)
+		if t.primaryModel != "" {
+			perModel[t.primaryModel] = perModel[t.primaryModel].Add(t.primary)
+		}
+	}
+
+	report.Totals = totals
+	report.Models = mergeModelLifetime(report.Models, perModel)
+	return report
+}
+
+// mergeModelLifetime returns the report's per-model rows with the closed-session
+// connector contributions in extra added onto each matching model, plus a row for
+// any model whose sessions have all closed (so per-model scoping keeps showing its
+// accumulated traffic). The live node counts (Sessions/SubAgents) on the existing
+// rows are left untouched; closed-only models carry zero node counts because they
+// have no open sessions. It does not mutate the input slice and returns it unchanged
+// when there is nothing to add back.
+//
+// Only the per-model Connector is accumulated to lifetime — that is the source the
+// Overall panel scopes its metrics from (buildOverallStats reads ms.Connector.*).
+// The session-layer token attribution (ModelStat.TokensIn/TokensOut) is deliberately
+// left at its live, open-session-only value: a closed session's tokens are recovered
+// from its Connector, and the panel never reads ModelStat.TokensIn. A future consumer
+// wanting lifetime per-model session-layer tokens should read Connector, not these.
+func mergeModelLifetime(models []stats.ModelStat, extra map[string]stats.ConnectorStat) []stats.ModelStat {
+	if len(extra) == 0 {
+		return models
+	}
+	out := make([]stats.ModelStat, 0, len(models)+len(extra))
+	seen := make(map[string]bool, len(models))
+	for _, m := range models {
+		seen[m.Name] = true
+		if c, ok := extra[m.Name]; ok {
+			m.Connector = m.Connector.Add(c)
+		}
+		out = append(out, m)
+	}
+	// Append closed-only models in a stable name-sorted order so the folded report is
+	// deterministic (ranging extra directly would vary run to run and could flake any
+	// future snapshot test on Models).
+	closedOnly := make([]string, 0, len(extra))
+	for name := range extra {
+		if !seen[name] {
+			closedOnly = append(closedOnly, name)
+		}
+	}
+	sort.Strings(closedOnly)
+	for _, name := range closedOnly {
+		out = append(out, stats.ModelStat{Name: name, Connector: extra[name]})
+	}
+	return out
+}
 
 // buildOverallStats assembles the panel's view from the Statistics report joined
 // with the focused/selected model config (issue #107). It is pure and unit tested.
