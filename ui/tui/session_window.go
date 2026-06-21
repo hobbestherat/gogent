@@ -226,7 +226,9 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 	interjectButton := tv.NewButton(interjectLabel, tv.Rect{}, nil)
 	queueButton := tv.NewButton(queueLabel, tv.Rect{}, nil)
 	stopButton := tv.NewButton(stopLabel, tv.Rect{}, nil)
+	// Error-coloured halt, kept red even when keyboard-focused (issue #201).
 	stopButton.FG = colorError
+	stopButton.FocusFG = colorError
 	modelLabel := tv.NewLabel("Model", tv.Rect{})
 	modelSelect := tv.NewSelect(wb.desktop, wb.modelNames, tv.Rect{})
 	modelLabel.SetTarget(modelSelect)
@@ -815,16 +817,29 @@ func runningButtonsWidth(interject, queue, stop string) int {
 func (sw *SessionWindow) layoutInputRow(wd, ht, inputH int) {
 	y := ht - inputH
 	if !sw.busy {
-		sw.interjectButton.Component.SetBounds(tv.Rect{})
-		sw.queueButton.Component.SetBounds(tv.Rect{})
-		sw.stopButton.Component.SetBounds(tv.Rect{})
+		// Hide via Visible, not just zero bounds: turbotv's focus traversal
+		// (collectFocusable) skips !Visible/!Enabled but not zero-bounds widgets, so
+		// an invisible-but-visible button would still catch a Tab and swallow Enter
+		// (issue #201).
+		sw.hideRunningButton(sw.interjectButton)
+		sw.hideRunningButton(sw.queueButton)
+		sw.hideRunningButton(sw.stopButton)
+		sw.sendButton.Component.Visible = true
 		sw.input.Component.SetBounds(tv.Rect{X: 0, Y: y, W: wd - 10, H: inputH})
 		sw.sendButton.Component.SetBounds(tv.Rect{X: wd - 9, Y: y, W: 8, H: 1})
 		return
 	}
-	sw.sendButton.Component.SetBounds(tv.Rect{})
+	sw.hideRunningButton(sw.sendButton)
+	sw.interjectButton.Component.Visible = true
+	sw.queueButton.Component.Visible = true
+	sw.stopButton.Component.Visible = true
 	il, ql, sl := interjectLabel, queueLabel, stopLabel
-	if runningButtonsWidth(il, ql, sl) > wd-minInputWidth {
+	// Degrade to glyphs once the full-label buttons would leave the prompt fewer
+	// than minInputWidth cells. The buttons consume runningButtonsWidth plus the
+	// one-cell gap between the prompt and the first button, so that gap is part of
+	// the budget too — without it the prompt ends up a cell short of the floor
+	// (issue #201).
+	if runningButtonsWidth(il, ql, sl) > wd-minInputWidth-inputRowGap {
 		il, ql, sl = interjectGlyph, queueGlyph, stopGlyph
 	}
 	sw.interjectButton.SetLabel(il)
@@ -842,6 +857,15 @@ func (sw *SessionWindow) layoutInputRow(wd, ht, inputH int) {
 	sw.interjectButton.Component.SetBounds(tv.Rect{X: interjectX, Y: y, W: interjectW, H: 1})
 	sw.queueButton.Component.SetBounds(tv.Rect{X: queueX, Y: y, W: queueW, H: 1})
 	sw.stopButton.Component.SetBounds(tv.Rect{X: stopX, Y: y, W: stopW, H: 1})
+}
+
+// hideRunningButton removes an input-row button from view and, crucially, from the
+// Tab-focus cycle: turbotv's collectFocusable skips !Visible widgets but keeps
+// zero-bounds ones, so a merely zeroed button would still catch focus and swallow
+// Enter (issue #201). Zeroing the bounds too keeps the layout assertions simple.
+func (sw *SessionWindow) hideRunningButton(b *tv.Button) {
+	b.Component.Visible = false
+	b.Component.SetBounds(tv.Rect{})
 }
 
 // guardInterjectButton greys the Interject button while it is disabled — the input
@@ -893,21 +917,24 @@ func (sw *SessionWindow) interject() {
 	if text == "" || !sw.busy {
 		return
 	}
-	sw.completer.hide()
-	sw.input.Clear()
+	// Check the handler before clearing the box, so an unwired backend does not
+	// destroy the typed text (issue #201).
 	if sw.wb.handlers.OnInject == nil {
 		sw.addNote("interject unavailable")
 		return
 	}
+	sw.completer.hide()
+	sw.input.Clear()
 	sw.addNote("interjected: " + text)
 	go sw.wb.handlers.OnInject(sw.id, text)
 }
 
-// interjectEnabled reports whether the Interject button is actionable: there is
-// non-blank input text to slip into the running turn (issue #201). It drives both
-// the button's greyed disabled state and the interject() guard.
+// interjectEnabled reports whether the Interject button is actionable: a turn is
+// in flight and there is non-blank input text to slip into it (issue #201). It
+// drives both the button's greyed disabled state and the interject() guard; the
+// busy term keeps the predicate honest even though the button is hidden while idle.
 func (sw *SessionWindow) interjectEnabled() bool {
-	return strings.TrimSpace(sw.input.GetText()) != ""
+	return sw.busy && strings.TrimSpace(sw.input.GetText()) != ""
 }
 
 // clearQueue discards any pending queued message, optionally noting why. It is
