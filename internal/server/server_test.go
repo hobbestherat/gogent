@@ -18,7 +18,6 @@ import (
 // chat-completions protocol, serving canned responses in sequence. It lets the
 // server tests drive a real Gogent without a live model provider.
 type fakeBackend struct {
-	mu        []byte // unused; placeholder to keep struct non-empty for clarity
 	responses []map[string]any
 	calls     int
 }

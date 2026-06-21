@@ -235,9 +235,9 @@ func TestBearerTokenParsing(t *testing.T) {
 		{"Bearer abc", "abc"},
 		{"bearer abc", "abc"}, // case-insensitive scheme
 		{"BEARER abc", "abc"},
-		{"Token abc", ""},  // wrong scheme
-		{"", ""},           // none
-		{"Bearer  ", ""},   // empty after scheme
+		{"Token abc", ""}, // wrong scheme
+		{"", ""},          // none
+		{"Bearer  ", ""},  // empty after scheme
 	}
 	for _, c := range cases {
 		r := &http.Request{Header: http.Header{}}

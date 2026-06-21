@@ -58,14 +58,15 @@ func (svc authSvc) Login(r *http.Request, req loginRequest) (interface{}, error)
 	}
 	cookie := svc.s.provider.signer.issue(1, pw, svc.s.provider.cfg.now())
 	return &webapi.CookieResponse{
-		Cookies: []*http.Cookie{{
+		// Secure is intentionally off so the cookie also works over plain HTTP on
+		// the loopback; front remote access with TLS as appropriate. HttpOnly +
+		// SameSite=Lax are set; the missing-Secure gosec warning is by design.
+		Cookies: []*http.Cookie{{ //nolint:gosec // Secure intentionally off for loopback HTTP (see comment)
 			Name:     sessionCookieName,
 			Value:    cookie,
 			Path:     "/",
 			HttpOnly: true,
 			SameSite: http.SameSiteLaxMode,
-			// Secure is intentionally off so the cookie also works over plain
-			// HTTP on the loopback; front remote access with TLS as appropriate.
 		}},
 		Data: map[string]any{"authenticated": true, "scope": string(scopeHuman)},
 	}, nil
@@ -74,7 +75,9 @@ func (svc authSvc) Login(r *http.Request, req loginRequest) (interface{}, error)
 // Logout handles POST /auth/logout — clears the session cookie.
 func (svc authSvc) Logout(r *http.Request) (interface{}, error) {
 	return &webapi.CookieResponse{
-		Cookies: []*http.Cookie{{
+		// Deletion cookie (empty value, MaxAge<0): Secure/HttpOnly are irrelevant
+		// for clearing, and Secure stays off to match the loopback-HTTP login cookie.
+		Cookies: []*http.Cookie{{ //nolint:gosec // deletion cookie; Secure off to match login (loopback HTTP)
 			Name: sessionCookieName, Value: "", Path: "/",
 			MaxAge: -1, // delete
 		}},

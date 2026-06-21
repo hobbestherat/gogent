@@ -16,10 +16,10 @@ import (
 // It is created when the agent loop calls a blocking Prompter/Reviewer (running
 // in a tool goroutine) and resolved by POST /approvals/:aid/decision.
 type pendingApproval struct {
-	id        string
-	kind      string // "permission" | "edit_review"
-	sessionID string
-	agentID   string
+	id         string
+	kind       string // "permission" | "edit_review"
+	sessionID  string
+	agentID    string
 	permission *permissionDetail
 	editReview *editReviewDetail
 	createdAt  time.Time
@@ -43,9 +43,9 @@ type approvalBridge struct {
 	timeout time.Duration // max wait before denying; 0 means never (block forever)
 	now     func() time.Time
 
-	mu       sync.Mutex
-	pending  map[string]*pendingApproval
-	nextSeq  int64
+	mu      sync.Mutex
+	pending map[string]*pendingApproval
+	nextSeq int64
 }
 
 func newApprovalBridge(h *hub, timeout time.Duration, now func() time.Time) *approvalBridge {
@@ -106,10 +106,10 @@ func (b *approvalBridge) alloc(kind, sessionID, agentID string, perm *permission
 	b.nextSeq++
 	id := "apr_" + strconv.FormatInt(b.nextSeq, 36)
 	ap := &pendingApproval{
-		id:        id,
-		kind:      kind,
-		sessionID: sessionID,
-		agentID:   agentID,
+		id:         id,
+		kind:       kind,
+		sessionID:  sessionID,
+		agentID:    agentID,
 		permission: perm,
 		editReview: edit,
 		createdAt:  b.now(),

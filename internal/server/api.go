@@ -41,10 +41,10 @@ func (slogLogger) Printf(format string, args ...any) {
 // (the gogent backend, the event hub, the approval bridge and the auth
 // provider). It is constructed once at startup by NewServer.
 type Server struct {
-	g        *gogent.Gogent
-	hub      *hub
+	g         *gogent.Gogent
+	hub       *hub
 	approvals *approvalBridge
-	provider *composingProvider
+	provider  *composingProvider
 
 	// busy tracks which sessions have a turn in flight, so /messages returns 409
 	// rather than queuing a second concurrent turn on the same session.
@@ -59,11 +59,11 @@ type Server struct {
 // is a bearer token (GOGENT_HTTP_TOKEN) granting the given scope (human or peer).
 // PeerBaseURL, when set, identifies this server to a peer; it is informational.
 type Options struct {
-	Password       string
-	Token          string
-	TokenScope     authScope // human (default) or peer
+	Password        string
+	Token           string
+	TokenScope      authScope // human (default) or peer
 	ApprovalTimeout time.Duration
-	now            func() time.Time // injectable clock (tests)
+	now             func() time.Time // injectable clock (tests)
 }
 
 // NewServer builds the server: it wires the event hub as the session observer,

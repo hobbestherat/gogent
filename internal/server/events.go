@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/hobbestherat/webapi"
@@ -27,7 +28,7 @@ func (svc eventsSvc) SessionEvents(r *http.Request, id string) (interface{}, err
 					return nil
 				case te := <-sub:
 					if err := stream.Send(sessionSSE(te.ev, te.sessionID)); err != nil {
-						return err
+						return fmt.Errorf("send session event: %w", err)
 					}
 				}
 			}
@@ -48,7 +49,7 @@ func (svc eventsSvc) GlobalEvents(r *http.Request) (interface{}, error) {
 					return nil
 				case te := <-sub:
 					if err := stream.Send(globalSSE(te)); err != nil {
-						return err
+						return fmt.Errorf("send global event: %w", err)
 					}
 				}
 			}
