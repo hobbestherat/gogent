@@ -26,10 +26,15 @@ import (
 //	C. SessionWindow.refreshTheme re-renders the transcript and re-seeds the window
 //	   chrome; Workbench.RefreshTheme walks every open window then redraws.
 //
-// The tests are organised in groups A–I below. Groups A–H verify behaviour the fix
-// got right (they PASS against the implementation). Group I ("DEFECTS FOUND")
-// documents real gaps the tester found in fix C — cached construction-time colours
-// that refreshTheme still leaves frozen — and currently FAIL, as a defect report.
+// The tests are organised in groups A–I below. Groups A–H verify the core
+// behaviour. Group I nails down the cached construction-time colours the live
+// switch must reseed (the transcript view's own FG/BG, and the status/separator
+// label backgrounds) — these were real defects the tester found in fix C during
+// round 1; the driver fixed them in the round-1 fixes commit (reseed sw.history
+// before the read-only return; route status/separator through reseedLabel), so the
+// tests now PASS and guard against regressions. Group J covers edge cases the
+// switch must also handle: a live switch to NO_COLOR, a switch back to default, and
+// the read-only analysis window's transcript area.
 
 // ----------------------------------------------------------------------------
 // Shared helpers.
@@ -824,22 +829,19 @@ func flatSpanFGs(spans [][]tv.StyledSpan) []tui.Color {
 }
 
 // ----------------------------------------------------------------------------
-// Group I: DEFECTS FOUND — cached construction-time colours refreshTheme leaves
-// frozen. These tests currently FAIL and document real gaps in fix C. Per the issue
-// spec, refreshTheme must refresh "any cached construction-time colours" and "cover
-// the same regions a restart fixes"; a restart re-seeds these from ActiveTheme at
-// construction (NewTextView / NewLabel), so the live switch should too.
+// Group I: cached construction-time colours the live switch must reseed. These
+// were real defects in fix C during round 1 (the transcript TextView's own FG/BG,
+// and the status/separator label backgrounds, stayed frozen); the round-1 fixes
+// commit reseeded them, so these tests now PASS and pin the fix.
 // ----------------------------------------------------------------------------
 
-// TestIssue204DefectTranscriptViewColorsNotRefreshed: the transcript TextView
-// (sw.history) caches FG/BG/FocusFG from tv.ActiveTheme at construction and draws
-// with them (TextView.draw fills its whole bounds with BG). refreshTheme re-renders
-// the entries and re-seeds the window content surface, but never touches the view's
-// own colours, so the transcript AREA keeps the old window background after a live
-// theme switch — e.g. a blue transcript panel inside a black window on default→dark.
-// The fix is to reseed sw.history.{FG,BG,FocusFG} from tv.ActiveTheme() in
-// refreshTheme (and Clear() does not reset them, so render() alone is not enough).
-func TestIssue204DefectTranscriptViewColorsNotRefreshed(t *testing.T) {
+// TestIssue204RefreshThemeReseedsTranscriptViewColors checks refreshTheme re-seeds
+// the transcript TextView's own FG/BG/FocusFG. The view caches them at construction
+// (NewTextView) and TextView.draw fills its whole bounds with BG, so without a
+// reseed the transcript AREA keeps the old window background after a live switch
+// (a blue panel inside a black window on default→dark). Clear() does not reset
+// them, so render() alone is not enough.
+func TestIssue204RefreshThemeReseedsTranscriptViewColors(t *testing.T) {
 	issue204RestoreTheme(t)
 	ApplyTheme(issue204Default())
 
@@ -851,31 +853,28 @@ func TestIssue204DefectTranscriptViewColorsNotRefreshed(t *testing.T) {
 	sw.refreshTheme()
 	th := tv.ActiveTheme()
 
-	// Precondition: the theme really switched (so a stale value is a real defect,
-	// not a no-op).
+	// Precondition: the theme really switched (else a stale value is a no-op, not
+	// a meaningful check).
 	if defBG == th.WindowBG {
 		t.Fatalf("precondition failed: default WindowBG %+v == high-contrast %+v", defBG, th.WindowBG)
 	}
 
 	if sw.history.FG != th.WindowFG {
-		t.Errorf("DEFECT: transcript view FG not reseeded by refreshTheme: got %+v, want %+v — the transcript area keeps the old foreground",
-			sw.history.FG, th.WindowFG)
+		t.Errorf("transcript view FG not reseeded: got %+v, want %+v", sw.history.FG, th.WindowFG)
 	}
 	if sw.history.BG != th.WindowBG {
-		t.Errorf("DEFECT: transcript view BG not reseeded by refreshTheme: got %+v, want %+v — the transcript area keeps the old background after a live switch",
-			sw.history.BG, th.WindowBG)
+		t.Errorf("transcript view BG not reseeded: got %+v, want %+v — the transcript area would keep the old background", sw.history.BG, th.WindowBG)
 	}
 	if sw.history.FocusFG != th.MnemonicFG {
-		t.Errorf("DEFECT: transcript view FocusFG not reseeded by refreshTheme: got %+v, want %+v", sw.history.FocusFG, th.MnemonicFG)
+		t.Errorf("transcript view FocusFG not reseeded: got %+v, want %+v", sw.history.FocusFG, th.MnemonicFG)
 	}
 }
 
-// TestIssue204DefectLabelBackgroundsNotRefreshed: modelLabel/effortLabel get their
-// FG/BG/HotFG reseeded via reseedLabel, but the status and separator labels are only
-// given a fresh FG (refreshStatus / the explicit chromeDivider set). Their BG/HotFG
-// stay frozen at the construction-time window background, inconsistent with both the
-// other labels and a restart.
-func TestIssue204DefectLabelBackgroundsNotRefreshed(t *testing.T) {
+// TestIssue204RefreshThemeReseedsStatusAndSeparatorLabels checks the status and
+// divider labels — which own their own foregrounds (severity colour / chrome
+// divider) — still get their BG/HotFG re-seeded like the other labels, so a stale
+// construction-time background doesn't show behind them.
+func TestIssue204RefreshThemeReseedsStatusAndSeparatorLabels(t *testing.T) {
 	issue204RestoreTheme(t)
 	ApplyTheme(issue204Default())
 
@@ -892,19 +891,157 @@ func TestIssue204DefectLabelBackgroundsNotRefreshed(t *testing.T) {
 	}
 
 	if sw.status.BG != th.WindowBG {
-		t.Errorf("DEFECT: status label BG not reseeded: got %+v, want %+v (modelLabel/effortLabel ARE reseeded — this is inconsistent)",
-			sw.status.BG, th.WindowBG)
+		t.Errorf("status label BG not reseeded: got %+v, want %+v", sw.status.BG, th.WindowBG)
 	}
 	if sw.status.HotFG != th.MnemonicFG {
-		t.Errorf("DEFECT: status label HotFG not reseeded: got %+v, want %+v", sw.status.HotFG, th.MnemonicFG)
+		t.Errorf("status label HotFG not reseeded: got %+v, want %+v", sw.status.HotFG, th.MnemonicFG)
+	}
+	// The status label still owns its severity foreground (refreshStatus), and the
+	// divider its chrome colour — re-seeding must not clobber those.
+	if sw.separator.FG != chromeDivider {
+		t.Errorf("separator FG drifted from chromeDivider: got %+v, want %+v", sw.separator.FG, chromeDivider)
+	}
+	if want := statusColor(!sw.busy, sw.statusStats, sw.wb.budgetConfig()); sw.status.FG != want {
+		t.Errorf("status FG not the live severity colour: got %+v, want %+v", sw.status.FG, want)
 	}
 	if defSepBG == th.WindowBG {
 		t.Fatalf("precondition failed: default separator BG %+v == high-contrast WindowBG %+v", defSepBG, th.WindowBG)
 	}
 	if sw.separator.BG != th.WindowBG {
-		t.Errorf("DEFECT: separator label BG not reseeded: got %+v, want %+v", sw.separator.BG, th.WindowBG)
+		t.Errorf("separator label BG not reseeded: got %+v, want %+v", sw.separator.BG, th.WindowBG)
 	}
 	if sw.separator.HotFG != th.MnemonicFG {
-		t.Errorf("DEFECT: separator label HotFG not reseeded: got %+v, want %+v", sw.separator.HotFG, th.MnemonicFG)
+		t.Errorf("separator label HotFG not reseeded: got %+v, want %+v", sw.separator.HotFG, th.MnemonicFG)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Group J: edge cases — NO_COLOR switch, switchback, and the read-only transcript.
+// ----------------------------------------------------------------------------
+
+// TestIssue204LiveSwitchToNoColor checks a live switch to a NO_COLOR theme
+// neutralises an open window too: every transcript record resolves to the terminal
+// default colour, rich Markdown is disabled, and the window chrome/transcript area
+// all become the terminal default. This is the same ApplyTheme; RefreshTheme chain
+// but driven to ColorNone, which ApplyTheme treats specially (neutral chrome).
+func TestIssue204LiveSwitchToNoColor(t *testing.T) {
+	issue204RestoreTheme(t)
+	ApplyTheme(issue204Default())
+
+	w := newTestWorkbench(t)
+	sw := w.openWindow("s", "S")
+	populateAll(sw)
+	sw.transcript.render()
+
+	// Capture a coloured precondition: under the default theme records are coloured.
+	coloredBefore := false
+	for _, r := range sw.transcript.records {
+		if r.headerColor() != tui.DefaultColor() {
+			coloredBefore = true
+			break
+		}
+	}
+	if !coloredBefore {
+		t.Fatal("precondition: default-theme records should be coloured before the switch")
+	}
+
+	ApplyTheme(ResolveTheme(config.ThemeConfig{NoColor: true}, truecolorEnv, false))
+	w.RefreshTheme()
+
+	// Under NO_COLOR every role resolves to the terminal default and rich Markdown
+	// is disabled, so records render flat in the default colour.
+	if richMarkdownEnabled() {
+		t.Errorf("rich Markdown should be disabled under NO_COLOR")
+	}
+	for i, r := range sw.transcript.records {
+		if got := r.headerColor(); got != tui.DefaultColor() {
+			t.Errorf("record %d (kind %v) header = %+v under NO_COLOR, want terminal default", i, r.kind, got)
+		}
+		for j, ln := range r.lines {
+			if ln.role != roleNone && ln.effectiveColor() != tui.DefaultColor() {
+				t.Errorf("record %d line %d = %+v under NO_COLOR, want terminal default", i, j, ln.effectiveColor())
+			}
+		}
+	}
+
+	// The transcript area and window chrome are neutralised too.
+	if sw.history.BG != tui.DefaultColor() || sw.history.FG != tui.DefaultColor() {
+		t.Errorf("transcript view not neutralised: FG=%+v BG=%+v, want default", sw.history.FG, sw.history.BG)
+	}
+	th := tv.ActiveTheme()
+	if sw.window.Content.Background.BG != th.WindowBG {
+		t.Errorf("content BG = %+v, want neutral %+v", sw.window.Content.Background.BG, th.WindowBG)
+	}
+	if sw.sendButton.FG != th.ButtonFG {
+		t.Errorf("send button FG = %+v, want neutral %+v", sw.sendButton.FG, th.ButtonFG)
+	}
+}
+
+// TestIssue204SwitchbackToDefault checks the switch is symmetric: an open window
+// built under a coloured preset, then switched BACK to default via the live path,
+// re-seeds to the stock chrome and recolours records to the default ANSI palette.
+// (Round-trip coverage: most tests only go default→coloured.)
+func TestIssue204SwitchbackToDefault(t *testing.T) {
+	issue204RestoreTheme(t)
+	ApplyTheme(issue204HighContrast())
+
+	w := newTestWorkbench(t)
+	sw := w.openWindow("s", "S")
+	populateAll(sw)
+	sw.transcript.render()
+	hcContentBG := sw.window.Content.Background.BG
+
+	ApplyTheme(issue204Default())
+	w.RefreshTheme()
+	th := tv.ActiveTheme()
+
+	// Chrome is back on the stock turbotui theme.
+	if th != baseTVTheme {
+		t.Errorf("tv.ActiveTheme() = %+v, want the stock baseTVTheme after switchback", th)
+	}
+	if sw.window.Content.Background.BG != th.WindowBG {
+		t.Errorf("content BG = %+v, want %+v", sw.window.Content.Background.BG, th.WindowBG)
+	}
+	if hcContentBG == sw.window.Content.Background.BG {
+		t.Error("content background did not change on the switchback to default")
+	}
+	if sw.sendButton.BG != th.ButtonBG {
+		t.Errorf("send button BG = %+v, want %+v", sw.sendButton.BG, th.ButtonBG)
+	}
+	// Records now resolve to the default ANSI palette, not the high-contrast RGB one.
+	for i, r := range sw.transcript.records {
+		if got, want := r.headerColor(), roleColor(r.role); got != want {
+			t.Errorf("record %d (kind %v) header = %+v, want default role colour %+v", i, r.kind, got, want)
+		}
+		if got := r.headerColor(); got.Mode == tui.ColorRGB {
+			t.Errorf("record %d (kind %v) header still RGB %+v after switchback to default; want an ANSI colour", i, r.kind, got)
+		}
+	}
+}
+
+// TestIssue204ReadOnlyTranscriptAreaReskinned checks the transcript-view reseed runs
+// for a read-only analysis window too (the reseed is deliberately placed before the
+// read-only early return). A read-only window has no input chrome, but its transcript
+// area must still follow the new palette.
+func TestIssue204ReadOnlyTranscriptAreaReskinned(t *testing.T) {
+	issue204RestoreTheme(t)
+	ApplyTheme(issue204Default())
+
+	w := newTestWorkbench(t)
+	ro := newSessionWindow(w, "analysis-1", "Saved", tv.Rect{}, true)
+	defBG := ro.history.BG
+
+	ApplyTheme(issue204HighContrast())
+	ro.refreshTheme()
+	th := tv.ActiveTheme()
+
+	if defBG == th.WindowBG {
+		t.Fatalf("precondition failed: default WindowBG %+v == high-contrast %+v", defBG, th.WindowBG)
+	}
+	if ro.history.BG != th.WindowBG {
+		t.Errorf("read-only transcript view BG not reseeded: got %+v, want %+v — the reseed must run before the read-only return", ro.history.BG, th.WindowBG)
+	}
+	if ro.history.FG != th.WindowFG {
+		t.Errorf("read-only transcript view FG not reseeded: got %+v, want %+v", ro.history.FG, th.WindowFG)
 	}
 }
