@@ -24,6 +24,7 @@ import (
 	"gogent/internal/fileops"
 	"gogent/internal/gogent"
 	"gogent/internal/model"
+	"gogent/internal/server"
 	"gogent/internal/stats"
 	"gogent/internal/tool"
 	tuipkg "gogent/ui/tui"
@@ -35,6 +36,7 @@ var (
 	httpPort   = flag.Int("http-port", 8080, "HTTP server port")
 	disableTUI = flag.Bool("no-tui", false, "Disable TUI (for API testing)")
 	noColor    = flag.Bool("no-color", false, "Disable coloured output (also honours the NO_COLOR env var)")
+	httpPassword = flag.String("http-password", "", "Password for HTTP API login (env GOGENT_HTTP_PASSWORD). Setting one authorizes binding to a non-loopback host.")
 )
 
 var (
@@ -121,11 +123,28 @@ func main() {
 		fmt.Printf("  Active skills: %d\n", len(skillRegistry.ListActiveSkills()))
 	}
 
-	// Start HTTP server (always)
-	fmt.Printf("\nStarting HTTP server on http://%s:%d\n", *httpHost, *httpPort)
-	go startHTTPServer(*httpHost, *httpPort, g)
+	// Resolve the HTTP API password (--http-password flag > GOGENT_HTTP_PASSWORD
+	// env). A non-empty password authorizes binding the
+	// listener to a non-loopback host; without one, a non-loopback --http-host is
+	// refused so the instance is never exposed without an identity gate.
+	httpPassword := resolveHTTPPassword(*httpPassword)
 
-	// Create and start the multi-session TUI if enabled
+	// Start HTTP server (always): the new /api surface + the legacy handlers.
+	apiServer := server.NewServer(g, server.Options{
+		Password:        httpPassword,
+		Token:           os.Getenv("GOGENT_HTTP_TOKEN"),
+		ApprovalTimeout: 5 * time.Minute,
+	})
+	if *disableTUI {
+		// Headless: the API bridge is the only prompter/reviewer, so a remote
+		// client answers interactive prompts over /approvals.
+		apiServer.InstallApprovalGates()
+	}
+	fmt.Printf("\nStarting HTTP server on http://%s:%d\n", *httpHost, *httpPort)
+	go startHTTPServer(*httpHost, *httpPort, g, apiServer, httpPassword)
+
+	// Create and start the multi-session TUI if enabled. (apiServer is declared
+	// above alongside the HTTP server startup.)
 	var wb *tuipkg.Workbench
 	if !*disableTUI {
 		// Resolve and install the colour theme before the workbench (and its
@@ -820,8 +839,35 @@ func newHTTPHandler(backend httpBackend, exitToken string, shutdown func()) http
 // self-directed syscall.Kill, which is unavailable on Windows.
 var httpShutdownCh = make(chan struct{}, 1)
 
-func startHTTPServer(host string, port int, g *gogent.Gogent) {
-	handler := newHTTPHandler(newGogentBackend(g), os.Getenv("GOGENT_HTTP_TOKEN"), func() {
+// resolveHTTPPassword determines the HTTP API login password from its sources in
+// priority order: the --http-password flag, then the GOGENT_HTTP_PASSWORD env
+// var. Empty means password login is off and the listener stays loopback-only.
+func resolveHTTPPassword(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	if v := os.Getenv("GOGENT_HTTP_PASSWORD"); v != "" {
+		return v
+	}
+	return ""
+}
+
+func startHTTPServer(host string, port int, g *gogent.Gogent, apiServer *server.Server, password string) {
+	// A non-loopback host requires a password or token so the instance is not
+	// exposed on the network without an identity gate. Loopback binds need none.
+	if !isLoopbackHost(host) && password == "" && os.Getenv("GOGENT_HTTP_TOKEN") == "" {
+		fmt.Printf("Refusing to bind HTTP server to non-loopback host %q without a password or token.\n", host)
+		fmt.Println("Set --http-password (or GOGENT_HTTP_PASSWORD / GOGENT_HTTP_TOKEN) to authorize it.")
+		return
+	}
+
+	// Build the root mux: the new /api surface (webapi, reflection-bound + SSE)
+	// alongside the legacy form-encoded handlers (/message, /status, /exit) for
+	// backward compatibility.
+	root := http.NewServeMux()
+	root.Handle("/api/", apiServer.Handler())
+
+	legacy := newHTTPHandler(newGogentBackend(g), os.Getenv("GOGENT_HTTP_TOKEN"), func() {
 		// Best-effort, non-blocking: a single buffered slot is enough since one
 		// shutdown request is all that matters.
 		select {
@@ -830,23 +876,48 @@ func startHTTPServer(host string, port int, g *gogent.Gogent) {
 		}
 	})
 
-	server := &http.Server{
+	// /health is public; /exit self-gates (loopback or token). /message and
+	// /status are gated by the API's auth middleware so they are not exposed
+	// unauthenticated when the server is bound to a non-loopback host (the same
+	// identity check the /api surface applies). On loopback the middleware is a
+	// pass-through.
+	authed := apiServer.AuthMiddleware(legacy)
+	root.Handle("/message", authed)
+	root.Handle("/status", authed)
+	root.Handle("/exit", legacy)
+	root.Handle("/health", legacy)
+
+	srv := &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", host, port),
-		Handler:           handler,
+		Handler:           root,
 		ReadHeaderTimeout: httpReadHeaderTimeout,
 		ReadTimeout:       httpReadTimeout,
 		IdleTimeout:       httpIdleTimeout,
 	}
 
 	fmt.Printf("HTTP server listening on http://%s:%d\n", host, port)
-	fmt.Println("Endpoints:")
-	fmt.Println("  GET  /health - Health check")
-	fmt.Println("  POST /message - Send message (form-data: message=...)")
-	fmt.Println("                  Set X-Gogent-Session (or cookie/session field) for an isolated session")
-	fmt.Println("  GET  /status - Get tool execution logs and stats (per X-Gogent-Session)")
-	fmt.Println("  POST /exit - Exit server (local-only, or X-Gogent-Token)")
+	fmt.Println("API surface under /api (sessions, messages, events, approvals, settings, models, tools, skills).")
+	fmt.Println("Legacy endpoints:")
+	fmt.Println("  GET  /health  - Health check")
+	fmt.Println("  POST /message - Send message (form-data: message=...)  [legacy; prefer POST /api/sessions/:id/messages]")
+	fmt.Println("  GET  /status  - Tool logs + stats  [legacy; prefer GET /api/sessions/:id/stats]")
+	fmt.Println("  POST /exit    - Exit server (local-only, or X-Gogent-Token)")
 
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Printf("HTTP server error: %v", err)
 	}
+}
+
+// isLoopbackHost reports whether a bind host names the loopback interface
+// ("127.0.0.1", "::1", "localhost"), so a non-loopback bind can require a
+// password/token before it is exposed on the network.
+func isLoopbackHost(host string) bool {
+	switch host {
+	case "", "127.0.0.1", "::1", "localhost":
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
