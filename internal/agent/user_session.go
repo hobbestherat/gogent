@@ -1093,6 +1093,16 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 	// tool call happens, so the budget is per stretch — never per task — and a
 	// model that genuinely has nothing to do cannot loop. A new user message
 	// starts a fresh runLoop, so the counter is implicitly per user message too.
+	//
+	// Scope notes (the loop is shared, so these hold for every caller):
+	//   - Sub-agent loops get the same recovery. runLoop backs both the root task
+	//     loop and every sub-agent/interactive loop, each with its own local
+	//     continuationNudges, so a narrating sub-agent is recovered and bounded
+	//     identically (its events are suppressed, so the nudge is silent there).
+	//   - A nudge consumes a step. The continuation round-trip runs under step+1
+	//     and the loop's step counter advances on the `continue`, so a nudge counts
+	//     against the MaxSteps cap exactly like any other round-trip — intended, so
+	//     the per-task bound still governs total cost.
 	continuationNudges := 0
 	for step := 0; maxSteps <= 0 || step < maxSteps; step++ {
 		// Bail out promptly if the loop was stopped or the session closed; the
@@ -1111,7 +1121,7 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 			break
 		}
 
-		calls := s.collectToolCalls(resp)
+		calls, explicitFinal := s.collectToolCalls(resp)
 		if len(calls) == 0 {
 			// No tool calls. Normally this is the assistant's final answer and the
 			// loop ends. But a reasoning model sometimes emits a bare *preamble* — an
@@ -1123,8 +1133,28 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 			// the model another round-trip instead of breaking. The note is
 			// deliver-only — like a queued user note it is not emitted as an assistant
 			// step, so it stays out of the visible transcript.
-			if s.shouldNudgeContinuation(resp, continuationNudges) {
+			//
+			// explicitFinal short-circuits this: a deliberate structured-output final
+			// is the strongest terminal signal there is and must end the turn even if
+			// its text happens to open like a preamble (issue #307 constraint #2).
+			if !explicitFinal && s.shouldNudgeContinuation(resp, continuationNudges) {
 				continuationNudges++
+				// Retain the preamble text so the empty-final recovery (#171) can still
+				// surface it if the post-nudge turn lands empty — the nudge path
+				// continues before lastAssistant is set on the tool-call branch below,
+				// so without this a preamble→empty-turn sequence would emit an empty
+				// final (issue #307).
+				if t := strings.TrimSpace(resp.Content); t != "" {
+					lastAssistant = t
+				}
+				// A queued user interjection (the Interject button, issue #201) is NOT
+				// drained here: this branch continues before the takePendingNote block
+				// below. That is deliberate and lossless — the note is held in its
+				// latest-wins slot and delivered at the next turn boundary (the tool
+				// round after the model follows through, or the UI's drain-on-idle if the
+				// model declares done), one round-trip later at most. Keeping the splice
+				// points separate avoids stacking the synthetic nudge and a real user
+				// note into the same request.
 				note := []model.Message{{Role: model.RoleUser, Content: continuationNudgeNote}}
 				if err := advance(note, step+1); err != nil {
 					return responses, err
@@ -1390,9 +1420,18 @@ func (s *UserSession) runToolCallsSerial(ctx context.Context, agent *Agent, agen
 
 // collectToolCalls returns the tool calls for a response, preferring native
 // tool_calls and falling back to a JSON object embedded in the text.
-func (s *UserSession) collectToolCalls(resp *model.CompletionResponse) []tool.ToolCall {
+//
+// explicitFinal reports that the turn was an EXPLICIT structured final — a
+// JSON-text {"response": ..., "final": true} object — whose text has been folded
+// into resp.Content (and no calls returned). The caller uses it to distinguish
+// "no calls because the model deliberately ended" from "no calls because the
+// model only narrated": the former must terminate immediately and must NOT be
+// given a preamble continuation nudge, even when its response text happens to
+// open like a preamble (issue #307 constraint #2). The native structured_output
+// path needs no such signal — it returns a real call the serial runner finalizes.
+func (s *UserSession) collectToolCalls(resp *model.CompletionResponse) (calls []tool.ToolCall, explicitFinal bool) {
 	if resp == nil {
-		return nil
+		return nil, false
 	}
 
 	// Native tool calls.
@@ -1409,7 +1448,7 @@ func (s *UserSession) collectToolCalls(resp *model.CompletionResponse) []tool.To
 				CallID: tc.ID,
 			})
 		}
-		return calls
+		return calls, false
 	}
 
 	// Fallback: one or more JSON objects embedded in the assistant text. Small
@@ -1418,7 +1457,6 @@ func (s *UserSession) collectToolCalls(resp *model.CompletionResponse) []tool.To
 	// at once — so we scan for every balanced object (issue #32) rather than
 	// substring-matching a single exact shape.
 	responseText := strings.TrimSpace(resp.Content)
-	var calls []tool.ToolCall
 	for _, obj := range tool.ExtractJSONObjects(responseText) {
 		// A {"response": ..., "final": true} object is the structured final
 		// answer: stop and surface its text instead of acting on any calls.
@@ -1428,14 +1466,14 @@ func (s *UserSession) collectToolCalls(resp *model.CompletionResponse) []tool.To
 		}
 		if err := json.Unmarshal([]byte(obj), &structuredOutput); err == nil && structuredOutput.Final {
 			resp.Content = structuredOutput.Response
-			return nil
+			return nil, true
 		}
 		var parsed tool.ToolCall
 		if err := json.Unmarshal([]byte(obj), &parsed); err == nil && parsed.Tool != "" {
 			calls = append(calls, parsed)
 		}
 	}
-	return calls
+	return calls, false
 }
 
 // shouldNudgeContinuation reports whether a tool-free turn should be given one

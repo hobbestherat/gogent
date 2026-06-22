@@ -391,7 +391,7 @@ func TestCollectToolCallsFallback(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := &model.CompletionResponse{Content: tc.content}
-			calls := s.collectToolCalls(resp)
+			calls, _ := s.collectToolCalls(resp)
 			if tc.wantContent != "" {
 				if len(calls) != 0 {
 					t.Fatalf("expected no calls for final answer, got %+v", calls)
