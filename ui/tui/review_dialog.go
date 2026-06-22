@@ -61,9 +61,12 @@ func showReviewDialog(desktop *tv.Desktop, req gogent.EditReviewRequest, request
 		return
 	}
 
-	// Large by default (≈80%×85% of the terminal) with a 40×12 floor; the diff
-	// view fills the dialog, so it grows with the terminal (issue #299).
-	spec := tv.DialogSpec{MinW: 40, MinH: 12}
+	// Large by default (≈80%×85% of the terminal) with a 40×12 floor; the diff view
+	// fills the dialog, so it grows with the terminal (issue #299). A 120-column MaxW
+	// keeps a diff readable on an ultrawide terminal (issue #317) — matching the
+	// permission dialog's cap — while it still grows tall (no height cap; a diff wants
+	// the vertical space).
+	spec := tv.DialogSpec{MinW: 40, MaxW: 120, MinH: 12}
 	x, y, width, height := tv.ResolveDialogRect(spec, desktop.App().Width(), desktop.App().Height())
 
 	title := fmt.Sprintf("Review %s: %s", req.Op, req.Path)

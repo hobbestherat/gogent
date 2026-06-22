@@ -388,40 +388,75 @@ func TestBrowserPreferredWidthClamped(t *testing.T) {
 	}
 }
 
-// TestThemeEditorPinnedFootprint verifies the theme editor keeps its fixed
-// content footprint (Min == Max == themeEditorDialogW × themeEditorDialogH) on
-// every terminal size — the invariant that keeps the scrolling viewport geometry
-// from issues #279/#291 valid even though it now flows through the shared resolver
-// and is re-centered on resize (issue #299).
-func TestThemeEditorPinnedFootprint(t *testing.T) {
-	spec := tv.DialogSpec{
-		MinW: themeEditorDialogW, MinH: themeEditorDialogH,
-		MaxW: themeEditorDialogW, MaxH: themeEditorDialogH,
+// TestThemeEditorFlooredAndGrows replaces the old TestThemeEditorPinnedFootprint:
+// after issue #317 the theme editor is no longer pinned (Min == Max). Its spec is a
+// pure 80×22 FLOOR (tv.DialogSpec{MinW: 80, MinH: 22}), so it collapses to 80×22 on a
+// small terminal — keeping the menu-bar clearance and the #279/#291 scrolling viewport
+// valid — and grows toward the shared 80%×85% cap on a larger one. This pins the new
+// invariant: floor at the bottom, grow toward the cap above it, centred throughout.
+func TestThemeEditorFlooredAndGrows(t *testing.T) {
+	// The real spec showThemeEditor hands the resolver. A drift here (e.g. a stray
+	// MaxW/MaxH reintroducing the pin) is caught by TestThemeEditorOpensFlooredAndGrows,
+	// which opens the editor itself; this guards the resolver policy directly.
+	spec := tv.DialogSpec{MinW: themeEditorDialogW, MinH: themeEditorDialogH}
+
+	for _, tc := range []struct {
+		name  string
+		termW int
+		termH int
+		wantW int
+		wantH int
+	}{
+		{"floors on an 80x24 terminal", 80, 24, 80, 22},
+		{"floors on a sub-floor terminal", 70, 20, 80, 22},
+		{"floors on a tiny terminal", 30, 8, 80, 22},
+		{"grows toward the cap on 200x50", 200, 50, 160, 42}, // 80% of 200, 85% of 50
+		{"grows on a mid terminal", 120, 40, 96, 34},         // 80% of 120, 85% of 40
+		{"grows toward the cap on an ultrawide", 300, 80, 240, 68},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			x, y, w, h := tv.ResolveDialogRect(spec, tc.termW, tc.termH)
+			if w != tc.wantW || h != tc.wantH {
+				t.Errorf("at %dx%d theme editor = %dx%d, want %dx%d", tc.termW, tc.termH, w, h, tc.wantW, tc.wantH)
+			}
+			// Never below the documented 80×22 floor, never pinned (it must exceed the
+			// floor once the terminal is roomy enough).
+			if w < themeEditorDialogW || h < themeEditorDialogH {
+				t.Errorf("at %dx%d size %dx%d fell below the %dx%d floor", tc.termW, tc.termH, w, h, themeEditorDialogW, themeEditorDialogH)
+			}
+			// Centred, with the origin floored at 0 on a terminal smaller than the editor.
+			wantX, wantY := (tc.termW-w)/2, (tc.termH-h)/2
+			if wantX < 0 {
+				wantX = 0
+			}
+			if wantY < 0 {
+				wantY = 0
+			}
+			if x != wantX || y != wantY {
+				t.Errorf("at %dx%d origin = (%d,%d), want (%d,%d)", tc.termW, tc.termH, x, y, wantX, wantY)
+			}
+		})
 	}
-	for _, dim := range []struct{ W, H int }{{200, 50}, {120, 40}, {80, 24}, {70, 20}} {
-		x, y, w, h := tv.ResolveDialogRect(spec, dim.W, dim.H)
-		if w != themeEditorDialogW || h != themeEditorDialogH {
-			t.Errorf("at %dx%d theme editor = %dx%d, want pinned %dx%d",
-				dim.W, dim.H, w, h, themeEditorDialogW, themeEditorDialogH)
-		}
-		// Still centered (origin floored at 0 on a terminal smaller than the editor).
-		wantX, wantY := (dim.W-w)/2, (dim.H-h)/2
-		if wantX < 0 {
-			wantX = 0
-		}
-		if wantY < 0 {
-			wantY = 0
-		}
-		if x != wantX || y != wantY {
-			t.Errorf("at %dx%d origin = (%d,%d), want (%d,%d)", dim.W, dim.H, x, y, wantX, wantY)
-		}
+
+	// It must actually GROW, not stay pinned: a roomy terminal is strictly larger than
+	// the floor in both axes.
+	_, _, bigW, bigH := tv.ResolveDialogRect(spec, 200, 50)
+	if bigW <= themeEditorDialogW || bigH <= themeEditorDialogH {
+		t.Errorf("on 200x50 the editor resolved to %dx%d — it stayed pinned at the %dx%d floor instead of growing",
+			bigW, bigH, themeEditorDialogW, themeEditorDialogH)
 	}
 }
 
-// TestInlineDialogSpecFloors checks every dialog that still uses a pure Min-floor
-// inline DialogSpec honours the Min floor on a tiny terminal, and grows to the 80%
-// default on a roomy one. The spec literals here mirror each show* function; a
-// drift between them and the source is exactly what this guards.
+// TestInlineDialogSpecFloors pins each inline DialogSpec's resolved size on a tiny
+// terminal (the Min floor) and on a roomy 200×50 one. The spec literals here mirror
+// each show* function; a drift between them and the source is exactly what this guards
+// (and the open-the-dialog tests in dialog_issue317_test.go catch drift end-to-end).
+//
+// After issue #317 NONE of these four is a pure Min-floor spec any more: the two
+// fixed-form dialogs (Sub-agent Settings, Notifications) are PINNED to a content
+// footprint (PreferredW + MaxW + MaxH == MinH) so they never balloon to 160×42, and
+// the two viewers (Review, Monologue) carry a 120-column MaxW so they grow tall but not
+// ultrawide. Each row's bigW/bigH is the documented resolved size on 200×50.
 //
 // The command palette and help overlay are deliberately omitted: after #309 their
 // real specs carry a content-keyed MaxH (item count + chrome), so they no longer
@@ -434,10 +469,10 @@ func TestInlineDialogSpecFloors(t *testing.T) {
 		floorW, fH int
 		bigW, bigH int // expected on a 200x50 terminal
 	}{
-		{"sub-agent settings", tv.DialogSpec{MinW: 64, MinH: 22}, 64, 22, 160, 42},
-		{"notifications", tv.DialogSpec{MinW: 50, MinH: 18}, 50, 18, 160, 42},
-		{"review", tv.DialogSpec{MinW: 40, MinH: 12}, 40, 12, 160, 42},
-		{"sub-agent monologue", tv.DialogSpec{MinW: 40, MinH: 10}, 40, 10, 160, 42},
+		{"sub-agent settings", tv.DialogSpec{MinW: 64, MaxW: 76, PreferredW: 72, MinH: 20, MaxH: 20}, 64, 20, 72, 20},
+		{"notifications", tv.DialogSpec{MinW: 50, MaxW: 58, PreferredW: 54, MinH: 18, MaxH: 18}, 50, 18, 54, 18},
+		{"review", tv.DialogSpec{MinW: 40, MaxW: 120, MinH: 12}, 40, 12, 120, 42},
+		{"sub-agent monologue", tv.DialogSpec{MinW: 40, MaxW: 120, MinH: 10}, 40, 10, 120, 42},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, _, w, h := tv.ResolveDialogRect(tc.spec, 30, 8)
@@ -446,7 +481,12 @@ func TestInlineDialogSpecFloors(t *testing.T) {
 			}
 			_, _, bw, bh := tv.ResolveDialogRect(tc.spec, 200, 50)
 			if bw != tc.bigW || bh != tc.bigH {
-				t.Errorf("roomy terminal size = %dx%d, want %dx%d (large by default)", bw, bh, tc.bigW, tc.bigH)
+				t.Errorf("roomy terminal size = %dx%d, want %dx%d", bw, bh, tc.bigW, tc.bigH)
+			}
+			// The two pinned forms must NOT reach the 160×42 percentage box that motivated
+			// the issue; the two capped viewers must NOT span an ultrawide terminal.
+			if bw >= 160 {
+				t.Errorf("%s width = %d on 200x50 — it balloons toward the 160-wide percentage box (issue #317)", tc.name, bw)
 			}
 		})
 	}
