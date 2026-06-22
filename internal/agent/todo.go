@@ -1,6 +1,9 @@
 package agent
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // TodoStatus is the lifecycle state of one checklist item (issue #43).
 type TodoStatus string
@@ -16,10 +19,13 @@ const (
 
 // TodoItem is one entry in a session's task checklist. Content is the
 // user-facing description; Status tracks its progress so the sidebar can render
-// it at a glance.
+// it at a glance. Note is an optional free-form annotation (a finding, rationale
+// or detail) the model can attach to a task, turning the checklist into a
+// working artifact rather than just a label (issue #263).
 type TodoItem struct {
 	Content string     `json:"content"`
 	Status  TodoStatus `json:"status"`
+	Note    string     `json:"note,omitempty"`
 }
 
 // NormalizeTodoStatus coerces an arbitrary status value into a valid TodoStatus,
@@ -34,6 +40,67 @@ func NormalizeTodoStatus(s string) TodoStatus {
 	default:
 		return TodoPending
 	}
+}
+
+// todoGlyph maps a status to a compact glyph for the system-prompt checklist
+// block. It mirrors the sidebar's glyphs (☐ pending, ◐ in-progress, ☑ completed)
+// so the model and the human see the same shape.
+func todoGlyph(status TodoStatus) string {
+	switch status {
+	case TodoInProgress:
+		return "◐"
+	case TodoCompleted:
+		return "☑"
+	default:
+		return "☐"
+	}
+}
+
+// TodoSummary returns a one-line tally of the checklist in done/in-progress/
+// pending order, e.g. "2 done, 1 in progress, 0 pending". It is used both in the
+// todo tool result and the rendered system-prompt block (issue #263).
+func TodoSummary(items []TodoItem) string {
+	var done, inProgress, pending int
+	for _, it := range items {
+		switch it.Status {
+		case TodoCompleted:
+			done++
+		case TodoInProgress:
+			inProgress++
+		default:
+			pending++
+		}
+	}
+	return fmt.Sprintf("%d done, %d in progress, %d pending", done, inProgress, pending)
+}
+
+// RenderTodos produces a compact markdown block describing the live checklist,
+// suitable for injection into the recurring system prompt (issue #263). Each row
+// is a status glyph + content (+ note in parentheses); a final line carries the
+// counts. It returns "" for an empty list so callers can omit the section
+// entirely. Because the system prompt is rebuilt every loop and kept out of the
+// compaction-able transcript, this keeps the checklist in front of the model
+// even after a context compaction.
+func RenderTodos(items []TodoItem) string {
+	if len(items) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Task checklist\n")
+	b.WriteString("The live checklist for this session (the same list shown in the sidebar). It survives context compaction, so treat it as the source of truth for outstanding work. Call the `todo` tool to flip an item's status as you make progress, and to read the current list back.\n")
+	for _, it := range items {
+		content := strings.TrimSpace(it.Content)
+		if content == "" {
+			content = "(empty)"
+		}
+		fmt.Fprintf(&b, "- %s %s", todoGlyph(it.Status), content)
+		if note := strings.TrimSpace(it.Note); note != "" {
+			fmt.Fprintf(&b, " (%s)", note)
+		}
+		b.WriteString("\n")
+	}
+	fmt.Fprintf(&b, "(%s)", TodoSummary(items))
+	return b.String()
 }
 
 // SetTodos replaces the session's task checklist with items and emits a

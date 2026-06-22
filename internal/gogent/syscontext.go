@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"gogent/internal/agent"
 	"gogent/internal/vcs"
 )
 
@@ -68,10 +69,13 @@ func discoverAgentsDocs(workspaceRoot, configDir string) []agentsDoc {
 }
 
 // buildSystemContext assembles the extra system-prompt context for a session:
-// project AGENTS.md instructions followed by the index of available skills. It
-// is installed as a session's SystemContextProvider, so it is re-evaluated each
-// loop and reflects runtime skill (de)activation.
-func (g *Gogent) buildSystemContext() string {
+// project AGENTS.md instructions, the repo map, a live git status, the index of
+// available skills and the session's live todo checklist. It is installed as a
+// session's SystemContextProvider, so it is re-evaluated each loop and reflects
+// runtime skill (de)activation and todo updates. The checklist is injected here
+// (rather than left in the transcript) so it survives context compaction, which
+// the system prompt is deliberately excluded from (issue #263).
+func (g *Gogent) buildSystemContext(sessionID string) string {
 	var b strings.Builder
 
 	if g.agentsContext != "" {
@@ -111,6 +115,18 @@ func (g *Gogent) buildSystemContext() string {
 			for _, sk := range active {
 				fmt.Fprintf(&b, "- %s: %s\n", sk.Name, sk.Description)
 			}
+		}
+	}
+
+	// Inject the session's live task checklist so the model always sees the
+	// current items and statuses, even after a compaction has summarized the
+	// originating todo tool calls out of the transcript (issue #263).
+	if sess := g.GetUserSession(sessionID); sess != nil {
+		if todos := agent.RenderTodos(sess.Todos()); todos != "" {
+			if b.Len() > 0 {
+				b.WriteString("\n\n")
+			}
+			b.WriteString(todos)
 		}
 	}
 
