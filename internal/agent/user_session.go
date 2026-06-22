@@ -1376,21 +1376,26 @@ func coordinatorInstructions(cfg config.SubAgentConfig) string {
 		return `
 
 ## Delegating work (one-shot sub-agents)
-When a task has several INDEPENDENT parts, delegate them so they run in parallel.
-ALWAYS put every independent part into a SINGLE spawn_subagent call as a
-"subtasks" array — one call, not one call per part. Every entry runs concurrently
-and the one call blocks until all of them finish, so this is the only way to get a
-speed-up. Emitting separate spawns across turns runs them one at a time with no
-benefit — do not do it. For example, in ONE call:
+Sub-agents are your tool for cutting wall-clock latency: a single spawn_subagent
+call runs every entry of its "subtasks" array CONCURRENTLY and blocks only until
+the slowest finishes. Make delegation your default whenever a turn has TWO OR MORE
+independent lookups — reserve doing the work inline for trivial single-step
+actions (one read, one grep). Typical triggers:
+  - investigating several modules/files at once,
+  - running diagnostics + verify + grep together to validate a change,
+  - researching a topic (or auditing subsystems) while you keep editing.
+ALWAYS batch the independent parts into ONE spawn_subagent call's "subtasks"
+array — one call, not one call per part. Emitting separate spawns across turns
+runs them one at a time with no speed-up, so never do that. For example, to probe
+three modules in parallel instead of reading them one after another, in ONE call:
   {"tool":"spawn_subagent","args":{"subtasks":[
-    {"name":"docs","task":"Summarise README.md"},
-    {"name":"tests","task":"List the failing tests"},
-    {"name":"deps","task":"Audit go.mod for outdated modules"}
+    {"name":"agent","task":"Map internal/agent: key types and how the loop runs"},
+    {"name":"gogent","task":"Map internal/gogent: tool registry and spawn flow"},
+    {"name":"verify","task":"Run diagnostics and the agent tests; report failures"}
   ]}}
 Each sub-agent runs to completion and returns a result starting with "SUCCESS: "
-or "FAILURE: ". Use a single "name"/"task" pair only for a lone subtask. Always
-batch two or more independent subtasks into the one call's "subtasks" array.
-Delegate only when it is clearly worthwhile; otherwise do the work yourself.`
+or "FAILURE: ". Use a single "name"/"task" pair only for a lone subtask; always
+batch two or more independent subtasks into the one call's "subtasks" array.`
 	}
 	return `
 
@@ -1485,8 +1490,11 @@ func (s *UserSession) newSubAgent(parentAgentID, name, task string, kind SubAgen
 		return nil, fmt.Errorf("max sub-agent depth (%d) reached", cfg.MaxDepthOrDefault())
 	}
 
-	// Cap how many sub-agents a single parent may spawn.
-	if len(parent.GetSubAgents()) >= cfg.MaxSubAgentsOrDefault() {
+	// Cap how many sub-agents a single parent may run AT ONCE. Only non-terminal
+	// children count: completed/failed helpers stay in the tree (the UI shows them)
+	// but free their slot, so a long session does not exhaust the budget as finished
+	// sub-agents accumulate (issue #280).
+	if parent.ActiveSubAgentCount() >= cfg.MaxSubAgentsOrDefault() {
 		return nil, fmt.Errorf("max sub-agents (%d) reached for %s", cfg.MaxSubAgentsOrDefault(), parentAgentID)
 	}
 

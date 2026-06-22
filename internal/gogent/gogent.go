@@ -672,12 +672,16 @@ func (g *Gogent) initializeToolRegistry() {
 
 	g.toolRegistry.Register(&tool.Tool{
 		Name: "spawn_subagent",
-		Description: "Delegate work to sub-agents. To run several INDEPENDENT tasks in " +
-			"parallel, make ONE call with a \"subtasks\" array — every entry runs " +
-			"concurrently and the call blocks until all finish. Use \"name\"/\"task\" only " +
-			"for a single lone task. Do NOT issue spawns one-per-turn; batch them. In " +
-			"one-shot mode results end with SUCCESS:/FAILURE:; in interactive mode they " +
-			"may return CLARIFY: questions.",
+		Description: "Delegate work to sub-agents to cut wall-clock latency. A SINGLE call " +
+			"with a \"subtasks\" array runs every entry CONCURRENTLY and blocks only until the " +
+			"slowest finishes — prefer it over investigating files or running checks one after " +
+			"another yourself. Reach for it to parallelize multi-file/multi-module investigation, " +
+			"to run several checks at once (e.g. diagnostics + verify + grep), or to research a " +
+			"topic while you keep working. Batch the independent parts into the one call's " +
+			"\"subtasks\" array; do NOT issue spawns one-per-turn (they then run serially with no " +
+			"speed-up). Use \"name\"/\"task\" only for a single lone task. In one-shot mode (the " +
+			"default) each sub-agent runs to completion and its result ends with SUCCESS: or " +
+			"FAILURE:; in interactive mode it may return a CLARIFY: question instead.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{

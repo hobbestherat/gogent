@@ -174,6 +174,26 @@ func (a *Agent) GetSubAgents() []*Agent {
 	return subAgents
 }
 
+// ActiveSubAgentCount reports how many direct sub-agents are still in a
+// non-terminal state (anything other than completed/failed). Terminal children
+// are kept in the tree — the UI still shows them — but they no longer occupy a
+// delegation slot, so a long session does not exhaust the max-sub-agents budget
+// as completed/failed helpers accumulate (issue #280). It reads children through
+// the lock-guarded GetSubAgents and each child's GetStatus, so it is safe to call
+// concurrently with sub-agent spawns and status changes.
+func (a *Agent) ActiveSubAgentCount() int {
+	n := 0
+	for _, sub := range a.GetSubAgents() {
+		switch sub.GetStatus() {
+		case StatusCompleted, StatusFailed:
+			// terminal — does not count against the budget
+		default:
+			n++
+		}
+	}
+	return n
+}
+
 // ListAllAgents returns all agents in the tree recursively. Each level reads its
 // children through the lock-guarded GetSubAgents, so it is safe to call while
 // other goroutines add sub-agents to the tree.
