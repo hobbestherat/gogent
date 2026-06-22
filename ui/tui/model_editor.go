@@ -255,7 +255,13 @@ func (w *Workbench) showModelEditor() {
 			w.desktop.Redraw()
 			w.showConfirm("Default model", fmt.Sprintf("%q is now the default for new sessions.", name), nil)
 		}
-		dialog.Window.AddContent(newButton("Set Default", tv.Rect{X: 2, Y: height - 3, W: 14, H: 1}, setDefault))
+		// Size the button to its rendered label width (ButtonLabelWidth = the
+		// clean caption + 4 cells of "[ … ]" chrome, floored at minButtonWidth)
+		// rather than a hand-picked constant: "Set Default" is 11 cells, so its
+		// natural width is 15, and the old W:14 clipped the closing "]" by one
+		// cell (the button was not fully shown).
+		setDefaultW := tv.ButtonLabelWidth("Set Default")
+		dialog.Window.AddContent(newButton("Set Default", tv.Rect{X: 2, Y: height - 3, W: setDefaultW, H: 1}, setDefault))
 	}
 
 	dialog.Root().OnTypeFn = func(_ *tv.VisualComponent, event tui.TypeEvent) bool {
