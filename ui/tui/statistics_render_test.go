@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"gogent/internal/stats"
+
+	tv "github.com/hobbestherat/turbotui/turbotv"
 )
 
 // sampleStatsReport is a representative report reused across the render/export
@@ -165,20 +167,25 @@ func TestFormatMs(t *testing.T) {
 
 // TestStatisticsDialogSize covers clamping to the terminal and the min floors.
 func TestStatisticsDialogSize(t *testing.T) {
+	// statisticsSpec mirrors the inline DialogSpec in showStatisticsDialog (issue
+	// #299): 85% wide, 60×14 floor, no upper cap — shared with Resources/Sessions.
+	statisticsSpec := func(screenW int) tv.DialogSpec {
+		return tv.DialogSpec{MinW: 60, MinH: 14, PreferredW: screenW * 85 / 100}
+	}
 	for _, tc := range []struct {
 		name             string
 		screenW, screenH int
 		wantW, wantH     int
 	}{
-		{"large screen caps at 80x24", 200, 100, 80, 24},
-		{"fits narrow terminal", 70, 30, 68, 24},
-		{"short terminal floors height", 120, 16, 80, 14},
-		{"tiny terminal floors both", 50, 20, 60, 18},
+		{"large screen grows to 85%", 200, 100, 170, 85},
+		{"medium terminal grows", 120, 40, 102, 34},
+		{"short terminal floors height", 120, 16, 102, 14},
+		{"tiny terminal floors both", 50, 20, 60, 16},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			gotW, gotH := statisticsDialogSize(tc.screenW, tc.screenH)
+			_, _, gotW, gotH := tv.ResolveDialogRect(statisticsSpec(tc.screenW), tc.screenW, tc.screenH)
 			if gotW != tc.wantW || gotH != tc.wantH {
-				t.Errorf("statisticsDialogSize(%d,%d) = %dx%d, want %dx%d",
+				t.Errorf("statistics size(%d,%d) = %dx%d, want %dx%d",
 					tc.screenW, tc.screenH, gotW, gotH, tc.wantW, tc.wantH)
 			}
 		})

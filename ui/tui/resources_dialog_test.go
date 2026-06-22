@@ -267,22 +267,30 @@ func TestLoadItemsNilGetter(t *testing.T) {
 	}
 }
 
-// TestResourcesDialogSize covers clamping to the terminal and the min floors.
+// resourcesSpec rebuilds the DialogSpec showResourcesDialog uses (issue #299):
+// large by default (85% wide) with a 60×14 floor and no upper cap, so the
+// two-pane browser grows with the terminal instead of capping at 96×32.
+func resourcesSpec(screenW int) tv.DialogSpec {
+	return tv.DialogSpec{MinW: 60, MinH: 14, PreferredW: screenW * 85 / 100}
+}
+
+// TestResourcesDialogSize covers the spec-driven sizing: grows to ~85% on a big
+// terminal (no 96×32 cap), and floors at 60×14 on a small one.
 func TestResourcesDialogSize(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		screenW, H   int
 		wantW, wantH int
 	}{
-		{"large screen caps at 96x32", 200, 100, 96, 32},
-		{"fits narrow terminal", 70, 30, 68, 28},
-		{"short terminal floors height", 120, 16, 96, 14},
-		{"tiny terminal floors both", 50, 20, 60, 18},
+		{"large screen grows to 85%", 200, 100, 170, 85},
+		{"medium terminal grows", 120, 40, 102, 34},
+		{"short terminal floors height", 120, 16, 102, 14},
+		{"tiny terminal floors both", 50, 20, 60, 16},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			gotW, gotH := resourcesDialogSize(tc.screenW, tc.H)
+			_, _, gotW, gotH := tv.ResolveDialogRect(resourcesSpec(tc.screenW), tc.screenW, tc.H)
 			if gotW != tc.wantW || gotH != tc.wantH {
-				t.Errorf("resourcesDialogSize(%d,%d) = %dx%d, want %dx%d",
+				t.Errorf("resources size(%d,%d) = %dx%d, want %dx%d",
 					tc.screenW, tc.H, gotW, gotH, tc.wantW, tc.wantH)
 			}
 		})
