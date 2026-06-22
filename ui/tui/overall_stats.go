@@ -221,28 +221,39 @@ func (l *lifetimeStats) fold(report stats.Report) stats.Report {
 // phantomDefaultSessionID is the id of the always-present HTTP/API fallback session
 // created at startup (cmd/main.go's CreateUserSession("default", …)). It is the
 // shared headless session and is never opened as a TUI window, so it must not be
-// counted among the sessions the TUI user actually sees (issue #278).
+// counted among the sessions the TUI user actually sees (issue #278). It is not
+// flagged ephemeral in the backend (it is created via CreateUserSession, not
+// NewEphemeralSession), so it is matched by id rather than by SessionRow.Ephemeral.
 const phantomDefaultSessionID = "default"
 
-// filterPhantomSessions returns a copy of the report with the phantom backend
-// "default" session removed: its per-session row is dropped and its full
-// contribution — including the Sessions count — is subtracted from the grand
-// Totals. This makes the TUI's Statistics dialog and Overall panel count only the
-// sessions the user sees as windows, fixing the off-by-one against the "Sessions &
-// Agents" sidebar (issue #278).
+// isPhantomSession reports whether a report row is a backend session with no TUI
+// window: the shared "default" session or any on-demand ephemeral HTTP/API session
+// (SessionRow.Ephemeral, set by Gogent.Statistics). These are the sessions the TUI
+// must hide from its Statistics surfaces (issue #278).
+func isPhantomSession(s stats.SessionRow) bool {
+	return s.ID == phantomDefaultSessionID || s.Ephemeral
+}
+
+// filterPhantomSessions returns a copy of the report with every windowless backend
+// session removed — the shared "default" session and any ephemeral HTTP/API session
+// (see isPhantomSession). Each removed row is dropped and its full contribution —
+// including the Sessions count — is subtracted from the grand Totals. This makes the
+// TUI's Statistics dialog and Overall panel count only the sessions the user sees as
+// windows, fixing the off-by-one (off-by-N with live HTTP clients) against the
+// "Sessions & Agents" sidebar (issue #278).
 //
-// It is applied TUI-side only, before fold, so the phantom is never remembered as a
+// It is applied TUI-side only, before fold, so a phantom is never remembered as a
 // closed session (it would otherwise be re-emitted forever). The backend
 // Statistics() report is left untouched, so the headless GET /stats endpoint still
-// reports "default" — there it is the real session the API talks to.
+// reports every session — there "default" is the real session the API talks to.
 //
-// It does not mutate the input report: Totals is a value copy and a fresh Sessions
-// slice is built only when a phantom row is actually present.
+// It does not mutate the input report: Totals is a value copy and fresh Sessions /
+// Models slices are built only when a phantom row is actually present.
 func filterPhantomSessions(report stats.Report) stats.Report {
 	kept := make([]stats.SessionRow, 0, len(report.Sessions))
-	removed := false
+	var removed []stats.SessionRow
 	for _, s := range report.Sessions {
-		if s.ID == phantomDefaultSessionID {
+		if isPhantomSession(s) {
 			report.Totals.Sessions--
 			report.Totals.Turns -= s.Turns
 			report.Totals.TokensIn -= s.TokensIn
@@ -251,15 +262,63 @@ func filterPhantomSessions(report stats.Report) stats.Report {
 			report.Totals.Compactions -= s.Compactions
 			report.Totals.Primary = report.Totals.Primary.Sub(s.Primary)
 			report.Totals.Fast = report.Totals.Fast.Sub(s.Fast)
-			removed = true
+			removed = append(removed, s)
 			continue
 		}
 		kept = append(kept, s)
 	}
-	if removed {
-		report.Sessions = kept
+	if len(removed) == 0 {
+		return report
 	}
+	report.Sessions = kept
+	// The phantom can carry real per-model traffic (an HTTP request routed to the
+	// shared "default" session while the TUI runs), so back it out of report.Models
+	// too — otherwise the Models tab and the Overview "Models (tokens)" summary keep
+	// counting it and the per-model rows no longer sum to the filtered grand total
+	// (issue #278). Mirror fold's attribution: a session's traffic belongs to its
+	// PrimaryModel. Node counts (Sessions/SubAgents) are left as live, matching fold.
+	report.Models = subtractModelTraffic(report.Models, removed)
 	return report
+}
+
+// subtractModelTraffic returns the per-model rows with each removed session's
+// connector and token attribution backed out of its PrimaryModel row. It mirrors
+// how fold attributes a session's traffic to its primary model, so the inverse here
+// keeps the per-model breakdown consistent with the filtered grand totals. Like
+// fold/mergeModelLifetime it leaves the live node counts (Sessions/SubAgents)
+// untouched and does not mutate the input slice (it copies before adjusting). Rows
+// are not pruned even if they fall to zero traffic, matching the rest of the stats
+// pipeline, which never drops a model row.
+func subtractModelTraffic(models []stats.ModelStat, removed []stats.SessionRow) []stats.ModelStat {
+	type delta struct {
+		conn      stats.ConnectorStat
+		tokensIn  int
+		tokensOut int
+	}
+	deltas := make(map[string]delta)
+	for _, s := range removed {
+		if s.PrimaryModel == "" {
+			continue // no model to attribute the traffic to
+		}
+		d := deltas[s.PrimaryModel]
+		d.conn = d.conn.Add(s.Primary)
+		d.tokensIn += s.TokensIn
+		d.tokensOut += s.TokensOut
+		deltas[s.PrimaryModel] = d
+	}
+	if len(deltas) == 0 {
+		return models
+	}
+	out := make([]stats.ModelStat, len(models))
+	copy(out, models)
+	for i := range out {
+		if d, ok := deltas[out[i].Name]; ok {
+			out[i].Connector = out[i].Connector.Sub(d.conn)
+			out[i].TokensIn -= d.tokensIn
+			out[i].TokensOut -= d.tokensOut
+		}
+	}
+	return out
 }
 
 // mergeModelLifetime returns the report's per-model rows with the closed-session

@@ -1884,6 +1884,14 @@ func (g *Gogent) Statistics() stats.Report {
 	}
 	toolReg := g.toolRegistry
 	skills := g.skills
+	// Snapshot which sessions are ephemeral (on-demand HTTP/API sessions, issue
+	// #25) so each row can be tagged. The report is not filtered here — GET /stats
+	// must keep every session — but the tag lets the TUI drop windowless sessions
+	// from its own Statistics surfaces (issue #278).
+	ephemeral := make(map[string]bool, len(g.ephemeral))
+	for id, eph := range g.ephemeral {
+		ephemeral[id] = eph
+	}
 	g.mu.RUnlock()
 
 	// Stable order: oldest session first (creation time, then id), matching how
@@ -1914,6 +1922,7 @@ func (g *Gogent) Statistics() stats.Report {
 			PrimaryModel:  primaryModel,
 			Primary:       primary,
 			Fast:          fast,
+			Ephemeral:     ephemeral[it.id],
 		})
 		rep.Totals.Sessions++
 		rep.Totals.Turns += snap.Turns

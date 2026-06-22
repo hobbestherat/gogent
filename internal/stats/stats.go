@@ -70,6 +70,13 @@ type SessionRow struct {
 	PrimaryModel string        `json:"primary_model,omitempty"`
 	Primary      ConnectorStat `json:"primary"`
 	Fast         ConnectorStat `json:"fast"`
+	// Ephemeral marks a session the backend never persists — the shared HTTP/API
+	// sessions created on demand by NewEphemeralSession (issue #25). It is purely
+	// informational in the report (the headless GET /stats endpoint still lists
+	// every session); the TUI uses it to drop sessions that have no window from its
+	// Statistics surfaces so the count matches the sidebar (issue #278). Omitted from
+	// JSON when false so the common, persisted-session shape is unchanged.
+	Ephemeral bool `json:"ephemeral,omitempty"`
 }
 
 // ConnectorStat mirrors the low-level model connector counters (see
