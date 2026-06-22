@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"gogent/internal/config"
 
@@ -155,6 +156,34 @@ func buildThemeConfig(preset string, noColor, noShadow bool, specs map[string]st
 	}
 	if len(overrides) > 0 {
 		cfg.Overrides = overrides
+	}
+	return cfg
+}
+
+// carryUnexposedOverrides preserves any prior override whose key the editor does not
+// expose as a field. buildThemeConfig rebuilds Overrides from themeRoles alone, and
+// Gogent.SetTheme replaces the persisted theme config wholesale (no merge), so without
+// this a Save — even one made for an unrelated reason — would silently drop a hand-set
+// override that has no editor row. Issue #265's focus pairs (button_focus_fg/bg,
+// input_focus_fg/bg) are the first such keys: they are first-class config roles
+// (applyOverrides understands them) but are deliberately kept out of themeRoles for the
+// editor's layout ceiling. Keys the editor DOES expose are left to the rebuilt set — the
+// field is their source of truth — and an exposed key is matched after the same
+// normalisation applyOverrides uses, so a differently-cased duplicate is not carried
+// alongside the field-derived value.
+func carryUnexposedOverrides(cfg config.ThemeConfig, prior map[string]string) config.ThemeConfig {
+	exposed := make(map[string]bool, len(themeRoles))
+	for _, role := range themeRoles {
+		exposed[role.key] = true
+	}
+	for k, v := range prior {
+		if exposed[strings.ToLower(strings.TrimSpace(k))] {
+			continue
+		}
+		if cfg.Overrides == nil {
+			cfg.Overrides = map[string]string{}
+		}
+		cfg.Overrides[k] = v
 	}
 	return cfg
 }
@@ -336,6 +365,9 @@ func (w *Workbench) showThemeEditor() {
 			idx = 0
 		}
 		cfg := buildThemeConfig(themePresets[idx].name, noColor.IsChecked(), noShadow.IsChecked(), specs)
+		// Don't let a Save erase overrides the editor has no field for (the #265 focus
+		// pairs): SetTheme replaces the config wholesale, so carry the unexposed keys.
+		cfg = carryUnexposedOverrides(cfg, cur.Overrides)
 		w.handlers.SetTheme(cfg) // persists + re-applies the live palette
 		w.desktop.RemoveLayer(layer)
 		w.rebuildMenu()
