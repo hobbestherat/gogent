@@ -271,40 +271,69 @@ func filterPhantomSessions(report stats.Report) stats.Report {
 		return report
 	}
 	report.Sessions = kept
-	// The phantom can carry real per-model traffic (an HTTP request routed to the
-	// shared "default" session while the TUI runs), so back it out of report.Models
-	// too — otherwise the Models tab and the Overview "Models (tokens)" summary keep
-	// counting it and the per-model rows no longer sum to the filtered grand total
-	// (issue #278). Mirror fold's attribution: a session's traffic belongs to its
-	// PrimaryModel. Node counts (Sessions/SubAgents) are left as live, matching fold.
+	// A phantom can carry real per-model traffic (an HTTP request routed to the
+	// shared "default" or an ephemeral session while the TUI runs), so back it out of
+	// report.Models too — otherwise the Models tab and the Overview "Models (tokens)"
+	// summary keep counting it and the per-model rows no longer match the filtered
+	// grand total (issue #278). subtractModelTraffic uses each row's exact per-model
+	// split and also backs out its per-model session/sub-agent node counts.
 	report.Models = subtractModelTraffic(report.Models, removed)
 	return report
 }
 
 // subtractModelTraffic returns the per-model rows with each removed session's
-// connector and token attribution backed out of its PrimaryModel row. It mirrors
-// how fold attributes a session's traffic to its primary model, so the inverse here
-// keeps the per-model breakdown consistent with the filtered grand totals. Like
-// fold/mergeModelLifetime it leaves the live node counts (Sessions/SubAgents)
-// untouched and does not mutate the input slice (it copies before adjusting). Rows
-// are not pruned even if they fall to zero traffic, matching the rest of the stats
-// pipeline, which never drops a model row.
+// contribution backed out, so the breakdown stays consistent with the filtered grand
+// totals and the Overall panel's model-scoped counts (issue #278). For each removed
+// session it subtracts:
+//
+//   - the connector and token attribution, per model. When the row carries a
+//     PerModel split (the real backend shape), each model's slice is backed out of
+//     exactly that model — so a session that switched models does not leave traffic
+//     stranded on one model or drive another negative. When PerModel is empty (rows
+//     built without a split, e.g. in tests), it falls back to attributing the
+//     aggregate Primary to PrimaryModel, matching the earlier single-model behaviour.
+//   - the node counts (Sessions/SubAgents) from the session's PrimaryModel, mirroring
+//     how Gogent.Statistics() keys those counts.
+//
+// The token and node-count back-outs are floored at zero so a row whose fields were
+// not seeded (synthetic input) cannot go negative; on a real report they are exact.
+//
+// It does not mutate the input slice (it copies before adjusting) and does not prune
+// rows that fall to zero, matching the rest of the stats pipeline.
 func subtractModelTraffic(models []stats.ModelStat, removed []stats.SessionRow) []stats.ModelStat {
 	type delta struct {
 		conn      stats.ConnectorStat
 		tokensIn  int
 		tokensOut int
+		sessions  int
+		subAgents int
 	}
 	deltas := make(map[string]delta)
+	addTraffic := func(model string, conn stats.ConnectorStat, tin, tout int) {
+		d := deltas[model]
+		d.conn = d.conn.Add(conn)
+		d.tokensIn += tin
+		d.tokensOut += tout
+		deltas[model] = d
+	}
 	for _, s := range removed {
-		if s.PrimaryModel == "" {
-			continue // no model to attribute the traffic to
+		if len(s.PerModel) > 0 {
+			// Exact: back each model's slice out of that same model.
+			for _, m := range s.PerModel {
+				addTraffic(m.Name, m.Connector, m.TokensIn, m.TokensOut)
+			}
+		} else if s.PrimaryModel != "" {
+			// Fallback: no split available, attribute the aggregate to the final model.
+			addTraffic(s.PrimaryModel, s.Primary, s.TokensIn, s.TokensOut)
 		}
-		d := deltas[s.PrimaryModel]
-		d.conn = d.conn.Add(s.Primary)
-		d.tokensIn += s.TokensIn
-		d.tokensOut += s.TokensOut
-		deltas[s.PrimaryModel] = d
+		// Node counts are keyed by the session's primary model only (matching
+		// Gogent.Statistics()'s mt.Sessions++ / mt.SubAgents += per primaryModel).
+		if s.PrimaryModel != "" {
+			d := deltas[s.PrimaryModel]
+			d.sessions++
+			d.subAgents += s.SubAgents
+			deltas[s.PrimaryModel] = d
+		}
 	}
 	if len(deltas) == 0 {
 		return models
@@ -314,11 +343,24 @@ func subtractModelTraffic(models []stats.ModelStat, removed []stats.SessionRow) 
 	for i := range out {
 		if d, ok := deltas[out[i].Name]; ok {
 			out[i].Connector = out[i].Connector.Sub(d.conn)
-			out[i].TokensIn -= d.tokensIn
-			out[i].TokensOut -= d.tokensOut
+			out[i].TokensIn = clampZero(out[i].TokensIn - d.tokensIn)
+			out[i].TokensOut = clampZero(out[i].TokensOut - d.tokensOut)
+			out[i].Sessions = clampZero(out[i].Sessions - d.sessions)
+			out[i].SubAgents = clampZero(out[i].SubAgents - d.subAgents)
 		}
 	}
 	return out
+}
+
+// clampZero returns n, or 0 when n is negative. It floors the token and node-count
+// back-outs so a model row whose fields were not seeded (synthetic input) cannot
+// render a negative value; on a real report every back-out is exact and the floor is
+// a no-op.
+func clampZero(n int) int {
+	if n < 0 {
+		return 0
+	}
+	return n
 }
 
 // mergeModelLifetime returns the report's per-model rows with the closed-session
