@@ -42,12 +42,13 @@ type themeGroup struct {
 // The button/input roles (issue #265) live under "Buttons and inputs" and expose the
 // resting pair for each — button_fg/button_bg and input_fg/input_bg, the most-seen
 // state and the core ask of #265, with full fg+bg control so a recoloured background
-// stays legible. The focus pairs (button_focus_*/input_focus_*) are deliberately
-// omitted from the editor — a sixth section row would push the grid past the
-// always-on-top menu bar on the 24-row terminal this dialog targets (see the height
-// note in showThemeEditor) — but they remain first-class, config-overridable roles
+// stays legible — followed by the #279 text-selection pair. The focus pairs
+// (button_focus_*/input_focus_*) are deliberately kept out of the editor to keep it to
+// the most-used roles, but they remain first-class, config-overridable roles
 // (applyOverrides/ResolveTheme/ApplyTheme), are carried across a Save by
 // carryUnexposedOverrides, and are audited by paletteContrast like every other role.
+// The section content now scrolls (see showThemeEditor), so the editor can hold more
+// roles than fit at once without growing past the 24-row terminal ceiling.
 var themeGroups = []themeGroup{
 	{"Session output", []themeRole{
 		{"user", "User messages", func(t Theme) tui.Color { return t.User }},
@@ -63,6 +64,10 @@ var themeGroups = []themeGroup{
 		{"desktop_bg", "Desktop background", func(t Theme) tui.Color { return t.DesktopBG }},
 		{"panel_fg", "Sidebar text", func(t Theme) tui.Color { return t.PanelFG }},
 		{"panel_bg", "Sidebar background", func(t Theme) tui.Color { return t.PanelBG }},
+		// Window background/text (issue #291): the surface behind the transcript, now a
+		// first-class, editable role rather than turbotui's fixed ANSI-4 blue.
+		{"window_fg", "Window text", func(t Theme) tui.Color { return t.WindowFG }},
+		{"window_bg", "Window background", func(t Theme) tui.Color { return t.WindowBG }},
 		{"title", "Panel titles", func(t Theme) tui.Color { return t.Title }},
 		{"divider", "Borders / dividers", func(t Theme) tui.Color { return t.Divider }},
 		{"accent", "Indicators / badges", func(t Theme) tui.Color { return t.Accent }},
@@ -82,6 +87,10 @@ var themeGroups = []themeGroup{
 		{"button_bg", "Button background", func(t Theme) tui.Color { return t.ButtonBG }},
 		{"input_fg", "Input text", func(t Theme) tui.Color { return t.InputFG }},
 		{"input_bg", "Input background", func(t Theme) tui.Color { return t.InputBG }},
+		// Text selection inside inputs (issue #279): the colours a selected run is painted
+		// in, distinct from the dropdown/menu Selection* roles.
+		{"text_selection_fg", "Selected text fg", func(t Theme) tui.Color { return t.TextSelectionFG }},
+		{"text_selection_bg", "Selected text bg", func(t Theme) tui.Color { return t.TextSelectionBG }},
 	}},
 	{"Code", []themeRole{
 		{"code_bg", "Code block background", func(t Theme) tui.Color { return t.CodeBG }},
@@ -146,11 +155,22 @@ const swatchSample = "▉▉ Aa"
 // cell is 22 wide; keep it in step with the widest themeRoles label.
 const themeEditorLabelW = 22
 
-// themeEditorContentTop is the first row the grouped role sections occupy (issue
-// #267). The roles start here with no blank separator — the spec-format hint moved up
-// beside the toggles on row 2 — so the five sections' header-plus-role rows fit under
-// the height ceiling the menu bar imposes (see the note in showThemeEditor).
+// themeEditorContentTop is the first row the scrolling role/section viewport occupies
+// (issue #267). The roles start here with no blank separator — the spec-format hint moved
+// up beside the toggles on row 2 — so the viewport gets the full run of rows between the
+// toggles and the action buttons.
 const themeEditorContentTop = 3
+
+// themeEditorVisibleRows is the height of the scroll viewport: the rows between
+// themeEditorContentTop and the Save/Reset/Cancel button row (themeEditorDialogH-3). The
+// grouped content can be taller than this; the viewport scrolls it (gogent #279/#291 added
+// roles that overflow it) while the dialog height stays fixed for the 24-row terminal.
+const themeEditorVisibleRows = themeEditorDialogH - 3 - themeEditorContentTop
+
+// themeEditorScrollbarX is the content-relative column the fixed vertical scrollbar
+// occupies: the last usable content column, just inside the right border. The right
+// section column is placed so its widest cell ends one column short of it.
+const themeEditorScrollbarX = themeEditorDialogW - 3
 
 // Geometry of the modal theme editor (issue #267). Width stays at 80 so the dialog
 // fits a standard 80-column terminal (centeredDialog only clamps the origin, it does
@@ -180,62 +200,114 @@ type themeEditorColumn struct {
 // much as balance: the right column carries the longest labels — "Code block
 // background:" (22) and the dropdown/menu pairs (20) — so it gets the full
 // themeEditorLabelW cell, while the left column's labels top out at "Indicators /
-// badges:" (20). The columns are balanced at 16 rows each (Session output + UI chrome
-// on the left, Controls + Buttons and inputs + Code on the right), filling rows
-// themeEditorContentTop..18. checkThemeEditorLayout asserts this split, the content-top
-// and the height stay mutually consistent.
+// badges:" (20). The right column starts at x=39 (not the far right) so its widest cell
+// ends at col 76, leaving themeEditorScrollbarX (77) free for the fixed scrollbar. Each
+// column stacks whole groups (a header row then one role per row); the columns can be
+// taller than the viewport, which scrolls them. checkThemeEditorLayout asserts the
+// columns do not collide, labels fit, and the scroll window can reveal every row.
 func themeEditorColumns() []themeEditorColumn {
 	return []themeEditorColumn{
 		{2, 20, themeGroups[:2]},                 // left: Session output, UI chrome
-		{40, themeEditorLabelW, themeGroups[2:]}, // right: Controls, Buttons and inputs, Code
+		{39, themeEditorLabelW, themeGroups[2:]}, // right: Controls, Buttons and inputs, Code
 	}
 }
 
-// checkThemeEditorLayout asserts the grouped editor's layout invariants hold for the
-// current themeGroups, themeEditorColumns and geometry consts, panicking at package
-// init (and thus in every test run and at program start) if a future edit breaks one.
-// The renderer relies on all of these silently: without this guard, adding a role or a
-// sixth group would push the last section onto the Save/Reset/Cancel button row, a
-// longer label would clip on screen, or a group could be dropped from a column — with
-// no compile-time or runtime signal, only the render tests catching it. This turns the
-// three otherwise-independent magic numbers (the [:2]/[2:] split, themeEditorContentTop
-// and themeEditorDialogH) into one asserted, loud-on-violation relationship.
+// themeEditorColumnRows is the number of on-screen rows a column occupies before
+// scrolling: one header row per group plus one row per role.
+func themeEditorColumnRows(col themeEditorColumn) int {
+	rows := 0
+	for _, g := range col.groups {
+		rows += 1 + len(g.roles)
+	}
+	return rows
+}
+
+// themeEditorContentRows is the height of the tallest column — the full scrollable
+// content height the viewport pages through.
+func themeEditorContentRows() int {
+	max := 0
+	for _, col := range themeEditorColumns() {
+		if r := themeEditorColumnRows(col); r > max {
+			max = r
+		}
+	}
+	return max
+}
+
+// themeEditorMaxScroll is the largest valid scroll offset: 0 when the content fits the
+// viewport, otherwise the number of rows by which the tallest column overflows it.
+func themeEditorMaxScroll() int {
+	if m := themeEditorContentRows() - themeEditorVisibleRows; m > 0 {
+		return m
+	}
+	return 0
+}
+
+// clampThemeScroll clamps a scroll offset to [0, themeEditorMaxScroll()].
+func clampThemeScroll(y int) int {
+	if y < 0 {
+		return 0
+	}
+	if max := themeEditorMaxScroll(); y > max {
+		return max
+	}
+	return y
+}
+
+// checkThemeEditorLayout asserts the scrolling editor's layout invariants hold for the
+// current themeGroups, themeEditorColumns and geometry consts, panicking at package init
+// (and thus in every test run and at program start) if a future edit breaks one. The
+// renderer relies on all of these silently. Unlike the pre-scroll guard, adding a role no
+// longer has to fit under the height ceiling — the viewport scrolls — so this asserts the
+// scrolling model is self-consistent instead: the viewport is non-empty and clears the
+// buttons, the columns do not collide with each other or the scrollbar, every label fits
+// its cell, every role is placed exactly once, and the scroll range can bring the tallest
+// column's last row into view.
 func checkThemeEditorLayout() {
-	const (
-		buttonRow    = themeEditorDialogH - 3 // Reset/Save/Cancel live on this row
-		contentRight = themeEditorDialogW - 3 // last usable content column (border at -2)
-	)
+	const buttonRow = themeEditorDialogH - 3 // Reset/Save/Cancel live on this row
+
+	// The scroll viewport must be at least one row tall and sit strictly above the buttons.
+	if themeEditorVisibleRows < 1 {
+		panic(fmt.Sprintf("theme editor: visible viewport is %d rows — nothing would show", themeEditorVisibleRows))
+	}
+	if last := themeEditorContentTop + themeEditorVisibleRows - 1; last >= buttonRow {
+		panic(fmt.Sprintf("theme editor: viewport last row %d collides with the buttons at row %d", last, buttonRow))
+	}
+
 	cols := themeEditorColumns()
 	placed := 0
 	for ci, col := range cols {
-		// Columns must not collide: this column's widest extent (its swatch end) must
-		// fall before the next column's x, and the last column must stay inside the border.
+		// Columns must not collide: this column's widest extent (its swatch end) must fall
+		// before the next column's x; the last column must stop short of the scrollbar column.
 		swatchEnd := col.x + col.labelW + themeEditorFieldW + themeEditorSwatchW + 2 - 1
-		limit := contentRight
+		limit := themeEditorScrollbarX - 1
 		if ci+1 < len(cols) {
 			limit = cols[ci+1].x - 1
 		}
 		if swatchEnd > limit {
-			panic(fmt.Sprintf("theme editor: column %d swatch ends at col %d, past its limit %d — widen the dialog or narrow the label cell", ci, swatchEnd, limit))
+			panic(fmt.Sprintf("theme editor: column %d swatch ends at col %d, past its limit %d — move the column or narrow the label cell", ci, swatchEnd, limit))
 		}
-		// Walk the column top-down: one header row, then one role per row.
-		y := themeEditorContentTop
 		for _, g := range col.groups {
-			y++ // header row
 			for _, role := range g.roles {
 				if n := len([]rune(role.label)) + 1; n > col.labelW {
 					panic(fmt.Sprintf("theme editor: label %q + \":\" is %d cols but column %d cell is %d wide — it would clip on screen", role.label, n, ci, col.labelW))
 				}
-				y++
 				placed++
 			}
-		}
-		if last := y - 1; last >= buttonRow {
-			panic(fmt.Sprintf("theme editor: column %d last role row %d collides with the buttons at row %d — grow the height or rebalance the columns", ci, last, buttonRow))
 		}
 	}
 	if placed != len(themeRoles) {
 		panic(fmt.Sprintf("theme editor: columns place %d roles but themeRoles has %d — a group is unplaced or double-placed", placed, len(themeRoles)))
+	}
+
+	// The scrollbar column must sit inside the right border.
+	if themeEditorScrollbarX >= themeEditorDialogW-2 {
+		panic(fmt.Sprintf("theme editor: scrollbar column %d overlaps the right border", themeEditorScrollbarX))
+	}
+	// Scroll-bounds consistency: at the maximum offset the tallest column's last row must
+	// land within the viewport, so every role is reachable by scrolling.
+	if reveal := themeEditorContentRows() - themeEditorMaxScroll(); reveal > themeEditorVisibleRows {
+		panic(fmt.Sprintf("theme editor: max scroll leaves %d rows for a %d-row viewport — the last roles can never be revealed", reveal, themeEditorVisibleRows))
 	}
 	// Menu-bar ceiling: centred on a 24-row terminal the top frame must clear row 0.
 	if topY := (24 - themeEditorDialogH) / 2; topY < 1 {
@@ -258,6 +330,42 @@ func themeSectionHeader(title string, r tv.Rect) *tv.Label {
 		text = title + " " + strings.Repeat("─", pad)
 	}
 	return dialogLabel(text, r)
+}
+
+// drawThemeEditorScrollbar paints the editor's 1-column vertical scrollbar over track:
+// a full-height │ line with ▲/▼ caps and a single █ thumb whose position reflects offset
+// within [0, total-visible]. It mirrors turbotui's shared (but unexported) text-view/tree
+// scrollbar so the editor's scroll affordance looks and behaves like the rest of the UI.
+// With nothing to scroll (total <= visible) only the track and caps are drawn.
+func drawThemeEditorScrollbar(surface tv.Surface, track tv.Rect, total, visible, offset int, fg, bg tui.Color) {
+	if track.H < 1 {
+		return
+	}
+	x := track.X
+	for row := 0; row < track.H; row++ {
+		surface.SetCell(x, track.Y+row, tui.Cell{Ch: '│', FG: fg, BG: bg})
+	}
+	surface.SetCell(x, track.Y, tui.Cell{Ch: '▲', FG: fg, BG: bg})
+	surface.SetCell(x, track.Bottom(), tui.Cell{Ch: '▼', FG: fg, BG: bg})
+	span := total - visible
+	inner := track.H - 2 // rows between the two arrow caps
+	if span <= 0 || inner <= 0 {
+		return
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > span {
+		offset = span
+	}
+	thumb := offset * (inner - 1) / span
+	if thumb < 0 {
+		thumb = 0
+	}
+	if thumb > inner-1 {
+		thumb = inner - 1
+	}
+	surface.SetCell(x, track.Y+1+thumb, tui.Cell{Ch: '█', FG: fg, BG: bg})
 }
 
 // swatchStyle computes a swatch's display from a spec field's current text and
@@ -323,8 +431,8 @@ func buildThemeConfig(preset string, noColor, noShadow bool, specs map[string]st
 // this a Save — even one made for an unrelated reason — would silently drop a hand-set
 // override that has no editor row. Issue #265's focus pairs (button_focus_fg/bg,
 // input_focus_fg/bg) are the first such keys: they are first-class config roles
-// (applyOverrides understands them) but are deliberately kept out of themeRoles for the
-// editor's layout ceiling. Keys the editor DOES expose are left to the rebuilt set — the
+// (applyOverrides understands them) but are deliberately kept out of themeRoles to keep the
+// editor to the most-used roles. Keys the editor DOES expose are left to the rebuilt set — the
 // field is their source of truth — and an exposed key is matched after the same
 // normalisation applyOverrides uses, so a differently-cased duplicate is not carried
 // alongside the field-derived value.
@@ -372,17 +480,15 @@ func (w *Workbench) showThemeEditor() {
 	}
 	cur := w.handlers.GetTheme()
 
-	// The grouped layout (issue #267) draws the 27 roles as five labelled sections
-	// across two columns (see themeEditorColumns): the left column stacks Session output
-	// (7) and UI chrome (7), the right column stacks Controls (8), Buttons and inputs (4)
-	// and Code (1). Each section costs one header row plus its roles, so both columns are
-	// exactly 16 rows tall, running from themeEditorContentTop (row 3) to row 18, clear
-	// of the Save/Reset/Cancel buttons at height-3=19. The geometry consts and the 22-row
-	// menu-bar ceiling are documented at themeEditorDialogH; checkThemeEditorLayout (run
-	// at init) asserts the split, the content-top and the height stay consistent, so this
-	// renderer can trust them. That ceiling is also why #265's four focus roles stay out
-	// of the editor (see themeGroups): a sixth section row would push the dialog's top
-	// frame onto the menu bar.
+	// The grouped layout (issue #267) draws the roles as five labelled sections across two
+	// columns (see themeEditorColumns): the left column stacks Session output and UI chrome,
+	// the right column stacks Controls, Buttons and inputs and Code. Each section costs one
+	// header row plus its roles. With the #279/#291 roles added the columns are taller than
+	// fit between themeEditorContentTop and the buttons, so the section content lives inside a
+	// scrolling viewport (built below): the preset row and the Save/Reset/Cancel buttons stay
+	// fixed while the grouped rows scroll, keeping the dialog at its 80x22 / 24-row-terminal
+	// size. checkThemeEditorLayout (run at init) asserts the scroll model is self-consistent,
+	// so this renderer can trust the geometry consts.
 	const (
 		width  = themeEditorDialogW
 		height = themeEditorDialogH
@@ -441,38 +547,51 @@ func (w *Workbench) showThemeEditor() {
 		swatches[i].FG = fg
 	}
 
-	// Two columns of labelled sections inside the width-80 dialog (issue #267).
-	// turbotui insets window content by the border (one column each side), so the usable
-	// content area is 78 columns wide (relative cols 0..77) — a child running to relative
-	// col 78 lands on the right border and is clipped. Each column holds a label, a
-	// 7-wide spec field ("#RRGGBB" / "default") and a 7-wide swatch ("invalid"); the right
-	// column's swatch must end no later than relative col 77.
-	//
-	// The split (themeEditorColumns) is by label width as much as balance: the right
-	// column carries the longest labels — "Code block background:" (22) and the
-	// dropdown/menu pairs (20) — so it gets the full themeEditorLabelW cell, while the
-	// left column's labels top out at "Indicators / badges:" (20). The left swatch ends
-	// at x = 2+20+7+2+7-1 = 37, clear of the right column at x=40; the right swatch ends
-	// at x = 40+22+7+2+7-1 = 77, just inside the border. Each column stacks whole groups
-	// (a header row then one role per row): the left holds Session output + UI chrome
-	// (8+8 = 16 rows), the right holds Controls + Buttons and inputs + Code (9+5+2 = 16
-	// rows), so both fill rows 3..18. checkThemeEditorLayout (init) guards these bounds.
+	// Two columns of labelled sections inside a scrolling viewport (issues #267/#279/#291).
+	// turbotui insets window content by the border, so the usable content area is 78 columns
+	// wide (relative cols 0..77). The viewport is a clipping container spanning the rows
+	// between the toggles and the buttons; its children are positioned by their column-local
+	// logical row (a header row then one role per row) and reflow() shifts and shows/hides
+	// them as scrollY changes, so rows outside the window are neither drawn, clicked nor
+	// focus-navigated. The left column ends at col 37 (clear of the right column at x=39); the
+	// right column's swatch ends at col 76, leaving themeEditorScrollbarX (77) for the fixed
+	// scrollbar. fields[i]/swatches[i] stay keyed by the single flat themeRoles index, so the
+	// scrolling only changes where each row is drawn — Save still reads every field regardless
+	// of scroll position. checkThemeEditorLayout (init) guards these bounds.
 	const fieldW, swatchW = themeEditorFieldW, themeEditorSwatchW
+
+	// viewport clips the scrolling section content to rows themeEditorContentTop ..
+	// themeEditorContentTop+themeEditorVisibleRows-1, stopping short of the scrollbar column.
+	viewport := tv.NewComponent(tv.Rect{X: 0, Y: themeEditorContentTop, W: themeEditorScrollbarX, H: themeEditorVisibleRows})
+	dialog.Window.AddContent(viewport)
+
+	// scrollRow couples a header/label/field/swatch component to its column-local logical
+	// row so reflow() can reposition and show/hide it as the viewport scrolls.
+	type scrollRow struct {
+		comp    *tv.VisualComponent
+		logical int
+	}
+	var rows []scrollRow
+	addRow := func(comp *tv.VisualComponent, logical int) {
+		viewport.AddChild(comp)
+		rows = append(rows, scrollRow{comp, logical})
+	}
+
 	i := 0
 	for _, col := range themeEditorColumns() {
-		rowY := themeEditorContentTop
+		logical := 0 // column-local row; viewport-relative Y is logical-scrollY (set by reflow)
 		for _, g := range col.groups {
-			dialog.Window.AddContent(themeSectionHeader(g.title,
-				tv.Rect{X: col.x, Y: rowY, W: col.labelW + fieldW + swatchW + 2, H: 1}))
-			rowY++
+			addRow(themeSectionHeader(g.title,
+				tv.Rect{X: col.x, Y: logical, W: col.labelW + fieldW + swatchW + 2, H: 1}).Root(), logical)
+			logical++
 			for _, role := range g.roles {
 				idx := i
-				dialog.Window.AddContent(dialogLabel(role.label+":", tv.Rect{X: col.x, Y: rowY, W: col.labelW, H: 1}))
-				box := tv.NewTextBox("", tv.Rect{X: col.x + col.labelW + 1, Y: rowY, W: fieldW, H: 1})
+				addRow(dialogLabel(role.label+":", tv.Rect{X: col.x, Y: logical, W: col.labelW, H: 1}).Root(), logical)
+				box := tv.NewTextBox("", tv.Rect{X: col.x + col.labelW + 1, Y: logical, W: fieldW, H: 1})
 				box.OnSubmit = func() { refresh() }
-				dialog.Window.AddContent(box)
+				addRow(box.Root(), logical)
 				fields[idx] = box
-				sw := tv.NewLabel(swatchSample, tv.Rect{X: col.x + col.labelW + fieldW + 2, Y: rowY, W: swatchW, H: 1})
+				sw := tv.NewLabel(swatchSample, tv.Rect{X: col.x + col.labelW + fieldW + 2, Y: logical, W: swatchW, H: 1})
 				sw.BG = tv.DefaultTheme.DialogBG
 				// Drive the swatch from the field's current value on every render (issue
 				// #243) so it tracks the field as the user types or moves focus away, not
@@ -482,11 +601,75 @@ func (w *Workbench) showThemeEditor() {
 					updateSwatch(idx)
 					baseDraw(c, surface)
 				}
-				dialog.Window.AddContent(sw)
+				addRow(sw.Root(), logical)
 				swatches[idx] = sw
 				i++
-				rowY++
+				logical++
 			}
+		}
+	}
+
+	// Scrolling state. scrollY is the first visible logical row; reflow() repositions every
+	// row to viewport-relative Y = logical-scrollY and hides those outside the window so they
+	// are not drawn, hit-tested or focus-navigated. scrollTo() clamps, reflows and redraws.
+	scrollY := 0
+	reflow := func() {
+		for _, r := range rows {
+			b := r.comp.Bounds
+			b.Y = r.logical - scrollY
+			r.comp.SetBounds(b)
+			r.comp.Visible = r.logical >= scrollY && r.logical < scrollY+themeEditorVisibleRows
+		}
+	}
+	// keepFocusVisible moves focus off a field that the latest scroll has hidden. A hidden
+	// focused widget stops receiving keys (the desktop's visibleInTree guard), which would
+	// otherwise strand keyboard scrolling until the user clicked or wheel-scrolled; moving
+	// focus to a still-visible field keeps Up/Down/PageUp/PageDown bubbling to this dialog.
+	keepFocusVisible := func() {
+		focusedHidden := false
+		for _, f := range fields {
+			if f.Root().Focused() && !f.Root().Visible {
+				focusedHidden = true
+				break
+			}
+		}
+		if !focusedHidden {
+			return
+		}
+		for _, f := range fields {
+			if f.Root().Visible {
+				w.desktop.SetFocus(f)
+				return
+			}
+		}
+	}
+	scrollTo := func(y int) {
+		n := clampThemeScroll(y)
+		if n == scrollY {
+			return
+		}
+		scrollY = n
+		reflow()
+		keepFocusVisible()
+		w.desktop.Redraw()
+	}
+
+	// The fixed vertical scrollbar, drawn only when the content overflows the viewport. Its
+	// DrawFn reads the live scrollY each frame, so the thumb tracks the current offset.
+	if themeEditorMaxScroll() > 0 {
+		bar := tv.NewComponent(tv.Rect{X: themeEditorScrollbarX, Y: themeEditorContentTop, W: 1, H: themeEditorVisibleRows})
+		bar.DrawFn = func(c *tv.VisualComponent, surface tv.Surface) {
+			drawThemeEditorScrollbar(surface, c.AbsoluteBounds(),
+				themeEditorContentRows(), themeEditorVisibleRows, scrollY,
+				tv.DefaultTheme.DialogFG, tv.DefaultTheme.DialogBG)
+		}
+		dialog.Window.AddContent(bar)
+		// Mouse wheel over the section content scrolls it. Delta is +1 for wheel-up and -1
+		// for wheel-down, so subtract it (scrollY -= Delta) to scroll the content the natural
+		// way — the same convention turbotui's own text view, tree and select use.
+		viewport.OnScrollFn = func(_ *tv.VisualComponent, event tui.ScrollEvent) bool {
+			scrollTo(scrollY - event.Delta)
+			return true
 		}
 	}
 
@@ -515,6 +698,7 @@ func (w *Workbench) showThemeEditor() {
 	noColor.SetChecked(cur.NoColor)
 	noShadow.SetChecked(cur.NoShadow)
 	loadFields(editedTheme(cur))
+	reflow() // position rows and hide those below the initial fold before the first paint
 	refresh()
 
 	var layer *tv.Layer
@@ -553,7 +737,26 @@ func (w *Workbench) showThemeEditor() {
 			cancel()
 			return true
 		}
-		return false
+		// Scroll the section viewport with Up/Down and PageUp/PageDown, but only when there
+		// is something to scroll — otherwise leave the arrows to the desktop's focus
+		// navigation so the editor behaves exactly as before when the content fits. These
+		// keys reach here by bubbling up from a focused field, which ignores them.
+		if themeEditorMaxScroll() == 0 {
+			return false
+		}
+		switch event.Key {
+		case tui.KeyUp:
+			scrollTo(scrollY - 1)
+		case tui.KeyDown:
+			scrollTo(scrollY + 1)
+		case tui.KeyPageUp:
+			scrollTo(scrollY - themeEditorVisibleRows)
+		case tui.KeyPageDown:
+			scrollTo(scrollY + themeEditorVisibleRows)
+		default:
+			return false
+		}
+		return true
 	}
 
 	layer = tv.NewModalLayer("theme-editor", dialog)

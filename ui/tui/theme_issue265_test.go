@@ -648,48 +648,55 @@ func TestIssue265DefaultButtonContrastIsTheDocumentedGamutLimit(t *testing.T) {
 // resting roles grew each column by one row (#265), so this guards the layout the issue's
 // step (6) calls out. The constants mirror showThemeEditor; if they drift there, update here.
 func TestIssue265EditorLayoutFits(t *testing.T) {
-	const width = 80
-	const height = 22
-	const fieldW, swatchW = 7, 7
-	columns := [...]struct{ x, labelW int }{
-		{2, 20},                 // left column
-		{40, themeEditorLabelW}, // right column (longest labels)
-	}
-	half := (len(themeRoles) + 1) / 2
+	const fieldW, swatchW = themeEditorFieldW, themeEditorSwatchW
 
-	maxRow := 0
-	for i, role := range themeRoles {
-		col, row := 0, 4+i
-		if i >= half {
-			col, row = 1, 4+i-half
+	cols := themeEditorColumns()
+	placed := 0
+	for ci, col := range cols {
+		// Columns must not collide: the swatch must end before the next column's x, and the
+		// last column before the fixed scrollbar column.
+		swatchEnd := col.x + col.labelW + 1 + fieldW + 1 + swatchW - 1
+		limit := themeEditorScrollbarX - 1
+		if ci+1 < len(cols) {
+			limit = cols[ci+1].x - 1
 		}
-		if row > maxRow {
-			maxRow = row
+		if swatchEnd > limit {
+			t.Errorf("column %d swatch ends at col %d, past its limit %d — columns collide or overrun the scrollbar",
+				ci, swatchEnd, limit)
 		}
-		lx, labelW := columns[col].x, columns[col].labelW
-		// Label cell must hold the descriptive label plus its trailing ":".
-		if got := len(role.label) + 1; got > labelW {
-			t.Errorf("role %q label %q+\":\" is %d cols but column %d cell is only %d wide — it would clip on screen",
-				role.key, role.label, got, col, labelW)
+		for _, g := range col.groups {
+			for _, role := range g.roles {
+				if got := len([]rune(role.label)) + 1; got > col.labelW {
+					t.Errorf("role %q label %q+\":\" is %d cols but column %d cell is only %d wide — it would clip on screen",
+						role.key, role.label, got, ci, col.labelW)
+				}
+				placed++
+			}
 		}
-		// The swatch must end within the dialog's content area (relative cols 0..width-3,
-		// i.e. inside the right border at width-2).
-		swatchEnd := lx + labelW + 1 + fieldW + 1 + swatchW - 1
-		if swatchEnd > width-3 {
-			t.Errorf("role %q swatch ends at col %d, past the content area (max %d) — it would be clipped by the border",
-				role.key, swatchEnd, width-3)
-		}
+	}
+	if placed != len(themeRoles) {
+		t.Errorf("columns place %d roles but themeRoles has %d", placed, len(themeRoles))
 	}
 
-	// The "Spec:" hint sits at height-4; the last role row must stay above it, and the
-	// dialog must clear the always-on-top menu bar when centred on a 24-row terminal.
-	if maxRow >= height-4 {
-		t.Errorf("last role row %d collides with the Spec hint at height-4=%d — grow the height or rebalance the columns", maxRow, height-4)
+	// The scroll viewport must be non-empty and clear the Save/Reset/Cancel buttons, and the
+	// scroll range must be able to bring the tallest column's last row into view.
+	if themeEditorVisibleRows < 1 {
+		t.Fatalf("viewport is %d rows — nothing would show", themeEditorVisibleRows)
 	}
+	const buttonRow = themeEditorDialogH - 3
+	if last := themeEditorContentTop + themeEditorVisibleRows - 1; last >= buttonRow {
+		t.Errorf("viewport last row %d collides with the buttons at row %d", last, buttonRow)
+	}
+	if reveal := themeEditorContentRows() - themeEditorMaxScroll(); reveal > themeEditorVisibleRows {
+		t.Errorf("max scroll leaves %d rows for a %d-row viewport — the last roles can never be revealed",
+			reveal, themeEditorVisibleRows)
+	}
+
+	// The centred dialog must clear the always-on-top menu bar on a 24-row terminal.
 	const minTerminalRows = 24
-	if y := (minTerminalRows - height) / 2; y < 1 {
+	if y := (minTerminalRows - themeEditorDialogH) / 2; y < 1 {
 		t.Errorf("centred dialog top y=%d on a %d-row terminal does not clear the menu bar (row 0) — height %d is too tall",
-			y, minTerminalRows, height)
+			y, minTerminalRows, themeEditorDialogH)
 	}
 }
 

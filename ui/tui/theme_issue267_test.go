@@ -39,9 +39,9 @@ var issue267WantGroups = []struct {
 	keys  []string
 }{
 	{"Session output", []string{"user", "agent", "note", "tool", "result", "info", "error"}},
-	{"UI chrome", []string{"desktop_fg", "desktop_bg", "panel_fg", "panel_bg", "title", "divider", "accent"}},
+	{"UI chrome", []string{"desktop_fg", "desktop_bg", "panel_fg", "panel_bg", "window_fg", "window_bg", "title", "divider", "accent"}},
 	{"Controls", []string{"menu_bar_fg", "menu_bar_bg", "dropdown_fg", "dropdown_bg", "dropdown_focus_fg", "dropdown_focus_bg", "dropdown_select_fg", "dropdown_select_bg"}},
-	{"Buttons and inputs", []string{"button_fg", "button_bg", "input_fg", "input_bg"}},
+	{"Buttons and inputs", []string{"button_fg", "button_bg", "input_fg", "input_bg", "text_selection_fg", "text_selection_bg"}},
 	{"Code", []string{"code_bg"}},
 }
 
@@ -87,7 +87,7 @@ func TestIssue267GroupMembership(t *testing.T) {
 // math is sized from these (left = 8+8 rows, right = 9+5+2 rows); a wrong count would
 // overflow a column past the buttons or leave the dialog mis-sized.
 func TestIssue267GroupCounts(t *testing.T) {
-	wantCounts := []int{7, 7, 8, 4, 1}
+	wantCounts := []int{7, 9, 8, 6, 1}
 	total := 0
 	for i, g := range themeGroups {
 		if len(g.roles) != wantCounts[i] {
@@ -95,8 +95,8 @@ func TestIssue267GroupCounts(t *testing.T) {
 		}
 		total += len(g.roles)
 	}
-	if total != 27 {
-		t.Errorf("groups hold %d roles total, want 27", total)
+	if total != 31 {
+		t.Errorf("groups hold %d roles total, want 31", total)
 	}
 }
 
@@ -339,10 +339,15 @@ func findRunes(rows [][]rune, needle string) (row, col int, ok bool) {
 // clipped header is the regression this guards. The "+ ─" suffix ensures we match the
 // header row, not an incidental substring (e.g. "Code" inside "Code block background").
 func TestIssue267AllSectionHeadersRender(t *testing.T) {
-	_, rows := issue267Render(t)
+	w, _ := issue267Render(t)
+	needles := make([]string, 0, len(themeGroups))
 	for _, g := range themeGroups {
-		if _, _, ok := findRunes(rows, g.title+" ─"); !ok {
-			t.Errorf("section header %q (title + ─ rule) is not on screen — the grouped layout is missing its heading", g.title)
+		needles = append(needles, g.title+" ─")
+	}
+	pos := editorScrollFind(w, needles)
+	for _, g := range themeGroups {
+		if !pos[g.title+" ─"].found {
+			t.Errorf("section header %q (title + ─ rule) is not on screen at any scroll offset — the grouped layout is missing its heading", g.title)
 		}
 	}
 }
@@ -364,35 +369,44 @@ func issue267labelColumn(col int) string {
 // that group's header. If a group's roles were scattered across columns or interleaved
 // with another group's, this fails.
 func TestIssue267RolesGroupedContiguouslyInOneColumn(t *testing.T) {
-	_, rows := issue267Render(t)
+	w, _ := issue267Render(t)
+	// Collect every header and role label across all scroll offsets, with each one's column
+	// and column-local logical row, so the grouping holds end-to-end even though no single
+	// frame shows the whole column.
+	var needles []string
 	for _, g := range themeGroups {
-		hRow, hCol, ok := findRunes(rows, g.title+" ─")
-		if !ok {
-			t.Errorf("group %q: header not found", g.title)
+		needles = append(needles, g.title+" ─")
+		for _, role := range g.roles {
+			needles = append(needles, issue243WantLabels[role.key]+":")
+		}
+	}
+	pos := editorScrollFind(w, needles)
+
+	for _, g := range themeGroups {
+		hp := pos[g.title+" ─"]
+		if !hp.found {
+			t.Errorf("group %q: header not found at any offset", g.title)
 			continue
 		}
-		hSide := issue267labelColumn(hCol)
 		var roleRows []int
 		for _, role := range g.roles {
-			label := issue243WantLabels[role.key] + ":"
-			rRow, rCol, ok := findRunes(rows, label)
-			if !ok {
-				t.Errorf("group %q: role label %q not on screen", g.title, label)
+			rp := pos[issue243WantLabels[role.key]+":"]
+			if !rp.found {
+				t.Errorf("group %q: role label %q not on screen at any offset", g.title, role.key)
 				continue
 			}
-			if side := issue267labelColumn(rCol); side != hSide {
-				t.Errorf("group %q role %q renders in the %s column but its header is in the %s column — the group is split across columns",
-					g.title, role.key, side, hSide)
+			if rp.isRight != hp.isRight {
+				t.Errorf("group %q role %q renders in a different column from its header — the group is split across columns", g.title, role.key)
 			}
-			roleRows = append(roleRows, rRow)
+			roleRows = append(roleRows, rp.logical)
 		}
 		if len(roleRows) != len(g.roles) {
 			continue
 		}
-		// Rows must be the header row + 1, +2, … contiguous with no gap.
+		// Logical rows must be the header row + 1, +2, … contiguous with no gap.
 		sort.Ints(roleRows)
-		if roleRows[0] != hRow+1 {
-			t.Errorf("group %q: first role is on row %d but the header is on row %d — they are not adjacent", g.title, roleRows[0], hRow)
+		if roleRows[0] != hp.logical+1 {
+			t.Errorf("group %q: first role is on logical row %d but the header is on row %d — they are not adjacent", g.title, roleRows[0], hp.logical)
 		}
 		for i := 1; i < len(roleRows); i++ {
 			if roleRows[i] != roleRows[i-1]+1 {
@@ -410,26 +424,34 @@ func TestIssue267RolesGroupedContiguouslyInOneColumn(t *testing.T) {
 // slot. A divergence means a field is seeded for one role but shown/saved under
 // another — the silent mis-wire the grouping must not introduce.
 func TestIssue267OnScreenOrderMatchesThemeRoles(t *testing.T) {
-	_, rows := issue267Render(t)
+	w, _ := issue267Render(t)
+	// Reconstruct each role's (column, logical row) across all scroll offsets, then order
+	// the labels the way the editor walks them (left column top-down, then right column
+	// top-down) and assert that equals themeRoles. The scroll viewport never shows the whole
+	// column at once, so the order is recovered from logical rows, not a single frame.
 	type pos struct {
-		key      string
-		isRight  bool
-		row, col int
+		key     string
+		isRight bool
+		logical int
 	}
+	needles := make([]string, 0, len(themeRoles))
+	for _, role := range themeRoles {
+		needles = append(needles, issue243WantLabels[role.key]+":")
+	}
+	found := editorScrollFind(w, needles)
 	var got []pos
 	for _, role := range themeRoles {
-		label := issue243WantLabels[role.key] + ":"
-		r, c, ok := findRunes(rows, label)
-		if !ok {
-			t.Fatalf("role %q label %q not on screen", role.key, label)
+		p := found[issue243WantLabels[role.key]+":"]
+		if !p.found {
+			t.Fatalf("role %q label not on screen at any scroll offset", role.key)
 		}
-		got = append(got, pos{role.key, issue267labelColumn(c) == "right", r, c})
+		got = append(got, pos{role.key, p.isRight, p.logical})
 	}
 	sort.SliceStable(got, func(i, j int) bool {
 		if got[i].isRight != got[j].isRight {
 			return !got[i].isRight // left column first
 		}
-		return got[i].row < got[j].row
+		return got[i].logical < got[j].logical
 	})
 	for i, role := range themeRoles {
 		if got[i].key != role.key {
@@ -445,13 +467,19 @@ func TestIssue267OnScreenOrderMatchesThemeRoles(t *testing.T) {
 // might miss if labels and fields were shifted together: here the *value* must match
 // the *label's* role, end to end through the real loadFields path.
 func TestIssue267FieldsSeededInPlacementOrder(t *testing.T) {
-	_, rows := issue267Render(t)
+	w, _ := issue267Render(t)
 	seeded := editedTheme(config.ThemeConfig{})
 	for _, role := range themeRoles {
 		label := issue243WantLabels[role.key] + ":"
+		// The role may sit below the initial fold; scroll it into view, then read the field
+		// token from the frame on which it is visible.
+		if !scrollEditorToReveal(w, label) {
+			t.Fatalf("role %q label not on screen at any scroll offset", role.key)
+		}
+		rows := editorGrid(w)
 		r, c, ok := findRunes(rows, label)
 		if !ok {
-			t.Fatalf("role %q label not on screen", role.key)
+			t.Fatalf("role %q label vanished after scrolling it into view", role.key)
 		}
 		// The spec field is the first whitespace-delimited token after the label cell.
 		p := c + len([]rune(label))
@@ -477,24 +505,30 @@ func TestIssue267FieldsSeededInPlacementOrder(t *testing.T) {
 // Save/Cancel must all be visible. The right column exactly fills its 16 rows, so a
 // single mis-count would push code_bg onto the button row and clip one or the other.
 func TestIssue267LastSectionClearsButtons(t *testing.T) {
-	_, rows := issue267Render(t)
+	w, _ := issue267Render(t)
 
+	// Buttons are fixed and visible before any scrolling.
+	for _, btn := range []string{"Reset", "Save", "Cancel"} {
+		if _, _, ok := findRunes(editorGrid(w), btn); !ok {
+			t.Errorf("%s button is not visible — the layout pushed it off the dialog", btn)
+		}
+	}
+
+	// Scroll code_bg into view, then assert it lands above the Save button on that frame.
+	if !scrollEditorToReveal(w, "Code block background:") {
+		t.Fatalf("code_bg never became visible after scrolling — the last section is unreachable")
+	}
+	rows := editorGrid(w)
 	codeRow, _, ok := findRunes(rows, "Code block background:")
 	if !ok {
-		t.Fatalf("code_bg row not on screen — the last section was clipped")
+		t.Fatalf("code_bg vanished after scrolling it into view")
 	}
-	// Buttons render as captions between flush brackets ("[ Save  ]"); match the caption.
 	saveRow, _, ok := findRunes(rows, "Save")
 	if !ok {
 		t.Fatalf("Save button not on screen")
 	}
 	if codeRow >= saveRow {
-		t.Errorf("code_bg is on row %d but the Save button is on row %d — the last section collides with or sits below the buttons", codeRow, saveRow)
-	}
-	for _, btn := range []string{"Reset", "Save", "Cancel"} {
-		if _, _, ok := findRunes(rows, btn); !ok {
-			t.Errorf("%s button is not visible — the grown layout pushed it off the dialog", btn)
-		}
+		t.Errorf("code_bg is on row %d but the Save button is on row %d — the scrolled section collides with or sits below the buttons", codeRow, saveRow)
 	}
 }
 
@@ -504,7 +538,7 @@ func TestIssue267LastSectionClearsButtons(t *testing.T) {
 // every section between them. The headless app is ≥24 rows, so this asserts the dialog's
 // own frame fits in a 24-row budget rather than resizing the buffer.
 func TestIssue267DialogFitsTwentyFourRowTerminal(t *testing.T) {
-	_, rows := issue267Render(t)
+	w, rows := issue267Render(t)
 
 	topRow, bottomRow := -1, -1
 	for y, r := range rows {
@@ -521,14 +555,21 @@ func TestIssue267DialogFitsTwentyFourRowTerminal(t *testing.T) {
 	if topRow < 1 {
 		t.Errorf("dialog top frame is on row %d — it overwrites the always-on-top menu bar at row 0", topRow)
 	}
+	// The dialog stays at its fixed 22-row height regardless of scrolling — the content
+	// scrolls inside it, the frame does not grow — so it must fit a 24-row terminal.
 	if h := bottomRow - topRow + 1; h > 24 {
 		t.Errorf("dialog frame spans %d rows (top=%d bottom=%d) — taller than a 24-row terminal", h, topRow, bottomRow)
 	}
-	// Every section header and the code_bg role must sit strictly between the frames.
+	// Every section header must, when scrolled into view, sit strictly inside the (fixed)
+	// dialog frame — the scroll viewport lives between the frames, so no header escapes it.
 	for _, g := range themeGroups {
-		hr, _, ok := findRunes(rows, g.title+" ─")
+		if !scrollEditorToReveal(w, g.title+" ─") {
+			t.Errorf("section %q header never became visible inside the frame", g.title)
+			continue
+		}
+		hr, _, ok := findRunes(editorGrid(w), g.title+" ─")
 		if !ok {
-			t.Errorf("section %q header missing inside the frame", g.title)
+			t.Errorf("section %q header vanished after scrolling it into view", g.title)
 			continue
 		}
 		if hr <= topRow || hr >= bottomRow {
@@ -549,7 +590,9 @@ func TestIssue267HeadersRenderUnderNoColor(t *testing.T) {
 		SetTheme: func(config.ThemeConfig) {},
 	})
 	w.showThemeEditor()
-	screen := screenText(w)
+	// Headers below the initial fold (e.g. "Code") only render after scrolling, so aggregate
+	// the rendered rows across every scroll offset before asserting each header is present.
+	screen := editorScrollAggregate(t, w)
 	for _, g := range themeGroups {
 		if !containsOnScreen(screen, g.title) {
 			t.Errorf("section header %q vanished under NO_COLOR", g.title)

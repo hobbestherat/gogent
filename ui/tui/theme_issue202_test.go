@@ -243,6 +243,10 @@ func TestIssue202DefaultPaletteFindingsContract(t *testing.T) {
 		{"dropdown", def.DropdownFG, def.DropdownBG, minContrastText},
 		{"dropdown-focus", def.DropdownFocusFG, def.DropdownFocusBG, minContrastText},
 		{"dropdown-select", def.DropdownSelectFG, def.DropdownSelectBG, minContrastText},
+		// Text-selection role (issue #279): a selected input cell is repainted to
+		// TextSelectionFG on TextSelectionBG, audited against each other. Inserted right after
+		// dropdown-select.
+		{"text-selection", def.TextSelectionFG, def.TextSelectionBG, minContrastText},
 		// Button/input roles (issue #265) carry their own fills. The resting button is the
 		// stock white-on-green (ANSI 15/2) at 3.11:1, held to the non-text/large floor as a
 		// documented gamut limit; the rest clear the body-text tier.

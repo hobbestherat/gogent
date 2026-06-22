@@ -251,8 +251,8 @@ func issue243RoleByKey(t *testing.T) map[string]themeRole {
 // out in two columns sized from len(themeRoles) (half := (len+1)/2), so a wrong count
 // either overflows the widened dialog or leaves empty rows — a layout regression.
 func TestIssue243ThemeRolesCount(t *testing.T) {
-	if got, want := len(themeRoles), 27; got != want {
-		t.Fatalf("len(themeRoles) = %d, want %d (the two-column layout is sized from this)", got, want)
+	if got, want := len(themeRoles), 31; got != want {
+		t.Fatalf("len(themeRoles) = %d, want %d (27 original + #291 window_fg/bg + #279 text_selection_fg/bg)", got, want)
 	}
 }
 
@@ -681,6 +681,8 @@ var issue243WantLabels = map[string]string{
 	"desktop_bg":         "Desktop background",
 	"panel_fg":           "Sidebar text",
 	"panel_bg":           "Sidebar background",
+	"window_fg":          "Window text",
+	"window_bg":          "Window background",
 	"title":              "Panel titles",
 	"divider":            "Borders / dividers",
 	"accent":             "Indicators / badges",
@@ -696,6 +698,8 @@ var issue243WantLabels = map[string]string{
 	"button_bg":          "Button background",
 	"input_fg":           "Input text",
 	"input_bg":           "Input background",
+	"text_selection_fg":  "Selected text fg",
+	"text_selection_bg":  "Selected text bg",
 	"code_bg":            "Code block background",
 }
 
@@ -781,7 +785,9 @@ func TestIssue243CodeBlockLabelRendersFully(t *testing.T) {
 		SetTheme: func(config.ThemeConfig) {},
 	})
 	w.showThemeEditor()
-	screen := screenText(w)
+	// The editor scrolls (issues #279/#291), so code_bg may sit below the initial fold;
+	// aggregate the rendered rows across every scroll offset before asserting.
+	screen := editorScrollAggregate(t, w)
 
 	if !containsOnScreen(screen, "Code block") {
 		t.Fatalf("setup: the code_bg label did not render at all — screen lacks 'Code block'")
@@ -873,8 +879,10 @@ func TestIssue243DialogFitsEightyColumnTerminal(t *testing.T) {
 	// the face bounds, a button whose bounds are wider than its label (e.g. Save's W:9 vs
 	// buttonWidth("Save")=8) renders the caption centred between flush brackets ("[ Save  ]"),
 	// so assert the caption is on screen rather than a contiguous "[ Save ]". Clipping/overflow
-	// is already guarded by the right-border integrity check above.
-	screen := screenText(w)
+	// is already guarded by the right-border integrity check above. The editor scrolls
+	// (#279/#291), so code_bg sits below the initial fold; aggregate across scroll offsets.
+	// The buttons stay fixed (outside the viewport), so they appear at every offset.
+	screen := editorScrollAggregate(t, w)
 	for _, needle := range []string{"Code block background", "Sidebar text", "Cancel", "Save"} {
 		if !containsOnScreen(screen, needle) {
 			t.Errorf("expected %q to be visible inside the 80-col dialog; it was clipped or absent", needle)
@@ -897,7 +905,9 @@ func TestIssue243AllRoleLabelsRenderFully(t *testing.T) {
 		SetTheme: func(config.ThemeConfig) {},
 	})
 	w.showThemeEditor()
-	screen := screenText(w)
+	// The editor scrolls (issues #279/#291); roles below the initial fold (divider, accent,
+	// code_bg, …) only render at a later offset, so aggregate across all scroll offsets.
+	screen := editorScrollAggregate(t, w)
 
 	for _, r := range themeRoles {
 		want, ok := issue243WantLabels[r.key]
