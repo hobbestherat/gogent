@@ -390,6 +390,29 @@ func NewWorkbench(models []*config.ModelConfig) *Workbench {
 	w.sidebar = newSidebar(w)
 	w.sidebar.reposition(app.Width(), app.Height())
 	w.desktop.AddLayer(w.sidebar.layer)
+	// Re-sync the derived active-session state (sidebar highlight, TODO region,
+	// Overall band) whenever the desktop raises a different window on its own —
+	// notably click-to-raise, which the toolkit handles internally without routing
+	// through Workbench.Focus (issue #304). Before this hook, clicking a background
+	// session window while idle left the sidebar highlight stranded until the busy
+	// ticker or a session event re-synced it.
+	//
+	// The desktop fires this on every top-layer change, including opening/closing a
+	// dialog that sits above the windows — but those do not change the active
+	// session (ActiveID falls back to the top-most session beneath), so we guard on
+	// the resolved active session actually changing. sidebar.focused records the id
+	// of the last session synced through refreshOverall (it always calls
+	// focusSession(ActiveID())), so an unchanged ActiveID means there is nothing to
+	// re-sync — skipping it keeps a dialog open from triggering a redundant
+	// GetStatistics fetch. refreshOverall only updates stored state and mutates no
+	// layers, so it cannot re-enter this hook; request a coalesced redraw to paint it.
+	w.desktop.OnActiveLayerChange(func(*tv.Layer) {
+		if w.sidebar == nil || w.ActiveID() == w.sidebar.focused {
+			return
+		}
+		w.refreshOverall()
+		w.desktop.RequestRedraw()
+	})
 	// Keep the sidebar pinned to the right edge across terminal resizes.
 	app.OnResize(func(tui.ResizeEvent) {
 		w.sidebar.reposition(w.app.Width(), w.app.Height())
