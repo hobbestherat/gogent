@@ -63,7 +63,8 @@ func TestTodoToolRejectsBadArgs(t *testing.T) {
 		name string
 		args map[string]interface{}
 	}{
-		{"missing todos key", map[string]interface{}{}},
+		// Note: an omitted "todos" key is no longer an error — it is read mode
+		// (issue #263), covered by the partner's read-mode test.
 		{"todos not array", map[string]interface{}{"todos": "nope"}},
 		{"empty content", map[string]interface{}{"todos": []interface{}{
 			map[string]interface{}{"content": "  "},

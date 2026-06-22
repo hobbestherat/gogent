@@ -911,43 +911,67 @@ func (g *Gogent) initializeToolRegistry() {
 		},
 	})
 
-	// todo tracks the session's task checklist (issue #43). Each call replaces the
-	// whole list; the new list is rendered in the sidebar so the user can follow
-	// multi-step progress. It is intentionally not read-only (it mutates session
-	// state) so concurrent calls stay serial, but it is retained in plan mode as a
-	// way to lay out a plan's steps.
+	// todo tracks the session's task checklist (issues #43, #263). The tool has
+	// two modes. Write mode (todos present) replaces the whole list and echoes the
+	// stored list back so the call's effect is unambiguous in the transcript. Read
+	// mode (todos omitted) returns the current list without mutating it, so the
+	// model can query live state before deciding its next step. The list is shown
+	// live in the sidebar and injected into the system prompt every turn (so it
+	// survives compaction). It is intentionally not read-only (write mode mutates
+	// session state) so concurrent calls stay serial, but it is retained in plan
+	// mode as a way to lay out a plan's steps.
 	g.toolRegistry.Register(&tool.Tool{
 		Name:        "todo",
-		Description: "Record or update the session's task checklist. Pass the full list each call (it replaces the previous one). Each item is {content, status} where status is pending, in_progress or completed (defaults to pending). The list is shown live in the sidebar; use it to lay out and track multi-step work.",
+		Description: "Record, update or read the session's task checklist. Pass `todos` (the full list) to replace the checklist; each item is {content, status?, note?} where status is pending, in_progress or completed (defaults to pending) and note is an optional finding/detail. Omit `todos` to read the current list back without changing it. Every call returns the stored list, its count and a summary. The list is shown live in the sidebar and stays in the system prompt; use it to lay out and track multi-step work.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"todos": map[string]interface{}{
 					"type":        "array",
-					"description": "The complete checklist. Each entry is {content: string, status?: pending|in_progress|completed}.",
+					"description": "The complete checklist. Omit to read the current list. Each entry is {content: string, status?: pending|in_progress|completed, note?: string}.",
 					"items": map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
 							"content": map[string]interface{}{"type": "string"},
 							"status":  map[string]interface{}{"type": "string", "enum": []string{"pending", "in_progress", "completed"}},
+							"note":    map[string]interface{}{"type": "string", "description": "Optional finding, rationale or detail attached to this item."},
 						},
 						"required": []string{"content"},
 					},
 				},
 			},
-			"required": []string{"todos"},
 		},
 		Execute: func(args map[string]interface{}, ctx tool.ToolContext) (interface{}, error) {
 			session := g.GetUserSession(ctx.SessionID)
 			if session == nil {
 				return nil, fmt.Errorf("session not found: %s", ctx.SessionID)
 			}
-			items, err := parseTodoItems(args["todos"])
+			// Read mode: no todos argument provided. Return the current list
+			// untouched so the model can query live state (issue #263).
+			raw, present := args["todos"]
+			if !present {
+				items := session.Todos()
+				return map[string]interface{}{
+					"mode":    "read",
+					"count":   len(items),
+					"todos":   items,
+					"summary": agent.TodoSummary(items),
+				}, nil
+			}
+			// Write mode: replace the checklist and echo the stored list back.
+			items, err := parseTodoItems(raw)
 			if err != nil {
 				return nil, err
 			}
 			session.SetTodos(items)
-			return map[string]interface{}{"success": true, "count": len(items)}, nil
+			stored := session.Todos()
+			return map[string]interface{}{
+				"mode":    "write",
+				"success": true,
+				"count":   len(stored),
+				"todos":   stored,
+				"summary": agent.TodoSummary(stored),
+			}, nil
 		},
 	})
 
@@ -1464,9 +1488,10 @@ func parseEditOps(raw interface{}) ([]fileops.EditOp, error) {
 }
 
 // parseTodoItems converts the todo tool's "todos" argument (a JSON array of
-// {content, status?} objects) into agent.TodoItem values, validating that the
-// array is present and well-shaped (issue #43). A missing/unknown status
-// defaults to pending via agent.NormalizeTodoStatus.
+// {content, status?, note?} objects) into agent.TodoItem values, validating that
+// the array is present and well-shaped (issues #43, #263). A missing/unknown
+// status defaults to pending via agent.NormalizeTodoStatus; note is optional and
+// trimmed.
 func parseTodoItems(raw interface{}) ([]agent.TodoItem, error) {
 	arr, ok := raw.([]interface{})
 	if !ok {
@@ -1483,7 +1508,12 @@ func parseTodoItems(raw interface{}) ([]agent.TodoItem, error) {
 			return nil, fmt.Errorf("todo %d: content is required", i+1)
 		}
 		status, _ := m["status"].(string)
-		items = append(items, agent.TodoItem{Content: content, Status: agent.NormalizeTodoStatus(status)})
+		note, _ := m["note"].(string)
+		items = append(items, agent.TodoItem{
+			Content: content,
+			Status:  agent.NormalizeTodoStatus(status),
+			Note:    strings.TrimSpace(note),
+		})
 	}
 	return items, nil
 }

@@ -656,13 +656,19 @@ func (s *sidebar) applyTodo(sessionID string, items []agent.TodoItem) {
 	s.todos[sessionID] = cp
 }
 
-// todoLabel renders one checklist row: a status glyph followed by the content.
+// todoLabel renders one checklist row: a status glyph, the content, and an
+// optional note in parentheses (issue #263), e.g. "☐ Read main.go (found the bug
+// on line 42)".
 func todoLabel(it agent.TodoItem) string {
 	content := strings.TrimSpace(it.Content)
 	if content == "" {
 		content = "(empty)"
 	}
-	return fmt.Sprintf("%s %s", todoStatusIcon(it.Status), content)
+	label := fmt.Sprintf("%s %s", todoStatusIcon(it.Status), content)
+	if note := strings.TrimSpace(it.Note); note != "" {
+		label += fmt.Sprintf(" (%s)", note)
+	}
+	return label
 }
 
 // todoStatusIcon maps a todo status to a compact glyph for the middle TODO

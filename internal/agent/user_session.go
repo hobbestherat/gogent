@@ -159,10 +159,12 @@ type UserSession struct {
 	rateLimiter *RateLimiter
 
 	// systemContextFn, when set, returns extra system-prompt context (project
-	// AGENTS.md instructions and the available-skills index) appended to every
-	// agent loop's system prompt. Evaluated per loop so runtime changes (skill
-	// activation) are reflected.
-	systemContextFn func() string
+	// AGENTS.md instructions, the available-skills index and the live todo
+	// checklist) appended to every agent loop's system prompt. It takes the
+	// session id so per-session state (the checklist) can be threaded in.
+	// Evaluated per loop so runtime changes (skill activation, todo updates) are
+	// reflected.
+	systemContextFn func(sessionID string) string
 
 	// Interactive (experimental) sub-agent bookkeeping.
 	interactive map[string]*InteractiveAgent
@@ -408,9 +410,10 @@ func (s *UserSession) UsesFastCompression() bool {
 }
 
 // SetSystemContextProvider registers a function returning extra system-prompt
-// context (project AGENTS.md instructions and the available-skills index). It is
-// evaluated at the start of each agent loop.
-func (s *UserSession) SetSystemContextProvider(fn func() string) {
+// context (project AGENTS.md instructions, the available-skills index and the
+// live todo checklist). It receives the session id so per-session state can be
+// threaded in, and is evaluated at the start of each agent loop.
+func (s *UserSession) SetSystemContextProvider(fn func(sessionID string) string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.systemContextFn = fn
@@ -424,7 +427,7 @@ func (s *UserSession) systemContext() string {
 	if fn == nil {
 		return ""
 	}
-	return fn()
+	return fn(s.ID)
 }
 
 // SetSubAgentLimiter installs the (typically process-wide) limiter that bounds
