@@ -576,33 +576,45 @@ func (sw *SessionWindow) handleMaximizeClick(event tui.ClickEvent) bool {
 // dragging is left untouched; it also skips minimized windows so their single-row
 // title bar is not enlarged back to MinHeight.
 func (sw *SessionWindow) installSidebarClamp() {
-	base := sw.window.Component.OnClickFn
-	sw.window.Component.OnClickFn = func(c *tv.VisualComponent, event tui.ClickEvent) bool {
-		before := sw.window.Component.Bounds
+	sw.wb.installSidebarClampOn(sw.window)
+}
+
+// installSidebarClampOn wraps win's click handler so that, after the base
+// handler has moved or resized the window, its bounds are constrained back into
+// the pinned window area (issue #106) — the same constraint SessionWindow
+// enforces. It is shared by session windows (via installSidebarClamp) and the
+// sub-agent monologue popup (issue #319), both of which are bare tv.NewWindows.
+// constrainWindowToBounds is a no-op while the sidebar is unpinned, so free
+// dragging is left untouched.
+func (w *Workbench) installSidebarClampOn(win *tv.Window) {
+	base := win.Component.OnClickFn
+	win.Component.OnClickFn = func(c *tv.VisualComponent, event tui.ClickEvent) bool {
+		before := win.Component.Bounds
 		handled := base(c, event)
-		sw.constrainToBounds(before)
+		constrainWindowToBounds(w, win, before)
 		return handled
 	}
 }
 
-// constrainToBounds pulls the window back inside the pinned window area after a
-// click moved or resized it. It tells drag and resize apart by what changed: a
-// resize (width/height changed) keeps the origin and caps the size at the area, so
-// the anchored edges stay put and only the dragged edge stops at the sidebar; a
-// drag (only the origin changed) keeps the size and shifts the origin, so the
-// window slides along the boundary instead of jumping. It is a no-op while the
-// sidebar is unpinned, the window is minimized, or the click changed nothing
-// (issue #106).
-func (sw *SessionWindow) constrainToBounds(before tv.Rect) {
-	if !sw.wb.sidebarPinned || sw.window.IsMinimized() {
+// constrainWindowToBounds is the pure-geometry core of the session-window sidebar
+// clamp (issue #106), lifted to a free function so the sub-agent monologue popup can
+// reuse it (issue #319). before is win's bounds before the click handler ran. It pulls win
+// back inside wb.windowArea() after a click moved or resized it, telling drag and
+// resize apart by what changed: a resize (width/height changed) keeps the origin and
+// caps the size at the area, so the anchored edges stay put and only the dragged edge
+// stops at the sidebar; a drag (only the origin changed) keeps the size and shifts the
+// origin, so the window slides along the boundary instead of jumping. It is a no-op
+// while the sidebar is unpinned, win is minimized, or the click changed nothing.
+func constrainWindowToBounds(wb *Workbench, win *tv.Window, before tv.Rect) {
+	if !wb.sidebarPinned || win.IsMinimized() {
 		return
 	}
-	b := sw.window.Component.Bounds
+	b := win.Component.Bounds
 	if b == before {
 		return
 	}
-	area := sw.wb.windowArea()
-	minW, minH := sw.window.MinWidth, sw.window.MinHeight
+	area := wb.windowArea()
+	minW, minH := win.MinWidth, win.MinHeight
 	var clamped tv.Rect
 	if b.W != before.W || b.H != before.H {
 		clamped = clampWindowSize(b, area, minW, minH)
@@ -610,7 +622,7 @@ func (sw *SessionWindow) constrainToBounds(before tv.Rect) {
 		clamped = clampWindowRect(b, area.W, area.H, minW, minH)
 	}
 	if clamped != b {
-		sw.window.Component.SetBounds(clamped)
+		win.Component.SetBounds(clamped)
 	}
 }
 
@@ -618,14 +630,22 @@ func (sw *SessionWindow) constrainToBounds(before tv.Rect) {
 // window area. It is used when the sidebar is pinned on so any window left
 // covering the sidebar is pulled back in. No-op while unpinned or minimized.
 func (sw *SessionWindow) clampToWindowArea() {
-	if !sw.wb.sidebarPinned || sw.window.IsMinimized() {
+	clampWindowToArea(sw.wb, sw.window)
+}
+
+// clampWindowToArea is the pure-geometry core of SessionWindow.clampToWindowArea,
+// lifted to a free function so the monologue popup can be re-clamped on a sidebar
+// pin-on / width change too (issue #319). It fully clamps win's size and origin into
+// wb.windowArea(). No-op while the sidebar is unpinned or win is minimized.
+func clampWindowToArea(wb *Workbench, win *tv.Window) {
+	if !wb.sidebarPinned || win.IsMinimized() {
 		return
 	}
-	area := sw.wb.windowArea()
-	b := sw.window.Component.Bounds
-	clamped := clampWindowRect(b, area.W, area.H, sw.window.MinWidth, sw.window.MinHeight)
+	area := wb.windowArea()
+	b := win.Component.Bounds
+	clamped := clampWindowRect(b, area.W, area.H, win.MinWidth, win.MinHeight)
 	if clamped != b {
-		sw.window.Component.SetBounds(clamped)
+		win.Component.SetBounds(clamped)
 	}
 }
 

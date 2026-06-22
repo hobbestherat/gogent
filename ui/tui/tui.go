@@ -278,6 +278,12 @@ type Workbench struct {
 	// geometry helpers read it without the lock. Zero means "use the default".
 	sidebarW int
 	monolog  *tv.Layer
+	// monologWindow is the open monologue popup's window, tracked alongside
+	// monolog so a sidebar pin-on / width change can re-clamp it into the window
+	// area (issue #319). turbotv's Layer.window is unexported with no accessor, so
+	// the window is stored directly. Set in showAgentMonolog, cleared on close /
+	// replace; nil when no monologue is open. Read/written on the UI thread.
+	monologWindow *tv.Window
 	// shutdown is cancelled (via quit) when the UI loop stops. Background
 	// goroutines blocked on a permission prompt select on it so they unblock
 	// instead of leaking when the user quits. See AskPermission.
@@ -1300,6 +1306,12 @@ func (w *Workbench) setSidebarWidth(req int) {
 		for _, sw := range windows {
 			sw.clampToWindowArea()
 		}
+		// The monologue popup is a bare *tv.Window with no *SessionWindow wrapper,
+		// so it is not in w.sessions; re-clamp it directly so a width change pulls
+		// it back inside the boundary too (issue #319).
+		if w.monologWindow != nil {
+			clampWindowToArea(w, w.monologWindow)
+		}
 	}
 	// Persist and repaint via the coalesced paths (issue #320), matching the
 	// toolkit's window-drag handling: a debounced layout write (no synchronous
@@ -1341,6 +1353,12 @@ func (w *Workbench) ToggleSidebarPin() {
 	if pinned {
 		for _, sw := range windows {
 			sw.clampToWindowArea()
+		}
+		// The monologue popup has no *SessionWindow wrapper (it is not in
+		// w.sessions), so pull it back inside the now-reserved area directly so
+		// pinning the sidebar on does not leave it covering the panel (issue #319).
+		if w.monologWindow != nil {
+			clampWindowToArea(w, w.monologWindow)
 		}
 	}
 	w.rebuildMenu()
