@@ -67,7 +67,7 @@ func TestRenderTodosEmpty(t *testing.T) {
 }
 
 // TestRenderTodosBlockShape exercises the full system-prompt block: the header,
-// the per-item glyph rows mirroring the sidebar (☐ ◐ ☑), the optional note in
+// the per-item glyph rows mirroring the sidebar (☐ ◐ ✔), the optional note in
 // parentheses, and the trailing summary line (issue #263).
 func TestRenderTodosBlockShape(t *testing.T) {
 	items := []TodoItem{
@@ -83,7 +83,7 @@ func TestRenderTodosBlockShape(t *testing.T) {
 	}
 	// Each status glyph appears with its content.
 	for _, want := range []string{
-		"☑ Read main.go",
+		"✔ Read main.go",
 		"◐ Fix the bug",
 		"☐ Run tests",
 	} {
@@ -92,7 +92,7 @@ func TestRenderTodosBlockShape(t *testing.T) {
 		}
 	}
 	// The note is rendered in parentheses, attached to its item only.
-	if !strings.Contains(got, "☑ Read main.go (found the bug on line 42)") {
+	if !strings.Contains(got, "✔ Read main.go (found the bug on line 42)") {
 		t.Errorf("note not rendered on its row:\n%s", got)
 	}
 	// The trailing summary reflects the live tally.

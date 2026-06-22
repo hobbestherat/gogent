@@ -29,7 +29,7 @@ func TestBuildSystemContextInjectsTodos(t *testing.T) {
 		t.Fatalf("checklist not injected into system context:\n%s", ctx)
 	}
 	for _, want := range []string{
-		"☑ Read main.go (bug on line 42)",
+		"✔ Read main.go (bug on line 42)",
 		"◐ Fix it",
 		"☐ Add a test",
 		"(1 done, 1 in progress, 1 pending)",
@@ -71,7 +71,7 @@ func TestBuildSystemContextReflectsUpdates(t *testing.T) {
 	// The model marks it done on the next turn.
 	us.SetTodos([]agent.TodoItem{{Content: "do work", Status: agent.TodoCompleted}})
 	after := g.buildSystemContext(id)
-	if !strings.Contains(after, "☑ do work") {
+	if !strings.Contains(after, "✔ do work") {
 		t.Errorf("completed status not reflected in re-built context:\n%s", after)
 	}
 	if strings.Contains(after, "◐ do work") {

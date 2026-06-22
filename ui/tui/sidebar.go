@@ -692,13 +692,15 @@ func todoLabel(it agent.TodoItem) string {
 // region. The glyphs are deliberately distinct from statusIcon's sub-agent set
 // (▶ ‖ ✓ ✗ •) so a checklist row is unambiguous at a glance even though the two
 // kinds now live in separate regions (issue #190): pending ☐, in-progress ◐,
-// completed ☑.
+// completed ✔. The completed glyph is the HEAVY check mark ✔ (U+2714), kept
+// deliberately distinct from the sub-agent completed icon ✓ (U+2713) so the two
+// never collide (issue #315).
 func todoStatusIcon(status agent.TodoStatus) string {
 	switch status {
 	case agent.TodoInProgress:
 		return "◐"
 	case agent.TodoCompleted:
-		return "☑"
+		return "✔"
 	default:
 		return "☐"
 	}

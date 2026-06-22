@@ -26,7 +26,7 @@ func TestTodoLabelWithNote(t *testing.T) {
 		{
 			"completed with note",
 			agent.TodoItem{Content: "Done", Status: agent.TodoCompleted, Note: "shipped"},
-			"☑ Done (shipped)",
+			"✔ Done (shipped)",
 		},
 		{
 			"note trimmed",
