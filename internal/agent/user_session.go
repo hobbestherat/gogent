@@ -691,10 +691,18 @@ func (s *UserSession) ExecuteTaskLoop(ctx context.Context, agentID string, initi
 }
 
 // planKeptTools are the non-read-only tools retained in plan mode alongside the
-// read-only investigation tools: todo (to lay out the plan's steps) and
-// structured_output (to finalize the plan). Everything side-effecting is
-// stripped by CloneForPlanMode (issue #43).
-var planKeptTools = []string{"todo", "structured_output"}
+// read-only investigation tools: todo (to lay out the plan's steps),
+// structured_output (to finalize the plan) and spawn_subagent (to fan out
+// bounded, read-only investigation in parallel while planning, issue #281).
+// Everything else side-effecting is stripped by CloneForPlanMode (issue #43).
+//
+// Keeping spawn_subagent does NOT let plan mode mutate the workspace: a
+// sub-agent's registry is cloned from the parent's (see newSubAgent), which in
+// plan mode is the already-plan-filtered, read-only registry — so a plan-mode
+// child inherits read/grep/glob/list/diagnostics but not write/edit/multi_edit/
+// apply_patch/shell. The fan-out stays bounded by the shared SubAgentLimiter and
+// the per-parent max-sub-agents cap, exactly as outside plan mode.
+var planKeptTools = []string{"todo", "structured_output", "spawn_subagent"}
 
 // recordPlan captures the final answer of a plan-mode turn as the plan awaiting
 // approval and emits SessionEventPlan so the UI can offer to approve it. An
@@ -713,17 +721,26 @@ func (s *UserSession) recordPlan(responses []*model.CompletionResponse) {
 // planModeSystemPrompt layers planning instructions on top of the base agent
 // prompt. It tells the model the workspace is read-only this turn and that its
 // answer is a plan for the user to approve, not something to carry out (issue
-// #43).
+// #43). It also permits bounded, read-only sub-agent delegation so the agent can
+// fan out parallel investigation while it plans (issue #281).
 func planModeSystemPrompt(base string) string {
 	return base + `
 
 ## PLAN MODE (read-only)
 You are in PLAN MODE. The tools that modify the workspace (write, edit,
-multi_edit, apply_patch, shell) and the sub-agent tools are unavailable this
-turn. Use only the read-only tools to investigate, then reply with a concrete,
-step-by-step plan the user will approve before you execute it. Lay the plan's
-steps out with the todo tool. Do NOT attempt to carry the plan out — present it
-as your final answer.`
+multi_edit, apply_patch, shell) are unavailable this turn. Use the read-only
+tools to investigate, then reply with a concrete, step-by-step plan the user
+will approve before you execute it.
+
+You MAY delegate read-only investigation to sub-agents to research the codebase
+in parallel while you plan. Batch the independent lookups into a SINGLE
+spawn_subagent call's "subtasks" array (e.g. one sub-agent per module to
+summarize its structure, or diagnostics + grep together) so they run
+concurrently. The sub-agents are also read-only this turn: they investigate and
+report findings only — they must NOT write, edit, or otherwise change anything.
+
+Lay the plan's steps out with the todo tool. Do NOT attempt to carry the plan
+out — present it as your final answer.`
 }
 
 // budgetExceededMarker prefixes an agent's final result when it stopped because
