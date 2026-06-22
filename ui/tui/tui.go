@@ -582,7 +582,10 @@ func (w *Workbench) settingsItems() []*tv.MenuItem {
 	}
 	cur := w.handlers.GetSettings()
 	mode := "one-shot"
-	if !cur.IsOneShot() {
+	switch {
+	case cur.ExposesOneShotTools() && cur.ExposesInteractiveTools():
+		mode = "both"
+	case cur.ExposesInteractiveTools():
 		mode = "interactive"
 	}
 	recursive := "off"
