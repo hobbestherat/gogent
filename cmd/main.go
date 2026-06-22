@@ -197,6 +197,11 @@ func main() {
 			OnClose: func(sessionID string) {
 				g.RemoveSession(sessionID)
 			},
+			// OnRename persists a retitled session to its index so the Sessions
+			// browser finds it by the new name (issue #272).
+			OnRename: func(sessionID, title string) {
+				g.RenameSession(sessionID, title)
+			},
 			GetSettings: func() config.SubAgentConfig {
 				return g.SubAgentSettings()
 			},

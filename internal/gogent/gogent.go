@@ -1244,6 +1244,17 @@ func (g *Gogent) SetSessionTitle(id, title string) {
 	g.mu.Unlock()
 }
 
+// RenameSession updates a session's title and persists it to the index right
+// away (issue #272). The title is otherwise only written on the next message
+// turn, so a rename was invisible to the on-disk index — and thus to the Sessions
+// browser, which searches the index by title — until (and unless) another message
+// was sent. Store.Save rewrites the index on a title-only change, so this records
+// the new name immediately.
+func (g *Gogent) RenameSession(id, title string) {
+	g.SetSessionTitle(id, title)
+	g.persistSession(id)
+}
+
 // persistSession writes the session's transcript to disk (best-effort). The
 // "default" HTTP session is intentionally not persisted.
 func (g *Gogent) persistSession(id string) {
