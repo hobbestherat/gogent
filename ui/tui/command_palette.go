@@ -90,6 +90,8 @@ func (w *Workbench) commands() []command {
 			run: func() { w.arrange(tv.TileColumns) }},
 		{category: "Window", name: "Tile grid", keys: "Ctrl+Shift+G",
 			run: func() { w.arrange(tv.TileGrid) }},
+		{category: "Window", name: "Cascade windows", keys: "Ctrl+Shift+D",
+			run: func() { w.arrange(tv.TileCascade) }},
 		{category: "Window", name: "Maximize all windows", keys: "Ctrl+Shift+M",
 			run: w.maximizeAll},
 

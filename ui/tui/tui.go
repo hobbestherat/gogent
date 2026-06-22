@@ -694,6 +694,11 @@ func (w *Workbench) viewItems() []*tv.MenuItem {
 			WithShortcutMod("Ctrl+Shift+G", tui.KeyRune, 'g', true, true, false),
 		tv.NewMenuItem("Maximi&ze All", func() { w.maximizeAll() }).
 			WithShortcutMod("Ctrl+Shift+M", tui.KeyRune, 'm', true, true, false),
+		// Cascade overlaps the windows in a diagonal stack so every title bar stays
+		// visible while the front window stays large (issue #271). Ctrl+Shift+C would
+		// clash with copy, so the accelerator is Ctrl+Shift+D (diagonal).
+		tv.NewMenuItem("Casca&de Windows", func() { w.arrange(tv.TileCascade) }).
+			WithShortcutMod("Ctrl+Shift+D", tui.KeyRune, 'd', true, true, false),
 		tv.NewMenuItem("----------", nil),
 		tv.NewMenuItem(pinLabel, func() { w.ToggleSidebarPin() }),
 		// Keyboard fallback for the draggable divider, for terminals that do not

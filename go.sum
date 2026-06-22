@@ -12,6 +12,8 @@ github.com/hobbestherat/turbotui v0.3.1-0.20260622090136-90617545b18b h1:oGdSqhg
 github.com/hobbestherat/turbotui v0.3.1-0.20260622090136-90617545b18b/go.mod h1:+cXzY+fhI8sBSN3k2L1Rb7mp1psKGT+D8R3qcCT+2d0=
 github.com/hobbestherat/turbotui v0.3.1-0.20260622111626-6482a8cf235e h1:rtVCPVUN5kZXDYf6jrvEt0PZuZNDJeljz7zFCyL99Ks=
 github.com/hobbestherat/turbotui v0.3.1-0.20260622111626-6482a8cf235e/go.mod h1:+cXzY+fhI8sBSN3k2L1Rb7mp1psKGT+D8R3qcCT+2d0=
+github.com/hobbestherat/turbotui v0.3.1-0.20260622112540-14d11a695bb5 h1:SrhaV4U1iJXdqQIlQTdp/rb4y1khsh/zYUrDB66ELwA=
+github.com/hobbestherat/turbotui v0.3.1-0.20260622112540-14d11a695bb5/go.mod h1:+cXzY+fhI8sBSN3k2L1Rb7mp1psKGT+D8R3qcCT+2d0=
 github.com/hobbestherat/webapi v0.1.0 h1:ggk03gfw7dgS+7zIog/eRctkKL6qBa9KE3arTsSWAXQ=
 github.com/hobbestherat/webapi v0.1.0/go.mod h1:XG9XQ/Jw1iDAyuZnzZFKYeE911Fa1hPd/v30/ZNQj4c=
 github.com/yuin/goldmark v1.8.2 h1:kEGpgqJXdgbkhcOgBxkC0X0PmoPG1ZyoZ117rDVp4zE=
