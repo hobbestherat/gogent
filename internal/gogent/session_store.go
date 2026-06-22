@@ -150,6 +150,10 @@ type LoadedSession struct {
 	// order seen on disk.
 	Transcripts map[string][]model.Message
 	AgentOrder  []string
+	// Model is the config name of the model the session was last using, read back
+	// from the index so a restored session resumes on that model (issue #266).
+	// Empty for older sessions persisted before the model was recorded.
+	Model string
 }
 
 // NewSessionStore creates (and ensures the directory for) a session store.
@@ -570,6 +574,7 @@ func (s *SessionStore) ListActive() ([]LoadedSession, error) {
 			File:        indexFilePath(base),
 			Transcripts: transcripts,
 			AgentOrder:  order,
+			Model:       idx.Model,
 		})
 	}
 	return sessions, nil
@@ -672,6 +677,7 @@ func (s *SessionStore) LoadSession(file string) (LoadedSession, error) {
 		File:        indexFilePath(base),
 		Transcripts: transcripts,
 		AgentOrder:  order,
+		Model:       idx.Model,
 	}, nil
 }
 
