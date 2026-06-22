@@ -742,6 +742,60 @@ func TestIssue265ReadOnlyWindowRefreshNoPanic(t *testing.T) {
 	}
 }
 
+// ----------------------------------------------------------------------------
+// Group I — DEFECT: the editor's Save reconstructs the overrides map from themeRoles
+// only, so a config-only focus-pair override (button_focus_*/input_focus_*) — which
+// #265 added to applyOverrides/ResolveTheme/ApplyTheme but deliberately kept OUT of the
+// editor — is silently ERASED the first time a user opens and Saves the theme editor,
+// even for an unrelated change. Before #265 every applyOverrides key was editor-exposed,
+// so this loss did not exist; #265 introduces the first overridable-but-not-editable keys
+// and, with them, this regression in round-trip fidelity. The issue calls the focus pairs
+// "first-class, config-overridable roles", which is incompatible with an unrelated Save
+// destroying them.
+// ----------------------------------------------------------------------------
+
+// TestIssue265FocusOverrideSurvivesEditorSave models a no-edit "open the editor, Save"
+// cycle exactly as showThemeEditor.save runs it: the spec fields are seeded from
+// editedTheme(cur) over themeRoles (loadFields), then buildThemeConfig rebuilds the whole
+// overrides map from those same themeRoles. Because the focus pairs are not in themeRoles,
+// a button_focus_bg/input_focus_bg the user set by hand in config.json is not carried into
+// the saved config, and SetTheme persists the result wholesale (g.config.Theme = t, no
+// merge) — so the override is gone after the next launch.
+//
+// This test asserts the override SURVIVES the Save (the desired behaviour). It does NOT
+// require the focus pairs to be editable — only that an existing one is not destroyed.
+// It currently FAILS, pinning the defect: the fix is to carry override keys not present in
+// themeRoles through buildThemeConfig (or to merge in SetTheme) rather than dropping them.
+func TestIssue265FocusOverrideSurvivesEditorSave(t *testing.T) {
+	for _, key := range []string{"button_focus_bg", "input_focus_bg", "button_focus_fg", "input_focus_fg"} {
+		t.Run(key, func(t *testing.T) {
+			const spec = "#ABCDEF"
+			cur := config.ThemeConfig{
+				Name:      themeDefault,
+				Overrides: map[string]string{key: spec},
+			}
+			// Sanity: the override is honoured by the pipeline today (it's a real role).
+			resolved := ResolveTheme(cur, truecolorEnv, false)
+			want, _ := parseColor(spec)
+			if buttonInputFields(resolved)[key] != want {
+				t.Fatalf("setup: %s override not honoured by ResolveTheme — got %+v, want %+v", key, buttonInputFields(resolved)[key], want)
+			}
+
+			// Faithful model of showThemeEditor.save with no user edits: fields seeded from
+			// editedTheme(cur) over themeRoles, then buildThemeConfig from those specs.
+			specs := specsFor(editedTheme(cur))
+			saved := buildThemeConfig(cur.Name, cur.NoColor, cur.NoShadow, specs)
+
+			if saved.Overrides[key] != spec {
+				t.Errorf("editor Save dropped the config-only %s override: saved.Overrides=%+v\n"+
+					"a hand-set focus-pair override is destroyed by an unrelated editor Save (SetTheme persists this wholesale). "+
+					"#265 calls the focus pairs first-class config roles; buildThemeConfig must preserve override keys it does not expose.",
+					key, saved.Overrides)
+			}
+		})
+	}
+}
+
 // TestIssue265StopButtonStaysErrorRedOnRoleSwitch guards a cross-cutting invariant: the Stop
 // button keeps the gogent error-red foreground (issue #201) even after refreshTheme reseeds
 // every button from the #265 roles. Its BG follows the role, but its FG/FocusFG must not be
