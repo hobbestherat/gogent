@@ -69,3 +69,44 @@ func TestStatistics_IncludesDefaultSessionForStats(t *testing.T) {
 		t.Errorf("default session's model 'opus' missing from per-model breakdown: %+v", rep.Models)
 	}
 }
+
+// TestStatistics_TagsEphemeralButKeepsThemForStats pins the round-1 backend half of
+// the issue #278 fix: Gogent.Statistics() must TAG on-demand HTTP/API sessions
+// (created via NewEphemeralSession, issue #25) with SessionRow.Ephemeral so the TUI
+// can drop windowless sessions, but it must NOT filter them out — GET /stats
+// (systemSvc.Stats → Statistics()) still has to report every session, including
+// ephemeral ones, because headless clients talk to them.
+func TestStatistics_TagsEphemeralButKeepsThemForStats(t *testing.T) {
+	g := NewGogent("/tmp/test-stats-ephemeral")
+
+	// A normal persisted (windowed) session.
+	persisted := makeStatsSession(g, "user-1")
+	persisted.SetPrimaryModel("opus")
+	persisted.AddTokenUsage(100, 20)
+
+	// An ephemeral HTTP/API session (no TUI window).
+	eph := g.NewEphemeralSession("http-client-7")
+	eph.SetPrimaryModel("haiku")
+	eph.AddTokenUsage(50, 10)
+
+	rep := g.Statistics()
+
+	// Both sessions are present for /stats — Statistics must not drop ephemeral.
+	if rep.Totals.Sessions != 2 {
+		t.Errorf("Totals.Sessions = %d, want 2 (ephemeral must still be reported for /stats)", rep.Totals.Sessions)
+	}
+	rows := map[string]bool{}
+	for _, s := range rep.Sessions {
+		rows[s.ID] = s.Ephemeral
+	}
+	got, ok := rows["http-client-7"]
+	if !ok {
+		t.Fatalf("ephemeral session missing from Statistics().Sessions: %+v", rep.Sessions)
+	}
+	if !got {
+		t.Errorf("ephemeral session row Ephemeral = false, want true (Statistics must tag it)")
+	}
+	if eph, ok := rows["user-1"]; !ok || eph {
+		t.Errorf("persisted session row Ephemeral = %v (ok=%v), want false", eph, ok)
+	}
+}

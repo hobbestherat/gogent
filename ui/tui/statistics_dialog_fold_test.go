@@ -300,25 +300,16 @@ func TestDialogPipeline_FilterThenFold_DefaultNeverReEmitted(t *testing.T) {
 	}
 }
 
-// TestFilterPhantomSessions_AlsoExcludesDefaultFromModels documents a KNOWN DEFECT
-// found while testing issue #278 and is SKIPPED so it does not gate the build. Flip
-// off the Skip when the implementation backs the default out of report.Models too.
-//
-// filterPhantomSessions backs the phantom "default" session out of report.Totals and
-// drops its row from report.Sessions, but it does NOT touch report.Models. The
-// "default" session is the shared headless HTTP/API fallback, so it CAN accrue real
-// per-model traffic (an HTTP request routed to "default" while gogent also runs the
-// TUI). When it does, the dialog's Models tab and the Overview "Models (tokens)"
-// summary still include that traffic, and the per-model breakdown no longer sums to
-// the (correctly filtered) grand total — the phantom is only half-removed.
-//
-// Issue #278's expected behaviour is that "the phantom default ... should not appear
-// in the Statistics report when running under the TUI", which the per-model rows
-// violate. A complete fix would also subtract the default's per-model connector from
-// report.Models (or drop a model row that becomes empty).
+// TestFilterPhantomSessions_AlsoExcludesDefaultFromModels covers a defect found in
+// round 1 and since fixed by subtractModelTraffic: the phantom "default" session is
+// the shared headless HTTP/API fallback, so it CAN accrue real per-model traffic (an
+// HTTP request routed to "default" while gogent also runs the TUI). If the filter
+// backed it out of report.Totals/Sessions but left report.Models alone, the Models
+// tab and Overview "Models (tokens)" summary would keep counting it and the per-model
+// rows would no longer sum to the filtered grand total — the phantom only half
+// removed, violating #278's "should not appear in the Statistics report under the
+// TUI". This pins that the per-model breakdown is also corrected.
 func TestFilterPhantomSessions_AlsoExcludesDefaultFromModels(t *testing.T) {
-	t.Skip("known defect: filterPhantomSessions does not back the default out of report.Models (issue #278)")
-
 	// default and a real session both used model "glm".
 	rep := buildReport(
 		sessSpec{id: phantomDefaultSessionID, primaryModel: "glm", primary: conn(5, 0, 500, 0, 50)},
@@ -338,5 +329,212 @@ func TestFilterPhantomSessions_AlsoExcludesDefaultFromModels(t *testing.T) {
 	}
 	if ms.Connector.Requests != 10 || ms.Connector.TokensIn != 100 {
 		t.Errorf("per-model glm = %+v, want only s1's {Req:10 In:100} (default excluded)", ms.Connector)
+	}
+}
+
+// TestDialogPipeline_EphemeralNeverReEmitted mirrors the default-phantom interaction
+// test for the ephemeral path: because filterPhantomSessions strips a live ephemeral
+// HTTP session BEFORE fold records it, the session is never remembered, so when the
+// HTTP client disconnects (the row vanishes) it is never re-emitted as a "closed"
+// row — unlike a genuine windowed session, which does survive.
+func TestDialogPipeline_EphemeralNeverReEmitted(t *testing.T) {
+	ls := newLifetimeStats()
+	pipeline := func(r stats.Report) stats.Report { return ls.fold(filterPhantomSessions(r)) }
+
+	// Refresh 1: a windowed session win-1 and a live ephemeral HTTP session http-1.
+	pipeline(markEphemeral(buildReport(
+		sessSpec{id: "win-1", primaryModel: "glm", primary: conn(10, 0, 1000, 0, 100)},
+		sessSpec{id: "http-1", primaryModel: "glm", primary: conn(5, 0, 500, 0, 50)},
+	), "http-1"))
+	if _, ok := ls.sessions["http-1"]; ok {
+		t.Errorf("fold recorded the ephemeral http-1; it must be filtered before fold")
+	}
+
+	// Refresh 2: win-1 closes and the ephemeral client disconnects (both gone).
+	out := pipeline(buildReport())
+
+	// win-1 survives as a re-emitted closed row...
+	if _, ok := sessionByID(out.Sessions, "win-1"); !ok {
+		t.Errorf("windowed win-1 should survive as a closed row: %+v", out.Sessions)
+	}
+	// ...but the ephemeral http-1 never resurfaces.
+	if _, ok := sessionByID(out.Sessions, "http-1"); ok {
+		t.Errorf("ephemeral http-1 re-emitted as a closed row: %+v", out.Sessions)
+	}
+	// Only win-1's traffic persisted; the ephemeral's never entered the totals.
+	if out.Totals.Primary.Requests != 10 || out.Totals.Primary.TokensIn != 1000 {
+		t.Errorf("totals = %+v, want only win-1's {Req:10 In:1000}", out.Totals.Primary)
+	}
+}
+
+// --- issue #278 round 2: ephemeral HTTP/API sessions -------------------------
+
+// markEphemeral flags the rows with the given ids as ephemeral, mirroring what
+// Gogent.Statistics() does for NewEphemeralSession sessions. buildReport already
+// folded each row's traffic into the grand Totals, so tagging here does not change
+// the totals — exactly the shape the TUI receives from the backend.
+func markEphemeral(rep stats.Report, ids ...string) stats.Report {
+	set := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		set[id] = true
+	}
+	for i := range rep.Sessions {
+		if set[rep.Sessions[i].ID] {
+			rep.Sessions[i].Ephemeral = true
+		}
+	}
+	return rep
+}
+
+// TestIsPhantomSession covers the windowless-session predicate: the shared "default"
+// session (matched by id, since it is created via CreateUserSession and is NOT
+// flagged ephemeral) OR any backend-flagged ephemeral session. Everything else — a
+// normal windowed session — is kept.
+func TestIsPhantomSession(t *testing.T) {
+	cases := []struct {
+		name string
+		row  stats.SessionRow
+		want bool
+	}{
+		{"default by id", stats.SessionRow{ID: phantomDefaultSessionID}, true},
+		{"ephemeral flag", stats.SessionRow{ID: "http-9", Ephemeral: true}, true},
+		{"default also flagged", stats.SessionRow{ID: phantomDefaultSessionID, Ephemeral: true}, true},
+		{"normal windowed", stats.SessionRow{ID: "s1"}, false},
+		{"non-default non-ephemeral", stats.SessionRow{ID: "default-2", Ephemeral: false}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isPhantomSession(tc.row); got != tc.want {
+				t.Errorf("isPhantomSession(%+v) = %v, want %v", tc.row, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFilterPhantomSessions_DropsEphemeralSessions is the round-2 #278 case: an
+// ephemeral HTTP/API session (no TUI window) must be dropped from the TUI's report
+// and its full contribution backed out of the grand totals and the per-model rows,
+// just like the "default" phantom — even though its id is arbitrary, not "default".
+func TestFilterPhantomSessions_DropsEphemeralSessions(t *testing.T) {
+	real := sessSpec{id: "s1", primaryModel: "glm", turns: 3, tokensIn: 100, tokensOut: 10, toolCalls: 2, primary: conn(10, 0, 100, 0, 10)}
+	httpSess := sessSpec{id: "http-client-7", primaryModel: "glm", turns: 1, tokensIn: 500, tokensOut: 50, toolCalls: 1, primary: conn(5, 1, 500, 0, 50)}
+
+	rep := markEphemeral(buildReport(real, httpSess), "http-client-7")
+	got := filterPhantomSessions(rep)
+
+	// Only the real windowed session remains.
+	if len(got.Sessions) != 1 || got.Sessions[0].ID != "s1" {
+		t.Fatalf("Sessions = %+v, want only [s1] (ephemeral http-client-7 dropped)", got.Sessions)
+	}
+	// Totals reduced to the real session alone.
+	if got.Totals.Sessions != 1 {
+		t.Errorf("Totals.Sessions = %d, want 1 (ephemeral backed out)", got.Totals.Sessions)
+	}
+	if got.Totals.Primary != real.primary {
+		t.Errorf("Totals.Primary = %+v, want %+v (ephemeral's traffic backed out)", got.Totals.Primary, real.primary)
+	}
+	if got.Totals.TokensIn != 100 || got.Totals.Turns != 3 || got.Totals.ToolCalls != 2 {
+		t.Errorf("session-layer totals = in %d / turns %d / tools %d, want 100/3/2",
+			got.Totals.TokensIn, got.Totals.Turns, got.Totals.ToolCalls)
+	}
+	// Per-model glm must carry only the real session's traffic, summing to the total.
+	ms, ok := got.ModelByName("glm")
+	if !ok {
+		t.Fatalf("glm row missing: %+v", got.Models)
+	}
+	if ms.Connector != real.primary || ms.Connector.Requests != got.Totals.Primary.Requests {
+		t.Errorf("per-model glm = %+v, want only s1's %+v (ephemeral's model traffic leaked)", ms.Connector, real.primary)
+	}
+}
+
+// TestFilterPhantomSessions_DropsDefaultAndEphemeralTogether exercises the combined
+// case the issue calls out — "off-by-N with live HTTP clients": the always-present
+// default plus several ephemeral sessions are all removed in one pass, leaving only
+// the windowed sessions and a count that matches the sidebar.
+func TestFilterPhantomSessions_DropsDefaultAndEphemeralTogether(t *testing.T) {
+	rep := markEphemeral(buildReport(
+		sessSpec{id: phantomDefaultSessionID, primary: conn(1, 0, 10, 0, 1)},
+		sessSpec{id: "win-1", primaryModel: "glm", primary: conn(10, 0, 100, 0, 10)},
+		sessSpec{id: "http-a", primaryModel: "glm", primary: conn(2, 0, 20, 0, 2)},
+		sessSpec{id: "win-2", primaryModel: "glm", primary: conn(20, 0, 200, 0, 20)},
+		sessSpec{id: "http-b", primaryModel: "glm", primary: conn(3, 0, 30, 0, 3)},
+	), "http-a", "http-b")
+
+	got := filterPhantomSessions(rep)
+
+	var ids []string
+	for _, s := range got.Sessions {
+		ids = append(ids, s.ID)
+	}
+	if !reflect.DeepEqual(ids, []string{"win-1", "win-2"}) {
+		t.Errorf("kept sessions = %v, want [win-1 win-2] (default + 2 ephemeral dropped)", ids)
+	}
+	if got.Totals.Sessions != 2 {
+		t.Errorf("Totals.Sessions = %d, want 2 (matches the 2 TUI windows)", got.Totals.Sessions)
+	}
+	// Grand total and per-model are only the two windows: 10+20 = 30 requests.
+	if got.Totals.Primary.Requests != 30 {
+		t.Errorf("Totals.Primary.Requests = %d, want 30 (win-1 10 + win-2 20)", got.Totals.Primary.Requests)
+	}
+	if ms, _ := got.ModelByName("glm"); ms.Connector.Requests != 30 {
+		t.Errorf("per-model glm Requests = %d, want 30 (phantoms backed out)", ms.Connector.Requests)
+	}
+}
+
+// --- subtractModelTraffic unit tests -----------------------------------------
+
+// TestSubtractModelTraffic_BacksOutPrimaryModel verifies a removed session's
+// connector and token attribution are subtracted from its PrimaryModel row, leaving
+// other models untouched and matching fold's attribution rule.
+func TestSubtractModelTraffic_BacksOutPrimaryModel(t *testing.T) {
+	models := []stats.ModelStat{
+		{Name: "glm", TokensIn: 300, TokensOut: 60, Connector: conn(30, 1, 300, 0, 60)},
+		{Name: "groq", TokensIn: 50, TokensOut: 5, Connector: conn(5, 0, 50, 0, 5)},
+	}
+	removed := []stats.SessionRow{
+		{ID: "http-1", PrimaryModel: "glm", TokensIn: 100, TokensOut: 20, Primary: conn(10, 0, 100, 0, 20)},
+	}
+	got := subtractModelTraffic(models, removed)
+
+	glm, _ := stats.Report{Models: got}.ModelByName("glm")
+	if glm.Connector.Requests != 20 || glm.Connector.TokensIn != 200 || glm.TokensIn != 200 || glm.TokensOut != 40 {
+		t.Errorf("glm after subtract = conn %+v tokens %d/%d, want conn{Req:20 In:200} tokens 200/40",
+			glm.Connector, glm.TokensIn, glm.TokensOut)
+	}
+	// groq (no removed session used it) is untouched.
+	groq, _ := stats.Report{Models: got}.ModelByName("groq")
+	if groq.Connector.Requests != 5 || groq.TokensIn != 50 {
+		t.Errorf("groq changed unexpectedly: %+v", groq)
+	}
+}
+
+// TestSubtractModelTraffic_DoesNotMutateInput guards that the input slice and its
+// elements are not modified (the filter relies on this to keep the backend report
+// the dialog also exports from intact).
+func TestSubtractModelTraffic_DoesNotMutateInput(t *testing.T) {
+	models := []stats.ModelStat{{Name: "glm", TokensIn: 300, Connector: conn(30, 0, 300, 0, 60)}}
+	before := append([]stats.ModelStat(nil), models...)
+	removed := []stats.SessionRow{{ID: "http-1", PrimaryModel: "glm", TokensIn: 100, Primary: conn(10, 0, 100, 0, 20)}}
+
+	_ = subtractModelTraffic(models, removed)
+	if !reflect.DeepEqual(models, before) {
+		t.Errorf("subtractModelTraffic mutated input:\n  before = %+v\n  after  = %+v", before, models)
+	}
+}
+
+// TestSubtractModelTraffic_SkipsEmptyModelAndNoOp covers two edge cases: a removed
+// session with no PrimaryModel contributes no subtraction (its traffic was never
+// attributed to a model), and an empty removed set is a pass-through.
+func TestSubtractModelTraffic_SkipsEmptyModelAndNoOp(t *testing.T) {
+	models := []stats.ModelStat{{Name: "glm", Connector: conn(30, 0, 300, 0, 60)}}
+
+	// Removed session with empty model: nothing to back out -> models unchanged.
+	got := subtractModelTraffic(models, []stats.SessionRow{{ID: "x", PrimaryModel: "", Primary: conn(9, 0, 90, 0, 9)}})
+	if !reflect.DeepEqual(got, models) {
+		t.Errorf("model-less removed session changed Models: %+v", got)
+	}
+	// Empty removed set: pass-through.
+	if got := subtractModelTraffic(models, nil); !reflect.DeepEqual(got, models) {
+		t.Errorf("empty removed set changed Models: %+v", got)
 	}
 }
