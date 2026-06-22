@@ -246,6 +246,31 @@ type Theme struct {
 	DropdownSelectFG tui.Color
 	DropdownSelectBG tui.Color
 
+	// Button and input-box colours (issue #265). turbotui's tv.Theme already has the
+	// Button*/Input* slots, and both freshly built widgets (widget_button/textbox/
+	// multiline seed from tv.ActiveTheme()) and the live reseed path (reseedButton and
+	// the input reseed in SessionWindow.refreshTheme) read them — but before #265 gogent
+	// only fed those slots indirectly: the default preset inherited turbotui's stock
+	// values and the black-canvas presets derived them from PanelFG/PanelBG/Accent inside
+	// blackCanvasTVTheme, so a resting button or input background could not be pointed
+	// anywhere independent of the preset and panel_bg. They are now first-class roles,
+	// mirroring the dropdown roles above; ApplyTheme installs them onto tv.DefaultTheme's
+	// Button*/Input* slots so an override reaches both a restart and a live theme switch.
+	//
+	// ButtonFG/ButtonBG colour the resting button and ButtonFocusFG/ButtonFocusBG the
+	// keyboard-focused button; InputFG/InputBG and InputFocusFG/InputFocusBG do the same
+	// for text boxes and the multiline input. (turbotui also seeds Select and Checkbox
+	// from the Input* slots, but gogent's Selects are re-seeded from the dropdown roles
+	// by newSelect/reseedSelect, so the Input* roles drive plain inputs and checkboxes.)
+	ButtonFG      tui.Color
+	ButtonBG      tui.Color
+	ButtonFocusFG tui.Color
+	ButtonFocusBG tui.Color
+	InputFG       tui.Color
+	InputBG       tui.Color
+	InputFocusFG  tui.Color
+	InputFocusBG  tui.Color
+
 	// CodeBG is the background painted behind fenced/indented code blocks in the
 	// rich-Markdown transcript (issue #184). It is a theme role, not a hardcoded
 	// black, so code blocks read as part of the active theme rather than a black
@@ -340,6 +365,20 @@ func defaultPalette() Theme {
 		DropdownFocusBG:  tui.ANSIColor(6),
 		DropdownSelectFG: tui.ANSIColor(0),
 		DropdownSelectBG: tui.ANSIColor(6),
+		// Buttons and inputs (issue #265): turbotui's stock values expressed as roles so
+		// the default preset's button/input chrome is editable rather than silently
+		// inheriting the library default — a green (ANSI 2) button with white text, a
+		// black (ANSI 0) input box with white text, and the cyan (ANSI 6) focus fill both
+		// share with the dropdown/focus treatment. Matching baseTVTheme keeps the default
+		// install's appearance unchanged.
+		ButtonFG:      tui.ANSIColor(15),
+		ButtonBG:      tui.ANSIColor(2),
+		ButtonFocusFG: tui.ANSIColor(0),
+		ButtonFocusBG: tui.ANSIColor(6),
+		InputFG:       tui.ANSIColor(15),
+		InputBG:       tui.ANSIColor(0),
+		InputFocusFG:  tui.ANSIColor(0),
+		InputFocusBG:  tui.ANSIColor(6),
 		// Fenced-code panel: a dark navy inset — a subtle shade of the desktop blue
 		// (issue #200) so code reads as a distinct themed panel rather than the old
 		// black-on-blue island. It is the one RGB role in this otherwise 16-colour
@@ -401,6 +440,18 @@ func highContrastPalette() Theme {
 		DropdownFocusBG:  okabeYellow,
 		DropdownSelectFG: black,
 		DropdownSelectBG: okabeYellow,
+		// Buttons and inputs (issue #265): the black-canvas derivation that
+		// blackCanvasTVTheme used to hardcode, now expressed as roles — white text on the
+		// black canvas at rest (== PanelFG/PanelBG) and the bright yellow accent marking
+		// focus (black on yellow), matching the focused dropdown.
+		ButtonFG:      white,
+		ButtonBG:      black,
+		ButtonFocusFG: black,
+		ButtonFocusBG: okabeYellow,
+		InputFG:       white,
+		InputBG:       black,
+		InputFocusFG:  black,
+		InputFocusBG:  okabeYellow,
 		// Unused: applyMarkdownPalette suppresses the code background for this
 		// pure-black preset (a black panel on black would vanish), but the role is
 		// set for completeness so the Theme is fully populated.
@@ -452,6 +503,17 @@ func darkPalette() Theme {
 		DropdownFocusBG:  amber,
 		DropdownSelectFG: black,
 		DropdownSelectBG: amber,
+		// Buttons and inputs (issue #265): the black-canvas derivation expressed as roles
+		// — soft white on the pure-black canvas at rest (== PanelFG/PanelBG) and the warm
+		// amber accent marking focus (black on amber), matching the focused dropdown.
+		ButtonFG:      softWhite,
+		ButtonBG:      black,
+		ButtonFocusFG: black,
+		ButtonFocusBG: amber,
+		InputFG:       softWhite,
+		InputBG:       black,
+		InputFocusFG:  black,
+		InputFocusBG:  amber,
 		// Code blocks render directly on the pure-black canvas (no distinct panel).
 		CodeBG: black,
 	}
@@ -495,6 +557,14 @@ func ResolveTheme(cfg config.ThemeConfig, env func(string) string, noColorFlag b
 	t.DropdownFocusBG = degrade(t.DropdownFocusBG, level)
 	t.DropdownSelectFG = degrade(t.DropdownSelectFG, level)
 	t.DropdownSelectBG = degrade(t.DropdownSelectBG, level)
+	t.ButtonFG = degrade(t.ButtonFG, level)
+	t.ButtonBG = degrade(t.ButtonBG, level)
+	t.ButtonFocusFG = degrade(t.ButtonFocusFG, level)
+	t.ButtonFocusBG = degrade(t.ButtonFocusBG, level)
+	t.InputFG = degrade(t.InputFG, level)
+	t.InputBG = degrade(t.InputBG, level)
+	t.InputFocusFG = degrade(t.InputFocusFG, level)
+	t.InputFocusBG = degrade(t.InputFocusBG, level)
 	t.CodeBG = degrade(t.CodeBG, level)
 	return t
 }
@@ -577,6 +647,22 @@ func applyOverrides(t *Theme, overrides map[string]string) {
 			t.DropdownSelectFG = c
 		case "dropdown_select_bg":
 			t.DropdownSelectBG = c
+		case "button_fg":
+			t.ButtonFG = c
+		case "button_bg":
+			t.ButtonBG = c
+		case "button_focus_fg":
+			t.ButtonFocusFG = c
+		case "button_focus_bg":
+			t.ButtonFocusBG = c
+		case "input_fg":
+			t.InputFG = c
+		case "input_bg":
+			t.InputBG = c
+		case "input_focus_fg":
+			t.InputFocusFG = c
+		case "input_focus_bg":
+			t.InputFocusBG = c
 		case "code_bg":
 			t.CodeBG = c
 		}
@@ -849,6 +935,21 @@ func paletteContrast(t Theme, windowBG tui.Color) []contrastFinding {
 		finding("dropdown", t.DropdownFG, t.DropdownBG, minContrastText),
 		finding("dropdown-focus", t.DropdownFocusFG, t.DropdownFocusBG, minContrastText),
 		finding("dropdown-select", t.DropdownSelectFG, t.DropdownSelectBG, minContrastText),
+		// Button and input roles (issue #265) carry their own fills, so each is audited
+		// against its actual background rather than windowBG: the resting and focused
+		// button label on their fills, the resting and focused input text on theirs. They
+		// paint label/field text, so they are held to the body-text tier — except the
+		// resting button, whose default value is turbotui's stock white-on-green (ANSI 15
+		// on ANSI 2) at 3.11:1: the green button hue is the library default the #265
+		// "default appearance unchanged" acceptance criterion pins, and white is already
+		// the most readable foreground on it, so like the gamut-limited error role it is
+		// held to the non-text/large floor (minContrastLarge) as a documented limit rather
+		// than abandoning the stock look. The black-canvas presets clear the body tier on
+		// every pair, so this floor only ever binds the default preset.
+		finding("button", t.ButtonFG, t.ButtonBG, minContrastLarge),
+		finding("button-focus", t.ButtonFocusFG, t.ButtonFocusBG, minContrastText),
+		finding("input", t.InputFG, t.InputBG, minContrastText),
+		finding("input-focus", t.InputFocusFG, t.InputFocusBG, minContrastText),
 	}
 }
 
@@ -879,7 +980,7 @@ func ApplyTheme(t Theme) {
 	case t.Level == ColorNone:
 		// Neutral chrome: dialog text is the terminal default, so coloured dialog
 		// lines must be too (no ANSI colour is emitted).
-		tv.DefaultTheme = neutralTVTheme()
+		tv.DefaultTheme = neutralTVTheme(t)
 		colorDialogHeader, colorDialogDetail = tui.DefaultColor(), tui.DefaultColor()
 	case t.Name == themeHighContrast || t.Name == themeDark:
 		// The high-contrast and dark presets both have a black canvas, so they use a
@@ -919,6 +1020,22 @@ func ApplyTheme(t Theme) {
 	tv.DefaultTheme.SelectionFG = t.DropdownSelectFG
 	tv.DefaultTheme.SelectionBG = t.DropdownSelectBG
 
+	// Button and input roles (issue #265). turbotui carries Button*/Input* slots that
+	// both freshly built widgets and the live reseed path (reseedButton, the input
+	// reseed in SessionWindow.refreshTheme) read from tv.ActiveTheme(), so — unlike the
+	// dropdown roles, which have no slot — these need no gogent package vars: install
+	// them onto tv.DefaultTheme here and the tv.SetTheme below propagates them to every
+	// widget. Installed over whichever chrome the switch selected — including the stock
+	// light-grey chrome of the default preset, whose buttons/inputs would otherwise stay
+	// on turbotui's baseTVTheme defaults and ignore an override (the same reason MenuBar
+	// is installed unconditionally above). The black-canvas and neutral builders already
+	// source these slots from the roles, so the install is a no-op there; under NO_COLOR
+	// every role has degraded to the terminal default, leaving the neutral chrome intact.
+	tv.DefaultTheme.ButtonFG, tv.DefaultTheme.ButtonBG = t.ButtonFG, t.ButtonBG
+	tv.DefaultTheme.ButtonFocusFG, tv.DefaultTheme.ButtonFocusBG = t.ButtonFocusFG, t.ButtonFocusBG
+	tv.DefaultTheme.InputFG, tv.DefaultTheme.InputBG = t.InputFG, t.InputBG
+	tv.DefaultTheme.InputFocusFG, tv.DefaultTheme.InputFocusBG = t.InputFocusFG, t.InputFocusBG
+
 	// Keep turbotui's active chrome theme in lockstep with the dialog chrome above.
 	// turbotui widgets (windows, the menu bar, labels, selects, buttons, inputs)
 	// seed their colours from tv.ActiveTheme() at construction, and the desktop and
@@ -931,16 +1048,20 @@ func ApplyTheme(t Theme) {
 }
 
 // neutralTVTheme is the window/dialog chrome under NO_COLOR: every slot uses the
-// terminal default so no ANSI colour is emitted for the surrounding widgets.
-func neutralTVTheme() tv.Theme {
+// terminal default so no ANSI colour is emitted for the surrounding widgets. The
+// button/input slots are sourced from t's Button*/Input* roles (issue #265) rather
+// than hardcoded — under NO_COLOR ResolveTheme has degraded every role to the
+// terminal default, so they equal d, but reading them from the roles keeps the
+// role the single source rather than a parallel hardcoded default.
+func neutralTVTheme(t Theme) tv.Theme {
 	d := tui.DefaultColor()
 	return tv.Theme{
 		DesktopBG: d, DesktopFG: d,
 		WindowBG: d, WindowFG: d, WindowBorderFG: d, WindowBorderBG: d,
 		WindowTitleFG: d, WindowTitleBG: d, WindowShadow: d,
-		ButtonBG: d, ButtonFG: d, ButtonFocusBG: d, ButtonFocusFG: d, ButtonShadow: d,
+		ButtonBG: t.ButtonBG, ButtonFG: t.ButtonFG, ButtonFocusBG: t.ButtonFocusBG, ButtonFocusFG: t.ButtonFocusFG, ButtonShadow: d,
 		DialogBG: d, DialogFG: d, DialogBorderFG: d, DialogBorderBG: d,
-		InputBG: d, InputFG: d, InputFocusBG: d, InputFocusFG: d,
+		InputBG: t.InputBG, InputFG: t.InputFG, InputFocusBG: t.InputFocusBG, InputFocusFG: t.InputFocusFG,
 		CloseButtonBG: d, CloseButtonFG: d,
 		MnemonicFG: d, SelectionBG: d, SelectionFG: d,
 	}
@@ -955,9 +1076,13 @@ func blackCanvasTVTheme(t Theme) tv.Theme {
 		DesktopBG: black, DesktopFG: white,
 		WindowBG: black, WindowFG: white, WindowBorderFG: white, WindowBorderBG: black,
 		WindowTitleFG: accent, WindowTitleBG: black, WindowShadow: divider,
-		ButtonBG: black, ButtonFG: white, ButtonFocusBG: accent, ButtonFocusFG: black, ButtonShadow: divider,
+		// Button/input colours come from the (overridable) Button*/Input* roles (issue
+		// #265); for a pristine black-canvas preset they equal black/white/accent/black,
+		// the values this builder used to hardcode, so the ApplyTheme install over this
+		// chrome is a no-op and an override flows through unchanged.
+		ButtonBG: t.ButtonBG, ButtonFG: t.ButtonFG, ButtonFocusBG: t.ButtonFocusBG, ButtonFocusFG: t.ButtonFocusFG, ButtonShadow: divider,
 		DialogBG: black, DialogFG: white, DialogBorderFG: white, DialogBorderBG: black,
-		InputBG: black, InputFG: white, InputFocusBG: accent, InputFocusFG: black,
+		InputBG: t.InputBG, InputFG: t.InputFG, InputFocusBG: t.InputFocusBG, InputFocusFG: t.InputFocusFG,
 		CloseButtonBG: err, CloseButtonFG: white,
 		MnemonicFG: accent, DialogMnemonicFG: accent, SelectionBG: accent, SelectionFG: black,
 		// Menu chrome: the menubar and dropdowns are drawn over the black canvas, so
