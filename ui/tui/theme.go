@@ -216,6 +216,18 @@ type Theme struct {
 	Divider   tui.Color
 	Accent    tui.Color
 
+	// Window colours (issue #291). The session/transcript windows and dialogs draw on
+	// turbotui's WindowBG/WindowFG. Before #291 those were not gogent roles: the default
+	// preset inherited turbotui's stock ANSI-4 blue window and the black-canvas presets
+	// derived the window from PanelFG/PanelBG inside blackCanvasTVTheme, so the theme
+	// editor exposed desktop_bg/panel_bg but could not change the window background a user
+	// actually sees behind the transcript (the bug #291 reports). They are now first-class
+	// roles — defaulting to the current values so the look is unchanged — and ApplyTheme
+	// installs them onto tv.DefaultTheme's Window* slots so an override reaches a restart
+	// and a live theme switch alike.
+	WindowFG tui.Color
+	WindowBG tui.Color
+
 	// Menu bar colours (issue #243). The always-on-top menu bar is a surface the
 	// user can see but, before #243, could not recolour: the default preset
 	// inherited turbotui's stock grey bar and the black-canvas presets derived the
@@ -270,6 +282,26 @@ type Theme struct {
 	InputBG       tui.Color
 	InputFocusFG  tui.Color
 	InputFocusBG  tui.Color
+
+	// Text-selection colours (issue #279). turbotui's TextBox/MultiLineInput repaint a
+	// selected cell to TextSelectionFG on TextSelectionBG — a slot distinct from the
+	// dropdown/menu Selection* roles, which keep driving popup and menu highlights. Before
+	// #279 the widgets borrowed Selection*, which gogent set to the focus accent, so a
+	// selection inside a focused input was painted the same colour as the field fill and was
+	// invisible. These roles default to an inversion of InputFocusBG (a clear luminance gap,
+	// not the accent) so a selection reads on the focused field; ApplyTheme installs them
+	// onto tv.DefaultTheme's TextSelection* slots, which the widgets read at draw time.
+	//
+	// NO_COLOR caveat: under NO_COLOR both roles degrade to the terminal default (as every
+	// role must — NO_COLOR forbids emitting colour), so a selection is default-on-default,
+	// indistinguishable from the focused field fill. turbotui's input widgets mark a
+	// selection only by FG/BG, and tui.Cell carries no reverse-video attribute, so there is
+	// no colour-free cue gogent can supply; making a selection visible under NO_COLOR would
+	// require turbotui to paint selected cells with a reverse/underline attribute. This
+	// matches the pre-#279 behaviour (the old shared Selection* roles degraded the same way),
+	// so it is a documented toolkit limitation, not a #279 regression.
+	TextSelectionFG tui.Color
+	TextSelectionBG tui.Color
 
 	// CodeBG is the background painted behind fenced/indented code blocks in the
 	// rich-Markdown transcript (issue #184). It is a theme role, not a hardcoded
@@ -347,6 +379,13 @@ func defaultPalette() Theme {
 		// are bumped to a visible 5.7:1 (issue #202).
 		Divider: tui.ANSIColor(7),
 		Accent:  tui.ANSIColor(11),
+		// Window (issue #291): turbotui's stock blue window — white text on the ANSI-4
+		// background — expressed as roles so the window a user sees behind the transcript is
+		// editable rather than silently inheriting the library default. Matching baseTVTheme
+		// keeps the default install's appearance unchanged (the reported "light blue" is just
+		// ANSI 4 rendering, not a regression).
+		WindowFG: tui.ANSIColor(15),
+		WindowBG: tui.ANSIColor(4),
 		// Stock turbotui menu bar: black text on a light-grey bar (the values
 		// baseTVTheme carries), expressed as roles so the default preset's bar is
 		// editable too rather than silently inheriting the library default.
@@ -379,6 +418,11 @@ func defaultPalette() Theme {
 		InputBG:       tui.ANSIColor(0),
 		InputFocusFG:  tui.ANSIColor(0),
 		InputFocusBG:  tui.ANSIColor(6),
+		// Text selection (issue #279): inverts the cyan (ANSI 6) focused-input fill —
+		// bright-white text on a black box — so a selection stands out against the field
+		// rather than re-using the accent the field already wears (the #279 collision).
+		TextSelectionFG: tui.ANSIColor(15),
+		TextSelectionBG: tui.ANSIColor(0),
 		// Fenced-code panel: a dark navy inset — a subtle shade of the desktop blue
 		// (issue #200) so code reads as a distinct themed panel rather than the old
 		// black-on-blue island. It is the one RGB role in this otherwise 16-colour
@@ -425,6 +469,10 @@ func highContrastPalette() Theme {
 		Title:     okabeYellow,
 		Divider:   grey,
 		Accent:    okabeYellow,
+		// Window (issue #291): the black canvas with white text (== PanelBG/PanelFG), so the
+		// black-canvas look is unchanged while the window background becomes overridable.
+		WindowFG: white,
+		WindowBG: black,
 		// White-on-black menu bar, matching the black canvas (it equals PanelFG /
 		// PanelBG so the bar reads as part of the surrounding chrome).
 		MenuBarFG: white,
@@ -452,6 +500,10 @@ func highContrastPalette() Theme {
 		InputBG:       black,
 		InputFocusFG:  black,
 		InputFocusBG:  okabeYellow,
+		// Text selection (issue #279): inverts the yellow focused-input fill — white text on
+		// a black box — so a selection is unmistakable on the high-contrast canvas.
+		TextSelectionFG: white,
+		TextSelectionBG: black,
 		// Unused: applyMarkdownPalette suppresses the code background for this
 		// pure-black preset (a black panel on black would vanish), but the role is
 		// set for completeness so the Theme is fully populated.
@@ -488,6 +540,10 @@ func darkPalette() Theme {
 		Title:     title,
 		Divider:   divider,
 		Accent:    tui.RGBColor(0xE0, 0xAF, 0x68), // amber, matching the tool tone
+		// Window (issue #291): the pure-black canvas with soft-white text (== PanelBG/PanelFG)
+		// so the dark look is unchanged while the window background becomes overridable.
+		WindowFG: softWhite,
+		WindowBG: black,
 		// Soft-white-on-dark-grey menu bar: a #262626 panel lifts the bar off the
 		// pure-black canvas while staying cohesive with it.
 		MenuBarFG: softWhite,
@@ -514,6 +570,10 @@ func darkPalette() Theme {
 		InputBG:       black,
 		InputFocusFG:  black,
 		InputFocusBG:  amber,
+		// Text selection (issue #279): inverts the amber focused-input fill — soft-white text
+		// on a black box — so a selection reads against the warm focus fill.
+		TextSelectionFG: softWhite,
+		TextSelectionBG: black,
 		// Code blocks render directly on the pure-black canvas (no distinct panel).
 		CodeBG: black,
 	}
@@ -549,6 +609,8 @@ func ResolveTheme(cfg config.ThemeConfig, env func(string) string, noColorFlag b
 	t.Title = degrade(t.Title, level)
 	t.Divider = degrade(t.Divider, level)
 	t.Accent = degrade(t.Accent, level)
+	t.WindowFG = degrade(t.WindowFG, level)
+	t.WindowBG = degrade(t.WindowBG, level)
 	t.MenuBarFG = degrade(t.MenuBarFG, level)
 	t.MenuBarBG = degrade(t.MenuBarBG, level)
 	t.DropdownFG = degrade(t.DropdownFG, level)
@@ -565,6 +627,8 @@ func ResolveTheme(cfg config.ThemeConfig, env func(string) string, noColorFlag b
 	t.InputBG = degrade(t.InputBG, level)
 	t.InputFocusFG = degrade(t.InputFocusFG, level)
 	t.InputFocusBG = degrade(t.InputFocusBG, level)
+	t.TextSelectionFG = degrade(t.TextSelectionFG, level)
+	t.TextSelectionBG = degrade(t.TextSelectionBG, level)
 	t.CodeBG = degrade(t.CodeBG, level)
 	return t
 }
@@ -631,6 +695,10 @@ func applyOverrides(t *Theme, overrides map[string]string) {
 			t.Divider = c
 		case "accent":
 			t.Accent = c
+		case "window_fg":
+			t.WindowFG = c
+		case "window_bg":
+			t.WindowBG = c
 		case "menu_bar_fg":
 			t.MenuBarFG = c
 		case "menu_bar_bg":
@@ -663,6 +731,10 @@ func applyOverrides(t *Theme, overrides map[string]string) {
 			t.InputFocusFG = c
 		case "input_focus_bg":
 			t.InputFocusBG = c
+		case "text_selection_fg":
+			t.TextSelectionFG = c
+		case "text_selection_bg":
+			t.TextSelectionBG = c
 		case "code_bg":
 			t.CodeBG = c
 		}
@@ -935,6 +1007,14 @@ func paletteContrast(t Theme, windowBG tui.Color) []contrastFinding {
 		finding("dropdown", t.DropdownFG, t.DropdownBG, minContrastText),
 		finding("dropdown-focus", t.DropdownFocusFG, t.DropdownFocusBG, minContrastText),
 		finding("dropdown-select", t.DropdownSelectFG, t.DropdownSelectBG, minContrastText),
+		// Text-selection role (issue #279): a selected input cell is repainted to
+		// TextSelectionFG on TextSelectionBG, so the pair is audited against each other (the
+		// colours a selection is actually drawn in) rather than windowBG. Selected text is
+		// body text, so it is held to the body-text tier — a palette change can't silently
+		// reintroduce an illegible selection. (Visibility against the focused field fill is
+		// guaranteed separately: the defaults invert InputFocusBG, and turbotui pins
+		// TextSelectionBG != InputFocusBG at the toolkit layer.)
+		finding("text-selection", t.TextSelectionFG, t.TextSelectionBG, minContrastText),
 		// Button and input roles (issue #265) carry their own fills, so each is audited
 		// against its actual background rather than windowBG: the resting and focused
 		// button label on their fills, the resting and focused input text on theirs. They
@@ -994,6 +1074,16 @@ func ApplyTheme(t Theme) {
 		colorDialogHeader, colorDialogDetail = tui.ANSIColor(5), tui.ANSIColor(4)
 	}
 
+	// Window colours are first-class theme roles (issue #291), so install them over
+	// whichever chrome the switch selected — including the stock blue chrome of the default
+	// preset, whose window would otherwise stay on turbotui's library default and ignore an
+	// override (the bug #291 reports). The black-canvas and neutral builders already source
+	// these slots from the roles, so the install is a no-op there; under NO_COLOR both have
+	// degraded to the terminal default, leaving the neutral window untouched. Defaulting to
+	// the current values keeps the look unchanged — the editor can now repoint it.
+	tv.DefaultTheme.WindowFG = t.WindowFG
+	tv.DefaultTheme.WindowBG = t.WindowBG
+
 	// Menu bar colours are first-class theme roles (issue #243), so install them
 	// over whichever chrome the switch selected — including the stock light-grey
 	// chrome of the default preset, whose bar would otherwise stay on turbotui's
@@ -1019,6 +1109,16 @@ func ApplyTheme(t Theme) {
 	dropdownDisabledFG = dropdownDisabledColor(t)
 	tv.DefaultTheme.SelectionFG = t.DropdownSelectFG
 	tv.DefaultTheme.SelectionBG = t.DropdownSelectBG
+
+	// Text-selection roles (issue #279). turbotui's TextBox/MultiLineInput read
+	// activeTheme.TextSelection* at draw time to repaint selected cells, so install them onto
+	// tv.DefaultTheme's TextSelection* slots; the tv.SetTheme below propagates them so a live
+	// theme switch recolours selections without a restart. Distinct from the Selection*
+	// install above, which drives dropdown/menu highlights — keeping them apart is the fix
+	// for the #279 collision. The black-canvas and neutral builders already source these from
+	// the roles; under NO_COLOR both have degraded to the terminal default.
+	tv.DefaultTheme.TextSelectionFG = t.TextSelectionFG
+	tv.DefaultTheme.TextSelectionBG = t.TextSelectionBG
 
 	// Button and input roles (issue #265). turbotui carries Button*/Input* slots that
 	// both freshly built widgets and the live reseed path (reseedButton, the input
@@ -1057,13 +1157,19 @@ func neutralTVTheme(t Theme) tv.Theme {
 	d := tui.DefaultColor()
 	return tv.Theme{
 		DesktopBG: d, DesktopFG: d,
-		WindowBG: d, WindowFG: d, WindowBorderFG: d, WindowBorderBG: d,
+		// Window colours come from the (overridable) Window* roles (issue #291); under
+		// NO_COLOR ResolveTheme has degraded them to the terminal default, so they equal d,
+		// but reading them from the roles keeps the role the single source.
+		WindowBG: t.WindowBG, WindowFG: t.WindowFG, WindowBorderFG: d, WindowBorderBG: d,
 		WindowTitleFG: d, WindowTitleBG: d, WindowShadow: d,
 		ButtonBG: t.ButtonBG, ButtonFG: t.ButtonFG, ButtonFocusBG: t.ButtonFocusBG, ButtonFocusFG: t.ButtonFocusFG, ButtonShadow: d,
 		DialogBG: d, DialogFG: d, DialogBorderFG: d, DialogBorderBG: d,
 		InputBG: t.InputBG, InputFG: t.InputFG, InputFocusBG: t.InputFocusBG, InputFocusFG: t.InputFocusFG,
 		CloseButtonBG: d, CloseButtonFG: d,
+		// Text-selection slots come from the (overridable) TextSelection* roles (issue #279);
+		// under NO_COLOR they too have degraded to the terminal default.
 		MnemonicFG: d, SelectionBG: d, SelectionFG: d,
+		TextSelectionBG: t.TextSelectionBG, TextSelectionFG: t.TextSelectionFG,
 	}
 }
 
@@ -1074,7 +1180,11 @@ func blackCanvasTVTheme(t Theme) tv.Theme {
 	black, white, accent, divider, err := t.PanelBG, t.PanelFG, t.Accent, t.Divider, t.Error
 	return tv.Theme{
 		DesktopBG: black, DesktopFG: white,
-		WindowBG: black, WindowFG: white, WindowBorderFG: white, WindowBorderBG: black,
+		// Window colours come from the (overridable) Window* roles (issue #291); for a
+		// pristine black-canvas preset they equal black/white (== PanelBG/PanelFG), the values
+		// this builder used to hardcode, so the ApplyTheme install over this chrome is a no-op
+		// and an override flows through unchanged.
+		WindowBG: t.WindowBG, WindowFG: t.WindowFG, WindowBorderFG: white, WindowBorderBG: black,
 		WindowTitleFG: accent, WindowTitleBG: black, WindowShadow: divider,
 		// Button/input colours come from the (overridable) Button*/Input* roles (issue
 		// #265); for a pristine black-canvas preset they equal black/white/accent/black,
@@ -1085,6 +1195,11 @@ func blackCanvasTVTheme(t Theme) tv.Theme {
 		InputBG: t.InputBG, InputFG: t.InputFG, InputFocusBG: t.InputFocusBG, InputFocusFG: t.InputFocusFG,
 		CloseButtonBG: err, CloseButtonFG: white,
 		MnemonicFG: accent, DialogMnemonicFG: accent, SelectionBG: accent, SelectionFG: black,
+		// Text selection inside inputs (issue #279) comes from the (overridable)
+		// TextSelection* roles, distinct from the accent-driven Selection* above: for a
+		// pristine black-canvas preset they invert the accent focus fill (white/soft-white on
+		// black), so a selection reads on a focused input instead of vanishing into the accent.
+		TextSelectionBG: t.TextSelectionBG, TextSelectionFG: t.TextSelectionFG,
 		// Menu chrome: the menubar and dropdowns are drawn over the black canvas, so
 		// they need explicit colours too — otherwise they fall back to the terminal
 		// default and read as low-contrast/invisible (issue #200). The bar colours come
