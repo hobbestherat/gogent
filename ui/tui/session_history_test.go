@@ -743,81 +743,37 @@ func TestPromptHistoryNavHelpersSafeOnEmpty(t *testing.T) {
 	}
 }
 
-// --- Visual-line math unit tests -------------------------------------------
+// --- Visual-line edge detection under word wrap (issue #270) ----------------
 //
-// These pin the pure helpers that decide when Up/Down recall vs. move the caret,
-// independent of the session machinery. They are the most likely place for an
-// off-by-one, so they are spelled out as tables.
+// The session input now word-wraps (input.WordWrap = true), and the caret-edge
+// predicates derive visual rows from the widget's real wrap layout via
+// CaretRowInLine. This pins the word-wrap case the old char-wrap helpers got
+// wrong: a caret on a word-wrapped continuation row is not on the first row.
 
-func TestInputVisualWidth(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		boundsW int
-		want    int
-	}{
-		{"unset (before layout)", 0, 0},
-		{"single column", 1, 0},
-		{"two columns", 2, 1},
-		{"typical", 70, 69},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			in := tv.NewMultiLineInput("x", tv.Rect{W: tc.boundsW})
-			if got := inputVisualWidth(in); got != tc.want {
-				t.Errorf("inputVisualWidth(W=%d) = %d, want %d", tc.boundsW, got, tc.want)
-			}
-		})
+func TestCaretEdgePredicatesWordWrap(t *testing.T) {
+	w := newTestWorkbench(t)
+	sw := w.openWindow("s", "S")
+	// contentWidth 10 (W=11). "aaaa bbbb cccc" word-wraps into
+	// ["aaaa bbbb ", "cccc"] — char wrap would have split mid-word differently.
+	sw.input.Component.SetBounds(tv.Rect{W: 11})
+	sw.input.SetText("aaaa bbbb cccc")
+
+	// Caret on the wrapped continuation row (x=12 → second row): NOT first row.
+	sw.input.CursorY, sw.input.CursorX = 0, 12
+	if sw.caretOnFirstVisualLine() {
+		t.Error("caret on a word-wrapped continuation row must not be on the first visual line")
 	}
-}
-
-func TestLineVisualRows(t *testing.T) {
-	// width 5 (W=6): "abcde" (5) → 1 row; "abcdef" (6) → 2; "" → 1.
-	for _, tc := range []struct {
-		name  string
-		text  string
-		width int // contentWidth
-		want  int
-	}{
-		{"empty is one row", "", 5, 1},
-		{"exactly one row", "abcde", 5, 1},
-		{"one past wraps to two", "abcdef", 5, 2},
-		{"exact multiple", "aaaaa", 5, 1},
-		{"three rows", "abcdefghijkl", 5, 3},
-		{"unwrapped width treats line as one row", "a very long line", 0, 1},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			in := tv.NewMultiLineInput(tc.text, tv.Rect{})
-			in.Component.SetBounds(tv.Rect{W: tc.width + 1}) // contentWidth = width
-			if got := lineVisualRows(in, 0); got != tc.want {
-				t.Errorf("lineVisualRows(%q, width=%d) = %d, want %d", tc.text, tc.width, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestVisualRowInLine(t *testing.T) {
-	// width 5 (W=6): 12-rune line → rows [0,5)[5,10)[10,12).
-	in := tv.NewMultiLineInput("abcdefghijkl", tv.Rect{})
-	in.Component.SetBounds(tv.Rect{W: 6})
-	for _, tc := range []struct {
-		cursorX int
-		want    int
-	}{
-		{0, 0},  // start of first row
-		{4, 0},  // still first row
-		{5, 1},  // start of second row
-		{9, 1},  // still second row
-		{10, 2}, // start of last row
-		{12, 2}, // end clamps to last row
-	} {
-		if got := visualRowInLine(in, 0, tc.cursorX); got != tc.want {
-			t.Errorf("visualRowInLine(cursorX=%d) = %d, want %d", tc.cursorX, got, tc.want)
-		}
+	if !sw.caretOnLastVisualLine() {
+		t.Error("caret on the last word-wrapped row should be on the last visual line")
 	}
 
-	// Unwrapped width: always row 0.
-	in2 := tv.NewMultiLineInput("abcdefghijkl", tv.Rect{})
-	if got := visualRowInLine(in2, 0, 12); got != 0 {
-		t.Errorf("visualRowInLine with unwrapped width = %d, want 0", got)
+	// Caret in the first row (x=2): first row, not last.
+	sw.input.CursorX = 2
+	if !sw.caretOnFirstVisualLine() {
+		t.Error("caret in the first word-wrapped row should be on the first visual line")
+	}
+	if sw.caretOnLastVisualLine() {
+		t.Error("caret in the first word-wrapped row is not on the last visual line")
 	}
 }
 

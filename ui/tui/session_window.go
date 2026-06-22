@@ -250,6 +250,10 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 	}
 
 	input := tv.NewMultiLineInput("", tv.Rect{})
+	// Word-wrap the prompt box so whole words stay on one line instead of being cut
+	// mid-word at the right edge (issue #270). The caret/history-edge helpers read
+	// the widget's real wrap layout via CaretRowInLine, so recall stays correct.
+	input.WordWrap = true
 	sendButton := newButton("Send", tv.Rect{}, nil)
 	// Running-turn controls (issue #201). Labels carry the Enter affordance (Queue)
 	// and an error-coloured halt (Stop); their handlers are wired below, once the
@@ -1407,13 +1411,15 @@ func (sw *SessionWindow) historyNext() bool {
 // caretOnFirstVisualLine reports whether the input caret sits on the topmost
 // visual row, where Up recalls older history rather than moving up a line. A caret
 // on a wrapped continuation of the first logical line is not on the first visual
-// line. See visualRowInLine for the char-wrap assumption.
+// line. The visual-row geometry comes from the widget's real wrap layout
+// (CaretRowInLine), so it is correct under word wrap (issue #270).
 func (sw *SessionWindow) caretOnFirstVisualLine() bool {
 	in := sw.input
 	if in == nil || in.CursorY != 0 {
 		return false
 	}
-	return visualRowInLine(in, 0, in.CursorX) == 0
+	row, _ := in.CaretRowInLine()
+	return row == 0
 }
 
 // caretOnLastVisualLine reports whether the input caret sits on the bottommost
@@ -1423,49 +1429,11 @@ func (sw *SessionWindow) caretOnLastVisualLine() bool {
 	if in == nil {
 		return false
 	}
-	last := len(in.Lines) - 1
-	if in.CursorY != last {
+	if in.CursorY != len(in.Lines)-1 {
 		return false
 	}
-	return visualRowInLine(in, last, in.CursorX) == lineVisualRows(in, last)-1
-}
-
-// inputVisualWidth is the text width the input wraps at: one column narrower than
-// the widget for the scrollbar, matching MultiLineInput.contentWidth. A width
-// below 2 (unset bounds before layout, e.g. under test) yields 0, which the
-// callers treat as "do not wrap" so each logical line is a single visual row.
-func inputVisualWidth(in *tv.MultiLineInput) int {
-	if w := in.Component.Bounds.W; w > 1 {
-		return w - 1
-	}
-	return 0
-}
-
-// lineVisualRows is the number of visual rows the given logical line occupies at
-// the input's current width, assuming the input's default character wrapping
-// (WordWrap is off for the session input). An empty line, or an unwrapped width,
-// is one row.
-func lineVisualRows(in *tv.MultiLineInput, lineIdx int) int {
-	width := inputVisualWidth(in)
-	length := len([]rune(in.Lines[lineIdx]))
-	if width < 1 || length == 0 {
-		return 1
-	}
-	return (length + width - 1) / width
-}
-
-// visualRowInLine is the zero-based visual row of cursorX within its logical line,
-// clamped to the line's last row. With an unwrapped width it is always 0.
-func visualRowInLine(in *tv.MultiLineInput, lineIdx, cursorX int) int {
-	width := inputVisualWidth(in)
-	if width < 1 {
-		return 0
-	}
-	row := cursorX / width
-	if last := lineVisualRows(in, lineIdx) - 1; row > last {
-		row = last
-	}
-	return row
+	row, rows := in.CaretRowInLine()
+	return row == rows-1
 }
 
 // setBusy updates the status line and busy flag, anchoring the live elapsed
