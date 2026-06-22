@@ -1902,12 +1902,13 @@ type AgentEvent struct {
 
 // InteractiveAgent tracks one asynchronous, conversational sub-agent.
 type InteractiveAgent struct {
-	ID    string
-	Name  string
-	agent *Agent
-	inbox chan string   // coordinator → sub-agent messages (e.g. CLARIFY answers)
-	done  chan struct{} // closed to request termination
-	once  sync.Once
+	ID      string
+	Name    string
+	agent   *Agent
+	inbox   chan string   // coordinator → sub-agent messages (e.g. CLARIFY answers)
+	done    chan struct{} // closed to request termination
+	once    sync.Once
+	limiter *SubAgentLimiter // the concurrency slot acquired at launch, released once when the worker exits
 }
 
 // LaunchInteractiveAgent starts an asynchronous sub-agent and returns its id
@@ -1938,11 +1939,12 @@ func (s *UserSession) LaunchInteractiveAgent(parentAgentID, name, task string) (
 	parent := child.GetParent()
 
 	ia := &InteractiveAgent{
-		ID:    child.ID,
-		Name:  child.DisplayName(),
-		agent: child,
-		inbox: make(chan string, 4),
-		done:  make(chan struct{}),
+		ID:      child.ID,
+		Name:    child.DisplayName(),
+		agent:   child,
+		inbox:   make(chan string, 4),
+		done:    make(chan struct{}),
+		limiter: limiter, // release exactly this acquired slot when the worker exits
 	}
 	s.mu.Lock()
 	s.interactive[child.ID] = ia
@@ -1961,11 +1963,11 @@ func (s *UserSession) LaunchInteractiveAgent(parentAgentID, name, task string) (
 func (s *UserSession) runInteractive(ia *InteractiveAgent, task string) {
 	// Release the global concurrency slot acquired in LaunchInteractiveAgent when
 	// this worker exits, on every terminal path (completion, failure, termination,
-	// panic). Exactly one release pairs with the one acquire at launch.
-	s.mu.RLock()
-	limiter := s.subAgentLimiter
-	s.mu.RUnlock()
-	defer limiter.release()
+	// panic). Release the exact limiter captured at acquire time (not a re-read of
+	// s.subAgentLimiter) so the release can never hit a different limiter if one
+	// were ever swapped in mid-launch. Exactly one release pairs with the one
+	// acquire at launch.
+	defer ia.limiter.release()
 
 	// This runs on its own background goroutine, so a panic here would crash the
 	// whole process. Contain it and finish the agent as failed instead (issue #8).
