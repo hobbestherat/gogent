@@ -1437,11 +1437,19 @@ var subAgentToolNames = []string{
 	"wait_agent_event",
 }
 
-const subAgentOneShotPrompt = `You are a focused sub-agent working on a single delegated subtask. Use the available tools to complete it.
-When finished, reply with a final plain-text answer that STARTS with either:
+// subAgentOneShotPrompt is a deliberately lean prompt for one-shot sub-agents
+// (issue #283): it leads with the SUCCESS/FAILURE task contract and skips broad
+// persona framing, since the child is scoped to a single subtask. It still
+// receives the full systemContext (repo map, AGENTS.md, git status, skills,
+// todos), which runLoop appends every turn — only the persona is trimmed. The
+// path-trust line (G3) tells the child to act on paths it was handed rather than
+// re-grepping to rediscover them.
+const subAgentOneShotPrompt = `Complete the single delegated subtask below using the available tools, then stop.
+Reply with a final plain-text answer that STARTS with either:
   "SUCCESS: " followed by the result, or
   "FAILURE: " followed by the reason you could not complete it.
-Do not ask questions; make reasonable assumptions and proceed. Keep it concise.`
+Trust any file paths given in the task (or in the primed context) as authoritative — read them directly; do not grep or list to rediscover paths you were already given.
+Do not ask questions; make reasonable assumptions and proceed. Be concise.`
 
 const subAgentInteractivePrompt = `You are a sub-agent working on a delegated subtask. Use the available tools to complete it.
 When finished, reply with a final plain-text answer that STARTS with either:
@@ -1464,6 +1472,143 @@ func (s *UserSession) subAgentPrompt(oneShot bool) string {
 		prompt += recursionInstructions(cfg)
 	}
 	return prompt
+}
+
+// Bounds for the sub-agent context primer (issue #283). The primer re-uses the
+// parent's already-gathered discovery so the child does not re-read/re-grep from
+// scratch; it must stay small so it never becomes a transcript dump.
+const (
+	maxPrimerPaths    = 20
+	maxPrimerSearches = 8
+	maxPrimerBytes    = 1500
+)
+
+// primerPathTools are the tools whose calls reveal a workspace path the parent
+// already inspected; primerSearchTools are those that reveal a search it ran.
+var (
+	primerPathTools   = map[string]bool{"read": true, "edit": true, "write": true, "list": true}
+	primerSearchTools = map[string]bool{"grep": true, "glob": true}
+)
+
+// subAgentPrimer builds a bounded context primer from what the parent agent has
+// already discovered — the file paths it read/edited/listed and the searches it
+// ran — so a freshly spawned child can act on them instead of re-deriving them
+// (issue #283, G1). It carries only references (paths and search descriptors),
+// never file contents or the parent's reasoning, so it stays small and does not
+// defeat the point of the child's fresh context. The repo map is already
+// injected via systemContext, so it is not duplicated here. Returns "" when the
+// parent has gathered nothing worth priming.
+func subAgentPrimer(parent *Agent) string {
+	if parent == nil || parent.ThoughtTrain == nil {
+		return ""
+	}
+	var paths, searches []string
+	seenPath := map[string]bool{}
+	seenSearch := map[string]bool{}
+	for _, msg := range parent.ThoughtTrain.GetTranscript() {
+		for _, call := range msg.ToolCalls {
+			name := call.Function.Name
+			isPath, isSearch := primerPathTools[name], primerSearchTools[name]
+			if !isPath && !isSearch {
+				continue
+			}
+			var args map[string]interface{}
+			if json.Unmarshal([]byte(call.Function.Arguments), &args) != nil {
+				continue
+			}
+			if isPath {
+				if p := strings.TrimSpace(stringField(args, "path")); p != "" && !seenPath[p] && len(paths) < maxPrimerPaths {
+					seenPath[p] = true
+					paths = append(paths, p)
+				}
+				continue
+			}
+			if d := describePrimerSearch(name, args); d != "" && !seenSearch[d] && len(searches) < maxPrimerSearches {
+				seenSearch[d] = true
+				searches = append(searches, d)
+			}
+		}
+	}
+	if len(paths) == 0 && len(searches) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("Context already gathered by the delegating agent (authoritative — do not re-discover):")
+	if len(paths) > 0 {
+		b.WriteString("\nFiles/paths already inspected:")
+		for _, p := range paths {
+			b.WriteString("\n- " + p)
+		}
+	}
+	if len(searches) > 0 {
+		b.WriteString("\nSearches already run:")
+		for _, d := range searches {
+			b.WriteString("\n- " + d)
+		}
+	}
+	b.WriteString("\nAct on these directly; read a listed file only if you need its contents, and do not grep/list to rediscover paths you were already given.")
+	return truncatePrimer(b.String(), maxPrimerBytes)
+}
+
+// describePrimerSearch renders a grep/glob call as a one-line descriptor for the
+// primer, or "" if the call lacks a usable pattern.
+func describePrimerSearch(name string, args map[string]interface{}) string {
+	pat := strings.TrimSpace(stringField(args, "pattern"))
+	if pat == "" {
+		return ""
+	}
+	switch name {
+	case "grep":
+		if p := strings.TrimSpace(stringField(args, "path")); p != "" {
+			return fmt.Sprintf("grep %q in %s", pat, p)
+		}
+		return fmt.Sprintf("grep %q", pat)
+	case "glob":
+		return fmt.Sprintf("glob %q", pat)
+	}
+	return ""
+}
+
+// stringField returns args[key] as a string, or "" if missing or not a string.
+func stringField(args map[string]interface{}, key string) string {
+	s, _ := args[key].(string)
+	return s
+}
+
+// truncatePrimer caps the primer at max bytes, cutting on a line boundary so a
+// path is never sliced in half and appending a truncation marker. The result is
+// guaranteed to be at most max bytes long.
+func truncatePrimer(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	const suffix = "\n- … (truncated)"
+	budget := max - len(suffix)
+	if budget < 0 {
+		budget = 0
+	}
+	cut := s[:budget]
+	if i := strings.LastIndexByte(cut, '\n'); i > 0 {
+		cut = cut[:i]
+	}
+	return cut + suffix
+}
+
+// SeededMessage prepends the agent's context primer (SeedContext) to its task
+// message, producing the first user message for a sub-agent's loop. With no
+// primer it returns task unchanged (issue #283).
+func (a *Agent) SeededMessage(task string) string {
+	if a == nil {
+		return task
+	}
+	a.mu.Lock()
+	seed := a.SeedContext
+	a.mu.Unlock()
+	if strings.TrimSpace(seed) == "" {
+		return task
+	}
+	return seed + "\n\n" + task
 }
 
 // newSubAgent validates depth, builds a child agent under parentAgentID, wires
@@ -1513,6 +1658,11 @@ func (s *UserSession) newSubAgent(parentAgentID, name, task string, kind SubAgen
 	child.Name = name
 	child.Kind = kind
 	child.Task = task
+	// Pre-seed the child with a bounded primer of what the parent already
+	// discovered, so a small delegated task does not pay a re-discovery tax
+	// (issue #283). Built before the child is published; SeededMessage folds it
+	// into the child's first user message.
+	child.SeedContext = subAgentPrimer(parent)
 	child.Status = StatusRunning
 	if timeoutMs > 0 {
 		child.TimeoutMs = timeoutMs
@@ -1586,7 +1736,7 @@ func (s *UserSession) SpawnSubAgent(ctx context.Context, parentAgentID, name, ta
 	child.SetStatus(StatusRunning)
 	s.emitSubAgent(child, "spawned: "+task, nil)
 
-	responses, runErr := s.runLoop(ctx, child, child.ID, task, s.subAgentPrompt(oneShot))
+	responses, runErr := s.runLoop(ctx, child, child.ID, child.SeededMessage(task), s.subAgentPrompt(oneShot))
 
 	child.SetState(StateIdle)
 	parent.SetState(StateThinking)
@@ -1692,7 +1842,9 @@ func (s *UserSession) runInteractive(ia *InteractiveAgent, task string) {
 		}
 	}()
 
-	message := task
+	// Seed only the first turn with the parent's primer; subsequent turns carry
+	// the coordinator's replies verbatim (issue #283).
+	message := ia.agent.SeededMessage(task)
 	for {
 		select {
 		case <-ia.done:
