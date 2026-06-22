@@ -225,7 +225,13 @@ func newSidebar(wb *Workbench) *sidebar {
 			s.divider.SetBounds(tv.Rect{X: 0, Y: 0, W: 1, H: h})
 		}
 		// The pin/unpin glyph sits one cell in from the right edge of the header row
-		// (issue #314), clear of the title text and the divider column.
+		// (issue #314), clear of the title text and the divider column. Note column
+		// w-2 is also the tree's last content column (the tree spans X:2..w-2 above),
+		// but the glyph is row-disjoint from it — the glyph is on the header row (Y:0)
+		// while the tree starts at Y:1 — so they never share a cell and a header-edge
+		// click routes to the glyph, never the tree. This row separation is the
+		// invariant that keeps the shared column safe: if the header ever grew past a
+		// single row, or the tree moved up to Y:0, this would have to move with it.
 		if s.pinToggle != nil {
 			s.pinToggle.SetBounds(tv.Rect{X: w - 2, Y: 0, W: 1, H: 1})
 		}
