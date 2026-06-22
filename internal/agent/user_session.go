@@ -1457,6 +1457,7 @@ When finished, reply with a final plain-text answer that STARTS with either:
   "FAILURE: " followed by the reason you could not complete it.
 If — and only if — you are genuinely blocked and need the coordinator to decide something, instead reply STARTING with
   "CLARIFY: " followed by your specific question.
+Trust any file paths given in the task (or in the primed context) as authoritative — read them directly; do not grep or list to rediscover paths you were already given.
 Keep it concise.`
 
 // subAgentPrompt builds the system prompt for a sub-agent, layering recursion
@@ -1577,8 +1578,10 @@ func stringField(args map[string]interface{}, key string) string {
 }
 
 // truncatePrimer caps the primer at max bytes, cutting on a line boundary so a
-// path is never sliced in half and appending a truncation marker. The result is
-// guaranteed to be at most max bytes long.
+// path is never sliced in half and appending a truncation marker. For any
+// realistic budget (max >= the marker length, always true for the sole caller's
+// maxPrimerBytes) the result is at most max bytes; for a degenerate tiny max the
+// budget floors at 0 and the marker alone is returned.
 func truncatePrimer(s string, max int) string {
 	if len(s) <= max {
 		return s
@@ -1602,9 +1605,11 @@ func (a *Agent) SeededMessage(task string) string {
 	if a == nil {
 		return task
 	}
-	a.mu.Lock()
+	// SeedContext is set once in newSubAgent before the child is published (and
+	// before runInteractive's goroutine is started), then never mutated — so it
+	// is read here without the agent lock, matching how its sibling construction
+	// fields are accessed. Do not write SeedContext after the agent is published.
 	seed := a.SeedContext
-	a.mu.Unlock()
 	if strings.TrimSpace(seed) == "" {
 		return task
 	}
