@@ -124,6 +124,26 @@ func (c ConnectorStat) Add(other ConnectorStat) ConnectorStat {
 	}
 }
 
+// Sub returns the element-wise difference of two connector stats (c minus
+// other). It is the inverse of Add, used to back out a session's contribution
+// from a grand total — e.g. excluding the phantom backend "default" session from
+// the TUI's Statistics totals (issue #278).
+func (c ConnectorStat) Sub(other ConnectorStat) ConnectorStat {
+	return ConnectorStat{
+		Requests:         c.Requests - other.Requests,
+		Success:          c.Success - other.Success,
+		Errors:           c.Errors - other.Errors,
+		TokensIn:         c.TokensIn - other.TokensIn,
+		CachedTokensIn:   c.CachedTokensIn - other.CachedTokensIn,
+		TokensOut:        c.TokensOut - other.TokensOut,
+		TotalTimeMs:      c.TotalTimeMs - other.TotalTimeMs,
+		Timeouts:         c.Timeouts - other.Timeouts,
+		ContextOverflows: c.ContextOverflows - other.ContextOverflows,
+		Refusals:         c.Refusals - other.Refusals,
+		GenericErrors:    c.GenericErrors - other.GenericErrors,
+	}
+}
+
 // AvgLatencyMs is the mean per-request latency in milliseconds, or 0 when there
 // were no requests.
 func (c ConnectorStat) AvgLatencyMs() int64 {

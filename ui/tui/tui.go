@@ -1901,9 +1901,11 @@ func (w *Workbench) refreshOverall() {
 	}
 	// Fold the live (open-session-only) report through the process-lifetime
 	// accumulator so closing a session does not erase the tokens / requests / errors
-	// it already burned (issue #232). The full Statistics view still consumes the raw
-	// GetStatistics() report directly, so it keeps its per-active-session semantics.
-	report := w.overallLifetime.fold(w.handlers.GetStatistics())
+	// it already burned (issue #232). filterPhantomSessions first drops the backend
+	// "default" session, which has no TUI window, so the panel counts only what the
+	// user sees (issue #278). The Statistics dialog consumes the same folded report
+	// (issue #277).
+	report := w.overallLifetime.fold(filterPhantomSessions(w.handlers.GetStatistics()))
 	w.sidebar.refreshOverallStats(report, modelCfg, selected)
 }
 
