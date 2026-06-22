@@ -101,6 +101,13 @@ type sessionTally struct {
 	compactions  int
 	primary      stats.ConnectorStat
 	fast         stats.ConnectorStat
+	// subAgents and perModel mirror the SessionRow fields of the same name so a
+	// closed session is re-attributed to the exact models it used (not just its final
+	// model) and re-emitted faithfully. perModel is nil for rows recorded without a
+	// split; the closed-session path then falls back to attributing primary to
+	// primaryModel, matching the pre-split behaviour.
+	subAgents int
+	perModel  []stats.SessionModelStat
 }
 
 // newLifetimeStats returns an empty process-lifetime accumulator.
@@ -109,29 +116,43 @@ func newLifetimeStats() *lifetimeStats {
 }
 
 // fold records the live report's open-session tallies into the lifetime store and
-// returns a copy of the report whose grand totals and per-model connector stats are
-// augmented with the contributions of sessions that have since closed.
+// returns a copy of the report whose grand totals, per-session rows and per-model
+// connector stats are augmented with the contributions of sessions that have since
+// closed.
 //
 // The live report already sums the currently-open sessions correctly, so fold takes
 // it as the baseline and only adds back the last-known tally of every session that
 // is remembered but no longer present (i.e. closed). The result: a still-open
 // session keeps updating live; closing a session keeps its tokens / requests /
-// errors / cache-hits in the totals instead of erasing them; a new session simply
-// adds on top of the accumulated figure.
+// errors / cache-hits in the totals — and keeps its per-session row in the Sessions
+// list — instead of erasing them; a new session simply adds on top of the
+// accumulated figure.
 //
-// Only the lifetime-sensitive aggregates are touched — Totals' connector/token
-// counters and each model's Connector. The per-session rows, tool and skill
-// breakdowns, and the live "what's on screen" node counts (Totals.Sessions, and each
-// model's Sessions/SubAgents) pass through unchanged: those track the currently-open
-// set and are meant to drop when a session closes.
+// Closed sessions are re-emitted as stats.SessionRow entries from the stored tally
+// (id, turns, tokens, tool calls, compactions, primary model, primary/fast
+// connector). They are appended after the live (open) rows in stable id-sorted
+// order. ContextTokens/ContextWindow are live context-window metrics with no
+// lifetime meaning, so closed rows carry zeros (the Sessions renderer handles
+// contextPercent(0, 0)). This makes the Statistics dialog show cross-session
+// history once it consumes the folded report (issue #277).
+//
+// The live "what's on screen" count Totals.Sessions (and each model's
+// Sessions/SubAgents) passes through unchanged: it tracks the currently-open set
+// and is meant to drop when a session closes, so it keeps matching the sidebar
+// window count. The re-emitted closed rows are historical and intentionally not
+// counted there (so Totals.Sessions can be < len(report.Sessions) after a close).
+// Tool and skill breakdowns also pass through unchanged (global registries).
 //
 // Because it only augments the report's own totals (never recomputes them from the
 // per-session rows), fold is robust to reports whose totals are not a strict sum of
-// their session rows, and is a no-op until the first session closes.
+// their session rows, and is a no-op until the first session closes. It does not
+// mutate its input report: a fresh Sessions slice is built rather than appending
+// into the caller's backing array, and Totals is a value copy.
 //
 // Must be called on the UI thread: it reads and writes the unguarded sessions map.
-// Its sole caller, Workbench.refreshOverall, runs on the UI thread (the stats ticker
-// marshals via desktop.Post), so no locking is needed.
+// Its callers, Workbench.refreshOverall and Workbench.showStatisticsDialog, run on
+// the UI thread (the stats ticker marshals via desktop.Post), so no locking is
+// needed.
 func (l *lifetimeStats) fold(report stats.Report) stats.Report {
 	open := make(map[string]bool, len(report.Sessions))
 	for _, s := range report.Sessions {
@@ -145,17 +166,29 @@ func (l *lifetimeStats) fold(report stats.Report) stats.Report {
 			compactions:  s.Compactions,
 			primary:      s.Primary,
 			fast:         s.Fast,
+			subAgents:    s.SubAgents,
+			perModel:     s.PerModel,
 		}
 	}
 
-	// Add back every closed session — remembered but absent from the live report — so
-	// its counters persist in the grand totals and per-model breakdown.
+	// Every remembered session absent from the live report has closed. Collect them
+	// in a stable id order so both the re-emitted rows and the per-model add-backs
+	// are deterministic (a map range order would vary run to run).
+	closedIDs := make([]string, 0, len(l.sessions))
+	for id := range l.sessions {
+		if !open[id] {
+			closedIDs = append(closedIDs, id)
+		}
+	}
+	sort.Strings(closedIDs)
+
+	// Add back each closed session so its counters persist in the grand totals and
+	// per-model breakdown, and re-emit its per-session row for the Sessions list.
 	totals := report.Totals
 	perModel := make(map[string]stats.ConnectorStat)
-	for id, t := range l.sessions {
-		if open[id] {
-			continue
-		}
+	closedRows := make([]stats.SessionRow, 0, len(closedIDs))
+	for _, id := range closedIDs {
+		t := l.sessions[id]
 		totals.Turns += t.turns
 		totals.TokensIn += t.tokensIn
 		totals.TokensOut += t.tokensOut
@@ -163,14 +196,190 @@ func (l *lifetimeStats) fold(report stats.Report) stats.Report {
 		totals.Compactions += t.compactions
 		totals.Primary = totals.Primary.Add(t.primary)
 		totals.Fast = totals.Fast.Add(t.fast)
-		if t.primaryModel != "" {
+		// Re-attribute per-model connector to the EXACT models the session used when
+		// its split was recorded (so a closed model-switching session keeps modelA's
+		// share on A and modelB's on B, matching the live report). Fall back to the
+		// final model when no split is available (rows recorded without PerModel).
+		if len(t.perModel) > 0 {
+			for _, m := range t.perModel {
+				perModel[m.Name] = perModel[m.Name].Add(m.Connector)
+			}
+		} else if t.primaryModel != "" {
 			perModel[t.primaryModel] = perModel[t.primaryModel].Add(t.primary)
 		}
+		closedRows = append(closedRows, stats.SessionRow{
+			ID:           id,
+			Turns:        t.turns,
+			TokensIn:     t.tokensIn,
+			TokensOut:    t.tokensOut,
+			ToolCalls:    t.toolCalls,
+			Compactions:  t.compactions,
+			PrimaryModel: t.primaryModel,
+			Primary:      t.primary,
+			Fast:         t.fast,
+			SubAgents:    t.subAgents,
+			PerModel:     t.perModel,
+			// ContextTokens/ContextWindow are live-only; closed rows carry zeros.
+		})
+	}
+
+	// Build a fresh Sessions slice (open rows verbatim, then closed rows) so the
+	// caller's backing array is never touched. Skip the copy entirely when nothing
+	// has closed, leaving the input slice referenced unchanged.
+	if len(closedRows) > 0 {
+		sessions := make([]stats.SessionRow, len(report.Sessions), len(report.Sessions)+len(closedRows))
+		copy(sessions, report.Sessions)
+		report.Sessions = append(sessions, closedRows...)
 	}
 
 	report.Totals = totals
 	report.Models = mergeModelLifetime(report.Models, perModel)
 	return report
+}
+
+// phantomDefaultSessionID is the id of the always-present HTTP/API fallback session
+// created at startup (cmd/main.go's CreateUserSession("default", …)). It is the
+// shared headless session and is never opened as a TUI window, so it must not be
+// counted among the sessions the TUI user actually sees (issue #278). It is not
+// flagged ephemeral in the backend (it is created via CreateUserSession, not
+// NewEphemeralSession), so it is matched by id rather than by SessionRow.Ephemeral.
+const phantomDefaultSessionID = "default"
+
+// isPhantomSession reports whether a report row is a backend session with no TUI
+// window: the shared "default" session or any on-demand ephemeral HTTP/API session
+// (SessionRow.Ephemeral, set by Gogent.Statistics). These are the sessions the TUI
+// must hide from its Statistics surfaces (issue #278).
+func isPhantomSession(s stats.SessionRow) bool {
+	return s.ID == phantomDefaultSessionID || s.Ephemeral
+}
+
+// filterPhantomSessions returns a copy of the report with every windowless backend
+// session removed — the shared "default" session and any ephemeral HTTP/API session
+// (see isPhantomSession). Each removed row is dropped and its full contribution —
+// including the Sessions count — is subtracted from the grand Totals. This makes the
+// TUI's Statistics dialog and Overall panel count only the sessions the user sees as
+// windows, fixing the off-by-one (off-by-N with live HTTP clients) against the
+// "Sessions & Agents" sidebar (issue #278).
+//
+// It is applied TUI-side only, before fold, so a phantom is never remembered as a
+// closed session (it would otherwise be re-emitted forever). The backend
+// Statistics() report is left untouched, so the headless GET /stats endpoint still
+// reports every session — there "default" is the real session the API talks to.
+//
+// It does not mutate the input report: Totals is a value copy and fresh Sessions /
+// Models slices are built only when a phantom row is actually present.
+func filterPhantomSessions(report stats.Report) stats.Report {
+	kept := make([]stats.SessionRow, 0, len(report.Sessions))
+	var removed []stats.SessionRow
+	for _, s := range report.Sessions {
+		if isPhantomSession(s) {
+			report.Totals.Sessions--
+			report.Totals.Turns -= s.Turns
+			report.Totals.TokensIn -= s.TokensIn
+			report.Totals.TokensOut -= s.TokensOut
+			report.Totals.ToolCalls -= s.ToolCalls
+			report.Totals.Compactions -= s.Compactions
+			report.Totals.Primary = report.Totals.Primary.Sub(s.Primary)
+			report.Totals.Fast = report.Totals.Fast.Sub(s.Fast)
+			removed = append(removed, s)
+			continue
+		}
+		kept = append(kept, s)
+	}
+	if len(removed) == 0 {
+		return report
+	}
+	report.Sessions = kept
+	// A phantom can carry real per-model traffic (an HTTP request routed to the
+	// shared "default" or an ephemeral session while the TUI runs), so back it out of
+	// report.Models too — otherwise the Models tab and the Overview "Models (tokens)"
+	// summary keep counting it and the per-model rows no longer match the filtered
+	// grand total (issue #278). subtractModelTraffic uses each row's exact per-model
+	// split and also backs out its per-model session/sub-agent node counts.
+	report.Models = subtractModelTraffic(report.Models, removed)
+	return report
+}
+
+// subtractModelTraffic returns the per-model rows with each removed session's
+// contribution backed out, so the breakdown stays consistent with the filtered grand
+// totals and the Overall panel's model-scoped counts (issue #278). For each removed
+// session it subtracts:
+//
+//   - the connector and token attribution, per model. When the row carries a
+//     PerModel split (the real backend shape), each model's slice is backed out of
+//     exactly that model — so a session that switched models does not leave traffic
+//     stranded on one model or drive another negative. When PerModel is empty (rows
+//     built without a split, e.g. in tests), it falls back to attributing the
+//     aggregate Primary to PrimaryModel, matching the earlier single-model behaviour.
+//   - the node counts (Sessions/SubAgents) from the session's PrimaryModel, mirroring
+//     how Gogent.Statistics() keys those counts.
+//
+// The token and node-count back-outs are floored at zero so a row whose fields were
+// not seeded (synthetic input) cannot go negative; on a real report they are exact.
+//
+// It does not mutate the input slice (it copies before adjusting) and does not prune
+// rows that fall to zero, matching the rest of the stats pipeline.
+func subtractModelTraffic(models []stats.ModelStat, removed []stats.SessionRow) []stats.ModelStat {
+	type delta struct {
+		conn      stats.ConnectorStat
+		tokensIn  int
+		tokensOut int
+		sessions  int
+		subAgents int
+	}
+	deltas := make(map[string]delta)
+	addTraffic := func(model string, conn stats.ConnectorStat, tin, tout int) {
+		d := deltas[model]
+		d.conn = d.conn.Add(conn)
+		d.tokensIn += tin
+		d.tokensOut += tout
+		deltas[model] = d
+	}
+	for _, s := range removed {
+		if len(s.PerModel) > 0 {
+			// Exact: back each model's slice out of that same model.
+			for _, m := range s.PerModel {
+				addTraffic(m.Name, m.Connector, m.TokensIn, m.TokensOut)
+			}
+		} else if s.PrimaryModel != "" {
+			// Fallback: no split available, attribute the aggregate to the final model.
+			addTraffic(s.PrimaryModel, s.Primary, s.TokensIn, s.TokensOut)
+		}
+		// Node counts are keyed by the session's primary model only (matching
+		// Gogent.Statistics()'s mt.Sessions++ / mt.SubAgents += per primaryModel).
+		if s.PrimaryModel != "" {
+			d := deltas[s.PrimaryModel]
+			d.sessions++
+			d.subAgents += s.SubAgents
+			deltas[s.PrimaryModel] = d
+		}
+	}
+	if len(deltas) == 0 {
+		return models
+	}
+	out := make([]stats.ModelStat, len(models))
+	copy(out, models)
+	for i := range out {
+		if d, ok := deltas[out[i].Name]; ok {
+			out[i].Connector = out[i].Connector.Sub(d.conn)
+			out[i].TokensIn = clampZero(out[i].TokensIn - d.tokensIn)
+			out[i].TokensOut = clampZero(out[i].TokensOut - d.tokensOut)
+			out[i].Sessions = clampZero(out[i].Sessions - d.sessions)
+			out[i].SubAgents = clampZero(out[i].SubAgents - d.subAgents)
+		}
+	}
+	return out
+}
+
+// clampZero returns n, or 0 when n is negative. It floors the token and node-count
+// back-outs so a model row whose fields were not seeded (synthetic input) cannot
+// render a negative value; on a real report every back-out is exact and the floor is
+// a no-op.
+func clampZero(n int) int {
+	if n < 0 {
+		return 0
+	}
+	return n
 }
 
 // mergeModelLifetime returns the report's per-model rows with the closed-session

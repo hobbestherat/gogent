@@ -747,15 +747,26 @@ func TestWorkbench_OverallPersistsAcrossManyRefreshes(t *testing.T) {
 
 // --- round 2: gaps surfaced in review ----------------------------------------
 
-// TestStatisticsView_UsesRawReportNotFolded pins the plan's promise that "the
-// full Statistics view still consumes the raw report directly — unaffected" by the
-// lifetime fold. showStatisticsDialog captures w.handlers.GetStatistics() verbatim
-// (statistics_dialog.go:47) and never folds, so a closed session must VANISH from
-// the Statistics overview while it PERSISTS in the Overall panel. This is the
-// intentional split between the two views, and the test guards it from both
-// directions: the dialog fetches exactly one raw report (no fold path), that raw
-// report excludes the closed session, and the Overall panel (folded) retains it.
-func TestStatisticsView_UsesRawReportNotFolded(t *testing.T) {
+// TestStatisticsDialog_UsesFoldedFilteredReport pins the new contract (issues #277
+// + #278) and REPLACES the old TestStatisticsView_UsesRawReportNotFolded, which
+// pinned the now-removed "dialog consumes the raw report" behaviour.
+//
+// showStatisticsDialog now builds its report as
+//
+//	w.overallLifetime.fold(filterPhantomSessions(w.handlers.GetStatistics()))
+//
+// (statistics_dialog.go), so the dialog must: (a) fold through the process-lifetime
+// accumulator like the Overall panel — closing a session keeps its traffic and its
+// per-session row (#277); and (b) filter the phantom backend "default" session —
+// which has no TUI window — BEFORE the fold, so its count matches the sidebar and it
+// is never remembered as a closed row (#278).
+//
+// The dialog renders into a TextView the test cannot read back, so the dialog is
+// bound from two angles: its observable side effect on the shared lifetime
+// accumulator (fold records the open set; the filter keeps "default" out of it), and
+// the report rebuilt from that exact accumulator expression, rendered through the
+// same renderStatistics the dialog uses.
+func TestStatisticsDialog_UsesFoldedFilteredReport(t *testing.T) {
 	w := newTestWorkbench(t)
 
 	closed := sessSpec{id: "s1", primaryModel: "test", primary: conn(100, 1, 1111, 0, 0)}
@@ -764,63 +775,88 @@ func TestStatisticsView_UsesRawReportNotFolded(t *testing.T) {
 	// s1 opens then closes; s2 stays open. The Overall panel (folded) keeps both.
 	w.handlers.GetStatistics = func() stats.Report { return buildReport(closed) }
 	w.refreshOverall()
-	w.handlers.GetStatistics = func() stats.Report { return buildReport(open) } // s1 closed, s2 open
-	w.refreshOverall()
-	if got := w.sidebar.overall; got.Requests != 123 || got.TokensIn != 1333 {
-		t.Fatalf("Overall panel (folded) = %+v, want {Req:123 In:1333} (s1 100/1111 + s2 23/222)", got)
+	if got := w.sidebar.overall; got.Requests != 100 || got.TokensIn != 1111 {
+		t.Fatalf("Overall after s1 open = %+v, want {Req:100 In:1111}", got)
 	}
 
-	// The Statistics dialog reads the RAW report. A spy proves it fetches exactly
-	// one report at open time (the raw GetStatistics path), never the folded
-	// accumulator, and that opening the dialog is non-blocking and panic-free.
-	raw := buildReport(open)
+	// The live backend report now lists the open s2 plus the always-present phantom
+	// "default" session (which has its own HTTP traffic but no TUI window). s1 closed.
 	var calls int
-	w.handlers.GetStatistics = func() stats.Report { calls++; return raw }
+	w.handlers.GetStatistics = func() stats.Report {
+		calls++
+		return buildReport(open, sessSpec{id: phantomDefaultSessionID, primary: conn(7, 2, 70, 0, 7)})
+	}
 	w.showStatisticsDialog()
+
+	// The dialog fetches exactly one report (the single GetStatistics call wrapped by
+	// filterPhantomSessions), and opens a non-blocking, panic-free modal layer.
 	if calls != 1 {
-		t.Fatalf("showStatisticsDialog called GetStatistics %d times, want exactly 1 (single raw fetch; no fold)", calls)
+		t.Fatalf("showStatisticsDialog called GetStatistics %d times, want exactly 1", calls)
+	}
+	if top := w.desktop.TopLayer(); top == nil || top.Name != "statistics-dialog" {
+		t.Fatalf("top layer = %v, want statistics-dialog", top)
 	}
 
-	// The dialog's data source excludes the closed s1; the Overall panel includes
-	// it. The two views intentionally diverge.
-	if raw.Totals.Primary.Requests != 23 || raw.Totals.Primary.TokensIn != 222 {
-		t.Errorf("raw (dialog source) = %+v, want only open s2 {Req:23 In:222}", raw.Totals.Primary)
+	// Folding is observable: opening the dialog records the live (open) sessions into
+	// the shared lifetime accumulator. The phantom "default" must NOT be recorded —
+	// filterPhantomSessions strips it BEFORE fold, so it can never be re-emitted as a
+	// closed row on a later refresh. (Had the dialog used the raw report, neither s2
+	// nor anything else would have been recorded by opening it.)
+	if _, ok := w.overallLifetime.sessions["s2"]; !ok {
+		t.Error("dialog did not fold: open session s2 was not recorded in the lifetime accumulator")
 	}
-	if w.sidebar.overall.Requests != 123 {
-		t.Errorf("folded (panel) Requests = %d, want 123 (s1 persisted + s2)", w.sidebar.overall.Requests)
-	}
-
-	// Rendering the raw overview must yield a DIFFERENT string than the folded
-	// overview — proving the dialog (which renders the raw report via this same
-	// renderStatistics call) cannot show the folded/lifetime totals. The exact
-	// request counts are asserted on the structured totals above; here we only
-	// confirm the renderer is sensitive to the difference.
-	folded := newLifetimeStats()
-	folded.fold(buildReport(closed))
-	foldedReport := folded.fold(buildReport(open))
-	rawOverview := renderStatistics(statsOverview, raw)
-	foldedOverview := renderStatistics(statsOverview, foldedReport)
-	if rawOverview == foldedOverview {
-		t.Error("raw and folded Statistics overviews are identical; fold must change the rendered grand totals")
-	}
-	// The folded grand total (123 requests) appears only in the folded overview;
-	// the raw overview carries the open-only total (23). This is the concrete
-	// text-level proof that the dialog — which renders the raw report — cannot
-	// show the lifetime figure.
-	if !strings.Contains(foldedOverview, "123") {
-		t.Error("folded overview missing the lifetime request total 123")
-	}
-	if strings.Contains(rawOverview, "123") {
-		t.Error("raw Statistics overview leaked the folded lifetime total 123:\n" + rawOverview)
+	if _, ok := w.overallLifetime.sessions[phantomDefaultSessionID]; ok {
+		t.Error("dialog recorded the phantom default; filterPhantomSessions must strip it before fold")
 	}
 
-	// Defensive: fold never mutates the raw report the dialog captured, so even a
-	// later refresh cannot retroactively alter what the dialog shows.
-	before := raw.Totals.Primary.Requests
-	w.handlers.GetStatistics = func() stats.Report { return buildReport() } // all closed
-	w.refreshOverall()
-	if raw.Totals.Primary.Requests != before {
-		t.Errorf("fold mutated the dialog's captured raw report: Requests %d -> %d", before, raw.Totals.Primary.Requests)
+	// Rebuild the exact report the dialog rendered and assert both fixes in its
+	// rendered sections.
+	report := w.overallLifetime.fold(filterPhantomSessions(w.handlers.GetStatistics()))
+
+	// #278: no phantom default row, and the Overview session count equals the open
+	// window count (1: s2) — NOT the backend count, which would include "default".
+	for _, s := range report.Sessions {
+		if s.ID == phantomDefaultSessionID {
+			t.Errorf("phantom default leaked into the dialog's Sessions: %+v", report.Sessions)
+		}
+	}
+	if report.Totals.Sessions != 1 {
+		t.Errorf("Overview Sessions = %d, want 1 (open s2; default filtered, closed s1 not counted)", report.Totals.Sessions)
+	}
+
+	// #277: the closed s1 survives as a per-session row with its last-known tally, and
+	// its traffic persists in the grand totals.
+	var s1row *stats.SessionRow
+	for i := range report.Sessions {
+		if report.Sessions[i].ID == "s1" {
+			s1row = &report.Sessions[i]
+		}
+	}
+	if s1row == nil {
+		t.Fatalf("closed session s1 missing from the dialog's Sessions: %+v", report.Sessions)
+	}
+	if s1row.Primary.Requests != 100 || s1row.Primary.TokensIn != 1111 {
+		t.Errorf("closed s1 row = %+v, want {Req:100 In:1111}", s1row.Primary)
+	}
+	// Lifetime grand totals = closed s1 (100/1111) + open s2 (23/222); the phantom
+	// default (7/70) is excluded.
+	if report.Totals.Primary.Requests != 123 || report.Totals.Primary.TokensIn != 1333 {
+		t.Errorf("dialog grand totals = %+v, want {Req:123 In:1333} (s1+s2, default excluded)", report.Totals.Primary)
+	}
+
+	// Text-level proof through the dialog's own renderStatistics: the Overview shows
+	// the lifetime request total (123), and the Sessions section lists the closed s1
+	// but no "default" row.
+	overview := renderStatistics(statsOverview, report)
+	if !strings.Contains(overview, "123") {
+		t.Errorf("Overview missing lifetime request total 123:\n%s", overview)
+	}
+	sessionsView := renderStatistics(statsSessions, report)
+	if !strings.Contains(sessionsView, "s1") {
+		t.Errorf("Sessions view missing the closed session s1:\n%s", sessionsView)
+	}
+	if strings.Contains(sessionsView, phantomDefaultSessionID) {
+		t.Errorf("Sessions view shows the phantom default row:\n%s", sessionsView)
 	}
 }
 

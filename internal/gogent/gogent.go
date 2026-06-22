@@ -1884,6 +1884,14 @@ func (g *Gogent) Statistics() stats.Report {
 	}
 	toolReg := g.toolRegistry
 	skills := g.skills
+	// Snapshot which sessions are ephemeral (on-demand HTTP/API sessions, issue
+	// #25) so each row can be tagged. The report is not filtered here — GET /stats
+	// must keep every session — but the tag lets the TUI drop windowless sessions
+	// from its own Statistics surfaces (issue #278).
+	ephemeral := make(map[string]bool, len(g.ephemeral))
+	for id, eph := range g.ephemeral {
+		ephemeral[id] = eph
+	}
 	g.mu.RUnlock()
 
 	// Stable order: oldest session first (creation time, then id), matching how
@@ -1902,6 +1910,20 @@ func (g *Gogent) Statistics() stats.Report {
 		primary := stats.FromSnapshot(it.s.ConnectorStats())
 		fast := stats.FromSnapshot(it.s.FastConnectorStats())
 		primaryModel := it.s.PrimaryModel()
+		subAgents := it.s.SubAgentCount()
+		// Capture the per-model split once: it feeds both the session row's PerModel
+		// (so a consumer excluding this session can back out its exact per-model
+		// contribution, issue #278) and the grand per-model aggregation below.
+		perModelStats := it.s.PerModelStats()
+		perModel := make([]stats.SessionModelStat, 0, len(perModelStats))
+		for _, m := range perModelStats {
+			perModel = append(perModel, stats.SessionModelStat{
+				Name:      m.Name,
+				TokensIn:  m.TokensIn,
+				TokensOut: m.TokensOut,
+				Connector: stats.FromSnapshot(m.Connector),
+			})
+		}
 		rep.Sessions = append(rep.Sessions, stats.SessionRow{
 			ID:            it.id,
 			Turns:         snap.Turns,
@@ -1914,6 +1936,9 @@ func (g *Gogent) Statistics() stats.Report {
 			PrimaryModel:  primaryModel,
 			Primary:       primary,
 			Fast:          fast,
+			Ephemeral:     ephemeral[it.id],
+			SubAgents:     subAgents,
+			PerModel:      perModel,
 		})
 		rep.Totals.Sessions++
 		rep.Totals.Turns += snap.Turns
@@ -1928,19 +1953,19 @@ func (g *Gogent) Statistics() stats.Report {
 		// switched models contributes to several entries), while the session and
 		// sub-agent counts are keyed by the session's current primary model — that is
 		// the model the panel scopes "sessions/sub-agents using this model" to.
-		for _, m := range it.s.PerModelStats() {
+		for _, m := range perModel {
 			mt := modelTotals[m.Name]
 			mt.Name = m.Name
 			mt.TokensIn += m.TokensIn
 			mt.TokensOut += m.TokensOut
-			mt.Connector = mt.Connector.Add(stats.FromSnapshot(m.Connector))
+			mt.Connector = mt.Connector.Add(m.Connector)
 			modelTotals[m.Name] = mt
 		}
 		if primaryModel != "" {
 			mt := modelTotals[primaryModel]
 			mt.Name = primaryModel
 			mt.Sessions++
-			mt.SubAgents += it.s.SubAgentCount()
+			mt.SubAgents += subAgents
 			modelTotals[primaryModel] = mt
 		}
 	}

@@ -36,15 +36,19 @@ func statisticsDialogSize(screenW, screenH int) (width, height int) {
 // read-only breakdown of the counters gogent already collects — grand totals,
 // per-session, per-tool, per-skill and per-model rows — with CSV/JSON export.
 //
-// The report is a point-in-time snapshot captured when the dialog opens. The
-// underlying counters are in-memory (durable history arrives with the audit
-// stream, issue #51).
+// The report is a point-in-time snapshot captured when the dialog opens. It is
+// folded through the process-lifetime accumulator (the same path the Overall
+// panel uses) so the view shows cross-session totals and keeps the per-session
+// rows of sessions that have closed during the run (issue #277), and the phantom
+// backend "default" session — which has no TUI window — is filtered out first so
+// the Sessions count matches the sidebar (issue #278). The underlying counters are
+// in-memory (durable history arrives with the audit stream, issue #51).
 func (w *Workbench) showStatisticsDialog() {
 	if w.handlers.GetStatistics == nil {
 		w.showConfirm("Statistics", "Statistics are unavailable.", nil)
 		return
 	}
-	report := w.handlers.GetStatistics()
+	report := w.overallLifetime.fold(filterPhantomSessions(w.handlers.GetStatistics()))
 
 	width, height := statisticsDialogSize(w.app.Width(), w.app.Height())
 	x, y := centeredDialog(w, width, height)

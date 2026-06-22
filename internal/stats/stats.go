@@ -70,6 +70,37 @@ type SessionRow struct {
 	PrimaryModel string        `json:"primary_model,omitempty"`
 	Primary      ConnectorStat `json:"primary"`
 	Fast         ConnectorStat `json:"fast"`
+	// Ephemeral marks a session the backend never persists — the shared HTTP/API
+	// sessions created on demand by NewEphemeralSession (issue #25). It is purely
+	// informational in the report (the headless GET /stats endpoint still lists
+	// every session); the TUI uses it to drop sessions that have no window from its
+	// Statistics surfaces so the count matches the sidebar (issue #278). Omitted from
+	// JSON when false so the common, persisted-session shape is unchanged.
+	Ephemeral bool `json:"ephemeral,omitempty"`
+	// SubAgents is the session's sub-agent count, attributed to PrimaryModel in the
+	// grand Models breakdown (issue #191). It is carried per row so a consumer that
+	// excludes this session can back the node count out of that model (issue #278).
+	SubAgents int `json:"sub_agents,omitempty"`
+	// PerModel is this session's usage split across every model it routed turns
+	// through. The grand Models breakdown is the sum of all sessions' PerModel, so a
+	// consumer excluding a session (the TUI dropping a windowless phantom, issue
+	// #278) can back out its exact per-model contribution rather than mis-attributing
+	// the whole aggregate Primary to the final model. Empty for rows assembled
+	// without a split; consumers then fall back to attributing Primary to
+	// PrimaryModel. Omitted from JSON when empty.
+	PerModel []SessionModelStat `json:"per_model,omitempty"`
+}
+
+// SessionModelStat is one model's slice of a single session's usage: the connector
+// counters and session-layer token attribution for the turns the session routed
+// through that model. A session that switched models carries several of these (see
+// SessionRow.PerModel). It mirrors the per-model fields of ModelStat without the
+// node counts, which are session-level (attributed to the session's primary model).
+type SessionModelStat struct {
+	Name      string        `json:"name"`
+	TokensIn  int           `json:"tokens_in"`
+	TokensOut int           `json:"tokens_out"`
+	Connector ConnectorStat `json:"connector"`
 }
 
 // ConnectorStat mirrors the low-level model connector counters (see
@@ -121,6 +152,26 @@ func (c ConnectorStat) Add(other ConnectorStat) ConnectorStat {
 		ContextOverflows: c.ContextOverflows + other.ContextOverflows,
 		Refusals:         c.Refusals + other.Refusals,
 		GenericErrors:    c.GenericErrors + other.GenericErrors,
+	}
+}
+
+// Sub returns the element-wise difference of two connector stats (c minus
+// other). It is the inverse of Add, used to back out a session's contribution
+// from a grand total — e.g. excluding the phantom backend "default" session from
+// the TUI's Statistics totals (issue #278).
+func (c ConnectorStat) Sub(other ConnectorStat) ConnectorStat {
+	return ConnectorStat{
+		Requests:         c.Requests - other.Requests,
+		Success:          c.Success - other.Success,
+		Errors:           c.Errors - other.Errors,
+		TokensIn:         c.TokensIn - other.TokensIn,
+		CachedTokensIn:   c.CachedTokensIn - other.CachedTokensIn,
+		TokensOut:        c.TokensOut - other.TokensOut,
+		TotalTimeMs:      c.TotalTimeMs - other.TotalTimeMs,
+		Timeouts:         c.Timeouts - other.Timeouts,
+		ContextOverflows: c.ContextOverflows - other.ContextOverflows,
+		Refusals:         c.Refusals - other.Refusals,
+		GenericErrors:    c.GenericErrors - other.GenericErrors,
 	}
 }
 
