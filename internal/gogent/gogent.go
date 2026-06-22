@@ -903,7 +903,7 @@ func (g *Gogent) initializeToolRegistry() {
 
 	g.toolRegistry.Register(&tool.Tool{
 		Name:        "wait_agent_event",
-		Description: "Block until an interactive sub-agent finishes or asks for clarification, then return that event. Optional timeout_ms.",
+		Description: "Block until an interactive sub-agent finishes or asks for clarification, then return that event; returns {timed_out:true} if none arrives in time. timeout_ms bounds the wait (defaults to 30000ms when omitted). Call this only while agents are still running — waiting with nothing outstanding just times out.",
 		InputSchema: map[string]interface{}{
 			"type":       "object",
 			"properties": map[string]interface{}{"timeout_ms": map[string]interface{}{"type": "number"}},
@@ -913,7 +913,10 @@ func (g *Gogent) initializeToolRegistry() {
 			if session == nil {
 				return nil, fmt.Errorf("session not found: %s", ctx.SessionID)
 			}
-			timeout := time.Duration(0)
+			// Use the model's timeout_ms when given; otherwise apply a finite
+			// default rather than 0, which NextAgentEvent treats as an unbounded
+			// block that would hang the turn forever when nothing is pending.
+			timeout := defaultWaitAgentEventTimeout
 			if v, ok := args["timeout_ms"].(float64); ok && v > 0 {
 				timeout = time.Duration(v) * time.Millisecond
 			}
@@ -2439,6 +2442,16 @@ func (g *Gogent) ExecuteToolCall(toolCall *tool.ToolCall, sessionID, agentID, me
 	}
 	return result, nil
 }
+
+// defaultWaitAgentEventTimeout bounds a wait_agent_event call that the model
+// issues without an explicit timeout_ms. NextAgentEvent treats a non-positive
+// timeout as "block until an event arrives", which would hang the whole turn if
+// the coordinator waits with nothing outstanding (e.g. after all agents have
+// completed, or before any launch). Capping the omitted-timeout case keeps the
+// parent unblockable forever while still giving a running agent ample time to
+// report; the model simply re-issues wait_agent_event on a timed_out result
+// (issue #284 — the parent must never be blocked).
+const defaultWaitAgentEventTimeout = 30 * time.Second
 
 // oneShotOnlyTools are the blocking coordination tools; interactiveOnlyTools are
 // the asynchronous (fire-and-forget) ones. A session is handed a registry with

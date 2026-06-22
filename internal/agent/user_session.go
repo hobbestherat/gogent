@@ -1491,6 +1491,10 @@ Concrete recipe for "research X in the background while I work on Y":
   4. React to the returned event: if it's CLARIFY, answer with agent_send and loop
      back to step 2; if it completed, fold the result into your work.
   5. Repeat wait_agent_event until every launched agent has completed.
+Only call wait_agent_event while at least one agent is still running; once they
+have all finished (or are only waiting on a CLARIFY) it just times out. A CLARIFY
+agent stays parked and holds a slot until you answer it (agent_send) or
+agent_terminate it, so don't leave one hanging.
 Launch several investigations up front, keep working, and collect results as they
 finish — that is the latency win over blocking.`
 
@@ -1522,7 +1526,10 @@ latency by running work concurrently. Choose the style by what you will do next:
     3. When you need the findings, call wait_agent_event (blocks until some agent
        finishes or asks a question) and react: answer a CLARIFY with agent_send,
        fold a completed result into your work, agent_terminate one you no longer need.
-    4. Repeat wait_agent_event until every launched agent has completed.
+    4. Repeat wait_agent_event until every launched agent has completed. Only wait
+       while an agent is still running — waiting with nothing outstanding (or only a
+       parked CLARIFY) just times out. Answer or agent_terminate a CLARIFY agent
+       promptly; it holds a slot until you do.
     agent_status {agent_id} reports a single worker's state on demand.
 Rule of thumb: "I need everything now" -> spawn_subagent; "start this and let me keep
 going" -> launch_agent then wait_agent_event later.`
@@ -2091,7 +2098,11 @@ func (s *UserSession) popPendingTerminal() (AgentEvent, bool) {
 }
 
 // NextAgentEvent blocks for the next interactive sub-agent event, up to timeout.
-// A non-positive timeout waits indefinitely. The boolean is false on timeout.
+// A non-positive timeout waits INDEFINITELY: callers must only pass one when they
+// know an event is still coming (a running agent will report), otherwise the call
+// blocks forever with nothing to wake it. The wait_agent_event tool therefore
+// always passes a finite timeout (see defaultWaitAgentEventTimeout). The boolean
+// is false on timeout.
 func (s *UserSession) NextAgentEvent(timeout time.Duration) (AgentEvent, bool) {
 	// Drain buffered events first, then any terminal events that spilled over
 	// when the buffer was full, before blocking. This guarantees a terminal
