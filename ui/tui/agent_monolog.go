@@ -26,8 +26,10 @@ func (w *Workbench) showAgentMonolog(sessionID, agentID, name string) {
 		title = agentID
 	}
 	// Large by default (≈80%×85% of the terminal) with a 40×10 floor; the history
-	// view fills the window, so it grows with the terminal (issue #299).
-	spec := tv.DialogSpec{MinW: 40, MinH: 10}
+	// view fills the window, so it grows with the terminal (issue #299). A 120-column
+	// MaxW keeps the transcript readable on an ultrawide terminal (issue #317) while it
+	// still grows tall (no height cap; a transcript wants the vertical space).
+	spec := tv.DialogSpec{MinW: 40, MaxW: 120, MinH: 10}
 	x, y, width, height := w.dialogRect(spec)
 
 	window := tv.NewWindow("monologue: "+title, tv.Rect{X: x, Y: y, W: width, H: height}, tui.LineSingle)
