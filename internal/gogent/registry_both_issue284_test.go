@@ -527,3 +527,76 @@ func TestTerminateInteractiveAgentStopsIt(t *testing.T) {
 		t.Errorf("terminated agent event type = %q, want failed", ty)
 	}
 }
+
+// TestLaunchAgentRespectsMaxSubAgents asserts the task-mandated invariant that
+// the per-parent max_subagents bound is preserved for the ASYNC engine too: with
+// the model gated so every launched child stays active (running), the
+// (MaxSubAgents+1)-th launch_agent from a single parent must be rejected, exactly
+// as a spawn_subagent fan-out would be. This guards against the fire-and-forget
+// path quietly bypassing the bound issue #284 says it must keep.
+func TestLaunchAgentRespectsMaxSubAgents(t *testing.T) {
+	srv := newGatedModelServer("SUCCESS: done")
+	server := httptest.NewServer(http.HandlerFunc(srv.handler))
+	defer server.Close()
+	defer srv.Release() // free the gated children at the end
+
+	g, _ := newBothModeSession(t, server.URL)
+	max := g.SubAgentSettings().MaxSubAgentsOrDefault()
+	if max <= 0 {
+		t.Fatalf("unexpected non-positive MaxSubAgents: %d", max)
+	}
+
+	// The first `max` launches succeed and stay active because the model is gated.
+	for i := 0; i < max; i++ {
+		resp, err := execTool(t, g, "launch_agent",
+			map[string]interface{}{"name": "w", "task": "loop"})
+		if err != nil {
+			t.Fatalf("launch %d/%d errored unexpectedly: %v", i+1, max, err)
+		}
+		if resp == nil || !resp.Success {
+			t.Fatalf("launch %d/%d unsuccessful: %+v", i+1, max, resp)
+		}
+	}
+
+	// The next launch must be rejected by the per-parent cap.
+	if _, err := execTool(t, g, "launch_agent",
+		map[string]interface{}{"name": "overflow", "task": "loop"}); err == nil {
+		t.Errorf("launch_agent beyond MaxSubAgents (%d) should error, but succeeded", max)
+	}
+}
+
+// TestAgentSendToRunningAgentIsRejected pins the safety guard in
+// SendToInteractiveAgent: agent_send is only valid while the worker is in the
+// StatusWaiting (CLARIFY) state. Sending to a RUNNING agent must return a clear
+// error rather than silently buffering a message into an inbox that
+// runInteractive only drains inside its CLARIFY branch (which would otherwise be
+// lost if the agent completes without asking). The error must name the protocol
+// so the coordinator learns the correct usage.
+func TestAgentSendToRunningAgentIsRejected(t *testing.T) {
+	srv := newGatedModelServer("SUCCESS: done")
+	server := httptest.NewServer(http.HandlerFunc(srv.handler))
+	defer server.Close()
+	defer srv.Release()
+
+	g, _ := newBothModeSession(t, server.URL)
+
+	resp, err := execTool(t, g, "launch_agent", map[string]interface{}{"name": "busy", "task": "loop"})
+	if err != nil {
+		t.Fatalf("launch_agent errored: %v", err)
+	}
+	m, _ := resp.Result.(map[string]interface{})
+	agentID, _ := m["agent_id"].(string)
+	if strings.TrimSpace(agentID) == "" {
+		t.Fatal("launch_agent returned no agent_id")
+	}
+
+	// The gated agent is running (not awaiting input); agent_send must be refused.
+	_, err = execTool(t, g, "agent_send",
+		map[string]interface{}{"agent_id": agentID, "message": "extra direction"})
+	if err == nil {
+		t.Fatal("agent_send to a running (non-waiting) agent should error, but succeeded")
+	}
+	if !strings.Contains(err.Error(), "CLARIFY") && !strings.Contains(strings.ToLower(err.Error()), "awaiting") {
+		t.Errorf("agent_send rejection should explain the CLARIFY-only protocol, got: %v", err)
+	}
+}
