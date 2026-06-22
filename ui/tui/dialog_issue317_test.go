@@ -622,12 +622,10 @@ func TestThemeEditorOuterBoundsReResolveOnResize(t *testing.T) {
 // button's screen column) must match a fresh open at 200×50; otherwise the dialog frame
 // grows to fill the terminal but its controls stay clustered in the open-time 80×22 box.
 //
-// NOTE (tester finding): this currently FAILS. showThemeEditor computes its layout once
-// at open from the open-time bounds and never recomputes it on resize, so dialog.Fit
-// re-resolves only the OUTER frame (see TestThemeEditorOuterBoundsReResolveOnResize) while
-// the columns, scrollbar, viewport and buttons stay laid out for 80×22. The dialog grows
-// but its content does not reflow — the regression #317 set out to remove for the
-// open-time case is still present on the resize-while-open path.
+// This regressed in the first implementation (the layout was computed once at open and
+// dialog.Fit re-resolved only the OUTER frame). The fix installs a layer.OnResize that
+// re-derives the whole interior (viewport, every row, the scrollbar and the buttons) from
+// the live bounds via relayout(); this test guards that fix.
 func TestThemeEditorReflowsContentOnResize(t *testing.T) {
 	openThemeEditor := func(w *Workbench) {
 		w.SetHandlers(Handlers{
@@ -661,4 +659,66 @@ func TestThemeEditorReflowsContentOnResize(t *testing.T) {
 			"the editor's internal content did not reflow to the enlarged dialog (the renderer reads the open-time "+
 			"bounds, not the live ones)", gotCol, wantCol)
 	}
+}
+
+// TestThemeEditorResizeReflowsColumnsAndScroll hardens the resize-reflow fix beyond the
+// single Save-button check: relayout() must re-place the scrolling ROWS (not only the
+// fixed buttons), and shrinking the dialog back to the floor must re-enable scrolling so a
+// below-the-fold role is reachable again. These exercise relayout()'s row-repositioning
+// and scroll-clamp paths, which a button-only check would miss.
+func TestThemeEditorResizeReflowsColumnsAndScroll(t *testing.T) {
+	openThemeEditor := func(w *Workbench) {
+		w.SetHandlers(Handlers{
+			GetTheme: func() config.ThemeConfig { return config.ThemeConfig{} },
+			SetTheme: func(config.ThemeConfig) {},
+		})
+		w.showThemeEditor()
+	}
+	controlsCol := func(w *Workbench) int {
+		_, c, ok := findRunes(editorGrid(w), "Controls ─")
+		if !ok {
+			t.Fatalf("Controls header not found on screen")
+		}
+		return c
+	}
+
+	t.Run("the right column reflows on enlarge, not just the buttons", func(t *testing.T) {
+		issue204RestoreTheme(t)
+		resized := newTestWorkbench(t)
+		resized.app.Resize(80, 24)
+		openThemeEditor(resized)
+		resized.app.Resize(200, 50)
+		got := controlsCol(resized)
+
+		fresh := newTestWorkbench(t)
+		fresh.app.Resize(200, 50)
+		openThemeEditor(fresh)
+		want := controlsCol(fresh)
+
+		if got != want {
+			t.Errorf("after enlarge the Controls column is at %d, but a fresh open at 200x50 puts it at %d — "+
+				"the scrolling rows did not spread to the wider dialog", got, want)
+		}
+	})
+
+	t.Run("shrinking back to the floor re-enables scrolling", func(t *testing.T) {
+		issue204RestoreTheme(t)
+		w := newTestWorkbench(t)
+		w.app.Resize(200, 50)
+		openThemeEditor(w)
+		// On the grown dialog the whole content fits — code_bg is visible without scrolling.
+		if !containsOnScreen(screenText(w), "Code block background:") {
+			t.Fatalf("precondition: code_bg should be visible on a grown 200x50 editor")
+		}
+		// Shrink to the floor: the viewport loses rows, the content overflows again, and
+		// code_bg falls below the fold.
+		w.app.Resize(80, 24)
+		if containsOnScreen(screenText(w), "Code block background:") {
+			t.Fatalf("precondition: code_bg should be below the fold after shrinking to 80x24")
+		}
+		// Scrolling must now reach it — relayout() re-enabled the scroll bounds.
+		if !scrollEditorToReveal(w, "Code block background:") {
+			t.Errorf("after shrinking to the floor, code_bg is unreachable by scrolling — relayout() did not re-enable the viewport scroll")
+		}
+	})
 }
