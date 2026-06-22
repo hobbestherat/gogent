@@ -743,57 +743,142 @@ func TestIssue265ReadOnlyWindowRefreshNoPanic(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
-// Group I — DEFECT: the editor's Save reconstructs the overrides map from themeRoles
-// only, so a config-only focus-pair override (button_focus_*/input_focus_*) — which
-// #265 added to applyOverrides/ResolveTheme/ApplyTheme but deliberately kept OUT of the
-// editor — is silently ERASED the first time a user opens and Saves the theme editor,
-// even for an unrelated change. Before #265 every applyOverrides key was editor-exposed,
-// so this loss did not exist; #265 introduces the first overridable-but-not-editable keys
-// and, with them, this regression in round-trip fidelity. The issue calls the focus pairs
-// "first-class, config-overridable roles", which is incompatible with an unrelated Save
-// destroying them.
+// Group I — editor Save must not destroy config-only overrides it has no field for.
+// The #265 focus pairs (button_focus_*/input_focus_*) are first-class config roles
+// (applyOverrides understands them) but are deliberately kept OUT of themeRoles for the
+// editor's layout ceiling, so they are the first overridable-but-not-editable keys. The
+// editor's save rebuilds Overrides from themeRoles alone and Gogent.SetTheme persists the
+// result wholesale (g.config.Theme = t, no merge), so without a carry-forward step a Save
+// — even one made for an unrelated reason — would silently erase a hand-set focus override.
+// The driver closed this with carryUnexposedOverrides; this group models the real save path
+// and pins both the fix and the helper's edge semantics so the regression cannot return.
 // ----------------------------------------------------------------------------
 
-// TestIssue265FocusOverrideSurvivesEditorSave models a no-edit "open the editor, Save"
-// cycle exactly as showThemeEditor.save runs it: the spec fields are seeded from
-// editedTheme(cur) over themeRoles (loadFields), then buildThemeConfig rebuilds the whole
-// overrides map from those same themeRoles. Because the focus pairs are not in themeRoles,
-// a button_focus_bg/input_focus_bg the user set by hand in config.json is not carried into
-// the saved config, and SetTheme persists the result wholesale (g.config.Theme = t, no
-// merge) — so the override is gone after the next launch.
-//
-// This test asserts the override SURVIVES the Save (the desired behaviour). It does NOT
+// editorSave models showThemeEditor.save with no user edits: the spec fields are seeded
+// from editedTheme(cur) over themeRoles (loadFields), buildThemeConfig rebuilds the config
+// from those specs, then carryUnexposedOverrides carries forward any prior override the
+// editor has no field for. This is the exact two-step the save closure runs before SetTheme.
+func editorSave(cur config.ThemeConfig) config.ThemeConfig {
+	specs := specsFor(editedTheme(cur))
+	cfg := buildThemeConfig(cur.Name, cur.NoColor, cur.NoShadow, specs)
+	return carryUnexposedOverrides(cfg, cur.Overrides)
+}
+
+// TestIssue265FocusOverrideSurvivesEditorSave asserts a hand-set focus-pair override
+// survives a no-edit "open the editor, Save" cycle (the desired behaviour). It does NOT
 // require the focus pairs to be editable — only that an existing one is not destroyed.
-// It currently FAILS, pinning the defect: the fix is to carry override keys not present in
-// themeRoles through buildThemeConfig (or to merge in SetTheme) rather than dropping them.
+// The override must also still be honoured end-to-end through ResolveTheme after the save,
+// proving it is genuinely preserved, not merely retained as dead config text.
 func TestIssue265FocusOverrideSurvivesEditorSave(t *testing.T) {
 	for _, key := range []string{"button_focus_bg", "input_focus_bg", "button_focus_fg", "input_focus_fg"} {
 		t.Run(key, func(t *testing.T) {
 			const spec = "#ABCDEF"
-			cur := config.ThemeConfig{
-				Name:      themeDefault,
-				Overrides: map[string]string{key: spec},
-			}
+			cur := config.ThemeConfig{Name: themeDefault, Overrides: map[string]string{key: spec}}
+
 			// Sanity: the override is honoured by the pipeline today (it's a real role).
-			resolved := ResolveTheme(cur, truecolorEnv, false)
 			want, _ := parseColor(spec)
-			if buttonInputFields(resolved)[key] != want {
-				t.Fatalf("setup: %s override not honoured by ResolveTheme — got %+v, want %+v", key, buttonInputFields(resolved)[key], want)
+			if got := buttonInputFields(ResolveTheme(cur, truecolorEnv, false))[key]; got != want {
+				t.Fatalf("setup: %s override not honoured by ResolveTheme — got %+v, want %+v", key, got, want)
 			}
 
-			// Faithful model of showThemeEditor.save with no user edits: fields seeded from
-			// editedTheme(cur) over themeRoles, then buildThemeConfig from those specs.
-			specs := specsFor(editedTheme(cur))
-			saved := buildThemeConfig(cur.Name, cur.NoColor, cur.NoShadow, specs)
-
+			saved := editorSave(cur)
 			if saved.Overrides[key] != spec {
-				t.Errorf("editor Save dropped the config-only %s override: saved.Overrides=%+v\n"+
-					"a hand-set focus-pair override is destroyed by an unrelated editor Save (SetTheme persists this wholesale). "+
-					"#265 calls the focus pairs first-class config roles; buildThemeConfig must preserve override keys it does not expose.",
+				t.Errorf("editor Save dropped the config-only %s override: saved.Overrides=%+v — a hand-set focus override must survive an unrelated Save (carryUnexposedOverrides)",
 					key, saved.Overrides)
+			}
+			// And it must still resolve to the configured colour after the round-trip.
+			if got := buttonInputFields(ResolveTheme(saved, truecolorEnv, false))[key]; got != want {
+				t.Errorf("after editor Save, %s no longer resolves to the override: got %+v, want %+v", key, got, want)
 			}
 		})
 	}
+}
+
+// TestIssue265EditorSaveCarryEdgeCases is the adversarial companion: it pins
+// carryUnexposedOverrides' semantics so the carry-forward neither loses unexposed keys nor
+// resurrects edited-away exposed ones.
+func TestIssue265EditorSaveCarryEdgeCases(t *testing.T) {
+	t.Run("exposed key is NOT carried from prior — the field is the source of truth", func(t *testing.T) {
+		// The user had a button_bg override but clears the field back to the preset default
+		// in the editor. buildThemeConfig drops it (field == base); the carry must not
+		// resurrect the stale prior value, or an edit-away could never take effect.
+		cur := config.ThemeConfig{Name: themeDefault, Overrides: map[string]string{"button_bg": "#FF0000"}}
+		// Model the field being reset to the preset default (specsFor(default palette)).
+		specs := specsFor(paletteByName(themeDefault))
+		cfg := buildThemeConfig(cur.Name, cur.NoColor, cur.NoShadow, specs)
+		cfg = carryUnexposedOverrides(cfg, cur.Overrides)
+		if _, ok := cfg.Overrides["button_bg"]; ok {
+			t.Errorf("carry resurrected an edited-away exposed override button_bg: %+v — exposed keys must come from the field, not prior", cfg.Overrides)
+		}
+	})
+
+	t.Run("a differently-cased exposed key is not carried alongside the field value", func(t *testing.T) {
+		// applyOverrides normalises keys, so "BUTTON_BG" is the same role as the field. The
+		// carry must dedupe it against the exposed set rather than smuggle a second entry in.
+		cur := config.ThemeConfig{Name: themeDefault, Overrides: map[string]string{"BUTTON_BG": "#FF0000"}}
+		specs := specsFor(paletteByName(themeDefault)) // field at default → no button_bg override
+		cfg := buildThemeConfig(cur.Name, cur.NoColor, cur.NoShadow, specs)
+		cfg = carryUnexposedOverrides(cfg, cur.Overrides)
+		if _, ok := cfg.Overrides["BUTTON_BG"]; ok {
+			t.Errorf("carry smuggled a cased duplicate of an exposed key: %+v", cfg.Overrides)
+		}
+	})
+
+	t.Run("multiple unexposed keys carried together, including odd casing, verbatim", func(t *testing.T) {
+		cur := config.ThemeConfig{
+			Name: themeDefault,
+			Overrides: map[string]string{
+				"button_focus_bg": "#111111",
+				"Input_Focus_FG":  "9",       // unexposed, odd case — carried with its original key
+				"button_bg":       "#FF0000", // exposed → dropped (field is source of truth)
+			},
+		}
+		// The user also edited an exposed field (input_bg) to a non-default value.
+		specs := specsFor(paletteByName(themeDefault))
+		specs["input_bg"] = "#222222"
+		cfg := buildThemeConfig(cur.Name, cur.NoColor, cur.NoShadow, specs)
+		cfg = carryUnexposedOverrides(cfg, cur.Overrides)
+
+		if cfg.Overrides["button_focus_bg"] != "#111111" {
+			t.Errorf("unexposed button_focus_bg not carried: %+v", cfg.Overrides)
+		}
+		if cfg.Overrides["Input_Focus_FG"] != "9" {
+			t.Errorf("unexposed odd-cased Input_Focus_FG not carried verbatim: %+v", cfg.Overrides)
+		}
+		if cfg.Overrides["input_bg"] != "#222222" {
+			t.Errorf("edited exposed input_bg lost: %+v", cfg.Overrides)
+		}
+		if got := cfg.Overrides["button_bg"]; got != "" {
+			t.Errorf("exposed button_bg (edited away to default) should not be carried, got %q", got)
+		}
+	})
+
+	t.Run("nil prior overrides is a no-op", func(t *testing.T) {
+		cfg := buildThemeConfig(themeDefault, false, false, specsFor(paletteByName(themeDefault)))
+		got := carryUnexposedOverrides(cfg, nil)
+		if len(got.Overrides) != 0 {
+			t.Errorf("carry with nil prior produced overrides: %+v", got.Overrides)
+		}
+	})
+
+	t.Run("full editor round-trip with mixed exposed+unexposed overrides is stable", func(t *testing.T) {
+		// A real config: a resting override (exposed) and a focus override (unexposed).
+		cur := config.ThemeConfig{
+			Name: themeDefault,
+			Overrides: map[string]string{
+				"button_bg":      "#0ABCD1",
+				"input_focus_bg": "#654321",
+			},
+		}
+		first := editorSave(cur)
+		second := editorSave(first) // reopen + save again with no edits
+		if !reflect.DeepEqual(first, second) {
+			t.Errorf("editor save is not idempotent across reopen:\n first=%+v\nsecond=%+v", first, second)
+		}
+		if first.Overrides["button_bg"] != "#0ABCD1" || first.Overrides["input_focus_bg"] != "#654321" {
+			t.Errorf("mixed round-trip lost an override: %+v", first.Overrides)
+		}
+	})
 }
 
 // TestIssue265StopButtonStaysErrorRedOnRoleSwitch guards a cross-cutting invariant: the Stop
