@@ -286,6 +286,65 @@ func NewUserSession(id string, agent *Agent) *UserSession {
 // injection path via InjectUserNote and gets the same framing.
 const injectedNoteTemplate = "[The user added a clarification: %s]"
 
+// Continuation-nudge tuning for the bounded in-loop preamble recovery (issue
+// #307). A reasoning model sometimes emits a bare *preamble* — an announcement
+// of intent ("I'll start by…", "Let me…") — as its own tool-free turn before it
+// actually calls the tool it just described. runLoop's default rule (a turn with
+// no tool calls is the final answer) abandons such a task mid-narration. When a
+// tool-free turn looks like a preamble, the loop splices ONE cheap continuation
+// note (reusing the same note-injection path as queued user notes) and gives the
+// model another round-trip instead of breaking.
+const (
+	// maxContinuationNudges bounds how many times a single uninterrupted stretch
+	// of tool-free turns may be nudged before the loop accepts the text as final.
+	// Kept at 1 so a model that genuinely has nothing more to do cannot loop: once
+	// the bound is hit the loop falls back to the normal final-answer break. The
+	// budget is reset the moment a real tool call happens (see runLoop), so a long
+	// task still earns a fresh nudge after each productive turn.
+	maxContinuationNudges = 1
+
+	// continuationNudgeNote is the user-role note spliced in to give a preamble
+	// turn one more round-trip. It is phrased as a neutral either/or so a model
+	// that truly is finished can still terminate on the next turn (it just states
+	// it is done) rather than being pushed into busywork. Like the queued-note
+	// injection it is deliver-only: it rides into the transcript for the model but
+	// is never emitted as a SessionEventAssistantStep, so it stays out of the
+	// user-visible chat.
+	continuationNudgeNote = "[Continue: call the tools you described, or state that you are done.]"
+
+	// maxPreambleLen caps how long a tool-free turn may be and still be treated as
+	// a preamble. A genuine final answer — a summary, an explanation, a code block
+	// — runs long; a preamble is a sentence or two. Anything longer is final.
+	maxPreambleLen = 400
+)
+
+// preamblePrefixes are the case-insensitive opening phrases that mark a turn as
+// an announcement of a NEXT action rather than a final answer (issue #307). The
+// match is against the trimmed prefix, so a turn must literally START with an
+// intent phrase to qualify — the decisive, deliberately narrow signal.
+var preamblePrefixes = []string{
+	"i'll ", "i will ", "i am going to", "i'm going to",
+	"let me ", "let's ", "let us ",
+	"first, ", "first i", "first of all",
+	"to begin", "to start", "next, ",
+	"now i'll", "now i will", "now let me", "now let's",
+	"starting ", "i plan to", "i'm starting", "i am starting",
+}
+
+// completionMarkers are substrings whose presence means the model is presenting
+// a RESULT (so the turn is final), not announcing a step. Their presence vetoes
+// the preamble classification even when an intent phrase opens the text (issue
+// #307). Matched case-insensitively against the whole text.
+var completionMarkers = []string{
+	"```", // a code fence — the turn is presenting code/output
+	"done", "finished", "complete", "all set",
+	"in summary", "to summarize", "in conclusion",
+	"here is", "here are", "here's",
+	"the answer is", "the result is", "the fix is",
+	"no further", "nothing further",
+	"successfully", "i have ", "i've ", // past-tense report of work already done
+}
+
 // SetInjectQueuedInput toggles mid-turn injection of queued user notes at the
 // next turn boundary (issue #170, phase 2). Production wiring enables it for every
 // session as the agent-side path behind the per-message Interject button (issue
@@ -1005,6 +1064,46 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 	// <= 0 means UNLIMITED, so the loop relies entirely on its other exit
 	// conditions (final answer, budget, cancellation) to terminate.
 	maxSteps := s.MaxSteps()
+
+	// advance performs one model round-trip with the same emit/compact/refresh/
+	// usage bookkeeping the loop uses after a tool round, updating resp/responses
+	// in place. It is shared by the normal tool-result continuation and the
+	// preamble continuation nudge (issue #307) so both paths keep byte-identical
+	// loop semantics — including SessionEventThinking/ThinkingDone/Usage emission
+	// order. stepIdx is the step number the round-trip is announced under.
+	advance := func(nextMessages []model.Message, stepIdx int) error {
+		emit(SessionEvent{Type: SessionEventThinking, Step: stepIdx})
+		s.compactIfNeeded(sess, emit)
+		refreshSystemPrompt()
+		var rtErr error
+		resp, rtErr = s.modelRoundTrip(ctx, sess, agent, nextMessages, tools, reasoningSink(stepIdx))
+		thinkingDone(stepIdx)
+		if rtErr != nil {
+			emit(SessionEvent{Type: SessionEventError, Err: rtErr})
+			return rtErr
+		}
+		responses = append(responses, resp)
+		s.emitUsage(emit)
+		return nil
+	}
+
+	// continuationNudges counts how many preamble continuation nudges have been
+	// spliced in the current uninterrupted stretch of tool-free turns (issue
+	// #307). It is bounded by maxContinuationNudges and reset to 0 whenever a real
+	// tool call happens, so the budget is per stretch — never per task — and a
+	// model that genuinely has nothing to do cannot loop. A new user message
+	// starts a fresh runLoop, so the counter is implicitly per user message too.
+	//
+	// Scope notes (the loop is shared, so these hold for every caller):
+	//   - Sub-agent loops get the same recovery. runLoop backs both the root task
+	//     loop and every sub-agent/interactive loop, each with its own local
+	//     continuationNudges, so a narrating sub-agent is recovered and bounded
+	//     identically (its events are suppressed, so the nudge is silent there).
+	//   - A nudge consumes a step. The continuation round-trip runs under step+1
+	//     and the loop's step counter advances on the `continue`, so a nudge counts
+	//     against the MaxSteps cap exactly like any other round-trip — intended, so
+	//     the per-task bound still governs total cost.
+	continuationNudges := 0
 	for step := 0; maxSteps <= 0 || step < maxSteps; step++ {
 		// Bail out promptly if the loop was stopped or the session closed; the
 		// in-flight request (if any) has already been cancelled via ctx.
@@ -1022,11 +1121,52 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 			break
 		}
 
-		calls := s.collectToolCalls(resp)
+		calls, explicitFinal := s.collectToolCalls(resp)
 		if len(calls) == 0 {
-			// No tool calls -> the assistant produced its final answer.
+			// No tool calls. Normally this is the assistant's final answer and the
+			// loop ends. But a reasoning model sometimes emits a bare *preamble* — an
+			// announcement of intent ("I'll start by…", "Let me…") — as its own turn
+			// before it actually calls the tool it just described; treating that as
+			// final abandons the task mid-narration (issue #307). When the turn looks
+			// like a preamble and the per-stretch nudge budget is not yet spent, splice
+			// ONE cheap continuation note (reusing the note-injection path) and give
+			// the model another round-trip instead of breaking. The note is
+			// deliver-only — like a queued user note it is not emitted as an assistant
+			// step, so it stays out of the visible transcript.
+			//
+			// explicitFinal short-circuits this: a deliberate structured-output final
+			// is the strongest terminal signal there is and must end the turn even if
+			// its text happens to open like a preamble (issue #307 constraint #2).
+			if !explicitFinal && s.shouldNudgeContinuation(resp, continuationNudges) {
+				continuationNudges++
+				// Retain the preamble text so the empty-final recovery (#171) can still
+				// surface it if the post-nudge turn lands empty — the nudge path
+				// continues before lastAssistant is set on the tool-call branch below,
+				// so without this a preamble→empty-turn sequence would emit an empty
+				// final (issue #307).
+				if t := strings.TrimSpace(resp.Content); t != "" {
+					lastAssistant = t
+				}
+				// A queued user interjection (the Interject button, issue #201) is NOT
+				// drained here: this branch continues before the takePendingNote block
+				// below. That is deliberate and lossless — the note is held in its
+				// latest-wins slot and delivered at the next turn boundary (the tool
+				// round after the model follows through, or the UI's drain-on-idle if the
+				// model declares done), one round-trip later at most. Keeping the splice
+				// points separate avoids stacking the synthetic nudge and a real user
+				// note into the same request.
+				note := []model.Message{{Role: model.RoleUser, Content: continuationNudgeNote}}
+				if err := advance(note, step+1); err != nil {
+					return responses, err
+				}
+				continue
+			}
+			// Not a (further) preamble nudge -> the assistant produced its final answer.
 			break
 		}
+		// A real tool call this turn: reset the continuation-nudge budget so the bound
+		// is per uninterrupted stretch of tool-free turns, not per task (issue #307).
+		continuationNudges = 0
 
 		// Surface any intermediate reasoning the model emitted alongside its
 		// tool calls so the UI can show (foldable) thoughts.
@@ -1087,17 +1227,9 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 			}
 		}
 
-		emit(SessionEvent{Type: SessionEventThinking, Step: step + 1})
-		s.compactIfNeeded(sess, emit)
-		refreshSystemPrompt()
-		resp, err = s.modelRoundTrip(ctx, sess, agent, nextMessages, tools, reasoningSink(step+1))
-		thinkingDone(step + 1)
-		if err != nil {
-			emit(SessionEvent{Type: SessionEventError, Err: err})
+		if err := advance(nextMessages, step+1); err != nil {
 			return responses, err
 		}
-		responses = append(responses, resp)
-		s.emitUsage(emit)
 	}
 
 	if resp != nil {
@@ -1288,9 +1420,18 @@ func (s *UserSession) runToolCallsSerial(ctx context.Context, agent *Agent, agen
 
 // collectToolCalls returns the tool calls for a response, preferring native
 // tool_calls and falling back to a JSON object embedded in the text.
-func (s *UserSession) collectToolCalls(resp *model.CompletionResponse) []tool.ToolCall {
+//
+// explicitFinal reports that the turn was an EXPLICIT structured final — a
+// JSON-text {"response": ..., "final": true} object — whose text has been folded
+// into resp.Content (and no calls returned). The caller uses it to distinguish
+// "no calls because the model deliberately ended" from "no calls because the
+// model only narrated": the former must terminate immediately and must NOT be
+// given a preamble continuation nudge, even when its response text happens to
+// open like a preamble (issue #307 constraint #2). The native structured_output
+// path needs no such signal — it returns a real call the serial runner finalizes.
+func (s *UserSession) collectToolCalls(resp *model.CompletionResponse) (calls []tool.ToolCall, explicitFinal bool) {
 	if resp == nil {
-		return nil
+		return nil, false
 	}
 
 	// Native tool calls.
@@ -1307,7 +1448,7 @@ func (s *UserSession) collectToolCalls(resp *model.CompletionResponse) []tool.To
 				CallID: tc.ID,
 			})
 		}
-		return calls
+		return calls, false
 	}
 
 	// Fallback: one or more JSON objects embedded in the assistant text. Small
@@ -1316,7 +1457,6 @@ func (s *UserSession) collectToolCalls(resp *model.CompletionResponse) []tool.To
 	// at once — so we scan for every balanced object (issue #32) rather than
 	// substring-matching a single exact shape.
 	responseText := strings.TrimSpace(resp.Content)
-	var calls []tool.ToolCall
 	for _, obj := range tool.ExtractJSONObjects(responseText) {
 		// A {"response": ..., "final": true} object is the structured final
 		// answer: stop and surface its text instead of acting on any calls.
@@ -1326,14 +1466,68 @@ func (s *UserSession) collectToolCalls(resp *model.CompletionResponse) []tool.To
 		}
 		if err := json.Unmarshal([]byte(obj), &structuredOutput); err == nil && structuredOutput.Final {
 			resp.Content = structuredOutput.Response
-			return nil
+			return nil, true
 		}
 		var parsed tool.ToolCall
 		if err := json.Unmarshal([]byte(obj), &parsed); err == nil && parsed.Tool != "" {
 			calls = append(calls, parsed)
 		}
 	}
-	return calls
+	return calls, false
+}
+
+// shouldNudgeContinuation reports whether a tool-free turn should be given one
+// more round-trip with a continuation note rather than being accepted as the
+// final answer (issue #307). It is the gate in front of looksLikePreamble: it
+// also enforces the per-stretch bound (alreadyNudged < maxContinuationNudges)
+// and rejects a nil response, so a model that keeps narrating cannot loop —
+// once the bound is hit the loop falls back to its normal final-answer break.
+func (s *UserSession) shouldNudgeContinuation(resp *model.CompletionResponse, alreadyNudged int) bool {
+	if resp == nil || alreadyNudged >= maxContinuationNudges {
+		return false
+	}
+	return looksLikePreamble(resp.Content)
+}
+
+// looksLikePreamble reports whether a tool-free assistant turn reads as a bare
+// *announcement of intent* — a model narrating the step it is about to take
+// ("I'll start by…", "Let me…", "First, …") — rather than a genuine final
+// answer (issue #307).
+//
+// It is deliberately NARROW: a turn must clear THREE bars to qualify, and
+// anything ambiguous is treated as final (returns false). A false "continue"
+// (looping on a real answer) is worse than an occasional false "stop" (the
+// historical behaviour), so the test errs toward stopping:
+//
+//  1. SHORT. A real final answer — a summary, an explanation, a code block —
+//     runs long; a preamble is a sentence or two. Longer than maxPreambleLen is
+//     final.
+//  2. NO completion/terminal marker (a code fence, "done", "in summary", "here
+//     is", "the answer is", a past-tense "I have/I've", …). Such a marker means
+//     the model is presenting a result, not announcing a next step.
+//  3. OPENS with a recognised intent phrase (preamblePrefixes). This is the
+//     decisive signal: without an explicit announcement of a NEXT action the
+//     turn is treated as final. Matching the prefix (not just containment) means
+//     the text must literally start with the announcement to count.
+func looksLikePreamble(content string) bool {
+	text := strings.TrimSpace(content)
+	// An empty turn is not a preamble; the loop's empty-final recovery (#171)
+	// handles it, and nudging a silent model risks a wasted round-trip.
+	if text == "" || len(text) > maxPreambleLen {
+		return false
+	}
+	lower := strings.ToLower(text)
+	for _, marker := range completionMarkers {
+		if strings.Contains(lower, marker) {
+			return false
+		}
+	}
+	for _, p := range preamblePrefixes {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // runToolCall executes a single tool call and returns a textual result. ctx is
