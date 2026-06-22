@@ -264,6 +264,33 @@ func TestArrangeMatchesTileRectsForManyCounts(t *testing.T) {
 	}
 }
 
+// TestArrangeTileCascade verifies the Cascade arrangement (issue #271) lays
+// windows out exactly as the toolkit's TileCascade geometry, in sidebar order,
+// and clears the maximized flag. Cascade overlaps by design, so it asserts the
+// per-window bounds match TileRects rather than partitioning the area.
+func TestArrangeTileCascade(t *testing.T) {
+	for n := 1; n <= 9; n++ {
+		w := newTestWorkbench(t)
+		openLive(w, n)
+		w.arrange(tv.TileCascade)
+		area := w.tileArea()
+		rects := orderedBounds(w)
+		want, _, _ := tv.TileRects(tv.TileCascade, area, n)
+		if len(rects) != n {
+			t.Errorf("n=%d: got %d rects", n, len(rects))
+			continue
+		}
+		for i := range rects {
+			if rects[i] != want[i] {
+				t.Errorf("cascade n=%d window %d: got %+v want %+v", n, i, rects[i], want[i])
+			}
+		}
+		if anyMaximized(w) {
+			t.Errorf("cascade n=%d: a window stayed maximized", n)
+		}
+	}
+}
+
 // --- arrange: state transitions & edge cases --------------------------------
 
 // TestArrangeClearsMaximized verifies that arranging windows which were
