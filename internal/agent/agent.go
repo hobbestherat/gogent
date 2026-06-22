@@ -58,6 +58,14 @@ type Agent struct {
 	Kind         SubAgentKind
 	Task         string
 	Result       string
+	// SeedContext is a bounded primer (file paths and searches the parent agent
+	// already gathered) injected ahead of the task on a sub-agent's first turn so
+	// it starts from the parent's discovery instead of re-deriving it (issue
+	// #283). Empty for the root agent and for children whose parent had gathered
+	// nothing. Composed into the first user message by SeededMessage. Set once in
+	// newSubAgent before the child is published and never mutated afterward, so it
+	// is read without the agent lock; do not write it post-publish.
+	SeedContext  string
 	TimeoutMs    int64
 	ToolRegistry *tool.ToolRegistry
 	// TokenBudget caps the cumulative tokens (prompt + completion) this agent's
