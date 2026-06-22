@@ -911,11 +911,11 @@ func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []
 	}
 	// OpenAI structured outputs require parallel tool calls to be disabled
 	// whenever any advertised tool uses a strict schema; honor that invariant so
-	// a strict tool set is not rejected. The trigger is deliberately narrow — it
-	// keys on actual tool strictness, never on the mere presence of a tool — so a
-	// non-strict tool batch (e.g. several spawn_subagent calls, or read-only
-	// calls) is left at the provider default and can still be emitted in parallel.
-	// See parallelToolCallsMustBeDisabled for the audit behind that scoping.
+	// a strict tool set is not rejected. The trigger keys on actual tool
+	// strictness, not on the mere presence of a tool, so a non-strict tool batch
+	// (e.g. several spawn_subagent calls, or read-only calls) is left at the
+	// provider default and stays eligible for parallel emission. See
+	// parallelToolCallsMustBeDisabled for the scoping and the issue #282 audit.
 	if parallelToolCallsMustBeDisabled(c.spec, tools) {
 		off := false
 		reqBody.ParallelToolCalls = &off
@@ -946,14 +946,16 @@ func hasStrictTool(tools []ToolDef) bool {
 // OpenAI-compatible family that advertises supportsResponseFormat) rejects the
 // request unless parallel tool calls are disabled.
 //
-// It is intentionally the *minimal* trigger required by that invariant — strict
-// tool present, on a provider that enforces it — and nothing more. In particular,
-// gogent's agent loop advertises every tool as non-strict (toolDefsFromRegistry
-// never sets FunctionDef.Strict), and spawn_subagent is non-strict, so this
-// returns false for ordinary tool sets and a batched-spawn turn is never forced
-// serial by this rule. Providers without the invariant (e.g. Anthropic, which has
-// no response_format field) leave supportsResponseFormat unset and are never
-// affected, so their behaviour is unchanged.
+// The trigger is exactly that invariant and nothing broader — a strict tool, on a
+// provider that enforces it. The issue #282 audit confirmed this is already the
+// right scope rather than something to narrow: gogent's agent loop advertises
+// every tool as non-strict (toolDefsFromRegistry never sets FunctionDef.Strict),
+// and spawn_subagent is non-strict, so for ordinary tool sets this returns false
+// and a batched-spawn turn is never forced serial by this rule. Naming the
+// predicate locks that scope down (see the model tests) so a future strict tool
+// can never silently disable parallel spawns. Providers without the invariant
+// (e.g. Anthropic, no response_format field) leave supportsResponseFormat unset
+// and are never affected.
 func parallelToolCallsMustBeDisabled(spec providerSpec, tools []ToolDef) bool {
 	return spec.supportsResponseFormat && hasStrictTool(tools)
 }

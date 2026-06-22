@@ -686,14 +686,20 @@ func (g *Gogent) initializeToolRegistry() {
 				"subtasks": map[string]interface{}{
 					"type": "array",
 					"description": "Parallel batch of independent tasks; all run concurrently in " +
-						"this one call. PREFER this over multiple separate calls.",
+						"this one call. PREFER this over multiple separate calls. Each entry is " +
+						"a {name, task} object (preferred) or a bare task string.",
 					"items": map[string]interface{}{
-						"type": "object",
+						// An entry is normally a {name, task} object; a bare string is
+						// also accepted and taken as the task. The union type keeps the
+						// advertised contract honest with the tolerance in Execute, and
+						// there is no item-level "required" because the string form has
+						// no properties. (Array items are not enforced by validateArgs;
+						// this schema is advisory wire guidance for the model.)
+						"type": []string{"object", "string"},
 						"properties": map[string]interface{}{
 							"name": map[string]interface{}{"type": "string", "description": "Short label for this subtask."},
 							"task": map[string]interface{}{"type": "string", "description": "What this sub-agent should do."},
 						},
-						"required": []string{"task"},
 					},
 				},
 			},
