@@ -911,8 +911,12 @@ func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []
 	}
 	// OpenAI structured outputs require parallel tool calls to be disabled
 	// whenever any advertised tool uses a strict schema; honor that invariant so
-	// a strict tool set is not rejected.
-	if c.spec.supportsResponseFormat && hasStrictTool(tools) {
+	// a strict tool set is not rejected. The trigger is deliberately narrow — it
+	// keys on actual tool strictness, never on the mere presence of a tool — so a
+	// non-strict tool batch (e.g. several spawn_subagent calls, or read-only
+	// calls) is left at the provider default and can still be emitted in parallel.
+	// See parallelToolCallsMustBeDisabled for the audit behind that scoping.
+	if parallelToolCallsMustBeDisabled(c.spec, tools) {
 		off := false
 		reqBody.ParallelToolCalls = &off
 	}
@@ -934,6 +938,24 @@ func hasStrictTool(tools []ToolDef) bool {
 		}
 	}
 	return false
+}
+
+// parallelToolCallsMustBeDisabled reports whether this request must pin
+// parallel_tool_calls:false. The OpenAI structured-outputs invariant is the only
+// reason to do so: when an advertised tool uses a strict schema, OpenAI (and the
+// OpenAI-compatible family that advertises supportsResponseFormat) rejects the
+// request unless parallel tool calls are disabled.
+//
+// It is intentionally the *minimal* trigger required by that invariant — strict
+// tool present, on a provider that enforces it — and nothing more. In particular,
+// gogent's agent loop advertises every tool as non-strict (toolDefsFromRegistry
+// never sets FunctionDef.Strict), and spawn_subagent is non-strict, so this
+// returns false for ordinary tool sets and a batched-spawn turn is never forced
+// serial by this rule. Providers without the invariant (e.g. Anthropic, which has
+// no response_format field) leave supportsResponseFormat unset and are never
+// affected, so their behaviour is unchanged.
+func parallelToolCallsMustBeDisabled(spec providerSpec, tools []ToolDef) bool {
+	return spec.supportsResponseFormat && hasStrictTool(tools)
 }
 
 func (c *ModelConnection) complete(ctx context.Context, messages []Message, stream bool, tools []ToolDef, format *ResponseFormat) (*CompletionResponse, error) {

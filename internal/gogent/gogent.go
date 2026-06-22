@@ -671,14 +671,31 @@ func (g *Gogent) initializeToolRegistry() {
 	g.toolRegistry.RegisterVerifyTool(verifyCmd)
 
 	g.toolRegistry.Register(&tool.Tool{
-		Name:        "spawn_subagent",
-		Description: "Delegate work to one or more sub-agents. In one-shot mode they must end with SUCCESS:/FAILURE:. In interactive mode they may return CLARIFY: questions.",
+		Name: "spawn_subagent",
+		Description: "Delegate work to sub-agents. To run several INDEPENDENT tasks in " +
+			"parallel, make ONE call with a \"subtasks\" array — every entry runs " +
+			"concurrently and the call blocks until all finish. Use \"name\"/\"task\" only " +
+			"for a single lone task. Do NOT issue spawns one-per-turn; batch them. In " +
+			"one-shot mode results end with SUCCESS:/FAILURE:; in interactive mode they " +
+			"may return CLARIFY: questions.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"name":     map[string]interface{}{"type": "string", "description": "Sub-agent name (single-task mode)"},
-				"task":     map[string]interface{}{"type": "string", "description": "Task description (single-task mode)"},
-				"subtasks": map[string]interface{}{"type": "array", "description": "Optional parallel batch: [{name, task}, ...]"},
+				"name": map[string]interface{}{"type": "string", "description": "Sub-agent name (single-task mode)"},
+				"task": map[string]interface{}{"type": "string", "description": "Task description (single-task mode)"},
+				"subtasks": map[string]interface{}{
+					"type": "array",
+					"description": "Parallel batch of independent tasks; all run concurrently in " +
+						"this one call. PREFER this over multiple separate calls.",
+					"items": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"name": map[string]interface{}{"type": "string", "description": "Short label for this subtask."},
+							"task": map[string]interface{}{"type": "string", "description": "What this sub-agent should do."},
+						},
+						"required": []string{"task"},
+					},
+				},
 			},
 		},
 		Execute: func(args map[string]interface{}, ctx tool.ToolContext) (interface{}, error) {
@@ -707,13 +724,21 @@ func (g *Gogent) initializeToolRegistry() {
 				tasks := make([]func(), 0, len(items))
 				for i, raw := range items {
 					i, raw := i, raw
-					obj, ok := raw.(map[string]interface{})
-					if !ok {
+					var name, task string
+					switch v := raw.(type) {
+					case map[string]interface{}:
+						// Canonical shape: {"name": ..., "task": ...}.
+						name, _ = v["name"].(string)
+						task, _ = v["task"].(string)
+					case string:
+						// Tolerated weak-model shape: a bare string is the task, so a
+						// ["do X", "do Y"] batch still fans out concurrently instead of
+						// being rejected and retried one-per-turn (issue #282).
+						task = v
+					default:
 						results[i].Error = "invalid subtask item"
 						continue
 					}
-					name, _ := obj["name"].(string)
-					task, _ := obj["task"].(string)
 					results[i].Name = name
 					results[i].Task = task
 					if strings.TrimSpace(task) == "" {
