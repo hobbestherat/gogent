@@ -376,43 +376,124 @@ func (r *markdownRenderer) itemLines(item ast.Node, depth int) [][]tv.StyledSpan
 	return out
 }
 
-// tableLines renders a GFM table: the header row (bold), a dashed rule, then the
-// data rows. Cells are separated by a dim " │ " so the column structure stays
-// legible; cell inline content (emphasis, code) is rendered normally. Cells are
-// not column-aligned — the transcript soft-wraps — but the pipes and per-row
-// layout are preserved so the table reads as a table rather than a run-on.
-func (r *markdownRenderer) tableLines(tbl ast.Node) [][]tv.StyledSpan {
+// tableCell is a rendered table cell held between the measure and render passes:
+// its styled content spans plus that content's display width.
+type tableCell struct {
+	spans []tv.StyledSpan
+	width int
+}
+
+// tableLines renders a GFM table: the header row (bold), a rule, then the data
+// rows, with columns aligned (issue #313). It runs in two passes — measure, then
+// render — so every column shares a fixed width and the separators line up:
+//
+//  1. Measure: render each cell's inline content once and record the maximum
+//     display width (tui.StringWidth, width-aware) per column across the header
+//     and all data rows.
+//  2. Render: pad each cell to its column width, honouring the column's GFM
+//     alignment (left/none pad right, right pad left, centre split). Padding is
+//     emitted as separate neutral (unstyled) spans so the cell-text span stays
+//     intact and its inline styling (bold header, code, emphasis) is preserved.
+//
+// The header rule spans the full computed table width, with ┼ at each column
+// boundary (under the │) and ─ fill. Separator and rule spans carry the rule
+// colour but no cell styling. Cells are not viewport-clipped here: rows wider
+// than the viewport still soft-wrap (the optional overflow handling in the issue
+// is out of scope), but tables that fit — the common case — are fully aligned.
+func (r *markdownRenderer) tableLines(tbl *extast.Table) [][]tv.StyledSpan {
 	sep := r.base().withFG(r.pal.rule)
-	var out [][]tv.StyledSpan
-	row := func(cells ast.Node, header bool) {
-		var line []tv.StyledSpan
+
+	// Pass 1 — measure. Render every cell and accumulate per-column max widths.
+	var widths []int
+	render := func(cells ast.Node, header bool) []tableCell {
+		var row []tableCell
 		i := 0
 		for cell := cells.FirstChild(); cell != nil; cell = cell.NextSibling() {
-			if i > 0 {
-				line = append(line, sep.span(" │ "))
-			}
 			st := r.base()
 			st.bold = header
-			line = append(line, r.inlineSpans(cell, st)...)
+			spans := r.inlineSpans(cell, st)
+			w := 0
+			for _, span := range spans {
+				w += tui.StringWidth(span.Text)
+			}
+			if i >= len(widths) {
+				widths = append(widths, 0)
+			}
+			if w > widths[i] {
+				widths[i] = w
+			}
+			row = append(row, tableCell{spans: spans, width: w})
 			i++
 		}
-		out = append(out, line)
+		return row
 	}
+
+	var header []tableCell
+	var rows [][]tableCell
 	for child := tbl.FirstChild(); child != nil; child = child.NextSibling() {
 		switch node := child.(type) {
 		case *extast.TableHeader:
-			row(node, true)
-			width := 0
-			for _, span := range out[len(out)-1] {
-				width += tui.StringWidth(span.Text)
-			}
-			if width < 3 {
-				width = 3
-			}
-			out = append(out, []tv.StyledSpan{sep.span(strings.Repeat("─", width))})
+			header = render(node, true)
 		case *extast.TableRow:
-			row(node, false)
+			rows = append(rows, render(node, false))
 		}
+	}
+
+	// Pass 2 — render. Pad each cell to its column width and emit the aligned row.
+	alignOf := func(col int) extast.Alignment {
+		if col < len(tbl.Alignments) {
+			return tbl.Alignments[col]
+		}
+		return extast.AlignNone
+	}
+	padSpan := func(n int) tv.StyledSpan { return tv.StyledSpan{Text: strings.Repeat(" ", n)} }
+	emit := func(cells []tableCell) []tv.StyledSpan {
+		var line []tv.StyledSpan
+		for i, cell := range cells {
+			if i > 0 {
+				line = append(line, sep.span(" │ "))
+			}
+			gap := widths[i] - cell.width
+			if gap < 0 {
+				gap = 0
+			}
+			var left, right int
+			switch alignOf(i) {
+			case extast.AlignRight:
+				left = gap
+			case extast.AlignCenter:
+				left = gap / 2
+				right = gap - left
+			default: // AlignLeft, AlignNone
+				right = gap
+			}
+			if left > 0 {
+				line = append(line, padSpan(left))
+			}
+			line = append(line, cell.spans...)
+			if right > 0 {
+				line = append(line, padSpan(right))
+			}
+		}
+		return line
+	}
+
+	out := make([][]tv.StyledSpan, 0, len(rows)+2)
+	if header != nil {
+		out = append(out, emit(header))
+	}
+	// Header rule: ─ fill per column, ┼ at each column boundary so it lands under
+	// the │, spanning the full table width.
+	var rule strings.Builder
+	for i, w := range widths {
+		if i > 0 {
+			rule.WriteString("─┼─")
+		}
+		rule.WriteString(strings.Repeat("─", w))
+	}
+	out = append(out, []tv.StyledSpan{sep.span(rule.String())})
+	for _, row := range rows {
+		out = append(out, emit(row))
 	}
 	return out
 }
