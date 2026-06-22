@@ -326,6 +326,15 @@ type Workbench struct {
 	// #22 / #53). Lazily created and only touched on the UI thread; its AfterFunc
 	// goroutine just Posts the refresh back to the UI thread.
 	statsRefresh *time.Timer
+	// layoutPersist coalesces layout-file writes during a sidebar-divider drag
+	// (issue #320): the resize handler arms it once and each follow-up motion
+	// Resets it, so a drag writes ~/.gogent/workbench_layout.json at most once,
+	// shortly after the user stops moving, instead of synchronously on every
+	// mouse-motion report. It mirrors statsRefresh: lazily created, only touched
+	// on the UI thread, and its AfterFunc goroutine just Posts persistLayout back
+	// to the UI thread. The final width is always captured regardless by Run's
+	// shutdown defer w.persistLayout().
+	layoutPersist *time.Timer
 	// overallLifetime accumulates the Overall panel's token/request/error/cache-hit
 	// figures over the whole gogent run (issue #232). The Statistics report sums only
 	// the currently-open sessions, so without this a closed session's counters would
@@ -732,10 +741,16 @@ func (w *Workbench) viewItems() []*tv.MenuItem {
 			WithShortcutMod("Ctrl+Shift+D", tui.KeyRune, 'd', true, true, false),
 		tv.NewMenuItem("----------", nil),
 		tv.NewMenuItem(pinLabel, func() { w.ToggleSidebarPin() }),
-		// Keyboard fallback for the draggable divider, for terminals that do not
-		// report mouse drags (issue #175).
-		tv.NewMenuItem("&Widen Sidebar", func() { w.nudgeSidebarWidth(+sidebarNudge) }),
-		tv.NewMenuItem("Narro&w Sidebar", func() { w.nudgeSidebarWidth(-sidebarNudge) }),
+		// Secondary keyboard fallback for the sidebar (issue #314). The primary
+		// controls now live on the panel itself: drag the left-edge divider (the ↔
+		// grip) to resize, and click the header ▣/□ glyph to pin/unpin. The two
+		// Widen/Narrow entries below are a separated, clearly-labelled fallback
+		// group for terminals that do not report mouse drags (?1002h/?1003h off —
+		// bare SSH, minimal terminals). The divider mechanics are unchanged; this is
+		// just the no-mouse resize path.
+		tv.NewSeparator(),
+		tv.NewMenuItem("&Widen Sidebar (keyboard)", func() { w.nudgeSidebarWidth(+sidebarNudge) }),
+		tv.NewMenuItem("Narro&w Sidebar (keyboard)", func() { w.nudgeSidebarWidth(-sidebarNudge) }),
 	}
 }
 
@@ -1286,8 +1301,12 @@ func (w *Workbench) setSidebarWidth(req int) {
 			sw.clampToWindowArea()
 		}
 	}
-	w.persistLayout()
-	w.desktop.Redraw()
+	// Persist and repaint via the coalesced paths (issue #320), matching the
+	// toolkit's window-drag handling: a debounced layout write (no synchronous
+	// disk I/O per motion event) and a dirty-flag redraw the run loop flushes once
+	// per iteration after draining the input burst (RequestRedraw is idempotent).
+	w.scheduleLayoutPersist()
+	w.desktop.RequestRedraw()
 }
 
 // windowArea returns the desktop rectangle session windows are constrained to:
@@ -1836,6 +1855,13 @@ func (w *Workbench) Run() error {
 		if w.statsRefresh != nil {
 			w.statsRefresh.Stop()
 		}
+		// Stop the coalesced layout-persist timer too (issue #320) so it cannot Post
+		// after the loop is gone. The final width is already captured by the
+		// defer w.persistLayout() above, which runs after this teardown. Lazily
+		// created, so guard nil.
+		if w.layoutPersist != nil {
+			w.layoutPersist.Stop()
+		}
 	}()
 	// Re-open any persisted sessions (crash recovery / continuation), then
 	// re-apply the saved workbench layout (titles, pin/order, window bounds).
@@ -1916,6 +1942,33 @@ func (w *Workbench) scheduleOverallRefresh() {
 		return
 	}
 	w.statsRefresh.Reset(overallRefreshCoalesce)
+}
+
+// layoutPersistCoalesce bounds how often the layout file is written during a
+// sidebar-divider drag (issue #320): motion reports arriving faster than this
+// collapse into a single write ~200ms after the drag settles, instead of an
+// atomic temp-file write + rename per cell crossed.
+const layoutPersistCoalesce = 200 * time.Millisecond
+
+// scheduleLayoutPersist (re)arms a single coalesced layout persist. The first
+// resize after an idle period arms the timer; rapid follow-ups (a drag) Reset it,
+// so only one write fires ~200ms after the burst settles. It is a no-op when no
+// SaveLayout handler is wired. All callers run on the UI thread (the divider's
+// OnClickFn, the Widen/Narrow nudge), so the lazy creation and Reset are
+// single-threaded; the AfterFunc goroutine only Posts persistLayout back to the
+// UI thread. The final width is still captured even if the timer never fires:
+// Run's deferred persistLayout writes it at shutdown. Mirrors scheduleOverallRefresh.
+func (w *Workbench) scheduleLayoutPersist() {
+	if w.handlers.SaveLayout == nil {
+		return
+	}
+	if w.layoutPersist == nil {
+		w.layoutPersist = time.AfterFunc(layoutPersistCoalesce, func() {
+			w.desktop.Post(func() { w.persistLayout() })
+		})
+		return
+	}
+	w.layoutPersist.Reset(layoutPersistCoalesce)
 }
 
 // refreshOverall rebuilds the Overall panel from a fresh Statistics report and

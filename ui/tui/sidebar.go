@@ -121,8 +121,21 @@ type sidebar struct {
 
 	// divider is a 1-column drag handle pinned to the sidebar's left edge (issue
 	// #175). Dragging it left/right changes the live sidebar width; it sits in
-	// front of the tree so it claims clicks landing on column 0.
+	// front of the tree so it claims clicks landing on column 0. Its DrawFn paints
+	// a ↔ grip on the header row to advertise that it is grabbable (issue #314).
 	divider *tv.VisualComponent
+	// dividerActive is set while a divider drag is in progress (issue #314): the
+	// divider's OnClickFn sets it on press/drag and clears it on release, and the
+	// divider's DrawFn brightens the column while it is true so the user sees the
+	// handle respond to the grab. Touched only on the UI thread.
+	dividerActive bool
+	// pinToggle is the clickable pin/unpin glyph in the sidebar header (issue
+	// #314): ▣ when the sidebar boundary is pinned, □ when unpinned (the codebase's
+	// filled=active convention, as on the window maximize button). Clicking it
+	// calls Workbench.ToggleSidebarPin — the same path as View → Pin/Unpin Sidebar.
+	// It is added LAST among the panel's children so HitTestDeep (last child first)
+	// routes clicks on its header cell to it rather than to the tree behind it.
+	pinToggle *tv.VisualComponent
 
 	// overallSelect is the model-selector dropdown at the top of the Overall band
 	// (issue #191): it scopes every metric below it to one model. Its options are
@@ -211,6 +224,11 @@ func newSidebar(wb *Workbench) *sidebar {
 		if s.divider != nil {
 			s.divider.SetBounds(tv.Rect{X: 0, Y: 0, W: 1, H: h})
 		}
+		// The pin/unpin glyph sits one cell in from the right edge of the header row
+		// (issue #314), clear of the title text and the divider column.
+		if s.pinToggle != nil {
+			s.pinToggle.SetBounds(tv.Rect{X: w - 2, Y: 0, W: 1, H: 1})
+		}
 		// Model selector just below the band's top separator (issues #191, #233), or
 		// hidden when the band was dropped (sidebar too short). The band occupies the
 		// bottom bandH rows; its top row holds the divider, so the selector sits one row
@@ -271,11 +289,27 @@ func newSidebar(wb *Workbench) *sidebar {
 	divider := tv.NewComponent(tv.Rect{})
 	divider.DrawFn = func(c *tv.VisualComponent, surface tv.Surface) {
 		abs := c.AbsoluteBounds()
+		// The column body stays the plain border glyph; while a drag is in progress
+		// the whole handle brightens to the accent colour (bold) so the grab reads as
+		// "live" (issue #314).
+		barFG := chromeDivider
+		if s.dividerActive {
+			barFG = chromeAccent
+		}
 		for y := 0; y < abs.H; y++ {
-			surface.SetCell(abs.X, abs.Y+y, tui.Cell{Ch: '│', FG: chromeDivider, BG: chromePanelBG})
+			surface.SetCell(abs.X, abs.Y+y, tui.Cell{Ch: '│', FG: barFG, BG: chromePanelBG, Bold: s.dividerActive})
+		}
+		// Grip marker on the header row advertises that the divider is draggable
+		// (issue #314): ↔ (U+2194) is single-cell, widely supported and reads as
+		// "drag horizontally". Drawn in the accent colour over the top of the column.
+		if abs.H > 0 {
+			surface.SetCell(abs.X, abs.Y, tui.Cell{Ch: '↔', FG: chromeAccent, BG: chromePanelBG, Bold: true})
 		}
 	}
 	divider.OnClickFn = func(c *tv.VisualComponent, event tui.ClickEvent) bool {
+		// Track the drag so the handle can highlight (issue #314): press and every
+		// drag-motion report carry Down=true, the release carries Down=false.
+		s.dividerActive = event.Down
 		if !event.Down {
 			return true
 		}
@@ -296,9 +330,40 @@ func newSidebar(wb *Workbench) *sidebar {
 	}
 	panel.AddChild(overallSelect.Root())
 
+	// Clickable pin/unpin glyph at the right edge of the header row (issue #314).
+	// It mirrors the divider pattern: a 1-cell child with its own DrawFn and
+	// OnClickFn. The glyph reflects the live state each frame (▣ pinned / □
+	// unpinned, the codebase's filled=active convention), and a click drives the
+	// same ToggleSidebarPin path as the View menu. Added LAST so HitTestDeep (last
+	// child first) routes clicks on its cell here rather than to the tree.
+	pinToggle := tv.NewComponent(tv.Rect{})
+	pinToggle.DrawFn = func(c *tv.VisualComponent, surface tv.Surface) {
+		abs := c.AbsoluteBounds()
+		if abs.W < 1 || abs.H < 1 {
+			return
+		}
+		glyph := '□'
+		if s.wb.IsSidebarPinned() {
+			glyph = '▣'
+		}
+		surface.SetCell(abs.X, abs.Y, tui.Cell{Ch: glyph, FG: chromeAccent, BG: chromePanelBG, Bold: true})
+	}
+	pinToggle.OnClickFn = func(c *tv.VisualComponent, event tui.ClickEvent) bool {
+		// Toggle once on the fresh press only: Down stays true through any drag
+		// motion the terminal reports, so gate on a non-drag press so a click that
+		// jitters cannot double-toggle. ToggleSidebarPin rebuilds the menu and
+		// redraws, so the glyph repaints to its new state.
+		if event.Down && !event.Drag {
+			s.wb.ToggleSidebarPin()
+		}
+		return true
+	}
+	panel.AddChild(pinToggle)
+
 	s.panel = panel
 	s.tree = tree
 	s.divider = divider
+	s.pinToggle = pinToggle
 	s.overallSelect = overallSelect
 	s.overallModelKeys = []string{""}
 	s.layer = tv.NewWindowLayer("sidebar", panel)
