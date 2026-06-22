@@ -857,10 +857,12 @@ func TestRenderMarkdownTable(t *testing.T) {
 	if sep, ok := mdFindSpan(lines, "│"); !ok || !spanIs(sep, pal.rule) {
 		t.Errorf("column separator should use rule colour, got %+v", sep)
 	}
-	// A dashed rule line exists.
+	// A rule line exists made only of ─ fill and ┼ column boundaries (issue #313:
+	// the rule now spans the full table width with ┼ under each │, not a bare run
+	// of dashes).
 	var hasRule bool
 	for _, ln := range lines {
-		if txt := mdLineText(ln); txt != "" && strings.Trim(txt, "─") == "" {
+		if txt := mdLineText(ln); txt != "" && strings.Contains(txt, "─") && strings.Trim(txt, "─┼") == "" {
 			hasRule = true
 		}
 	}
