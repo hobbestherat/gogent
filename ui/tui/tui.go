@@ -87,6 +87,11 @@ type Handlers struct {
 	// api_type/endpoint/api_key) for the model ids it serves, so the editor can
 	// swap the model-id text field for a dropdown. May be nil.
 	ScanModels func(config.ModelConfig) ([]string, error)
+	// GetDefaultModel / SetDefaultModel read and persist the default model used
+	// for new sessions (issue #296). SetDefaultModel validates the name against the
+	// configured models. May be nil (the editor then hides the default control).
+	GetDefaultModel func() string
+	SetDefaultModel func(string) error
 	// GetTranscript returns a (sub-)agent's message transcript for the monologue
 	// popup. May be nil.
 	GetTranscript func(sessionID, agentID string) []ChatMessage
