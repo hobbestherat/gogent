@@ -478,6 +478,22 @@ func TestOneShotPromptHasPathTrustGuidance(t *testing.T) {
 	}
 }
 
+func TestInteractivePromptHasPathTrustGuidance(t *testing.T) {
+	// The path-trust guidance (G3) must also be present in the interactive prompt,
+	// so the no-rediscover instruction survives even when the per-spawn primer is
+	// truncated. Regression guard for the fix that added it there.
+	if !strings.Contains(strings.ToLower(subAgentInteractivePrompt), "authoritative") {
+		t.Fatalf("interactive prompt missing path-trust guidance:\n%s", subAgentInteractivePrompt)
+	}
+}
+
+func TestInteractivePromptKeepsContract(t *testing.T) {
+	// Trimming/additions must not drop the SUCCESS/FAILURE contract.
+	if !strings.Contains(subAgentInteractivePrompt, "SUCCESS:") || !strings.Contains(subAgentInteractivePrompt, "FAILURE:") {
+		t.Fatalf("interactive prompt missing SUCCESS/FAILURE contract:\n%s", subAgentInteractivePrompt)
+	}
+}
+
 func TestOneShotPromptIsLeanerThanInteractive(t *testing.T) {
 	// G2: the one-shot persona should be trimmed relative to the interactive one.
 	// The interactive prompt opens with the verbose persona line; the lean
