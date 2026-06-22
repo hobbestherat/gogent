@@ -946,10 +946,12 @@ func (g *Gogent) initializeToolRegistry() {
 			if session == nil {
 				return nil, fmt.Errorf("session not found: %s", ctx.SessionID)
 			}
-			// Read mode: no todos argument provided. Return the current list
-			// untouched so the model can query live state (issue #263).
+			// Read mode: no todos argument provided (absent or an explicit null).
+			// Return the current list untouched so the model can query live state
+			// without the read path tripping on a null it meant as "just read"
+			// (issue #263).
 			raw, present := args["todos"]
-			if !present {
+			if !present || raw == nil {
 				items := session.Todos()
 				return map[string]interface{}{
 					"mode":    "read",

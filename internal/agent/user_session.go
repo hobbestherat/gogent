@@ -852,10 +852,23 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 
 	sess := agent.ThoughtTrain
 	tools := toolDefsFromRegistry(agent.ToolRegistry)
-	if sc := s.systemContext(); sc != "" {
-		systemPrompt += "\n\n" + sc
+
+	// Rebuild the system prompt before every model round-trip (not just once at
+	// loop start) so the extra system context — the skills index, the live git
+	// status and the todo checklist — reflects the latest session state. This is
+	// essential after an intra-turn compaction: compaction summarizes the
+	// originating todo tool calls out of the transcript, and re-injecting here is
+	// what keeps the checklist in front of the model on the very next round-trip
+	// within the same turn (issue #263). The base prompt is captured once so the
+	// per-loop context is re-appended fresh rather than accumulated.
+	baseSystemPrompt := systemPrompt
+	refreshSystemPrompt := func() {
+		full := baseSystemPrompt
+		if sc := s.systemContext(); sc != "" {
+			full += "\n\n" + sc
+		}
+		sess.SetSystemPrompt(full)
 	}
-	sess.SetSystemPrompt(systemPrompt)
 
 	// Only the top-level (root) agent streams its thinking/tool events into the
 	// session window. Sub-agent loops stay silent here so their internal tool
@@ -909,6 +922,7 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 
 	// First request carries the user message.
 	s.compactIfNeeded(sess, emit)
+	refreshSystemPrompt()
 	resp, err := s.modelRoundTrip(ctx, sess, agent,
 		[]model.Message{{Role: model.RoleUser, Content: initialMessage}},
 		tools,
@@ -1016,6 +1030,7 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 
 		emit(SessionEvent{Type: SessionEventThinking, Step: step + 1})
 		s.compactIfNeeded(sess, emit)
+		refreshSystemPrompt()
 		resp, err = s.modelRoundTrip(ctx, sess, agent, nextMessages, tools, reasoningSink(step+1))
 		thinkingDone(step + 1)
 		if err != nil {
