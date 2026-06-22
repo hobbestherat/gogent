@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"gogent/internal/config"
 
@@ -25,6 +26,15 @@ type themeRole struct {
 // The labels are screen-anchored descriptions (issue #243) — what the colour
 // actually paints on screen — rather than the struct field names, so a user can
 // tell each role apart at a glance.
+//
+// The button/input roles (issue #265) expose the resting pair for each — button_fg/
+// button_bg and input_fg/input_bg, the most-seen state and the core ask of #265, with
+// full fg+bg control so a recoloured background stays legible. The focus pairs
+// (button_focus_*/input_focus_*) are deliberately omitted from the editor — they would
+// add a fourth row per column, and a height tall enough to hold them centres into the
+// always-on-top menu bar on the 24-row terminal this dialog targets — but they remain
+// first-class, config-overridable roles (applyOverrides/ResolveTheme/ApplyTheme) and
+// are audited by paletteContrast like every other role.
 var themeRoles = []themeRole{
 	{"user", "User messages", func(t Theme) tui.Color { return t.User }},
 	{"agent", "Agent replies", func(t Theme) tui.Color { return t.Agent }},
@@ -48,6 +58,10 @@ var themeRoles = []themeRole{
 	{"dropdown_focus_bg", "Focused dropdown bg", func(t Theme) tui.Color { return t.DropdownFocusBG }},
 	{"dropdown_select_fg", "Open row text", func(t Theme) tui.Color { return t.DropdownSelectFG }},
 	{"dropdown_select_bg", "Open row highlight", func(t Theme) tui.Color { return t.DropdownSelectBG }},
+	{"button_fg", "Button text", func(t Theme) tui.Color { return t.ButtonFG }},
+	{"button_bg", "Button background", func(t Theme) tui.Color { return t.ButtonBG }},
+	{"input_fg", "Input text", func(t Theme) tui.Color { return t.InputFG }},
+	{"input_bg", "Input background", func(t Theme) tui.Color { return t.InputBG }},
 	{"code_bg", "Code block background", func(t Theme) tui.Color { return t.CodeBG }},
 }
 
@@ -146,6 +160,34 @@ func buildThemeConfig(preset string, noColor, noShadow bool, specs map[string]st
 	return cfg
 }
 
+// carryUnexposedOverrides preserves any prior override whose key the editor does not
+// expose as a field. buildThemeConfig rebuilds Overrides from themeRoles alone, and
+// Gogent.SetTheme replaces the persisted theme config wholesale (no merge), so without
+// this a Save — even one made for an unrelated reason — would silently drop a hand-set
+// override that has no editor row. Issue #265's focus pairs (button_focus_fg/bg,
+// input_focus_fg/bg) are the first such keys: they are first-class config roles
+// (applyOverrides understands them) but are deliberately kept out of themeRoles for the
+// editor's layout ceiling. Keys the editor DOES expose are left to the rebuilt set — the
+// field is their source of truth — and an exposed key is matched after the same
+// normalisation applyOverrides uses, so a differently-cased duplicate is not carried
+// alongside the field-derived value.
+func carryUnexposedOverrides(cfg config.ThemeConfig, prior map[string]string) config.ThemeConfig {
+	exposed := make(map[string]bool, len(themeRoles))
+	for _, role := range themeRoles {
+		exposed[role.key] = true
+	}
+	for k, v := range prior {
+		if exposed[strings.ToLower(strings.TrimSpace(k))] {
+			continue
+		}
+		if cfg.Overrides == nil {
+			cfg.Overrides = map[string]string{}
+		}
+		cfg.Overrides[k] = v
+	}
+	return cfg
+}
+
 // presetIndex returns the themePresets index for a canonical palette name,
 // defaulting to 0 (the default palette).
 func presetIndex(name string) int {
@@ -180,9 +222,15 @@ func (w *Workbench) showThemeEditor() {
 	// not scale an oversized dialog). The height grows with the role count: each
 	// column holds half the roles starting at Y=4, and the "Spec:" hint sits at
 	// height-4, so height must clear that last role row — the dropdown roles (#260)
-	// added three rows per column, lifting it from 18 to 21 (still within 24 rows).
+	// added three rows per column, lifting it from 18 to 21, and the button/input
+	// resting roles (#265) added one more per column, lifting it to 22. The 24-row
+	// terminal is the hard ceiling: this dialog is centred (centeredDialog), so on a
+	// 24-row terminal it sits at y=(24-height)/2, which must stay ≥1 to clear the
+	// always-on-top menu bar on row 0 — i.e. height ≤ 22. That ceiling is why #265's
+	// four focus roles are kept out of the editor (see themeRoles); a taller dialog
+	// would centre its top frame onto the menu bar.
 	const width = 80
-	const height = 21
+	const height = 22
 	x, y := centeredDialog(w, width, height)
 
 	dialog := tv.NewDialog("Theme", x, y, width, height)
@@ -215,8 +263,8 @@ func (w *Workbench) showThemeEditor() {
 
 	// One row per role across two columns; fields[i] edits themeRoles[i] and
 	// swatches[i] previews it. The roles split evenly: the first half fill the left
-	// column (the semantic transcript colours and the leading chrome roles), the
-	// remainder the right column (the menu-bar, dropdown and code-block roles).
+	// column (the semantic transcript colours and the chrome roles), the remainder the
+	// right column (the menu-bar, dropdown, button/input and code-block roles).
 	fields := make([]*tv.TextBox, len(themeRoles))
 	swatches := make([]*tv.Label, len(themeRoles))
 
@@ -239,9 +287,13 @@ func (w *Workbench) showThemeEditor() {
 	// gets the full themeEditorLabelW cell; the left column's labels top out at 19
 	// columns ("Desktop background:"), so a narrower cell there buys the gap the right
 	// column needs to keep its swatch (and the "invalid" marker) fully on screen.
+	// The left cell is 20 (not 19): the button/input roles (#265) grew each column, so
+	// the 19-column label "Indicators / badges" now falls in the left column and needs a
+	// 20-wide cell to hold its trailing ":". The left swatch then ends at
+	// x = 2+20+7+2+7-1 = 37, still clear of the right column at x=40.
 	const fieldW, swatchW = 7, 7
 	columns := [...]struct{ x, labelW int }{
-		{2, 19},                 // left column
+		{2, 20},                 // left column
 		{40, themeEditorLabelW}, // right column (longest labels)
 	}
 	half := (len(themeRoles) + 1) / 2
@@ -313,6 +365,9 @@ func (w *Workbench) showThemeEditor() {
 			idx = 0
 		}
 		cfg := buildThemeConfig(themePresets[idx].name, noColor.IsChecked(), noShadow.IsChecked(), specs)
+		// Don't let a Save erase overrides the editor has no field for (the #265 focus
+		// pairs): SetTheme replaces the config wholesale, so carry the unexposed keys.
+		cfg = carryUnexposedOverrides(cfg, cur.Overrides)
 		w.handlers.SetTheme(cfg) // persists + re-applies the live palette
 		w.desktop.RemoveLayer(layer)
 		w.rebuildMenu()

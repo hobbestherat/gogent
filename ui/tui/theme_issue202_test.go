@@ -243,6 +243,13 @@ func TestIssue202DefaultPaletteFindingsContract(t *testing.T) {
 		{"dropdown", def.DropdownFG, def.DropdownBG, minContrastText},
 		{"dropdown-focus", def.DropdownFocusFG, def.DropdownFocusBG, minContrastText},
 		{"dropdown-select", def.DropdownSelectFG, def.DropdownSelectBG, minContrastText},
+		// Button/input roles (issue #265) carry their own fills. The resting button is the
+		// stock white-on-green (ANSI 15/2) at 3.11:1, held to the non-text/large floor as a
+		// documented gamut limit; the rest clear the body-text tier.
+		{"button", def.ButtonFG, def.ButtonBG, minContrastLarge},
+		{"button-focus", def.ButtonFocusFG, def.ButtonFocusBG, minContrastText},
+		{"input", def.InputFG, def.InputBG, minContrastText},
+		{"input-focus", def.InputFocusFG, def.InputFocusBG, minContrastText},
 	}
 	if len(findings) != len(want) {
 		t.Fatalf("paletteContrast returned %d findings, want %d", len(findings), len(want))
