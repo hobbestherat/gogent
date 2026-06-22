@@ -540,6 +540,7 @@ func loadedToRestored(ls gogent.LoadedSession) tuipkg.RestoredSession {
 		ID:       ls.ID,
 		Title:    title,
 		Messages: toChatMessages(ls.Transcripts["root"]),
+		Model:    ls.Model,
 	}
 }
 

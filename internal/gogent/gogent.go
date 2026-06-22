@@ -1321,7 +1321,17 @@ func (g *Gogent) adoptLoaded(ls LoadedSession) (LoadedSession, bool) {
 		return LoadedSession{}, false
 	}
 
+	// Restore the session on the model it was last using (issue #266), not the
+	// global default: resolve the recorded model name, falling back to the default
+	// when it is empty (older sessions) or no longer in the config.
 	conn := g.defaultConnection()
+	primaryName := ""
+	if g.config != nil && ls.Model != "" {
+		if cfg := g.config.GetModelConfig(ls.Model); cfg != nil {
+			conn = g.buildConnection(cfg)
+			primaryName = cfg.Name
+		}
+	}
 	sess := model.NewModelSession("main", conn)
 	if msgs := ls.Transcripts["root"]; len(msgs) > 0 {
 		sess.ReplaceTranscript(msgs)
@@ -1329,6 +1339,14 @@ func (g *Gogent) adoptLoaded(ls LoadedSession) (LoadedSession, bool) {
 	rootAgent := agent.NewAgent("root", sess)
 	rootAgent.SetState(agent.StateIdle)
 	g.CreateUserSession(ls.ID, rootAgent)
+	if primaryName != "" {
+		// Report the restored model via PrimaryModel() from the first turn, so the
+		// Statistics/Overall panels and the next persist read the right model
+		// instead of the default.
+		if us := g.GetUserSession(ls.ID); us != nil {
+			us.SetPrimaryModel(primaryName)
+		}
+	}
 	g.SetSessionTitle(ls.ID, ls.Title)
 	if g.store != nil {
 		g.store.Adopt(ls.ID, ls.File, rootAgent.ListAllAgents()) // continue appending to the active shard

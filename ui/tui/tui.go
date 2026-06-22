@@ -189,6 +189,10 @@ type RestoredSession struct {
 	ID       string
 	Title    string
 	Messages []ChatMessage
+	// Model is the config name of the model the session was last using, so the
+	// re-opened window preselects it in the model dropdown (issue #266). Empty
+	// leaves the default selection.
+	Model string
 }
 
 // SessionMeta is the UI-facing, index-only view of one persisted session for the
@@ -837,11 +841,34 @@ func (w *Workbench) AdoptSession(rs RestoredSession) *SessionWindow {
 	}
 	sw := w.openWindow(rs.ID, title)
 	sw.restore(rs.Messages)
+	// Preselect the model the session was last using (issue #266) so the next
+	// send goes to it and the dropdown shows it, rather than defaulting to index 0.
+	// SetSelected does not fire OnChange, so this has no side effects.
+	if idx := w.modelIndexByName(rs.Model); idx >= 0 && sw.modelSelect != nil {
+		sw.modelSelect.SetSelected(idx)
+		sw.rebuildEffortOptions()
+	}
 	if w.handlers.OnCreate != nil {
 		w.handlers.OnCreate(rs.ID, title)
 	}
 	w.rebuildMenu()
 	return sw
+}
+
+// modelIndexByName returns the model dropdown index whose backing config has the
+// given config name, or -1 when name is empty or unmatched. It compares against
+// the resolved config (via modelByDisplayName) rather than re-deriving display
+// labels, so duplicate-display-name disambiguation can't desync the lookup.
+func (w *Workbench) modelIndexByName(name string) int {
+	if name == "" {
+		return -1
+	}
+	for i, label := range w.modelNames {
+		if cfg := w.modelByDisplayName(label); cfg != nil && cfg.Name == name {
+			return i
+		}
+	}
+	return -1
 }
 
 // OpenAnalysisSession opens a saved transcript in a read-only analysis window
