@@ -101,6 +101,13 @@ type sessionTally struct {
 	compactions  int
 	primary      stats.ConnectorStat
 	fast         stats.ConnectorStat
+	// subAgents and perModel mirror the SessionRow fields of the same name so a
+	// closed session is re-attributed to the exact models it used (not just its final
+	// model) and re-emitted faithfully. perModel is nil for rows recorded without a
+	// split; the closed-session path then falls back to attributing primary to
+	// primaryModel, matching the pre-split behaviour.
+	subAgents int
+	perModel  []stats.SessionModelStat
 }
 
 // newLifetimeStats returns an empty process-lifetime accumulator.
@@ -159,6 +166,8 @@ func (l *lifetimeStats) fold(report stats.Report) stats.Report {
 			compactions:  s.Compactions,
 			primary:      s.Primary,
 			fast:         s.Fast,
+			subAgents:    s.SubAgents,
+			perModel:     s.PerModel,
 		}
 	}
 
@@ -187,7 +196,15 @@ func (l *lifetimeStats) fold(report stats.Report) stats.Report {
 		totals.Compactions += t.compactions
 		totals.Primary = totals.Primary.Add(t.primary)
 		totals.Fast = totals.Fast.Add(t.fast)
-		if t.primaryModel != "" {
+		// Re-attribute per-model connector to the EXACT models the session used when
+		// its split was recorded (so a closed model-switching session keeps modelA's
+		// share on A and modelB's on B, matching the live report). Fall back to the
+		// final model when no split is available (rows recorded without PerModel).
+		if len(t.perModel) > 0 {
+			for _, m := range t.perModel {
+				perModel[m.Name] = perModel[m.Name].Add(m.Connector)
+			}
+		} else if t.primaryModel != "" {
 			perModel[t.primaryModel] = perModel[t.primaryModel].Add(t.primary)
 		}
 		closedRows = append(closedRows, stats.SessionRow{
@@ -200,6 +217,8 @@ func (l *lifetimeStats) fold(report stats.Report) stats.Report {
 			PrimaryModel: t.primaryModel,
 			Primary:      t.primary,
 			Fast:         t.fast,
+			SubAgents:    t.subAgents,
+			PerModel:     t.perModel,
 			// ContextTokens/ContextWindow are live-only; closed rows carry zeros.
 		})
 	}
