@@ -677,7 +677,13 @@ func (s *UserSession) ExecuteTaskLoop(ctx context.Context, agentID string, initi
 	tools := toolDefsFromRegistry(agent.ToolRegistry)
 	systemPrompt := buildAgentSystemPrompt(len(tools) > 0, s.SubAgentConfig())
 	if planMode {
-		systemPrompt = planModeSystemPrompt(systemPrompt)
+		// Only advertise read-only delegation when spawn_subagent actually survived
+		// the plan-mode filter. In one-shot mode it does (planKeptTools); in
+		// interactive mode toolRegistryForMode strips spawn_subagent and the
+		// non-read-only interactive coordination tools are dropped by CloneForPlanMode,
+		// leaving no delegation tool — so the prompt must not promise one (issue #281).
+		canDelegate := agent.ToolRegistry.Get("spawn_subagent") != nil
+		systemPrompt = planModeSystemPromptWith(systemPrompt, canDelegate)
 	}
 
 	responses, err := s.runLoop(ctx, agent, agentID, initialMessage, systemPrompt)
@@ -719,28 +725,62 @@ func (s *UserSession) recordPlan(responses []*model.CompletionResponse) {
 }
 
 // planModeSystemPrompt layers planning instructions on top of the base agent
-// prompt. It tells the model the workspace is read-only this turn and that its
-// answer is a plan for the user to approve, not something to carry out (issue
-// #43). It also permits bounded, read-only sub-agent delegation so the agent can
-// fan out parallel investigation while it plans (issue #281).
+// prompt for a plan-mode turn that can delegate (the default one-shot config,
+// where spawn_subagent survives the plan-mode filter). It tells the model the
+// workspace is read-only this turn and that its answer is a plan for the user to
+// approve, not something to carry out (issue #43), and permits bounded,
+// read-only sub-agent delegation so the agent can fan out parallel investigation
+// while it plans (issue #281). ExecuteTaskLoop calls planModeSystemPromptWith
+// with the actual delegation availability; this wrapper is the canonical
+// delegation-enabled prompt.
 func planModeSystemPrompt(base string) string {
-	return base + `
+	return planModeSystemPromptWith(base, true)
+}
+
+// planModeSystemPromptWith builds the plan-mode prompt, appending the read-only
+// delegation guidance only when canDelegate is true. The delegation paragraph
+// names spawn_subagent, so it must not be shown when that tool is absent from the
+// plan-mode registry — e.g. in interactive sub-agent mode, where
+// toolRegistryForMode strips spawn_subagent and CloneForPlanMode drops the
+// (non-read-only) interactive coordination tools, leaving no delegation tool.
+// Advertising delegation there would have the model emit calls that fail as
+// unknown, wasting turns (issue #281 regression guard).
+func planModeSystemPromptWith(base string, canDelegate bool) string {
+	prompt := base + `
 
 ## PLAN MODE (read-only)
 You are in PLAN MODE. The tools that modify the workspace (write, edit,
 multi_edit, apply_patch, shell) are unavailable this turn. Use the read-only
 tools to investigate, then reply with a concrete, step-by-step plan the user
-will approve before you execute it.
+will approve before you execute it.`
+	if canDelegate {
+		prompt += `
 
 You MAY delegate read-only investigation to sub-agents to research the codebase
 in parallel while you plan. Batch the independent lookups into a SINGLE
 spawn_subagent call's "subtasks" array (e.g. one sub-agent per module to
 summarize its structure, or diagnostics + grep together) so they run
 concurrently. The sub-agents are also read-only this turn: they investigate and
-report findings only — they must NOT write, edit, or otherwise change anything.
+report findings only — they must NOT write, edit, or otherwise change anything.`
+	} else {
+		// No delegation tool survived the plan-mode filter (interactive mode strips
+		// spawn_subagent and CloneForPlanMode drops the non-read-only interactive
+		// coordination tools). The base prompt's coordinatorInstructions still
+		// advertises those tools, so explicitly neutralize that stale guidance —
+		// otherwise the model emits delegation calls that fail as unknown this turn
+		// (issue #281: restores the coherence the removed "tools unavailable" line
+		// used to provide for interactive mode).
+		prompt += `
+
+Sub-agent delegation is unavailable this turn: do the investigation yourself with
+the read-only tools, and ignore any earlier guidance about launching or spawning
+sub-agents.`
+	}
+	prompt += `
 
 Lay the plan's steps out with the todo tool. Do NOT attempt to carry the plan
 out — present it as your final answer.`
+	return prompt
 }
 
 // budgetExceededMarker prefixes an agent's final result when it stopped because
