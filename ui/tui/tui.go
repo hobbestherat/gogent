@@ -855,6 +855,19 @@ func (w *Workbench) NewSession() *SessionWindow {
 	title := fmt.Sprintf("Session %d", num)
 	w.mu.Unlock()
 	sw := w.openWindow(id, title)
+	// Seed the dropdown to the configured default model (issue #306) so the first
+	// send goes to it and the header shows it, rather than silently defaulting to
+	// index 0. The backend's NewSession already builds on the default connection;
+	// without this the TUI's selectedModelName() would disagree with the backend.
+	// Mirrors AdoptSession's restore-model seeding (issue #266). SetSelected does
+	// not fire OnChange, so this has no side effects. An empty/unknown default
+	// yields idx -1 and leaves index 0 selected, matching the backend's fallback.
+	if w.handlers.GetDefaultModel != nil && sw.modelSelect != nil {
+		if idx := w.modelIndexByName(w.handlers.GetDefaultModel()); idx >= 0 {
+			sw.modelSelect.SetSelected(idx)
+			sw.rebuildEffortOptions()
+		}
+	}
 	w.desktop.SetFocus(sw.input)
 	if w.handlers.OnCreate != nil {
 		w.handlers.OnCreate(id, title)
