@@ -600,3 +600,74 @@ func TestAgentSendToRunningAgentIsRejected(t *testing.T) {
 		t.Errorf("agent_send rejection should explain the CLARIFY-only protocol, got: %v", err)
 	}
 }
+
+// TestLaunchAgentRespectsGlobalConcurrencyLimiter exercises the limiter-rejection
+// path added in the #284 fix: fire-and-forget launches must count against the
+// shared SubAgentLimiter (the global MaxConcurrent ceiling), NOT just the
+// per-parent MaxSubAgents cap. With a limiter of 1, the second concurrent
+// launch_agent is rejected non-blocking with a "concurrency limit reached" error
+// (distinct from the per-parent cap), and once the first worker finishes and
+// frees its slot, a fresh launch succeeds again — proving the acquire/release
+// pairing returns the slot.
+func TestLaunchAgentRespectsGlobalConcurrencyLimiter(t *testing.T) {
+	srv := newGatedModelServer("SUCCESS: done")
+	server := httptest.NewServer(http.HandlerFunc(srv.handler))
+	defer server.Close()
+	defer srv.Release()
+
+	g, us := newBothModeSession(t, server.URL)
+	// One global slot, so the second concurrent launch must be rejected by the
+	// limiter (MaxConcurrent), not by the per-parent MaxSubAgents (default 4).
+	us.SetSubAgentLimiter(agent.NewSubAgentLimiter(1))
+
+	first, err := execTool(t, g, "launch_agent", map[string]interface{}{"name": "a", "task": "loop"})
+	if err != nil {
+		t.Fatalf("first launch_agent errored: %v", err)
+	}
+	fm, _ := first.Result.(map[string]interface{})
+	firstID, _ := fm["agent_id"].(string)
+	if strings.TrimSpace(firstID) == "" {
+		t.Fatal("first launch_agent returned no agent_id")
+	}
+
+	// Second concurrent launch: the only slot is held, so this is rejected. The
+	// message must be the limiter rejection, NOT the per-parent max-subagents one.
+	_, err = execTool(t, g, "launch_agent", map[string]interface{}{"name": "b", "task": "loop"})
+	if err == nil {
+		t.Fatal("second concurrent launch_agent should be rejected by the global limiter, but succeeded")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "concurrency limit") {
+		t.Errorf("expected a concurrency-limit rejection, got: %v", err)
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "max sub-agents") {
+		t.Errorf("rejection should come from the global limiter, not the per-parent cap: %v", err)
+	}
+
+	// Release the model so the first worker completes and frees its slot, then
+	// drain its terminal event.
+	srv.Release()
+	harvest, err := execTool(t, g, "wait_agent_event", map[string]interface{}{"timeout_ms": float64(5000)})
+	if err != nil {
+		t.Fatalf("wait_agent_event errored: %v", err)
+	}
+	hm, _ := harvest.Result.(map[string]interface{})
+	if to, _ := hm["timed_out"].(bool); to {
+		t.Fatal("first worker never reported completion after release")
+	}
+
+	// The freed slot must be reusable. The release happens in a deferred call as
+	// the worker goroutine unwinds, which can race a hair behind the completion
+	// event, so retry briefly rather than assuming instant availability.
+	deadline := time.Now().Add(3 * time.Second)
+	var reacquired bool
+	for time.Now().Before(deadline) {
+		resp, lerr := execTool(t, g, "launch_agent", map[string]interface{}{"name": "c", "task": "loop"})
+		if lerr == nil && resp != nil && resp.Success {
+			reacquired = true
+			break
+		}
+	}
+	if !reacquired {
+		t.Error("slot freed by the finished worker was not reusable by a later launch_agent")
+	}
+}
