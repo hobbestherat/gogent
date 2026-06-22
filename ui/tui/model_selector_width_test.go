@@ -1,7 +1,10 @@
 package ui
 
 import (
+	"strings"
 	"testing"
+
+	"gogent/internal/config"
 
 	tui "github.com/hobbestherat/turbotui"
 	tv "github.com/hobbestherat/turbotui/turbotv"
@@ -51,78 +54,95 @@ func TestHeaderSelectWidthFitsLongestName(t *testing.T) {
 	}
 }
 
-// modelEditorSpec rebuilds the DialogSpec showModelEditor uses (issues #108,
-// #299): large by default (≈80% wide) with a 64×18 floor, and PreferredW wide
-// enough to hold the widest option in the boxed Select (longest + 2 cells of
-// Select chrome + boxX + 3) so a long model name never clips.
-func modelEditorSpec(longest int) tv.DialogSpec {
-	return tv.DialogSpec{MinW: 64, MinH: 18, PreferredW: longest + 2 + modelEditorBoxX + 3}
+// openModelEditor drives the REAL showModelEditor on a screenW×screenH terminal
+// with a single model whose option label has the requested display-cell width, and
+// returns the opened dialog's outer rectangle. Testing the live code path (rather
+// than a mirror of its DialogSpec) is deliberate: round 1 used a static
+// modelEditorSpec mirror that silently drifted from the source after the clip fix
+// landed, turning a fixed bug into a false failure. Driving showModelEditor keeps
+// the test honest against whatever sizing logic the dialog actually uses.
+//
+// The option label is nameLabel's "DisplayName (Name)"; with Name="x" (1 cell) the
+// label width is len(DisplayName)+4, so labelCells controls the widest option.
+func openModelEditor(t *testing.T, labelCells, screenW, screenH int) tv.Rect {
+	t.Helper()
+	if labelCells < 5 {
+		t.Fatalf("labelCells %d too small to build a label", labelCells)
+	}
+	dn := strings.Repeat("x", labelCells-4) // "<dn> (x)" == labelCells cells
+	w := newTestWorkbench(t)
+	w.SetHandlers(Handlers{
+		GetModels:   func() []config.ModelConfig { return []config.ModelConfig{{Name: "x", DisplayName: dn, Model: "m"}} },
+		UpdateModel: func(config.ModelConfig) error { return nil },
+	})
+	w.app.Resize(screenW, screenH)
+	w.showModelEditor()
+	if top := w.desktop.TopLayer(); top == nil || top.Root == nil {
+		t.Fatalf("model editor did not open")
+	}
+	return dialogBounds(w)
 }
 
-// TestModelEditorWidthFloor checks the 64-column floor holds on a terminal whose
-// 80% default would otherwise be narrower.
+// modelEditorLabelCells reports the display width of the option label
+// openModelEditor builds for labelCells (== labelCells by construction); it exists
+// so the fit assertion measures the real label rather than assuming.
+func modelEditorLabelCells(labelCells int) int {
+	return tui.StringWidth(strings.Repeat("x", labelCells-4) + " (x)")
+}
+
+// TestModelEditorWidthFloor checks the 64-column comfort floor holds on a terminal
+// whose 80% default would otherwise be narrower, for a short option.
 func TestModelEditorWidthFloor(t *testing.T) {
-	// screen 70 -> 80% = 56 < 64; short options keep the 64 floor.
-	_, _, w, _ := tv.ResolveDialogRect(modelEditorSpec(10), 70, 40)
-	if w != 64 {
-		t.Errorf("model editor width on a 70-col terminal = %d, want 64 (floor)", w)
+	// screen 70 -> 80% = 56 < 64; a short option keeps the 64 floor.
+	if b := openModelEditor(t, 8, 70, 40); b.W != modelEditorMinWidth {
+		t.Errorf("model editor width on a 70-col terminal = %d, want %d (floor)", b.W, modelEditorMinWidth)
 	}
 }
 
-// TestModelEditorSizedToContent documents the model editor's size after the #309
-// turbotui cap-not-floor change. With a short option it is now floored at 64 wide
-// (the content-driven PreferredW is tiny, so the Min floor wins) rather than the
-// old 80% default — a behaviour change the gogent #309 work did not touch.
-//
-// NOTE (#309 finding): the height is still the 85% default (42 of 50 rows) because
-// the editor declares no PrefH/MaxH, so a ~14-row editor sits in a 42-row box —
-// the same dead-vertical-space symptom #309 set out to remove, left unaddressed for
-// this dialog. Asserted here so the residual inflation is visible, not lost.
+// TestModelEditorSizedToContent checks the model editor sizes to content after the
+// #309 turbotui cap-not-floor change: with a short option it is the 64-wide comfort
+// floor (not the old 80% default), and — the round-1 BUG 3 fix — its height is the
+// fixed 18-row footprint, not the inflated 85% vertical default.
 func TestModelEditorSizedToContent(t *testing.T) {
-	_, _, w, h := tv.ResolveDialogRect(modelEditorSpec(10), 200, 50)
-	if w != 64 {
-		t.Errorf("model editor width on a 200-col terminal = %d, want 64 (content floor, not 160)", w)
+	b := openModelEditor(t, 8, 200, 50)
+	if b.W != modelEditorMinWidth {
+		t.Errorf("model editor width on a 200-col terminal = %d, want %d (content floor, not 160)", b.W, modelEditorMinWidth)
 	}
-	if h != 42 { // 85% of 50 — still inflated, no PrefH/MaxH on this dialog
-		t.Errorf("model editor height on a 50-row terminal = %d, want 42 (still the 85%% default)", h)
+	if b.H != modelEditorHeight {
+		t.Errorf("model editor height on a 50-row terminal = %d, want %d (pinned, not the 85%% default of 42)", b.H, modelEditorHeight)
 	}
 }
 
-// TestModelEditorWidthFitsOption asserts the model editor's documented invariant:
-// the boxed Select must be wide enough to show the widest option in full whenever
-// the terminal has room for it. modelEditorSpec sets PreferredW = longest + chrome
-// precisely so a long model name "still shows in full" (per model_editor.go).
-//
-// DEFECT (#309): after turbotui's percentage became an 80% width CAP, a
-// content-driven PreferredW above 80% of the screen is clamped DOWN below what the
-// option needs — even though the screen (width − 2*margin) could hold it. On a
-// 100-col terminal a 70-cell option needs a 93-col dialog (which fits in the 96
-// usable cols), but the 80% cap pins the dialog to 80 cols and the name CLIPS. The
-// gogent #309 work added a MaxW to the message/input/permission dialogs but missed
-// the model editor, so this dialog has no way to exceed the cap to fit its content.
+// TestModelEditorWidthFitsOption is the round-1 BUG 1 regression guard: the boxed
+// Select must show the widest option in full whenever the terminal has room for it.
+// model_editor.go now lifts MinW to the content width (bounded by the usable
+// screen) so a content-driven PreferredW above the 80% cap is no longer clamped
+// below what the option needs. The {70,100} case is the original repro: a 70-cell
+// option needs a 93-col dialog, which fits in the 96 usable cols.
 func TestModelEditorWidthFitsOption(t *testing.T) {
 	for _, tc := range []struct {
-		longest, screen int
+		name               string
+		labelCells, screen int
 	}{
-		{10, 200},  // short option, roomy screen
-		{70, 100},  // long option that fits the screen but exceeds the 80% cap
-		{120, 250}, // very long option, very roomy screen
+		{"short option, roomy screen", 10, 200},
+		{"long option exceeds 80% cap but fits screen", 70, 100},
+		{"very long option, very roomy screen", 120, 250},
 	} {
-		spec := modelEditorSpec(tc.longest)
-		_, _, width, _ := tv.ResolveDialogRect(spec, tc.screen, 50)
-		// Precondition: the screen genuinely has room for the option, so a clip is a
-		// policy defect, not an unavoidable small-terminal truncation.
-		needed := spec.PreferredW
-		usable := tc.screen - 4 // screen − 2*default margin
-		if needed > usable {
-			continue // screen too small to ever hold it; not what this test guards
-		}
-		boxW := width - modelEditorBoxX - 3
-		if boxW-2 < tc.longest {
-			t.Errorf("longest=%d screen=%d: boxW %d cannot hold the option (text area %d) — "+
-				"the 80%% width cap clamped the %d-col dialog the screen could hold; long model name clips (DEFECT)",
-				tc.longest, tc.screen, boxW, boxW-2, needed)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			labelW := modelEditorLabelCells(tc.labelCells)
+			needed := labelW + 2 + modelEditorBoxX + 3
+			usable := tc.screen - 2*tv.DefaultDialogMargin
+			if needed > usable {
+				t.Skipf("screen %d too small to ever hold a %d-cell option (needed %d > usable %d)",
+					tc.screen, labelW, needed, usable)
+			}
+			b := openModelEditor(t, tc.labelCells, tc.screen, 50)
+			boxW := b.W - modelEditorBoxX - 3 // mirrors showModelEditor's boxW
+			if boxW-2 < labelW {
+				t.Errorf("labelW=%d screen=%d: dialog width %d -> boxW %d cannot hold the option (text area %d); "+
+					"long model name would clip", labelW, tc.screen, b.W, boxW, boxW-2)
+			}
+		})
 	}
 }
 
