@@ -6,40 +6,14 @@ import (
 
 // buttonChrome is the number of columns turbotui draws around a button's label:
 // the "[ " prefix and " ]" suffix (see turbotui/turbotv/widget_button.go). A
-// button needs at least len(label without mnemonic) + buttonChrome columns to
-// render without clipping its text.
+// button needs at least StringWidth(label without mnemonic) + buttonChrome
+// columns to render without clipping its text. Button widths themselves come from
+// tv.ButtonLabelWidth (which also floors short captions); this constant is kept
+// only for the chrome-aware label elision in fitButtonLabel.
 const buttonChrome = 4
 
-// buttonLabelWidth returns the column width a turbotui button needs to display
-// label without clipping: the label with its '&' mnemonic marker removed, plus
-// the button chrome ("[ " ... " ]"). It mirrors the rendering in
-// turbotui/turbotv/widget_button.go so declared widths match what is drawn.
-func buttonLabelWidth(label string) int {
-	return cleanMnemonicRunes(label) + buttonChrome
-}
-
-// cleanMnemonicRunes returns the number of visible runes in label after removing
-// '&' mnemonic markers, matching turbotv.parseMnemonic: a single '&' before
-// another rune marks a hotkey and is dropped; "&&" is a literal '&'; a trailing
-// '&' with no following rune is treated as literal.
-func cleanMnemonicRunes(label string) int {
-	runes := []rune(label)
-	n := 0
-	for i := 0; i < len(runes); i++ {
-		if runes[i] == '&' && i+1 < len(runes) {
-			if runes[i+1] == '&' {
-				n++ // literal '&'
-				i++
-			}
-			continue // mnemonic marker dropped
-		}
-		n++
-	}
-	return n
-}
-
 // footerButtonRects lays out a right-aligned row of action buttons for a dialog
-// footer. Each button is sized to its rendered label width (buttonLabelWidth),
+// footer. Each button is sized to its rendered label width (tv.ButtonLabelWidth),
 // the group is right-aligned so the last button's right edge sits on rightX, and
 // neighbouring buttons are separated by gap blank columns. All rects share row y
 // and are clamped to [leftX, rightX] so they never start before leftX, run past
@@ -54,7 +28,7 @@ func footerButtonRects(labels []string, leftX, rightX, y, gap int) []tv.Rect {
 	rects := make([]tv.Rect, len(labels))
 	rightEdge := rightX
 	for i := len(labels) - 1; i >= 0; i-- {
-		w := buttonLabelWidth(labels[i])
+		w := tv.ButtonLabelWidth(labels[i])
 		x := rightEdge - w + 1
 		rects[i] = clampDialogRect(tv.Rect{X: x, Y: y, W: w, H: 1}, leftX, rightX)
 		rightEdge = x - gap - 1

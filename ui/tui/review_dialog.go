@@ -61,22 +61,10 @@ func showReviewDialog(desktop *tv.Desktop, req gogent.EditReviewRequest, request
 		return
 	}
 
-	width := desktop.App().Width() * 70 / 100
-	height := (desktop.App().Height() - 1) * 70 / 100
-	if width < 40 {
-		width = desktop.App().Width() - 2
-	}
-	if height < 12 {
-		height = desktop.App().Height() - 2
-	}
-	x := (desktop.App().Width() - width) / 2
-	y := (desktop.App().Height() - height) / 2
-	if x < 0 {
-		x = 0
-	}
-	if y < 0 {
-		y = 0
-	}
+	// Large by default (≈80%×85% of the terminal) with a 40×12 floor; the diff
+	// view fills the dialog, so it grows with the terminal (issue #299).
+	spec := tv.DialogSpec{MinW: 40, MinH: 12}
+	x, y, width, height := tv.ResolveDialogRect(spec, desktop.App().Width(), desktop.App().Height())
 
 	title := fmt.Sprintf("Review %s: %s", req.Op, req.Path)
 	dialog := tv.NewDialog(truncate(title, width-4), x, y, width, height)
@@ -136,6 +124,7 @@ func showReviewDialog(desktop *tv.Desktop, req gogent.EditReviewRequest, request
 
 	layer = tv.NewModalLayer("review-dialog", dialog)
 	desktop.AddLayer(layer)
+	dialog.Fit(spec) // re-resolve the rect when the terminal is resized (issue #299)
 	desktop.SetFocus(reject)
 }
 

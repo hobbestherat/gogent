@@ -25,22 +25,10 @@ func (w *Workbench) showAgentMonolog(sessionID, agentID, name string) {
 	if title == "" {
 		title = agentID
 	}
-	width := w.app.Width() * 60 / 100
-	height := (w.app.Height() - 1) * 70 / 100
-	if width < 30 {
-		width = w.app.Width() - 4
-	}
-	if height < 8 {
-		height = w.app.Height() - 2
-	}
-	x := (w.app.Width() - width) / 2
-	y := (w.app.Height() - height) / 2
-	if x < 0 {
-		x = 0
-	}
-	if y < 0 {
-		y = 0
-	}
+	// Large by default (≈80%×85% of the terminal) with a 40×10 floor; the history
+	// view fills the window, so it grows with the terminal (issue #299).
+	spec := tv.DialogSpec{MinW: 40, MinH: 10}
+	x, y, width, height := w.dialogRect(spec)
 
 	window := tv.NewWindow("monologue: "+title, tv.Rect{X: x, Y: y, W: width, H: height}, tui.LineSingle)
 	applyWindowShadow(window) // honour the NoShadow theme setting (issue #215)
@@ -57,6 +45,13 @@ func (w *Workbench) showAgentMonolog(sessionID, agentID, name string) {
 	}
 
 	layer := tv.NewWindowLayer("monolog", window)
+	// Re-resolve the popup against the new terminal size on resize so it stays
+	// ≈80%×85% instead of a fixed box; the content LayoutFn refills the history
+	// view to the new bounds (issue #299).
+	layer.OnResize = func(tv.Rect) {
+		nx, ny, nw, nh := w.dialogRect(spec)
+		window.Component.SetBounds(tv.Rect{X: nx, Y: ny, W: nw, H: nh})
+	}
 	window.OnClose = func(_ *tv.Window) {
 		w.desktop.RemoveLayer(layer)
 		if w.monolog == layer {

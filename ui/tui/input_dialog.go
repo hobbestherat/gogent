@@ -38,9 +38,10 @@ func (w *Workbench) showInputDialog(title, label, initial string, onResult func(
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	const width = 54
-	const height = 8
-	x, y := centeredDialog(w, width, height)
+	// Large by default (≈80%×85% of the terminal); the floor keeps a tiny prompt
+	// usable and PreferredW grows to show a long label in full (issue #299).
+	spec := tv.DialogSpec{MinW: 40, MinH: 7, PreferredW: tui.StringWidth(label) + 4}
+	x, y, width, height := w.dialogRect(spec)
 
 	dialog := tv.NewDialog(title, x, y, width, height)
 	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
@@ -81,6 +82,7 @@ func (w *Workbench) showInputDialog(title, label, initial string, onResult func(
 
 	layer = tv.NewModalLayer("input-dialog", dialog)
 	w.desktop.AddLayer(layer)
+	dialog.Fit(spec) // re-resolve the rect when the terminal is resized (issue #299)
 	w.desktop.SetFocus(box)
 	if cfg.selectAll {
 		// After focus, so the highlight is the field's final state on open.

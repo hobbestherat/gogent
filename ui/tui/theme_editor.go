@@ -173,10 +173,12 @@ const themeEditorVisibleRows = themeEditorDialogH - 3 - themeEditorContentTop
 const themeEditorScrollbarX = themeEditorDialogW - 3
 
 // Geometry of the modal theme editor (issue #267). Width stays at 80 so the dialog
-// fits a standard 80-column terminal (centeredDialog only clamps the origin, it does
-// not scale an oversized dialog). Height is held at 22 — the 24-row terminal is the
-// hard ceiling: this dialog is centred, so on a 24-row terminal it sits at
-// y=(24-22)/2=1, clearing the always-on-top menu bar on row 0. themeEditorFieldW and
+// fits a standard 80-column terminal, and height at 22 — the 24-row terminal is the
+// hard ceiling. The dialog is pinned to this footprint (the shared dialog resolver
+// is given Min == Max == these constants, issue #299) and centred, so on a 24-row
+// terminal it sits at y=(24-22)/2=1, clearing the always-on-top menu bar on row 0.
+// The fixed footprint is what lets the scrolling viewport's compile-time geometry
+// (issues #279/#291) stay valid. themeEditorFieldW and
 // themeEditorSwatchW are the spec-field ("#RRGGBB"/"default") and live-swatch
 // ("invalid") cell widths that follow each role label.
 const (
@@ -493,7 +495,12 @@ func (w *Workbench) showThemeEditor() {
 		width  = themeEditorDialogW
 		height = themeEditorDialogH
 	)
-	x, y := centeredDialog(w, width, height)
+	// Pin the editor to its 80×22 content footprint via the shared resolver
+	// (Min == Max), so the fixed-layout scrolling viewport (issues #279/#291) stays
+	// valid while the dialog is still centered — and re-centered on resize — like
+	// every other dialog (issue #299).
+	spec := tv.DialogSpec{MinW: width, MinH: height, MaxW: width, MaxH: height}
+	x, y, _, _ := w.dialogRect(spec)
 
 	dialog := tv.NewDialog("Theme", x, y, width, height)
 	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
@@ -761,5 +768,6 @@ func (w *Workbench) showThemeEditor() {
 
 	layer = tv.NewModalLayer("theme-editor", dialog)
 	w.desktop.AddLayer(layer)
+	dialog.Fit(spec) // re-center the pinned dialog when the terminal is resized (issue #299)
 	w.desktop.SetFocus(preset)
 }

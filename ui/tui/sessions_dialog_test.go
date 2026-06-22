@@ -3,6 +3,8 @@ package ui
 import (
 	"strings"
 	"testing"
+
+	tv "github.com/hobbestherat/turbotui/turbotv"
 )
 
 // TestFilterSessions covers case-insensitive matching across title/id/model,
@@ -149,22 +151,28 @@ func TestEmptySessionsDetail(t *testing.T) {
 	}
 }
 
-// TestSessionsDialogSize covers clamping to the terminal and the min floors.
+// TestSessionsDialogSize covers the spec-driven sizing (issue #299): the saved
+// sessions browser shares the Resources/Statistics 85%-wide, 60×14-floor spec, so
+// it grows with the terminal instead of capping at 80×22.
 func TestSessionsDialogSize(t *testing.T) {
+	// sessionsSpec mirrors the inline DialogSpec in showSessionsDialog.
+	sessionsSpec := func(screenW int) tv.DialogSpec {
+		return tv.DialogSpec{MinW: 60, MinH: 14, PreferredW: screenW * 85 / 100}
+	}
 	for _, tc := range []struct {
 		name             string
 		screenW, screenH int
 		wantW, wantH     int
 	}{
-		{"large screen caps at 80x22", 200, 100, 80, 22},
-		{"fits narrow terminal", 70, 30, 68, 22},
-		{"short terminal floors height", 120, 16, 80, 14},
-		{"tiny terminal floors both", 50, 20, 60, 18},
+		{"large screen grows to 85%", 200, 100, 170, 85},
+		{"medium terminal grows", 120, 40, 102, 34},
+		{"short terminal floors height", 120, 16, 102, 14},
+		{"tiny terminal floors both", 50, 20, 60, 16},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			gotW, gotH := sessionsDialogSize(tc.screenW, tc.screenH)
+			_, _, gotW, gotH := tv.ResolveDialogRect(sessionsSpec(tc.screenW), tc.screenW, tc.screenH)
 			if gotW != tc.wantW || gotH != tc.wantH {
-				t.Errorf("sessionsDialogSize(%d,%d) = %dx%d, want %dx%d",
+				t.Errorf("sessions size(%d,%d) = %dx%d, want %dx%d",
 					tc.screenW, tc.screenH, gotW, gotH, tc.wantW, tc.wantH)
 			}
 		})

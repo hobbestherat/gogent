@@ -19,29 +19,13 @@ const (
 	modelEditorBoxX   = 2 + modelEditorLabelW
 )
 
-// modelEditorWidth picks the model-editor dialog width so the widest Select
-// option (longestOption cells) fits its box without clipping, clamped to the
-// available screen width (issue #108). The Select needs two extra cells for its
-// value padding and ▼ glyph, and boxW = width - modelEditorBoxX - 3, so the
-// minimum non-clipping width is longestOption + 2 + modelEditorBoxX + 3. A
-// baseline minimum keeps the dialog from collapsing for short names.
-func modelEditorWidth(longestOption, screen int) int {
-	const minWidth = 64
-	width := longestOption + 2 + modelEditorBoxX + 3
-	if width < minWidth {
-		width = minWidth
-	}
-	if screen > 0 && width > screen {
-		width = screen
-	}
-	return width
-}
-
-// longestRuneLen returns the display width (in cells) of the widest string in ss.
+// longestRuneLen returns the display width (in cells) of the widest string in ss,
+// measured with tui.StringWidth so CJK/emoji model names are sized by the cells
+// they occupy rather than their rune count.
 func longestRuneLen(ss []string) int {
 	max := 0
 	for _, s := range ss {
-		if l := runeLen(s); l > max {
+		if l := tui.StringWidth(s); l > max {
 			max = l
 		}
 	}
@@ -64,7 +48,6 @@ func (w *Workbench) showModelEditor() {
 		return
 	}
 
-	const height = 18
 	const labelW = modelEditorLabelW
 	const boxX = modelEditorBoxX
 
@@ -92,11 +75,13 @@ func (w *Workbench) showModelEditor() {
 		names[i] = nameLabel(i)
 	}
 
-	// Size the dialog so the widest option label fits the boxed fields without
-	// clipping, clamped to the screen (issue #108).
-	width := modelEditorWidth(longestRuneLen(names), w.app.Width())
+	// Large by default (≈80%×85% of the terminal) with a 64×18 floor; PreferredW
+	// keeps the widest option label fitting the boxed fields without clipping so a
+	// long model name still shows in full (issues #108, #299). The Select needs two
+	// extra cells (value padding + ▼) and boxW = width - boxX - 3.
+	spec := tv.DialogSpec{MinW: 64, MinH: 18, PreferredW: longestRuneLen(names) + 2 + boxX + 3}
+	x, y, width, height := w.dialogRect(spec)
 	boxW := width - boxX - 3
-	x, y := centeredDialog(w, width, height)
 
 	dialog := tv.NewDialog("Model Settings", x, y, width, height)
 	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
@@ -283,6 +268,7 @@ func (w *Workbench) showModelEditor() {
 
 	layer = tv.NewModalLayer("model-editor", dialog)
 	w.desktop.AddLayer(layer)
+	dialog.Fit(spec) // re-resolve the rect when the terminal is resized (issue #299)
 	w.desktop.SetFocus(sel)
 }
 

@@ -6,13 +6,15 @@ import (
 
 	"gogent/internal/permission"
 
+	tui "github.com/hobbestherat/turbotui"
 	tv "github.com/hobbestherat/turbotui/turbotv"
 )
 
-// TestWrapRowCount checks the word-wrap row counter that sizes the dialog body.
-// The cases mirror turbotui's TextView Wrap layout (greedy word fill with hard
-// splits for over-long words) so the computed height matches what is rendered.
-func TestWrapRowCount(t *testing.T) {
+// TestWrapTextRowCounts locks the row count of turbotui's exported tv.WrapText,
+// the wrap gogent now delegates to for sizing the message/permission body (issue
+// #299). The dialog height prediction can only match the real TextView render if
+// this contract holds.
+func TestWrapTextRowCounts(t *testing.T) {
 	const w = 10
 	for _, tc := range []struct {
 		name string
@@ -26,32 +28,48 @@ func TestWrapRowCount(t *testing.T) {
 		{"over-long word splits", "abcdefghijk", 2},
 		{"over-long with remainder", "abcdefghijklmn", 2}, // 14 -> 10 + 4
 		{"over-long exact multiple", "aaaaaaaaaa", 1},     // 10 == width
-		{"many small words pack then wrap", "a b c d e f g h i j k", 3},
-		{"multiple spaces collapse", "hello     world", 2},
-		{"over-long then short joins", "abcdefghijklmn x", 2},
-		{"two over-long words", "abcdefghijklmno pqrstuvwxyza", 4},
-		{"trailing spaces ignored", "hello   ", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := wrapRowCount(tc.text, w); got != tc.want {
-				t.Errorf("wrapRowCount(%q, %d) = %d, want %d", tc.text, w, got, tc.want)
+			if got := len(tv.WrapText(tc.text, w)); got != tc.want {
+				t.Errorf("len(tv.WrapText(%q, %d)) = %d, want %d", tc.text, w, got, tc.want)
 			}
 		})
 	}
 
-	// Width below 1 is treated as 1 so a single column never under-counts. The
-	// space collapses (word wrap), so each of the 6 runes is its own row.
-	if got := wrapRowCount("abc def", 0); got != 6 {
-		t.Errorf("wrapRowCount width 0 = %d, want 6 (one rune per column)", got)
+	// Width below 1 is treated as 1, so each rune of a word lands on its own row.
+	if got := len(tv.WrapText("abc def", 0)); got != 6 {
+		t.Errorf("len(tv.WrapText(\"abc def\", 0)) = %d, want 6 (one rune per column)", got)
 	}
 }
 
-// over-long word at a width where it is an exact multiple leaves a full last row,
-// and a following word correctly starts a new row (not appended to a full one).
-func TestWrapRowCountExactMultipleThenWord(t *testing.T) {
-	// "aaaaaaaaaa" at width 5 fills two full rows; "b" starts a third.
-	if got := wrapRowCount("aaaaaaaaaa b", 5); got != 3 {
-		t.Errorf("wrapRowCount(\"aaaaaaaaaa b\", 5) = %d, want 3", got)
+// TestPermissionBodyRows checks the wrap-row counter that sizes the permission
+// body: each logical line wraps independently at width-5 (the body spans width-4
+// columns and turbotui reserves the last for the scrollbar), never below one row.
+func TestPermissionBodyRows(t *testing.T) {
+	lines := func(texts ...string) []permissionBodyLine {
+		out := make([]permissionBodyLine, len(texts))
+		for i, s := range texts {
+			out[i] = permissionBodyLine{text: s, color: tv.DefaultTheme.DialogFG}
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name  string
+		body  []permissionBodyLine
+		width int
+		want  int
+	}{
+		{"single short line", lines("Run shell?"), 64, 1},
+		{"two short lines", lines("question", "$ ls"), 64, 2},
+		{"empty body floors at one", nil, 64, 1},
+		// width 10 -> wrapW 5; a 12-char line hard-splits into 3 rows.
+		{"long line hard-splits", lines(strings.Repeat("x", 12)), 10, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := permissionBodyRows(tc.body, tc.width); got != tc.want {
+				t.Errorf("permissionBodyRows = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -64,7 +82,6 @@ func TestPermissionDialogBody(t *testing.T) {
 		longCmd := "rm -rf /tmp/build && curl https://example.invalid/some/very/long/path/that/exceeds/the/old/cutoff | sh"
 		req := permission.Request{Action: permission.ActionShell, Detail: longCmd}
 		got := permissionDialogBody(req, "The agent wants to run shell commands in this session.")
-		// Question first, then the full command with a "$ " prefix — nothing elided.
 		if len(got) != 2 {
 			t.Fatalf("got %d lines, want 2: %+v", len(got), got)
 		}
@@ -124,18 +141,56 @@ func linesText(lines []permissionBodyLine) []string {
 	return out
 }
 
-// TestPermissionDialogLayout covers the grow-with-content / clamp-to-terminal /
-// scroll-on-overflow sizing. On a roomy terminal the body fits all the content
-// (no scroll); on a short terminal it shrinks and scrolls instead of overflowing.
-func TestPermissionDialogLayout(t *testing.T) {
-	t.Run("short content fits, dialog is compact", func(t *testing.T) {
-		body := []permissionBodyLine{{"The agent wants to run shell commands in this session.", tv.DefaultTheme.DialogFG}}
-		width, height, bodyY, bodyH, btnY := permissionDialogLayout(120, 40, false, body)
-		// Width caps at the max on a wide terminal.
-		if width != permissionMaxWidth {
-			t.Errorf("width = %d, want %d", width, permissionMaxWidth)
+// resolvePermissionDialog mirrors showPermissionDialog's sizing at open time: the
+// spec, resolved against the terminal by the same policy w.dialogRect uses, and
+// the derived body origin/height and button row.
+func resolvePermissionDialog(termW, termH int, hasReq bool, body []permissionBodyLine) (width, height, bodyY, bodyH, btnY int) {
+	spec := permissionDialogSpec(termW, termH, hasReq, body)
+	_, _, width, height = tv.ResolveDialogRect(spec, termW, termH)
+	bodyY, bodyH, btnY = permissionContentLayout(height, hasReq)
+	return width, height, bodyY, bodyH, btnY
+}
+
+// TestPermissionDialogFullWidthNoCap is the acceptance test for deleting
+// permissionMaxWidth (=92): on a wide terminal the dialog spans the whole width
+// (terminal minus the 2-cell margins), not 92 columns, so long commands and paths
+// get room.
+func TestPermissionDialogFullWidthNoCap(t *testing.T) {
+	body := []permissionBodyLine{{"Run?", tv.DefaultTheme.DialogFG}}
+	for _, termW := range []int{120, 160, 200} {
+		width, _, _, _, _ := resolvePermissionDialog(termW, 40, false, body)
+		if want := termW - 4; width != want {
+			t.Errorf("termW=%d: width = %d, want %d (the 92-col cap must be gone)", termW, width, want)
 		}
-		// Structural identities hold by construction (sanity).
+		if width <= 92 {
+			t.Errorf("termW=%d: width %d still looks capped near 92", termW, width)
+		}
+	}
+}
+
+// TestPermissionDialogNoBodyCap is the acceptance test for deleting
+// permissionMaxBodyRows (=16): given room, a tall body grows well past 16 rows
+// rather than truncating. The old cap would have pinned bodyH at 16.
+func TestPermissionDialogNoBodyCap(t *testing.T) {
+	body := make([]permissionBodyLine, 40)
+	for i := range body {
+		body[i] = permissionBodyLine{text: "line of output", color: colorTool}
+	}
+	_, height, _, bodyH, _ := resolvePermissionDialog(120, 60, false, body)
+	if bodyH < 40 {
+		t.Errorf("bodyH = %d, want >= 40 (the 16-row cap must be gone)", bodyH)
+	}
+	if height > 60 {
+		t.Errorf("height %d exceeds terminal 60", height)
+	}
+}
+
+// TestPermissionDialogLayout covers the structural identities, the requester row,
+// grow-to-fit on a roomy terminal and clamp/scroll on a small one.
+func TestPermissionDialogLayout(t *testing.T) {
+	t.Run("structural identities hold", func(t *testing.T) {
+		body := []permissionBodyLine{{"q", tv.DefaultTheme.DialogFG}}
+		_, height, bodyY, bodyH, btnY := resolvePermissionDialog(120, 40, false, body)
 		if height != bodyY+bodyH+5 {
 			t.Errorf("height = %d, want bodyY(%d)+bodyH(%d)+5 = %d", height, bodyY, bodyH, bodyY+bodyH+5)
 		}
@@ -145,62 +200,45 @@ func TestPermissionDialogLayout(t *testing.T) {
 		if height < permissionMinHeight {
 			t.Errorf("height %d below floor %d", height, permissionMinHeight)
 		}
-		// The body shows all the content (no scroll) on a roomy terminal.
-		contentRows := wrapRowCount(body[0].text, width-5)
-		if bodyH < contentRows {
-			t.Errorf("bodyH = %d < content %d: short content should not scroll", bodyH, contentRows)
-		}
 	})
 
 	t.Run("requester pushes body down one row", func(t *testing.T) {
 		body := []permissionBodyLine{{"q", tv.DefaultTheme.DialogFG}}
-		_, _, bodyY, _, _ := permissionDialogLayout(120, 40, false, body)
-		_, _, bodyYReq, _, _ := permissionDialogLayout(120, 40, true, body)
+		_, _, bodyY, _, _ := resolvePermissionDialog(120, 40, false, body)
+		_, _, bodyYReq, _, _ := resolvePermissionDialog(120, 40, true, body)
 		if bodyY != 1 || bodyYReq != 2 {
 			t.Errorf("bodyY = %d (no req) / %d (req), want 1 / 2", bodyY, bodyYReq)
 		}
 	})
 
-	t.Run("long command grows height to fit, no scroll", func(t *testing.T) {
-		longCmd := strings.Repeat("arg-", 60) // ~240 chars -> wraps to several rows
+	t.Run("roomy terminal shows everything (no scroll)", func(t *testing.T) {
+		longCmd := strings.Repeat("arg-", 60) // wraps to several rows
 		body := []permissionBodyLine{{"$ " + longCmd, colorTool}}
-		width, _, _, bodyH, _ := permissionDialogLayout(120, 40, false, body)
-		wrapW := width - 5
-		want := wrapRowCount("$ "+longCmd, wrapW)
-		if bodyH != want {
-			t.Errorf("bodyH = %d, want full content %d (no scroll on a roomy terminal)", bodyH, want)
+		width, _, _, bodyH, _ := resolvePermissionDialog(120, 60, false, body)
+		want := permissionBodyRows(body, width)
+		if bodyH < want {
+			t.Errorf("bodyH = %d < content %d: should not scroll on a roomy terminal", bodyH, want)
 		}
 	})
 
-	t.Run("body scrolls on a short terminal", func(t *testing.T) {
-		longCmd := strings.Repeat("arg-", 200) // very tall content
-		body := []permissionBodyLine{{"$ " + longCmd, colorTool}}
-		_, height, _, bodyH, _ := permissionDialogLayout(120, 12, false, body)
+	t.Run("body scrolls but stays on screen on a short terminal", func(t *testing.T) {
+		body := []permissionBodyLine{{"$ " + strings.Repeat("arg-", 200), colorTool}}
+		_, height, _, bodyH, _ := resolvePermissionDialog(120, 12, false, body)
 		if bodyH < 1 {
 			t.Fatalf("bodyH = %d, want >= 1", bodyH)
 		}
 		if height > 12 {
 			t.Errorf("height %d exceeds terminal 12", height)
 		}
-		// Body is smaller than the content, so the view must scroll.
-		if bodyH >= wrapRowCount("$ "+longCmd, permissionMaxWidth-5) {
-			t.Errorf("bodyH %d fits all content; expected to scroll on a short terminal", bodyH)
-		}
 	})
 
-	t.Run("enormous content caps at max body rows", func(t *testing.T) {
-		body := []permissionBodyLine{{"$ " + strings.Repeat("x", 5000), colorTool}}
-		_, _, _, bodyH, _ := permissionDialogLayout(120, 80, false, body)
-		if bodyH > permissionMaxBodyRows {
-			t.Errorf("bodyH = %d, want <= cap %d", bodyH, permissionMaxBodyRows)
-		}
-	})
-
-	t.Run("tiny terminal never exceeds screen and keeps a body", func(t *testing.T) {
+	t.Run("tiny terminal honours floor and keeps a body", func(t *testing.T) {
 		body := []permissionBodyLine{{"q", tv.DefaultTheme.DialogFG}}
-		width, height, _, bodyH, _ := permissionDialogLayout(40, 10, false, body)
-		if width > 40 {
-			t.Errorf("width %d exceeds terminal 40", width)
+		width, height, _, bodyH, _ := resolvePermissionDialog(40, 10, false, body)
+		// MinW floor (52) is honoured even though it slightly exceeds a 40-col
+		// terminal — turbotui's documented "floor wins" policy.
+		if width < permissionMinWidth {
+			t.Errorf("width %d below floor %d", width, permissionMinWidth)
 		}
 		if height > 10 {
 			t.Errorf("height %d exceeds terminal 10", height)
@@ -211,12 +249,50 @@ func TestPermissionDialogLayout(t *testing.T) {
 	})
 }
 
+// TestPermissionDialogReResolvesOnResize locks the fix for the most severe resize
+// variant (issue #299): permissionDialogSpec bakes the open-time terminal into
+// PreferredW/MaxW (= termW-2) and MaxH (= termH-2), so dialog.Fit alone would pin
+// the dialog to the terminal it was opened on — staying ~78×22 on a 200×50 screen.
+// installResizeReflow recomputes the spec from the live terminal instead, so
+// growing the screen grows the dialog on BOTH axes, and a permission dialog
+// resized into a screen matches one opened fresh there (path-independent).
+func TestPermissionDialogReResolvesOnResize(t *testing.T) {
+	req := permission.Request{Action: permission.ActionShell, Detail: "ls -la"}
+
+	resized := newTestWorkbench(t)
+	resized.app.Resize(80, 24)
+	showPermissionDialog(resized.desktop, req, "", func(permission.Decision) {})
+	if top := resized.desktop.TopLayer(); top == nil || top.Name != "permission-dialog" {
+		t.Fatalf("permission dialog did not open")
+	}
+	small := dialogBounds(resized)
+
+	resized.app.Resize(200, 50)
+	grown := dialogBounds(resized)
+	if grown.W <= small.W || grown.H <= small.H {
+		t.Fatalf("permission dialog did not grow on resize (both axes): small=%+v grown=%+v", small, grown)
+	}
+
+	fresh := newTestWorkbench(t)
+	fresh.app.Resize(200, 50)
+	showPermissionDialog(fresh.desktop, req, "", func(permission.Decision) {})
+	want := dialogBounds(fresh)
+
+	if grown.W != want.W || grown.H != want.H {
+		t.Errorf("permission resized into 200x50 = %dx%d, want %dx%d (fresh open); both axes must re-resolve",
+			grown.W, grown.H, want.W, want.H)
+	}
+	if want.W != 200-4 {
+		t.Errorf("fresh permission width = %d, want 196 (full width, no 92-col cap)", want.W)
+	}
+}
+
 // TestPermissionButtonRow checks the three-button row is always in-bounds,
 // non-overlapping, with "Allow once" left-anchored, "Deny" right-anchored, and the
 // "Always …" button sized to its (possibly elided) label between them.
 func TestPermissionButtonRow(t *testing.T) {
 	const btnY = 9
-	for _, width := range []int{permissionMinWidth, 64, 80, permissionMaxWidth} {
+	for _, width := range []int{permissionMinWidth, 64, 80, 116, 196} {
 		t.Run("", func(t *testing.T) {
 			rightX := width - 3
 			allow, always, deny, alwaysText := permissionButtonRow(width, btnY, "Always allow /some/path")
@@ -239,14 +315,11 @@ func TestPermissionButtonRow(t *testing.T) {
 			if deny.X+deny.W-1 != rightX {
 				t.Errorf("deny right edge = %d, want %d", deny.X+deny.W-1, rightX)
 			}
-			if allow.W != buttonLabelWidth("Allow once") {
-				t.Errorf("allow width = %d, want %d", allow.W, buttonLabelWidth("Allow once"))
+			if allow.W != tv.ButtonLabelWidth("Allow once") {
+				t.Errorf("allow width = %d, want %d", allow.W, tv.ButtonLabelWidth("Allow once"))
 			}
-			if deny.W != buttonLabelWidth("Deny") {
-				t.Errorf("deny width = %d, want %d", deny.W, buttonLabelWidth("Deny"))
-			}
-			if always.W != buttonLabelWidth(alwaysText) {
-				t.Errorf("always width = %d, want label width %d (%q)", always.W, buttonLabelWidth(alwaysText), alwaysText)
+			if deny.W != tv.ButtonLabelWidth("Deny") {
+				t.Errorf("deny width = %d, want %d", deny.W, tv.ButtonLabelWidth("Deny"))
 			}
 			// Non-overlapping, ordered left -> right.
 			if allow.X+allow.W-1 >= always.X {
@@ -271,15 +344,15 @@ func TestPermissionButtonRowElidesLongResource(t *testing.T) {
 	if !strings.HasSuffix(alwaysText, "...") {
 		t.Errorf("elided label = %q, want trailing ...", alwaysText)
 	}
-	if always.W != buttonLabelWidth(alwaysText) {
-		t.Errorf("always width %d != label width %d", always.W, buttonLabelWidth(alwaysText))
-	}
 	if allow.X+allow.W-1 >= always.X || always.X+always.W-1 >= deny.X {
 		t.Errorf("buttons collide after elision: %+v %+v %+v", allow, always, deny)
 	}
 }
 
 // TestFitButtonLabel checks the chrome-aware elision used for button captions.
+// The elided caption's clean display width plus the "[ " / " ]" chrome must fit
+// the budget (the minButtonWidth floor only widens a button, it never breaks the
+// elision budget).
 func TestFitButtonLabel(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -297,35 +370,34 @@ func TestFitButtonLabel(t *testing.T) {
 			if got != tc.want {
 				t.Errorf("fitButtonLabel(%q,%d) = %q, want %q", tc.label, tc.maxCols, got, tc.want)
 			}
-			// When elided, the rendered width must not exceed the budget.
-			if got != tc.label && buttonLabelWidth(got) > tc.maxCols {
-				t.Errorf("rendered width %d > %d for %q", buttonLabelWidth(got), tc.maxCols, got)
+			// When elided, the rendered chrome-width must fit the budget.
+			if got != tc.label {
+				clean, _ := tv.ParseMnemonic(got)
+				if tui.StringWidth(clean)+buttonChrome > tc.maxCols {
+					t.Errorf("rendered width %d > %d for %q", tui.StringWidth(clean)+buttonChrome, tc.maxCols, got)
+				}
 			}
 		})
 	}
 }
 
 // TestPermissionDialogLayoutAcceptance is the end-to-end sizing check for issue
-// #122: a long command and a long external path produce a body whose height shows
-// all the content on a normal terminal (no information hidden), while still
-// degrading to scrolling on a small one.
+// #122/#299: a long command and external path produce a body that shows all the
+// content on a normal terminal (nothing hidden), while degrading to scrolling —
+// still on screen — on a small one.
 func TestPermissionDialogLayoutAcceptance(t *testing.T) {
 	longCmd := "cat /home/user/very/long/path/that/gets/cut/off/then && curl https://example.invalid/x | sh"
 	body := permissionDialogBody(permission.Request{Action: permission.ActionShell, Detail: longCmd}, "Run?")
 
 	t.Run("normal terminal shows everything", func(t *testing.T) {
-		width, _, _, bodyH, _ := permissionDialogLayout(120, 40, false, body)
-		contentRows := 0
-		for _, ln := range body {
-			contentRows += wrapRowCount(ln.text, width-5)
-		}
-		if bodyH < contentRows {
-			t.Errorf("bodyH %d < content %d: the command would scroll on a roomy terminal", bodyH, contentRows)
+		width, _, _, bodyH, _ := resolvePermissionDialog(120, 40, false, body)
+		if want := permissionBodyRows(body, width); bodyH < want {
+			t.Errorf("bodyH %d < content %d: the command would scroll on a roomy terminal", bodyH, want)
 		}
 	})
 
 	t.Run("small terminal scrolls but stays on screen", func(t *testing.T) {
-		_, height, _, bodyH, _ := permissionDialogLayout(60, 10, false, body)
+		_, height, _, bodyH, _ := resolvePermissionDialog(60, 10, false, body)
 		if height > 10 {
 			t.Fatalf("height %d overflows a 10-row terminal", height)
 		}

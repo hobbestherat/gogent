@@ -12,26 +12,6 @@ import (
 	tv "github.com/hobbestherat/turbotui/turbotv"
 )
 
-// statisticsDialogSize picks a size that fills a good chunk of a large terminal
-// while still fitting (and staying useful) on a small one. It mirrors the
-// Resources browser sizing so the two read-only explorers feel consistent.
-func statisticsDialogSize(screenW, screenH int) (width, height int) {
-	width, height = 80, 24
-	if w := screenW - 2; width > w {
-		width = w
-	}
-	if h := screenH - 2; height > h {
-		height = h
-	}
-	if width < 60 {
-		width = 60
-	}
-	if height < 14 {
-		height = 14
-	}
-	return width, height
-}
-
 // showStatisticsDialog opens the Statistics view (issue #57): a sectioned,
 // read-only breakdown of the counters gogent already collects — grand totals,
 // per-session, per-tool, per-skill and per-model rows — with CSV/JSON export.
@@ -50,8 +30,9 @@ func (w *Workbench) showStatisticsDialog() {
 	}
 	report := w.overallLifetime.fold(filterPhantomSessions(w.handlers.GetStatistics()))
 
-	width, height := statisticsDialogSize(w.app.Width(), w.app.Height())
-	x, y := centeredDialog(w, width, height)
+	// Large by default (≈85% of the terminal), floored so it stays usable on a
+	// small terminal; the list/detail split is derived from width below (#299).
+	x, y, width, height := w.dialogRect(w.browserDialogSpec())
 
 	dialog := tv.NewDialog("Statistics", x, y, width, height)
 	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
@@ -137,6 +118,10 @@ func (w *Workbench) showStatisticsDialog() {
 
 	layer = tv.NewModalLayer("statistics-dialog", dialog)
 	w.desktop.AddLayer(layer)
+	// PreferredW is a share of the terminal, so re-resolve against the live
+	// terminal on resize rather than the stale spec dialog.Fit would remember
+	// (issue #299).
+	installResizeReflow(w.desktop, dialog, layer, w.browserDialogSpec)
 	render(statsOverview)
 	w.desktop.SetFocus(sel)
 }

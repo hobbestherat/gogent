@@ -219,16 +219,10 @@ func showPermissionDialog(desktop *tv.Desktop, req permission.Request, requester
 
 	app := desktop.App()
 	requesterHdr := requesterLine(requester, req.Context.Agent)
-	width, height, bodyY, bodyH, btnY := permissionDialogLayout(app.Width(), app.Height(), requesterHdr != "", bodyLines)
+	spec := permissionDialogSpec(app.Width(), app.Height(), requesterHdr != "", bodyLines)
+	x, y, width, height := tv.ResolveDialogRect(spec, app.Width(), app.Height())
+	bodyY, bodyH, btnY := permissionContentLayout(height, requesterHdr != "")
 
-	x := (app.Width() - width) / 2
-	y := (app.Height() - height) / 2
-	if x < 0 {
-		x = 0
-	}
-	if y < 0 {
-		y = 0
-	}
 	dialog := tv.NewDialog(title, x, y, width, height)
 	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
 	dialog.Window.ShowClose = false
@@ -300,18 +294,23 @@ func showPermissionDialog(desktop *tv.Desktop, req permission.Request, requester
 
 	layer = tv.NewModalLayer("permission-dialog", dialog)
 	desktop.AddLayer(layer)
+	// The spec encodes the open-time terminal (full-width PreferredW/MaxW,
+	// content-driven height), so re-resolve against the live terminal on resize
+	// rather than the stale spec dialog.Fit would remember (issue #299).
+	installResizeReflow(desktop, dialog, layer, func() tv.DialogSpec {
+		return permissionDialogSpec(app.Width(), app.Height(), requesterHdr != "", bodyLines)
+	})
 	desktop.SetFocus(deny)
 }
 
-// Sizing knobs for the permission dialog. Width grows with the terminal (clamped
-// to [permissionMinWidth, permissionMaxWidth]) so long commands and paths get
-// room; height grows with the wrapped content up to permissionMaxBodyRows, beyond
-// which (and on short terminals) the body scrolls instead of overflowing.
+// Sizing floors for the permission dialog (issue #299). Width fills the terminal
+// (PreferredW/MaxW = termW-2) so long commands and paths get room — the cramping
+// 92-column cap is gone — and height grows with the wrapped content up to the
+// terminal edge — the 16-row body cap is gone too — scrolling only when even the
+// full screen cannot hold it. The floors keep a prompt legible on a tiny terminal.
 const (
-	permissionMinWidth    = 52
-	permissionMaxWidth    = 92
-	permissionMinHeight   = 8
-	permissionMaxBodyRows = 16
+	permissionMinWidth  = 52
+	permissionMinHeight = 8
 )
 
 // permissionBodyLine is one coloured line of the dialog's scrollable body. The
@@ -343,68 +342,73 @@ func permissionDialogBody(req permission.Request, question string) []permissionB
 	return lines
 }
 
-// permissionDialogLayout sizes the dialog for the terminal and its content and
-// returns the body's content-relative origin/height plus the button row Y. It is
-// pure so the sizing (grow-with-content, clamp-to-terminal, scroll-on-overflow)
-// can be tested without a live event loop (issue #122).
-func permissionDialogLayout(termW, termH int, hasRequester bool, bodyLines []permissionBodyLine) (width, height, bodyY, bodyH, btnY int) {
-	width = termW - 2
-	if width > permissionMaxWidth {
-		width = permissionMaxWidth
+// permissionBodyOffsetY is the body's content-relative top row: row 0 is top
+// padding, and a requester header (when present) takes row 1, pushing the body to
+// row 2.
+func permissionBodyOffsetY(hasRequester bool) int {
+	if hasRequester {
+		return 2
 	}
-	if width < permissionMinWidth {
-		width = permissionMinWidth
-	}
-	if width > termW {
-		width = termW
-	}
-	if width < 1 {
-		width = 1
-	}
+	return 1
+}
 
-	// Effective text columns inside the body: it spans width-4 columns (X:2 …
-	// width-3) and turbotui reserves its last column for the scrollbar.
+// permissionContentVChrome is the vertical cost below the body: 1 gap + 1 button
+// row + 1 bottom pad + 2 borders. height = bodyY + bodyH + permissionContentVChrome.
+const permissionContentVChrome = 5
+
+// permissionBodyRows reports how many display rows the wrapping body occupies in a
+// dialog of the given outer width — each logical line wrapped at width-5 (the body
+// spans width-4 columns and turbotui reserves the last for the scrollbar). It
+// delegates to turbotui's WrapText so the prediction matches the real render.
+func permissionBodyRows(bodyLines []permissionBodyLine, width int) int {
 	wrapW := width - 5
 	if wrapW < 1 {
 		wrapW = 1
 	}
-	contentRows := 0
+	rows := 0
 	for _, line := range bodyLines {
-		contentRows += wrapRowCount(line.text, wrapW)
+		rows += len(tv.WrapText(line.text, wrapW))
 	}
-	if contentRows < 1 {
-		contentRows = 1
+	if rows < 1 {
+		rows = 1
 	}
+	return rows
+}
 
-	bodyY = 1 // leave content row 0 as top padding
-	if hasRequester {
-		bodyY = 2
+// permissionDialogSpec turns a permission request into a terminal-aware
+// DialogSpec: full-width (PreferredW/MaxW = termW-2, no 92-column cap) so long
+// commands and paths get room, and tall enough for the wrapped content (PrefH) up
+// to the terminal edge (MaxH, replacing the 16-row body cap) so nothing is hidden
+// behind "…". It is pure so the sizing can be tested without a live event loop
+// (issues #122, #299); the body origin/height and button row come from
+// permissionContentLayout applied to the resolved height.
+func permissionDialogSpec(termW, termH int, hasRequester bool, bodyLines []permissionBodyLine) tv.DialogSpec {
+	// Resolve the width first (height does not affect it) so the body-row count is
+	// measured against the real dialog width.
+	_, _, width, _ := tv.ResolveDialogRect(
+		tv.DialogSpec{MinW: permissionMinWidth, PreferredW: termW - 2, MaxW: termW - 2}, termW, termH)
+	bodyY := permissionBodyOffsetY(hasRequester)
+	return tv.DialogSpec{
+		MinW:       permissionMinWidth,
+		MinH:       permissionMinHeight,
+		PreferredW: termW - 2,
+		MaxW:       termW - 2,
+		PrefH:      bodyY + permissionBodyRows(bodyLines, width) + permissionContentVChrome,
+		MaxH:       termH - 2,
 	}
+}
 
-	desiredBody := contentRows
-	if desiredBody > permissionMaxBodyRows {
-		desiredBody = permissionMaxBodyRows
-	}
-
-	// height = 2 borders + topPad + requester? + body + 1 gap + 1 button row + 1 bottom pad.
-	height = bodyY + desiredBody + 5
-	if max := termH - 2; height > max {
-		height = max
-	}
-	if height < permissionMinHeight {
-		height = permissionMinHeight
-	}
-	if height > termH {
-		height = termH
-	}
-
-	// Derive the body height from the final (possibly clamped) dialog height.
-	bodyH = height - bodyY - 5
+// permissionContentLayout derives the body's content-relative origin/height and
+// the button row Y from a resolved dialog height. Splitting it from the spec keeps
+// the open-time placement in lockstep with the size that was resolved.
+func permissionContentLayout(height int, hasRequester bool) (bodyY, bodyH, btnY int) {
+	bodyY = permissionBodyOffsetY(hasRequester)
+	bodyH = height - bodyY - permissionContentVChrome
 	if bodyH < 1 {
 		bodyH = 1
 	}
 	btnY = bodyY + bodyH + 1
-	return width, height, bodyY, bodyH, btnY
+	return bodyY, bodyH, btnY
 }
 
 // permissionButtonRow lays out the three action buttons on content row btnY across
@@ -417,9 +421,9 @@ func permissionButtonRow(width, btnY int, alwaysLabel string) (allowOnce, always
 	const gap = 2
 	leftX := 2
 	rightX := width - 3
-	allowOnce = tv.Rect{X: leftX, Y: btnY, W: buttonLabelWidth("Allow once"), H: 1}
+	allowOnce = tv.Rect{X: leftX, Y: btnY, W: tv.ButtonLabelWidth("Allow once"), H: 1}
 
-	denyW := buttonLabelWidth("Deny")
+	denyW := tv.ButtonLabelWidth("Deny")
 	deny = tv.Rect{X: rightX - denyW + 1, Y: btnY, W: denyW, H: 1}
 
 	slotStart := allowOnce.X + allowOnce.W + gap
@@ -429,7 +433,7 @@ func permissionButtonRow(width, btnY int, alwaysLabel string) (allowOnce, always
 		avail = 1
 	}
 	alwaysText = fitButtonLabel(alwaysLabel, avail)
-	alwaysW := buttonLabelWidth(alwaysText)
+	alwaysW := tv.ButtonLabelWidth(alwaysText)
 	if alwaysW < 1 {
 		alwaysW = 1
 	}
@@ -441,61 +445,39 @@ func permissionButtonRow(width, btnY int, alwaysLabel string) (allowOnce, always
 }
 
 // fitButtonLabel elides label (appending "...") so its rendered button width — the
-// clean rune count plus the "[ " / " ]" chrome — fits in maxCols. The full
-// resource stays visible in the scrollable body, so this only shortens the button
-// caption. Mirrors truncate()'s "..." convention but is chrome-aware.
+// clean label's display width plus the "[ " / " ]" chrome — fits in maxCols. The
+// full resource stays visible in the scrollable body, so this only shortens the
+// button caption. Width is measured with tui.StringWidth so a CJK/emoji resource
+// is neither over- nor under-elided. Mirrors truncate()'s "..." convention but is
+// chrome- and display-width-aware.
 func fitButtonLabel(label string, maxCols int) string {
 	maxClean := maxCols - buttonChrome
-	if maxClean <= 0 || cleanMnemonicRunes(label) <= maxClean {
+	clean, _ := tv.ParseMnemonic(label)
+	if maxClean <= 0 || tui.StringWidth(clean) <= maxClean {
 		return label
 	}
-	runes := []rune(label)
+	runes := []rune(clean)
 	if maxClean <= 3 {
-		return string(runes[:maxClean])
+		return truncateToWidth(runes, maxClean)
 	}
-	return string(runes[:maxClean-3]) + "..."
+	return truncateToWidth(runes, maxClean-3) + "..."
 }
 
-// wrapRowCount reports how many display rows text occupies when word-wrapped at
-// width columns, matching turbotui's TextView Wrap layout (greedy word fill that
-// hard-splits words longer than the width). It mirrors turbotv.wrapText so the
-// dialog's computed height matches what the widget actually renders; empty text
-// occupies a single row.
-func wrapRowCount(text string, width int) int {
-	if width < 1 {
-		width = 1
-	}
-	if text == "" {
-		return 1
-	}
-	rows := 0
-	cur := 0 // rune length of the in-progress row; 0 means the row is empty
-	for _, word := range strings.Fields(text) {
-		wlen := len([]rune(word))
-		if cur != 0 && cur+1+wlen <= width {
-			cur += 1 + wlen
-			continue
+// truncateToWidth returns the longest prefix of runes whose display width
+// (tui.StringWidth) does not exceed max columns, so a multi-cell rune is dropped
+// whole rather than split across the budget.
+func truncateToWidth(runes []rune, max int) string {
+	out := make([]rune, 0, len(runes))
+	width := 0
+	for _, r := range runes {
+		rw := tui.StringWidth(string(r))
+		if width+rw > max {
+			break
 		}
-		if wlen <= width {
-			rows++
-			cur = wlen
-			continue
-		}
-		// Over-long word: full width rows plus a final partial (or full) row.
-		full := wlen / width
-		rem := wlen % width
-		if rem == 0 {
-			rows += full
-			cur = width
-		} else {
-			rows += full + 1
-			cur = rem
-		}
+		out = append(out, r)
+		width += rw
 	}
-	if rows == 0 {
-		return 1
-	}
-	return rows
+	return string(out)
 }
 
 // requesterLine renders the "Requested by …" header for the permission dialog.
@@ -512,12 +494,18 @@ func requesterLine(session, agentID string) string {
 	return "Requested by " + session
 }
 
+// truncate shortens s to fit max display columns, appending "..." when it must
+// cut. Width is measured with tui.StringWidth and the cut lands on a rune
+// boundary (via truncateToWidth), so a multi-cell CJK/emoji glyph in a dialog
+// title or "Requested by …" header is never split mid-character into broken UTF-8
+// — the display-width consistency the whole sizing migration is built on (#299).
 func truncate(s string, max int) string {
-	if max <= 1 || len(s) <= max {
+	if max <= 1 || tui.StringWidth(s) <= max {
 		return s
 	}
+	runes := []rune(s)
 	if max <= 3 {
-		return s[:max]
+		return truncateToWidth(runes, max)
 	}
-	return s[:max-3] + "..."
+	return truncateToWidth(runes, max-3) + "..."
 }

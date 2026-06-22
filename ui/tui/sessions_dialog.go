@@ -24,8 +24,9 @@ func (w *Workbench) showSessionsDialog() {
 		return
 	}
 
-	width, height := sessionsDialogSize(w.app.Width(), w.app.Height())
-	x, y := centeredDialog(w, width, height)
+	// Large by default (≈85% of the terminal), floored so it stays usable on a
+	// small terminal; the list/detail split is derived from width below (#299).
+	x, y, width, height := w.dialogRect(w.browserDialogSpec())
 
 	dialog := tv.NewDialog("Saved Sessions", x, y, width, height)
 	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
@@ -177,28 +178,12 @@ func (w *Workbench) showSessionsDialog() {
 
 	layer = tv.NewModalLayer("sessions-dialog", dialog)
 	w.desktop.AddLayer(layer)
+	// PreferredW is a share of the terminal, so re-resolve against the live
+	// terminal on resize rather than the stale spec dialog.Fit would remember
+	// (issue #299).
+	installResizeReflow(w.desktop, dialog, layer, w.browserDialogSpec)
 	render()
 	w.desktop.SetFocus(list)
-}
-
-// sessionsDialogSize picks a browser size that fills a good chunk of a large
-// terminal while still fitting (and staying useful) on a small one. It mirrors
-// the Resources/Statistics browsers so the read-only explorers feel consistent.
-func sessionsDialogSize(screenW, screenH int) (width, height int) {
-	width, height = 80, 22
-	if w := screenW - 2; width > w {
-		width = w
-	}
-	if h := screenH - 2; height > h {
-		height = h
-	}
-	if width < 60 {
-		width = 60
-	}
-	if height < 14 {
-		height = 14
-	}
-	return width, height
 }
 
 // loadSessionItems fetches the persisted-session metadata and orders it newest
