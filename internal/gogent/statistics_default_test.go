@@ -110,3 +110,71 @@ func TestStatistics_TagsEphemeralButKeepsThemForStats(t *testing.T) {
 		t.Errorf("persisted session row Ephemeral = %v (ok=%v), want false", eph, ok)
 	}
 }
+
+// TestStatistics_PopulatesPerModelSplitForSwitchingSession is the backend half of the
+// round-2 fix: Statistics() must carry each session's exact per-model split in
+// SessionRow.PerModel so the TUI (filterPhantomSessions/subtractModelTraffic) can back
+// a windowless phantom out of the precise models it used, instead of dumping the
+// aggregate onto the final model. A session that switches opus -> haiku mid-life must
+// report BOTH slices, summing to its aggregate, with PrimaryModel = the final model.
+func TestStatistics_PopulatesPerModelSplitForSwitchingSession(t *testing.T) {
+	g := NewGogent("/tmp/test-stats-permodel")
+
+	sw := makeStatsSession(g, "switcher")
+	sw.SetPrimaryModel("opus")
+	sw.AddTokenUsage(500, 100)
+	sw.SetPrimaryModel("haiku") // switch; subsequent usage attributes to haiku
+	sw.AddTokenUsage(300, 60)
+
+	rep := g.Statistics()
+
+	var rowp *struct {
+		primary string
+		per     map[string][2]int
+		subs    int
+	}
+	for _, s := range rep.Sessions {
+		if s.ID != "switcher" {
+			continue
+		}
+		per := map[string][2]int{}
+		for _, m := range s.PerModel {
+			per[m.Name] = [2]int{m.TokensIn, m.TokensOut}
+		}
+		rowp = &struct {
+			primary string
+			per     map[string][2]int
+			subs    int
+		}{primary: s.PrimaryModel, per: per, subs: s.SubAgents}
+	}
+	if rowp == nil {
+		t.Fatalf("switcher session row missing: %+v", rep.Sessions)
+	}
+	if rowp.primary != "haiku" {
+		t.Errorf("PrimaryModel = %q, want haiku (final model after the switch)", rowp.primary)
+	}
+	if rowp.per["opus"] != [2]int{500, 100} {
+		t.Errorf("PerModel[opus] = %v, want {500,100}", rowp.per["opus"])
+	}
+	if rowp.per["haiku"] != [2]int{300, 60} {
+		t.Errorf("PerModel[haiku] = %v, want {300,60}", rowp.per["haiku"])
+	}
+	// SubAgents field is carried (zero here, but the field must be plumbed).
+	if rowp.subs != 0 {
+		t.Errorf("SubAgents = %d, want 0 (no sub-agents created)", rowp.subs)
+	}
+
+	// The row's PerModel must sum to the grand Models breakdown, the consistency the
+	// TUI back-out relies on.
+	for _, name := range []string{"opus", "haiku"} {
+		var m struct{ in, out int }
+		for _, gm := range rep.Models {
+			if gm.Name == name {
+				m.in, m.out = gm.TokensIn, gm.TokensOut
+			}
+		}
+		if [2]int{m.in, m.out} != rowp.per[name] {
+			t.Errorf("grand Models[%s] = {%d,%d} != session PerModel %v", name, m.in, m.out, rowp.per[name])
+		}
+	}
+}

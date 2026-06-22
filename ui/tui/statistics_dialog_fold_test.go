@@ -538,3 +538,134 @@ func TestSubtractModelTraffic_SkipsEmptyModelAndNoOp(t *testing.T) {
 		t.Errorf("empty removed set changed Models: %+v", got)
 	}
 }
+
+// --- issue #278 round 2: exact per-model back-out (model-switching phantom) ---
+
+// TestSubtractModelTraffic_UsesExactPerModelSplit is the regression for the round-1
+// defect: a phantom session that switched models (A then B) carries an aggregate
+// Primary connector (A+B) but its traffic is split across the A and B rows in
+// report.Models. Backing the WHOLE aggregate out of the final model (the old
+// behaviour) would drive B negative and strand A's contribution. With SessionRow
+// carrying the exact PerModel split, each model's slice must be backed out of that
+// same model — leaving A at zero and B reduced by only B's slice.
+func TestSubtractModelTraffic_UsesExactPerModelSplit(t *testing.T) {
+	// Grand per-model rows: A used only by the phantom (10/100); B used by the
+	// phantom (20/200) plus a windowed session (5/50) -> 25/250.
+	models := []stats.ModelStat{
+		{Name: "A", TokensIn: 100, TokensOut: 10, Connector: conn(10, 0, 100, 0, 10)},
+		{Name: "B", TokensIn: 250, TokensOut: 25, Connector: conn(25, 0, 250, 0, 25)},
+	}
+	phantom := stats.SessionRow{
+		ID: phantomDefaultSessionID, PrimaryModel: "B", // final model is B
+		TokensIn: 300, TokensOut: 30,
+		Primary: conn(30, 0, 300, 0, 30), // aggregate A+B
+		PerModel: []stats.SessionModelStat{
+			{Name: "A", TokensIn: 100, TokensOut: 10, Connector: conn(10, 0, 100, 0, 10)},
+			{Name: "B", TokensIn: 200, TokensOut: 20, Connector: conn(20, 0, 200, 0, 20)},
+		},
+	}
+
+	got := subtractModelTraffic(models, []stats.SessionRow{phantom})
+
+	a, _ := stats.Report{Models: got}.ModelByName("A")
+	b, _ := stats.Report{Models: got}.ModelByName("B")
+	// A fully backed out (exactly its slice), NOT left stranded.
+	if a.Connector != (stats.ConnectorStat{}) || a.TokensIn != 0 || a.TokensOut != 0 {
+		t.Errorf("model A = conn %+v tok %d/%d, want fully zeroed (phantom's A slice backed out)", a.Connector, a.TokensIn, a.TokensOut)
+	}
+	// B reduced by only B's slice (25-20=5 req, 250-200=50 in), NOT driven negative.
+	if b.Connector.Requests != 5 || b.Connector.TokensIn != 50 || b.TokensIn != 50 {
+		t.Errorf("model B = conn %+v tok %d, want {Req:5 In:50} tok 50 (only B's slice removed)", b.Connector, b.TokensIn)
+	}
+	if b.Connector.Requests < 0 || b.Connector.TokensIn < 0 {
+		t.Errorf("model B went negative: %+v (over-subtraction regression)", b.Connector)
+	}
+}
+
+// TestSubtractModelTraffic_BacksOutNodeCounts pins the round-2 fix that the per-model
+// session / sub-agent node counts are also decremented for a removed phantom, keyed
+// (like Gogent.Statistics()) by the session's PrimaryModel — so the Overall panel's
+// model-scoped "sessions/sub-agents using this model" no longer counts a windowless
+// session.
+func TestSubtractModelTraffic_BacksOutNodeCounts(t *testing.T) {
+	models := []stats.ModelStat{
+		{Name: "glm", Sessions: 2, SubAgents: 5, Connector: conn(30, 0, 300, 0, 60)},
+	}
+	removed := []stats.SessionRow{
+		{ID: phantomDefaultSessionID, PrimaryModel: "glm", SubAgents: 3, Primary: conn(10, 0, 100, 0, 20)},
+	}
+	got := subtractModelTraffic(models, removed)
+	glm, _ := stats.Report{Models: got}.ModelByName("glm")
+	if glm.Sessions != 1 {
+		t.Errorf("glm Sessions = %d, want 1 (2 - phantom's 1)", glm.Sessions)
+	}
+	if glm.SubAgents != 2 {
+		t.Errorf("glm SubAgents = %d, want 2 (5 - phantom's 3)", glm.SubAgents)
+	}
+}
+
+// TestSubtractModelTraffic_ClampsTokenAndNodeFloors verifies clampZero floors the
+// token and node-count back-outs at zero on synthetic input where a delta exceeds
+// the row's seeded value, so the breakdown never renders negative tokens or counts.
+func TestSubtractModelTraffic_ClampsTokenAndNodeFloors(t *testing.T) {
+	models := []stats.ModelStat{
+		{Name: "glm", TokensIn: 50, TokensOut: 5, Sessions: 0, SubAgents: 1, Connector: conn(0, 0, 0, 0, 0)},
+	}
+	// Removed session claims more tokens / sub-agents than the row was seeded with.
+	removed := []stats.SessionRow{
+		{ID: "http-1", PrimaryModel: "glm", TokensIn: 100, TokensOut: 99, SubAgents: 9, Primary: conn(0, 0, 0, 0, 0)},
+	}
+	got := subtractModelTraffic(models, removed)
+	glm, _ := stats.Report{Models: got}.ModelByName("glm")
+	if glm.TokensIn != 0 || glm.TokensOut != 0 {
+		t.Errorf("tokens = %d/%d, want floored to 0/0 (clampZero)", glm.TokensIn, glm.TokensOut)
+	}
+	if glm.Sessions != 0 || glm.SubAgents != 0 {
+		t.Errorf("node counts = %d/%d, want floored to 0/0 (clampZero)", glm.Sessions, glm.SubAgents)
+	}
+}
+
+// TestFilterPhantomSessions_ExactPerModelBackOutKeepsInvariant is the end-to-end
+// (real backend shape) proof of the round-2 fix: a windowless phantom that switched
+// models is filtered, and afterwards the per-model connector rows still sum to the
+// filtered grand Totals.Primary with no negative row — the invariant the round-1
+// implementation broke for model-switching phantoms.
+func TestFilterPhantomSessions_ExactPerModelBackOutKeepsInvariant(t *testing.T) {
+	// A windowed session on B (5/50) and a phantom default that used A (10/100) then
+	// B (20/200). Grand rows and totals are the faithful sum of both, as the backend
+	// produces them.
+	windowed := stats.SessionRow{ID: "win-1", PrimaryModel: "B", TokensIn: 50, TokensOut: 5, Primary: conn(5, 0, 50, 0, 5),
+		PerModel: []stats.SessionModelStat{{Name: "B", TokensIn: 50, TokensOut: 5, Connector: conn(5, 0, 50, 0, 5)}}}
+	phantom := stats.SessionRow{ID: phantomDefaultSessionID, PrimaryModel: "B", TokensIn: 300, TokensOut: 30, Primary: conn(30, 0, 300, 0, 30),
+		PerModel: []stats.SessionModelStat{
+			{Name: "A", TokensIn: 100, TokensOut: 10, Connector: conn(10, 0, 100, 0, 10)},
+			{Name: "B", TokensIn: 200, TokensOut: 20, Connector: conn(20, 0, 200, 0, 20)},
+		}}
+	rep := stats.Report{
+		Totals:   stats.Totals{Sessions: 2, TokensIn: 350, TokensOut: 35, Primary: conn(35, 0, 350, 0, 35)},
+		Sessions: []stats.SessionRow{windowed, phantom},
+		Models: []stats.ModelStat{
+			{Name: "A", TokensIn: 100, TokensOut: 10, Connector: conn(10, 0, 100, 0, 10)},
+			{Name: "B", TokensIn: 250, TokensOut: 25, Connector: conn(25, 0, 250, 0, 25)},
+		},
+	}
+
+	got := filterPhantomSessions(rep)
+
+	// Only the windowed session remains, and the grand total is just its traffic.
+	if got.Totals.Sessions != 1 || got.Totals.Primary != conn(5, 0, 50, 0, 5) {
+		t.Fatalf("filtered totals = sessions %d primary %+v, want 1 / {Req:5 In:50}", got.Totals.Sessions, got.Totals.Primary)
+	}
+	// The per-model connector rows must SUM to the filtered grand total — the
+	// invariant the round-1 code violated for a model-switching phantom.
+	var sum stats.ConnectorStat
+	for _, m := range got.Models {
+		if m.Connector.Requests < 0 || m.Connector.TokensIn < 0 {
+			t.Errorf("model %s went negative: %+v", m.Name, m.Connector)
+		}
+		sum = sum.Add(m.Connector)
+	}
+	if sum != got.Totals.Primary {
+		t.Errorf("sum of per-model connectors %+v != filtered grand total %+v (per-model breakdown inconsistent)", sum, got.Totals.Primary)
+	}
+}
