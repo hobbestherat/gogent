@@ -249,6 +249,44 @@ func TestPermissionDialogLayout(t *testing.T) {
 	})
 }
 
+// TestPermissionDialogReResolvesOnResize locks the fix for the most severe resize
+// variant (issue #299): permissionDialogSpec bakes the open-time terminal into
+// PreferredW/MaxW (= termW-2) and MaxH (= termH-2), so dialog.Fit alone would pin
+// the dialog to the terminal it was opened on — staying ~78×22 on a 200×50 screen.
+// installResizeReflow recomputes the spec from the live terminal instead, so
+// growing the screen grows the dialog on BOTH axes, and a permission dialog
+// resized into a screen matches one opened fresh there (path-independent).
+func TestPermissionDialogReResolvesOnResize(t *testing.T) {
+	req := permission.Request{Action: permission.ActionShell, Detail: "ls -la"}
+
+	resized := newTestWorkbench(t)
+	resized.app.Resize(80, 24)
+	showPermissionDialog(resized.desktop, req, "", func(permission.Decision) {})
+	if top := resized.desktop.TopLayer(); top == nil || top.Name != "permission-dialog" {
+		t.Fatalf("permission dialog did not open")
+	}
+	small := dialogBounds(resized)
+
+	resized.app.Resize(200, 50)
+	grown := dialogBounds(resized)
+	if grown.W <= small.W || grown.H <= small.H {
+		t.Fatalf("permission dialog did not grow on resize (both axes): small=%+v grown=%+v", small, grown)
+	}
+
+	fresh := newTestWorkbench(t)
+	fresh.app.Resize(200, 50)
+	showPermissionDialog(fresh.desktop, req, "", func(permission.Decision) {})
+	want := dialogBounds(fresh)
+
+	if grown.W != want.W || grown.H != want.H {
+		t.Errorf("permission resized into 200x50 = %dx%d, want %dx%d (fresh open); both axes must re-resolve",
+			grown.W, grown.H, want.W, want.H)
+	}
+	if want.W != 200-4 {
+		t.Errorf("fresh permission width = %d, want 196 (full width, no 92-col cap)", want.W)
+	}
+}
+
 // TestPermissionButtonRow checks the three-button row is always in-bounds,
 // non-overlapping, with "Allow once" left-anchored, "Deny" right-anchored, and the
 // "Always …" button sized to its (possibly elided) label between them.

@@ -240,6 +240,27 @@ func TestDialogShrinksOnResize(t *testing.T) {
 	}
 }
 
+// TestBrowserDialogSpecTracksLiveTerminal locks the fix that the two-pane browsers
+// (Resources / Saved Sessions / Statistics) recompute PreferredW from the CURRENT
+// terminal (issue #299) rather than baking the open-time width. browserDialogSpec
+// is the specFn handed to installResizeReflow, so its PreferredW must follow the
+// live w.app width; otherwise a browser opened small then enlarged would grow only
+// to the 80% default instead of its intended 85%.
+func TestBrowserDialogSpecTracksLiveTerminal(t *testing.T) {
+	w := newTestWorkbench(t)
+	for _, dim := range []struct{ W, H int }{{80, 24}, {200, 50}, {120, 40}} {
+		w.app.Resize(dim.W, dim.H)
+		spec := w.browserDialogSpec()
+		if spec.PreferredW != dim.W*85/100 {
+			t.Errorf("at width %d: browserDialogSpec PreferredW = %d, want %d (live 85%%)",
+				dim.W, spec.PreferredW, dim.W*85/100)
+		}
+		if spec.MinW != 60 || spec.MinH != 14 {
+			t.Errorf("browserDialogSpec floors = %dx%d, want 60x14", spec.MinW, spec.MinH)
+		}
+	}
+}
+
 // TestThemeEditorPinnedFootprint verifies the theme editor keeps its fixed
 // content footprint (Min == Max == themeEditorDialogW × themeEditorDialogH) on
 // every terminal size — the invariant that keeps the scrolling viewport geometry
