@@ -45,6 +45,9 @@ type Handlers struct {
 	OnSend func(sessionID, message, modelName, effort string)
 	// OnClose tears down the backend session when its window is closed.
 	OnClose func(sessionID string)
+	// OnRename notifies the backend that a session was renamed so it can persist
+	// the new title to the session index (issue #272). May be nil.
+	OnRename func(sessionID, title string)
 	// GetSettings returns the current sub-agent execution-model settings so the
 	// Settings menu can reflect them. May be nil.
 	GetSettings func() config.SubAgentConfig
@@ -1145,6 +1148,12 @@ func (w *Workbench) SetSessionTitle(id, title string) {
 	}
 	w.rebuildMenu()
 	w.persistLayout()
+	// Tell the backend so the new title reaches the session index (issue #272):
+	// persistLayout only updates layout.json, which the Sessions browser does not
+	// search. Without this the renamed session stays findable only by its old name.
+	if w.handlers.OnRename != nil {
+		w.handlers.OnRename(id, title)
+	}
 }
 
 // IsPinned reports whether a session is marked as a favorite.
