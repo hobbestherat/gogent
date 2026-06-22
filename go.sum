@@ -10,6 +10,8 @@ github.com/hexops/gotextdiff v1.0.3 h1:gitA9+qJrrTCsiCl7+kh75nPqQt1cx4ZkudSTLoUq
 github.com/hexops/gotextdiff v1.0.3/go.mod h1:pSWU5MAI3yDq+fZBTazCSJysOMbxWL1BSow5/V2vxeg=
 github.com/hobbestherat/turbotui v0.3.1-0.20260622175614-477ad40b3201 h1:E7fQeNBsaVAWcgX8vKTkZvOLqoguW4kTConNDYQHHz4=
 github.com/hobbestherat/turbotui v0.3.1-0.20260622175614-477ad40b3201/go.mod h1:+cXzY+fhI8sBSN3k2L1Rb7mp1psKGT+D8R3qcCT+2d0=
+github.com/hobbestherat/turbotui v0.3.1-0.20260622192106-e0463ead25d1 h1:GLG8FVxiAerio15TQgdj78NhaIt+nylWXMF2k7phHq4=
+github.com/hobbestherat/turbotui v0.3.1-0.20260622192106-e0463ead25d1/go.mod h1:+cXzY+fhI8sBSN3k2L1Rb7mp1psKGT+D8R3qcCT+2d0=
 github.com/hobbestherat/webapi v0.1.0 h1:ggk03gfw7dgS+7zIog/eRctkKL6qBa9KE3arTsSWAXQ=
 github.com/hobbestherat/webapi v0.1.0/go.mod h1:XG9XQ/Jw1iDAyuZnzZFKYeE911Fa1hPd/v30/ZNQj4c=
 github.com/yuin/goldmark v1.8.2 h1:kEGpgqJXdgbkhcOgBxkC0X0PmoPG1ZyoZ117rDVp4zE=
