@@ -19,6 +19,7 @@ func (w *Workbench) showAgentMonolog(sessionID, agentID, name string) {
 	if w.monolog != nil {
 		w.desktop.RemoveLayer(w.monolog)
 		w.monolog = nil
+		w.monologWindow = nil
 	}
 
 	title := name
@@ -30,10 +31,21 @@ func (w *Workbench) showAgentMonolog(sessionID, agentID, name string) {
 	// MaxW keeps the transcript readable on an ultrawide terminal (issue #317) while it
 	// still grows tall (no height cap; a transcript wants the vertical space).
 	spec := tv.DialogSpec{MinW: 40, MaxW: 120, MinH: 10}
-	x, y, width, height := w.dialogRect(spec)
+	// Center the popup on the pinned window area (left of the sidebar), not the full
+	// screen, so it opens clear of the "Sessions & Agents" panel — mirroring how
+	// session windows are sized against the window area (issue #319). windowArea() is
+	// the full screen when the sidebar is unpinned, so the unpinned case is unchanged.
+	area := w.windowArea()
+	x, y, width, height := tv.ResolveDialogRect(spec, area.W, area.H)
+	x += area.X
+	y += area.Y
 
 	window := tv.NewWindow("monologue: "+title, tv.Rect{X: x, Y: y, W: width, H: height}, tui.LineSingle)
 	applyWindowShadow(window) // honour the NoShadow theme setting (issue #215)
+	// Constrain drag/resize to the pinned sidebar area like a session window does
+	// (issue #319); installed before AddLayer so the very first interaction is
+	// clamped. A no-op while the sidebar is unpinned.
+	w.installSidebarClampOn(window)
 	history := tv.NewTextView("", tv.Rect{})
 	history.Wrap = true
 	if len(msgs) == 0 {
@@ -51,16 +63,21 @@ func (w *Workbench) showAgentMonolog(sessionID, agentID, name string) {
 	// ≈80%×85% instead of a fixed box; the content LayoutFn refills the history
 	// view to the new bounds (issue #299).
 	layer.OnResize = func(tv.Rect) {
-		nx, ny, nw, nh := w.dialogRect(spec)
-		window.Component.SetBounds(tv.Rect{X: nx, Y: ny, W: nw, H: nh})
+		// Re-resolve against the (possibly resized) window area so the popup stays
+		// ≈80%×85% and clear of the pinned sidebar (issue #319).
+		a := w.windowArea()
+		nx, ny, nw, nh := tv.ResolveDialogRect(spec, a.W, a.H)
+		window.Component.SetBounds(tv.Rect{X: nx + a.X, Y: ny + a.Y, W: nw, H: nh})
 	}
 	window.OnClose = func(_ *tv.Window) {
 		w.desktop.RemoveLayer(layer)
 		if w.monolog == layer {
 			w.monolog = nil
+			w.monologWindow = nil
 		}
 	}
 	w.monolog = layer
+	w.monologWindow = window
 	w.desktop.AddLayer(layer)
 	w.desktop.SetFocus(history)
 	w.desktop.Redraw()
