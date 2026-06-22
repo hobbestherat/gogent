@@ -483,3 +483,105 @@ func TestRunLoopContinuationNoteStaysOutOfTranscript(t *testing.T) {
 		}
 	}
 }
+
+// --- regression tests for the two defects found in review round 1 -----------
+
+// TestCollectToolCallsExplicitFinal pins the second return value of
+// collectToolCalls (issue #307 fix): only a JSON-text {"...","final":true}
+// object reports explicitFinal=true. Preamble narration, an ordinary JSON tool
+// call, a non-final structured object, and a nil response all report false. The
+// loop relies on this flag to NOT nudge a deliberate final whose text happens to
+// open like a preamble.
+func TestCollectToolCallsExplicitFinal(t *testing.T) {
+	s := &UserSession{}
+	tests := []struct {
+		name         string
+		resp         *model.CompletionResponse
+		wantCalls    int
+		wantExplicit bool
+		wantContent  string // checked only when non-empty
+	}{
+		{"structured final", &model.CompletionResponse{Content: `{"response":"all set","final":true}`}, 0, true, "all set"},
+		{"structured final preamble text", &model.CompletionResponse{Content: `{"response":"Let me know if you need anything.","final":true}`}, 0, true, "Let me know if you need anything."},
+		{"non-final structured", &model.CompletionResponse{Content: `{"response":"x","final":false}`}, 0, false, ""},
+		{"preamble narration", &model.CompletionResponse{Content: "Let me look around the repo."}, 0, false, ""},
+		{"json tool call in text", &model.CompletionResponse{Content: `{"tool":"read","args":{}}`}, 1, false, ""},
+		{"nil response", nil, 0, false, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			calls, explicit := s.collectToolCalls(tc.resp)
+			if len(calls) != tc.wantCalls {
+				t.Errorf("calls = %d, want %d", len(calls), tc.wantCalls)
+			}
+			if explicit != tc.wantExplicit {
+				t.Errorf("explicitFinal = %v, want %v", explicit, tc.wantExplicit)
+			}
+			if tc.wantContent != "" && tc.resp != nil && tc.resp.Content != tc.wantContent {
+				t.Errorf("resp.Content = %q, want %q", tc.resp.Content, tc.wantContent)
+			}
+		})
+	}
+}
+
+// TestRunLoopExplicitStructuredFinalNotNudged is the end-to-end regression for
+// review bug A: a deliberate structured-output final whose response text opens
+// like a preamble ("Let me know…") must terminate in ONE round-trip. The nudge
+// is short-circuited by explicitFinal, so the scripted second turn is never
+// requested, and the folded response text is surfaced as the final answer.
+func TestRunLoopExplicitStructuredFinalNotNudged(t *testing.T) {
+	b := &scriptedBackend{seq: []string{
+		respText(`{"response":"Let me know if you need anything else.","final":true}`),
+		respText("this second turn must never be requested for an explicit final"),
+	}}
+	us, id, getEvents := newLoopHarness(t, b)
+	ctx, cancel := runLoopCtx(t)
+	defer cancel()
+
+	if _, err := us.ExecuteTaskLoop(ctx, id, "go"); err != nil {
+		t.Fatalf("ExecuteTaskLoop: %v", err)
+	}
+
+	if got := b.requestCount(); got != 1 {
+		t.Errorf("round-trips = %d, want 1 (an explicit final:true must never be nudged, even if its text reads like a preamble)", got)
+	}
+	got, ok := finalText(getEvents())
+	if !ok {
+		t.Fatal("no SessionEventFinal emitted")
+	}
+	if got != "Let me know if you need anything else." {
+		t.Errorf("final text = %q, want the structured-final response text", got)
+	}
+}
+
+// TestRunLoopPreambleThenEmptyTurnSurfacesPreamble is the end-to-end regression
+// for review bug B: when a preamble nudge is followed by an empty terminal turn,
+// the empty-final recovery (#171) must surface the preamble text rather than an
+// empty answer. This works only because the nudge path now retains the preamble
+// as lastAssistant before continuing.
+func TestRunLoopPreambleThenEmptyTurnSurfacesPreamble(t *testing.T) {
+	const preamble = "I'll start by inspecting the files."
+	b := &scriptedBackend{seq: []string{
+		respText(preamble),
+		respText(""), // empty terminal turn after the single nudge
+	}}
+	us, id, getEvents := newLoopHarness(t, b)
+	ctx, cancel := runLoopCtx(t)
+	defer cancel()
+
+	if _, err := us.ExecuteTaskLoop(ctx, id, "go"); err != nil {
+		t.Fatalf("ExecuteTaskLoop: %v", err)
+	}
+
+	// One nudge happened (2 round-trips), then the bound stopped the loop.
+	if got := b.requestCount(); got != 2 {
+		t.Errorf("round-trips = %d, want 2 (preamble + one nudge)", got)
+	}
+	got, ok := finalText(getEvents())
+	if !ok {
+		t.Fatal("no SessionEventFinal emitted")
+	}
+	if got != preamble {
+		t.Errorf("final text = %q, want the retained preamble %q (empty-final recovery must not drop it)", got, preamble)
+	}
+}
