@@ -164,16 +164,25 @@ func TestIssue265DefaultPaletteValues(t *testing.T) {
 }
 
 // TestIssue265BlackCanvasPresetsDeriveFromRoles checks the two black-canvas presets keep
-// the derivation blackCanvasTVTheme used to hardcode — resting button/input = PanelFG on
-// PanelBG, focus = Accent — but now expressed via the roles, so blackCanvasTVTheme sourcing
-// them is a no-op and an override flows through. A regression that hardcoded the slots again
-// (ignoring the roles) would diverge here.
+// their resting/focus button/input derivations expressed via the roles, so blackCanvasTVTheme
+// sourcing them is a no-op and an override flows through. The two presets now diverge on the
+// resting background: the high-contrast preset seats resting buttons/inputs on its pure-black
+// panel (== PanelBG), while the dark preset seats them on its #262626 menu-bar panel
+// (== MenuBarBG, lifted off the pure-black canvas so they read as cohesive chrome rather than
+// black islands). Both keep focus == Accent, matching the focused dropdown. A regression that
+// hardcoded the slots again (ignoring the roles) would diverge here.
 func TestIssue265BlackCanvasPresetsDeriveFromRoles(t *testing.T) {
+	// restingBG is the background each preset seats resting buttons/inputs on.
+	restingBG := map[string]tui.Color{
+		themeHighContrast: highContrastPalette().PanelBG,   // pure black
+		themeDark:         darkPalette().MenuBarBG,         // #262626
+	}
 	for _, p := range []Theme{highContrastPalette(), darkPalette()} {
 		t.Run(p.Name, func(t *testing.T) {
-			// Resting button/input sit on the panel (== PanelFG/PanelBG).
-			if p.ButtonBG != p.PanelBG || p.InputBG != p.PanelBG {
-				t.Errorf("%s: resting Button/Input BG %+v/%+v != PanelBG %+v", p.Name, p.ButtonBG, p.InputBG, p.PanelBG)
+			wantBG := restingBG[p.Name]
+			// Resting button/input sit on the preset's resting panel (PanelBG or MenuBarBG).
+			if p.ButtonBG != wantBG || p.InputBG != wantBG {
+				t.Errorf("%s: resting Button/Input BG %+v/%+v != expected resting BG %+v", p.Name, p.ButtonBG, p.InputBG, wantBG)
 			}
 			if p.ButtonFG != p.PanelFG || p.InputFG != p.PanelFG {
 				t.Errorf("%s: resting Button/Input FG %+v/%+v != PanelFG %+v", p.Name, p.ButtonFG, p.InputFG, p.PanelFG)

@@ -472,6 +472,12 @@ func darkPalette() Theme {
 	dimGrey := tui.RGBColor(0x80, 0x80, 0x80)
 	divider := tui.RGBColor(0x5A, 0x5A, 0x5A)
 	amber := tui.RGBColor(0xE0, 0xAF, 0x68) // accent tone, shared by Tool/Accent
+	// menuBarPanel is the #262626 dark-grey panel the menu bar and closed dropdowns
+	// sit on, lifted off the pure-black canvas. The dark preset now seats resting
+	// buttons and inputs on this same panel (issue #200) so they read as cohesive
+	// chrome — matching the menu bar and dropdowns — rather than black islands on the
+	// canvas, while the focus treatment (black on amber) is unchanged.
+	menuBarPanel := tui.RGBColor(0x26, 0x26, 0x26)
 	return Theme{
 		Name:      themeDark,
 		User:      tui.RGBColor(0x7D, 0xCF, 0xE6), // soft cyan
@@ -491,27 +497,31 @@ func darkPalette() Theme {
 		// Soft-white-on-dark-grey menu bar: a #262626 panel lifts the bar off the
 		// pure-black canvas while staying cohesive with it.
 		MenuBarFG: softWhite,
-		MenuBarBG: tui.RGBColor(0x26, 0x26, 0x26),
+		MenuBarBG: menuBarPanel,
 		// Dropdowns (issue #260): the closed control matches the menu bar background
 		// (soft white on the #262626 bar) so it sits cohesively on the dark canvas; the
 		// focused control and open highlighted row use the amber accent (black on amber)
 		// for a warm, legible highlight. DropdownBG tracks MenuBarBG, which is #262626
 		// here (baked by the dark preset), not pure black.
 		DropdownFG:       softWhite,
-		DropdownBG:       tui.RGBColor(0x26, 0x26, 0x26), // == MenuBarBG
+		DropdownBG:       menuBarPanel, // == MenuBarBG
 		DropdownFocusFG:  black,
 		DropdownFocusBG:  amber,
 		DropdownSelectFG: black,
 		DropdownSelectBG: amber,
-		// Buttons and inputs (issue #265): the black-canvas derivation expressed as roles
-		// — soft white on the pure-black canvas at rest (== PanelFG/PanelBG) and the warm
-		// amber accent marking focus (black on amber), matching the focused dropdown.
+		// Buttons and inputs (issue #265): the dark-preset derivation expressed as roles
+		// — soft-white text on the #262626 menu-bar panel at rest (== MenuBarBG, lifted
+		// off the pure-black canvas so resting buttons/inputs read as cohesive chrome
+		// rather than black islands) and the warm amber accent marking focus (black on
+		// amber), matching the focused dropdown. The high-contrast preset instead seats
+		// resting buttons/inputs on its pure-black panel (== PanelBG); that derivation
+		// lives in highContrastPalette.
 		ButtonFG:      softWhite,
-		ButtonBG:      black,
+		ButtonBG:      menuBarPanel,
 		ButtonFocusFG: black,
 		ButtonFocusBG: amber,
 		InputFG:       softWhite,
-		InputBG:       black,
+		InputBG:       menuBarPanel,
 		InputFocusFG:  black,
 		InputFocusBG:  amber,
 		// Code blocks render directly on the pure-black canvas (no distinct panel).
