@@ -134,7 +134,12 @@ func (w *Workbench) showConfirm(title, message string, onResult func(bool)) {
 
 	layer = tv.NewModalLayer("confirm-dialog", dialog)
 	w.desktop.AddLayer(layer)
-	dialog.Fit(spec) // re-resolve the rect when the terminal is resized (issue #299)
+	// The spec encodes the open-time terminal (content-driven width/height), so
+	// re-resolve against the live terminal on resize rather than the stale spec
+	// dialog.Fit would remember (issue #299).
+	installResizeReflow(w.desktop, dialog, layer, func() tv.DialogSpec {
+		return messageDialogSpec(w.app.Width(), w.app.Height(), message)
+	})
 	w.desktop.SetFocus(focus)
 }
 

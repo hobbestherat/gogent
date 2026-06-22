@@ -2424,7 +2424,9 @@ func formatStatusLine(state string, stats agent.SessionStats, live liveStats, bu
 	}
 	line := state
 	if tui.StringWidth(line) > width {
-		return truncateRunes(line, width)
+		// Truncate by display width (not rune count) to match the StringWidth
+		// budget above, so a wide-glyph state can't overflow the line (issue #299).
+		return truncateToWidth([]rune(line), width)
 	}
 	for _, seg := range statusSegments(stats, live, budget) {
 		add := statusSep + seg

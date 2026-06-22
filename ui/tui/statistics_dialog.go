@@ -30,11 +30,9 @@ func (w *Workbench) showStatisticsDialog() {
 	}
 	report := w.overallLifetime.fold(filterPhantomSessions(w.handlers.GetStatistics()))
 
-	// Large by default (≈85% of the terminal) with a 60×14 floor so the two-pane
-	// browser stays usable on a small terminal; the list/detail split is derived
-	// from width below, so the panes grow with the dialog (issue #299).
-	spec := tv.DialogSpec{MinW: 60, MinH: 14, PreferredW: w.app.Width() * 85 / 100}
-	x, y, width, height := w.dialogRect(spec)
+	// Large by default (≈85% of the terminal), floored so it stays usable on a
+	// small terminal; the list/detail split is derived from width below (#299).
+	x, y, width, height := w.dialogRect(w.browserDialogSpec())
 
 	dialog := tv.NewDialog("Statistics", x, y, width, height)
 	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
@@ -120,7 +118,10 @@ func (w *Workbench) showStatisticsDialog() {
 
 	layer = tv.NewModalLayer("statistics-dialog", dialog)
 	w.desktop.AddLayer(layer)
-	dialog.Fit(spec) // re-resolve the rect when the terminal is resized (issue #299)
+	// PreferredW is a share of the terminal, so re-resolve against the live
+	// terminal on resize rather than the stale spec dialog.Fit would remember
+	// (issue #299).
+	installResizeReflow(w.desktop, dialog, layer, w.browserDialogSpec)
 	render(statsOverview)
 	w.desktop.SetFocus(sel)
 }

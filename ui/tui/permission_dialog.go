@@ -294,7 +294,12 @@ func showPermissionDialog(desktop *tv.Desktop, req permission.Request, requester
 
 	layer = tv.NewModalLayer("permission-dialog", dialog)
 	desktop.AddLayer(layer)
-	dialog.Fit(spec) // re-resolve the rect when the terminal is resized (issue #299)
+	// The spec encodes the open-time terminal (full-width PreferredW/MaxW,
+	// content-driven height), so re-resolve against the live terminal on resize
+	// rather than the stale spec dialog.Fit would remember (issue #299).
+	installResizeReflow(desktop, dialog, layer, func() tv.DialogSpec {
+		return permissionDialogSpec(app.Width(), app.Height(), requesterHdr != "", bodyLines)
+	})
 	desktop.SetFocus(deny)
 }
 
@@ -489,12 +494,18 @@ func requesterLine(session, agentID string) string {
 	return "Requested by " + session
 }
 
+// truncate shortens s to fit max display columns, appending "..." when it must
+// cut. Width is measured with tui.StringWidth and the cut lands on a rune
+// boundary (via truncateToWidth), so a multi-cell CJK/emoji glyph in a dialog
+// title or "Requested by …" header is never split mid-character into broken UTF-8
+// — the display-width consistency the whole sizing migration is built on (#299).
 func truncate(s string, max int) string {
-	if max <= 1 || len(s) <= max {
+	if max <= 1 || tui.StringWidth(s) <= max {
 		return s
 	}
+	runes := []rune(s)
 	if max <= 3 {
-		return s[:max]
+		return truncateToWidth(runes, max)
 	}
-	return s[:max-3] + "..."
+	return truncateToWidth(runes, max-3) + "..."
 }
