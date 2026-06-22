@@ -1322,6 +1322,14 @@ func makeToolResultMessage(call tool.ToolCall, result string) model.Message {
 // toolDefsFromRegistry converts the agent's tool registry into native tool defs,
 // advertising only the currently enabled tools (a disabled tool is hidden from
 // the model so it neither sees nor attempts to call it).
+//
+// Tools are advertised as NON-strict: FunctionDef.Strict is intentionally left
+// false for every tool, including spawn_subagent. That is what keeps the OpenAI
+// structured-outputs invariant (a strict tool forces parallel_tool_calls:false,
+// see model.parallelToolCallsMustBeDisabled) from ever suppressing a batched
+// spawn turn — the model is free to emit several spawn_subagent calls, or one
+// spawn_subagent carrying a "subtasks" batch, in a single turn so they execute
+// concurrently (issue #282).
 func toolDefsFromRegistry(reg *tool.ToolRegistry) []model.ToolDef {
 	if reg == nil {
 		return nil
@@ -1369,16 +1377,19 @@ func coordinatorInstructions(cfg config.SubAgentConfig) string {
 
 ## Delegating work (one-shot sub-agents)
 When a task has several INDEPENDENT parts, delegate them so they run in parallel.
-Prefer ONE spawn_subagent call carrying a "subtasks" array — every entry runs
-concurrently and the call blocks until all of them finish. For example:
+ALWAYS put every independent part into a SINGLE spawn_subagent call as a
+"subtasks" array — one call, not one call per part. Every entry runs concurrently
+and the one call blocks until all of them finish, so this is the only way to get a
+speed-up. Emitting separate spawns across turns runs them one at a time with no
+benefit — do not do it. For example, in ONE call:
   {"tool":"spawn_subagent","args":{"subtasks":[
     {"name":"docs","task":"Summarise README.md"},
     {"name":"tests","task":"List the failing tests"},
     {"name":"deps","task":"Audit go.mod for outdated modules"}
   ]}}
 Each sub-agent runs to completion and returns a result starting with "SUCCESS: "
-or "FAILURE: ". Use a single "name"/"task" pair only for a lone subtask. Do not
-issue the spawns one at a time across turns — batch independent work together.
+or "FAILURE: ". Use a single "name"/"task" pair only for a lone subtask. Always
+batch two or more independent subtasks into the one call's "subtasks" array.
 Delegate only when it is clearly worthwhile; otherwise do the work yourself.`
 	}
 	return `
