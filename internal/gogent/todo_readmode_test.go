@@ -248,6 +248,61 @@ func TestTodoToolNonStringNoteIgnored(t *testing.T) {
 	}
 }
 
+// TestTodoToolReadModeExplicitNull verifies that an explicit JSON null for
+// `todos` is treated as read mode, not a rejected call: a model that sends
+// {"todos": null} meaning "just read" must get the current list back (issue
+// #263). The driver's fix added `if !present || raw == nil` in the tool's
+// Execute to handle this.
+//
+// DEFECT (round 2): this fails. validateArgs (internal/tool/validate.go) runs in
+// ExecuteToolCall BEFORE Execute and rejects a null `todos` against its declared
+// `type: array` ("invalid args: args.todos: expected array, got null"). The
+// request therefore never reaches the `raw == nil` branch, so that branch is
+// dead code for the null case. The fix is at the wrong layer — the schema must
+// permit null (e.g. drop `type` on `todos`, or allow ["array","null"]) for the
+// explicit-null read path to work end-to-end. The OMITTED case ({} with no todos
+// key) works, because validateObject only validates properties that are present.
+func TestTodoToolReadModeExplicitNull(t *testing.T) {
+	id := "read-null"
+	g := newTodoGogent(t, id)
+
+	// Seed a list via a normal write.
+	execTodo(t, g, id, map[string]interface{}{
+		"todos": []interface{}{
+			map[string]interface{}{"content": "seeded", "status": "in_progress"},
+		},
+	})
+
+	// Read it back via an explicit null. This must succeed as read mode.
+	resp, err := g.GetToolRegistry().ExecuteToolCall(&tool.ToolCall{
+		Tool: "todo",
+		Args: map[string]interface{}{"todos": nil},
+	}, tool.ToolContext{SessionID: id, AgentID: "root"})
+	if err != nil {
+		t.Fatalf("explicit-null read errored: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("explicit-null todos was rejected instead of treated as read mode: %q "+
+			"(validateArgs rejects null before Execute's raw==nil branch can run)", resp.Error)
+	}
+	res, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("result not a map: %T", resp.Result)
+	}
+	if res["mode"] != "read" {
+		t.Errorf("explicit null mode = %v, want read", res["mode"])
+	}
+	todos, ok := res["todos"].([]agent.TodoItem)
+	if !ok || len(todos) != 1 || todos[0].Content != "seeded" {
+		t.Errorf("explicit null read did not return the current list: %+v", res["todos"])
+	}
+
+	// The read must not have cleared the seeded list.
+	if len(g.GetUserSession(id).Todos()) != 1 {
+		t.Errorf("explicit null read mutated the checklist")
+	}
+}
+
 // TestTodoToolReadModeUnknownSession verifies read mode still reports a clear
 // error for a session that does not exist (the session lookup precedes the
 // read/write branch).
