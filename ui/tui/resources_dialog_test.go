@@ -268,23 +268,29 @@ func TestLoadItemsNilGetter(t *testing.T) {
 }
 
 // resourcesSpec rebuilds the DialogSpec showResourcesDialog uses (issue #299):
-// large by default (85% wide) with a 60×14 floor and no upper cap, so the
-// two-pane browser grows with the terminal instead of capping at 96×32.
+// large by default (it asks for 85% wide) with a 60×14 floor and no upper cap, so
+// the two-pane browser grows with the terminal.
+//
+// NOTE (#309 finding): after turbotui's percentage became a CAP (80% wide), this
+// PreferredW=85% is no longer reachable — ResolveDialogRect clamps it down to the
+// 80% width default. The browser therefore renders at 80% wide, not the intended
+// 85%; the *5 share is now effectively dead. See TestBrowserPreferredWidthClamped.
 func resourcesSpec(screenW int) tv.DialogSpec {
 	return tv.DialogSpec{MinW: 60, MinH: 14, PreferredW: screenW * 85 / 100}
 }
 
-// TestResourcesDialogSize covers the spec-driven sizing: grows to ~85% on a big
-// terminal (no 96×32 cap), and floors at 60×14 on a small one.
+// TestResourcesDialogSize covers the spec-driven sizing: the width is the 80% cap
+// (the 85% PreferredW is clamped down to it, see resourcesSpec), the height grows
+// toward 85%, and both floor at 60×14 on a small terminal.
 func TestResourcesDialogSize(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		screenW, H   int
 		wantW, wantH int
 	}{
-		{"large screen grows to 85%", 200, 100, 170, 85},
-		{"medium terminal grows", 120, 40, 102, 34},
-		{"short terminal floors height", 120, 16, 102, 14},
+		{"large screen capped at 80% wide", 200, 100, 160, 85},
+		{"medium terminal capped at 80% wide", 120, 40, 96, 34},
+		{"short terminal floors height", 120, 16, 96, 14},
 		{"tiny terminal floors both", 50, 20, 60, 16},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
