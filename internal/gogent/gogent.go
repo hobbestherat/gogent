@@ -927,8 +927,14 @@ func (g *Gogent) initializeToolRegistry() {
 			"type": "object",
 			"properties": map[string]interface{}{
 				"todos": map[string]interface{}{
-					"type":        "array",
-					"description": "The complete checklist. Omit to read the current list. Each entry is {content: string, status?: pending|in_progress|completed, note?: string}.",
+					// No "type" is declared so the schema permits both an array
+					// (write) and a null (read): validateArgs only enforces a
+					// property's type when it is a string, and parseTodoItems still
+					// type-checks the array on the write path. This lets a model send
+					// {"todos": null} to mean "just read" without tripping schema
+					// validation, while "items" + the description keep the array shape
+					// advertised (issue #263).
+					"description": "The complete checklist (a JSON array). Omit it, or pass null, to read the current list back without changing it. Each entry is {content: string, status?: pending|in_progress|completed, note?: string}.",
 					"items": map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
