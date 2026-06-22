@@ -65,4 +65,3 @@ func TestExecuteTimeoutWindows(t *testing.T) {
 		t.Fatal("expected a timeout error message")
 	}
 }
-
