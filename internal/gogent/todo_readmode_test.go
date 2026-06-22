@@ -303,6 +303,36 @@ func TestTodoToolReadModeExplicitNull(t *testing.T) {
 	}
 }
 
+// TestTodoToolNonArrayTodosRejected guards the round-2 schema change: dropping
+// `"type": "array"` from the todos property (so an explicit null reaches read
+// mode) must NOT open a hole where a non-array, non-null todos silently slips
+// through. A string/number/object todos is present and non-nil, so it takes the
+// write path and parseTodoItems must reject it with a clear error — never panic,
+// never store garbage (issue #263).
+func TestTodoToolNonArrayTodosRejected(t *testing.T) {
+	id := "non-array"
+	g := newTodoGogent(t, id)
+
+	for _, bad := range []interface{}{
+		"not an array",
+		float64(42),
+		map[string]interface{}{"content": "looks like one item but is an object"},
+		true,
+	} {
+		resp, err := g.GetToolRegistry().ExecuteToolCall(&tool.ToolCall{
+			Tool: "todo",
+			Args: map[string]interface{}{"todos": bad},
+		}, tool.ToolContext{SessionID: id, AgentID: "root"})
+		if err == nil && resp.Success {
+			t.Errorf("non-array todos %#v was accepted, want rejection: %+v", bad, resp)
+		}
+		// Whatever happened, the checklist must remain empty (nothing stored).
+		if n := len(g.GetUserSession(id).Todos()); n != 0 {
+			t.Errorf("non-array todos %#v mutated the checklist (now %d items)", bad, n)
+		}
+	}
+}
+
 // TestTodoToolReadModeUnknownSession verifies read mode still reports a clear
 // error for a session that does not exist (the session lookup precedes the
 // read/write branch).
