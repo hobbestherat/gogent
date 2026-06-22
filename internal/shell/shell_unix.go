@@ -21,4 +21,3 @@ func newShellCommand(ctx context.Context, command string) *exec.Cmd {
 	}
 	return cmd
 }
-

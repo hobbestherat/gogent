@@ -31,11 +31,11 @@ import (
 )
 
 var (
-	verbose    = flag.Bool("verbose", false, "Enable verbose output")
-	httpHost   = flag.String("http-host", "127.0.0.1", "HTTP server host")
-	httpPort   = flag.Int("http-port", 8080, "HTTP server port")
-	disableTUI = flag.Bool("no-tui", false, "Disable TUI (for API testing)")
-	noColor    = flag.Bool("no-color", false, "Disable coloured output (also honours the NO_COLOR env var)")
+	verbose      = flag.Bool("verbose", false, "Enable verbose output")
+	httpHost     = flag.String("http-host", "127.0.0.1", "HTTP server host")
+	httpPort     = flag.Int("http-port", 8080, "HTTP server port")
+	disableTUI   = flag.Bool("no-tui", false, "Disable TUI (for API testing)")
+	noColor      = flag.Bool("no-color", false, "Disable coloured output (also honours the NO_COLOR env var)")
 	httpPassword = flag.String("http-password", "", "Password for HTTP API login (env GOGENT_HTTP_PASSWORD). Setting one authorizes binding to a non-loopback host.")
 )
 

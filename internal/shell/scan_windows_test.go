@@ -41,4 +41,3 @@ func TestExternalRootsIgnoresFlagsAndGlobsWindows(t *testing.T) {
 		t.Fatalf("expected no external roots, got %v", got)
 	}
 }
-

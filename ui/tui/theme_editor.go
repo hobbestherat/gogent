@@ -152,6 +152,99 @@ const themeEditorLabelW = 22
 // the height ceiling the menu bar imposes (see the note in showThemeEditor).
 const themeEditorContentTop = 3
 
+// Geometry of the modal theme editor (issue #267). Width stays at 80 so the dialog
+// fits a standard 80-column terminal (centeredDialog only clamps the origin, it does
+// not scale an oversized dialog). Height is held at 22 — the 24-row terminal is the
+// hard ceiling: this dialog is centred, so on a 24-row terminal it sits at
+// y=(24-22)/2=1, clearing the always-on-top menu bar on row 0. themeEditorFieldW and
+// themeEditorSwatchW are the spec-field ("#RRGGBB"/"default") and live-swatch
+// ("invalid") cell widths that follow each role label.
+const (
+	themeEditorDialogW = 80
+	themeEditorDialogH = 22
+	themeEditorFieldW  = 7
+	themeEditorSwatchW = 7
+)
+
+// themeEditorColumn places a contiguous run of groups in one on-screen column of the
+// editor: its x origin, the width of its label cell, and the groups stacked in it (each
+// drawn as a header row then one role per row).
+type themeEditorColumn struct {
+	x, labelW int
+	groups    []themeGroup
+}
+
+// themeEditorColumns is the two-column section placement (issue #267) — the single
+// source of truth both the renderer in showThemeEditor and the init-time layout guard
+// read, so the split point can never drift between them. The split is by label width as
+// much as balance: the right column carries the longest labels — "Code block
+// background:" (22) and the dropdown/menu pairs (20) — so it gets the full
+// themeEditorLabelW cell, while the left column's labels top out at "Indicators /
+// badges:" (20). The columns are balanced at 16 rows each (Session output + UI chrome
+// on the left, Controls + Buttons and inputs + Code on the right), filling rows
+// themeEditorContentTop..18. checkThemeEditorLayout asserts this split, the content-top
+// and the height stay mutually consistent.
+func themeEditorColumns() []themeEditorColumn {
+	return []themeEditorColumn{
+		{2, 20, themeGroups[:2]},                 // left: Session output, UI chrome
+		{40, themeEditorLabelW, themeGroups[2:]}, // right: Controls, Buttons and inputs, Code
+	}
+}
+
+// checkThemeEditorLayout asserts the grouped editor's layout invariants hold for the
+// current themeGroups, themeEditorColumns and geometry consts, panicking at package
+// init (and thus in every test run and at program start) if a future edit breaks one.
+// The renderer relies on all of these silently: without this guard, adding a role or a
+// sixth group would push the last section onto the Save/Reset/Cancel button row, a
+// longer label would clip on screen, or a group could be dropped from a column — with
+// no compile-time or runtime signal, only the render tests catching it. This turns the
+// three otherwise-independent magic numbers (the [:2]/[2:] split, themeEditorContentTop
+// and themeEditorDialogH) into one asserted, loud-on-violation relationship.
+func checkThemeEditorLayout() {
+	const (
+		buttonRow    = themeEditorDialogH - 3 // Reset/Save/Cancel live on this row
+		contentRight = themeEditorDialogW - 3 // last usable content column (border at -2)
+	)
+	cols := themeEditorColumns()
+	placed := 0
+	for ci, col := range cols {
+		// Columns must not collide: this column's widest extent (its swatch end) must
+		// fall before the next column's x, and the last column must stay inside the border.
+		swatchEnd := col.x + col.labelW + themeEditorFieldW + themeEditorSwatchW + 2 - 1
+		limit := contentRight
+		if ci+1 < len(cols) {
+			limit = cols[ci+1].x - 1
+		}
+		if swatchEnd > limit {
+			panic(fmt.Sprintf("theme editor: column %d swatch ends at col %d, past its limit %d — widen the dialog or narrow the label cell", ci, swatchEnd, limit))
+		}
+		// Walk the column top-down: one header row, then one role per row.
+		y := themeEditorContentTop
+		for _, g := range col.groups {
+			y++ // header row
+			for _, role := range g.roles {
+				if n := len([]rune(role.label)) + 1; n > col.labelW {
+					panic(fmt.Sprintf("theme editor: label %q + \":\" is %d cols but column %d cell is %d wide — it would clip on screen", role.label, n, ci, col.labelW))
+				}
+				y++
+				placed++
+			}
+		}
+		if last := y - 1; last >= buttonRow {
+			panic(fmt.Sprintf("theme editor: column %d last role row %d collides with the buttons at row %d — grow the height or rebalance the columns", ci, last, buttonRow))
+		}
+	}
+	if placed != len(themeRoles) {
+		panic(fmt.Sprintf("theme editor: columns place %d roles but themeRoles has %d — a group is unplaced or double-placed", placed, len(themeRoles)))
+	}
+	// Menu-bar ceiling: centred on a 24-row terminal the top frame must clear row 0.
+	if topY := (24 - themeEditorDialogH) / 2; topY < 1 {
+		panic(fmt.Sprintf("theme editor: height %d centres the top frame onto the menu bar on a 24-row terminal", themeEditorDialogH))
+	}
+}
+
+func init() { checkThemeEditorLayout() }
+
 // themeSectionHeader builds a section heading for the grouped editor (issue #267): the
 // title followed by a horizontal rule that fills the rest of the column, so the
 // section reads as a divider above its roles. It is a dialog-coloured label like every
@@ -279,24 +372,21 @@ func (w *Workbench) showThemeEditor() {
 	}
 	cur := w.handlers.GetTheme()
 
-	// Width stays at 80 so the dialog fits a standard 80-column terminal
-	// (centeredDialog only clamps the origin, it does not scale an oversized dialog).
 	// The grouped layout (issue #267) draws the 27 roles as five labelled sections
-	// across two columns: the left column stacks Session output (7) and UI chrome (7),
-	// the right column stacks Controls (8), Buttons and inputs (4) and Code (1). Each
-	// section costs one header row plus its roles, so both columns are exactly 16 rows
-	// tall (8+8 left, 9+5+2 right) running from themeEditorContentTop (row 3) to row 18.
-	//
-	// The height is held at 22 — the 24-row terminal is the hard ceiling: this dialog
-	// is centred (centeredDialog), so on a 24-row terminal it sits at y=(24-22)/2=1,
-	// which clears the always-on-top menu bar on row 0. To fit five header rows under
-	// that ceiling the spec-format hint moved up beside the toggles (row 2) and the
-	// roles start at row 3 with no blank separator, leaving the last section row at 18,
-	// clear of the Save/Reset/Cancel buttons at height-3=19. That ceiling is also why
-	// #265's four focus roles stay out of the editor (see themeGroups): a sixth section
-	// row would centre the dialog's top frame onto the menu bar.
-	const width = 80
-	const height = 22
+	// across two columns (see themeEditorColumns): the left column stacks Session output
+	// (7) and UI chrome (7), the right column stacks Controls (8), Buttons and inputs (4)
+	// and Code (1). Each section costs one header row plus its roles, so both columns are
+	// exactly 16 rows tall, running from themeEditorContentTop (row 3) to row 18, clear
+	// of the Save/Reset/Cancel buttons at height-3=19. The geometry consts and the 22-row
+	// menu-bar ceiling are documented at themeEditorDialogH; checkThemeEditorLayout (run
+	// at init) asserts the split, the content-top and the height stay consistent, so this
+	// renderer can trust them. That ceiling is also why #265's four focus roles stay out
+	// of the editor (see themeGroups): a sixth section row would push the dialog's top
+	// frame onto the menu bar.
+	const (
+		width  = themeEditorDialogW
+		height = themeEditorDialogH
+	)
 	x, y := centeredDialog(w, width, height)
 
 	dialog := tv.NewDialog("Theme", x, y, width, height)
@@ -358,24 +448,18 @@ func (w *Workbench) showThemeEditor() {
 	// 7-wide spec field ("#RRGGBB" / "default") and a 7-wide swatch ("invalid"); the right
 	// column's swatch must end no later than relative col 77.
 	//
-	// The split is by label width as much as balance: the right column carries the
-	// longest labels — "Code block background:" (22) and the dropdown/menu pairs (20) —
-	// so it gets the full themeEditorLabelW cell, while the left column's labels top out
-	// at "Indicators / badges:" (20). The left swatch ends at x = 2+20+7+2+7-1 = 37,
-	// clear of the right column at x=40; the right swatch ends at x = 40+22+7+2+7-1 = 77,
-	// just inside the border. Each column stacks whole groups (a header row then one role
-	// per row): the left holds Session output + UI chrome (8+8 = 16 rows), the right holds
-	// Controls + Buttons and inputs + Code (9+5+2 = 16 rows), so both fill rows 3..18.
-	const fieldW, swatchW = 7, 7
-	columns := []struct {
-		x, labelW int
-		groups    []themeGroup
-	}{
-		{2, 20, themeGroups[:2]},                 // left: Session output, UI chrome
-		{40, themeEditorLabelW, themeGroups[2:]}, // right: Controls, Buttons and inputs, Code
-	}
+	// The split (themeEditorColumns) is by label width as much as balance: the right
+	// column carries the longest labels — "Code block background:" (22) and the
+	// dropdown/menu pairs (20) — so it gets the full themeEditorLabelW cell, while the
+	// left column's labels top out at "Indicators / badges:" (20). The left swatch ends
+	// at x = 2+20+7+2+7-1 = 37, clear of the right column at x=40; the right swatch ends
+	// at x = 40+22+7+2+7-1 = 77, just inside the border. Each column stacks whole groups
+	// (a header row then one role per row): the left holds Session output + UI chrome
+	// (8+8 = 16 rows), the right holds Controls + Buttons and inputs + Code (9+5+2 = 16
+	// rows), so both fill rows 3..18. checkThemeEditorLayout (init) guards these bounds.
+	const fieldW, swatchW = themeEditorFieldW, themeEditorSwatchW
 	i := 0
-	for _, col := range columns {
+	for _, col := range themeEditorColumns() {
 		rowY := themeEditorContentTop
 		for _, g := range col.groups {
 			dialog.Window.AddContent(themeSectionHeader(g.title,
