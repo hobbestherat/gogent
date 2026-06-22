@@ -229,8 +229,25 @@ func newSidebar(wb *Workbench) *sidebar {
 	// sub-agent node (Enter, or a repeat click) opens its internal-monologue
 	// popup; activating a session node just raises it.
 	tree.OnSelect = func(n *tv.TreeNode) {
-		if ref, ok := n.Data.(nodeRef); ok && ref.sessionID != "" {
+		ref, ok := n.Data.(nodeRef)
+		if !ok {
+			return
+		}
+		// Only raise the window for a SESSION node. For a sub-agent node, Focus would
+		// snap the tree selection back to the parent session row (issue #302),
+		// blocking keyboard navigation onto the sub-agent and the Enter/OnActivate
+		// path — so leave the selection where the user put it instead.
+		if ref.agentID == "" && ref.sessionID != "" {
 			s.wb.Focus(ref.sessionID)
+		}
+	}
+	// A single MOUSE click on a sub-agent row opens its monologue (issue #302).
+	// OnSelectMouse fires only on a pointer click, not on keyboard traversal, so
+	// arrowing through the tree never pops a window; showAgentMonolog replaces any
+	// open popup. Keyboard users reach it via Enter (OnActivate) below.
+	tree.OnSelectMouse = func(n *tv.TreeNode) {
+		if ref, ok := n.Data.(nodeRef); ok && ref.agentID != "" && ref.sessionID != "" {
+			s.wb.showAgentMonolog(ref.sessionID, ref.agentID, ref.name)
 		}
 	}
 	tree.OnActivate = func(n *tv.TreeNode) {
