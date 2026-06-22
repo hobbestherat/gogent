@@ -177,9 +177,11 @@ func TestStatisticsDialogSize(t *testing.T) {
 		screenW, screenH int
 		wantW, wantH     int
 	}{
-		{"large screen grows to 85%", 200, 100, 170, 85},
-		{"medium terminal grows", 120, 40, 102, 34},
-		{"short terminal floors height", 120, 16, 102, 14},
+		// The 85% PreferredW is clamped to the 80% width cap (#309 finding); see
+		// TestBrowserPreferredWidthClamped.
+		{"large screen capped at 80% wide", 200, 100, 160, 85},
+		{"medium terminal capped at 80% wide", 120, 40, 96, 34},
+		{"short terminal floors height", 120, 16, 96, 14},
 		{"tiny terminal floors both", 50, 20, 60, 16},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

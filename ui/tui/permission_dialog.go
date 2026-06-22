@@ -294,23 +294,31 @@ func showPermissionDialog(desktop *tv.Desktop, req permission.Request, requester
 
 	layer = tv.NewModalLayer("permission-dialog", dialog)
 	desktop.AddLayer(layer)
-	// The spec encodes the open-time terminal (full-width PreferredW/MaxW,
-	// content-driven height), so re-resolve against the live terminal on resize
-	// rather than the stale spec dialog.Fit would remember (issue #299).
+	// The spec's PrefH is measured against the open-time width, so re-resolve
+	// against the live terminal on resize rather than the stale spec dialog.Fit
+	// would remember (issues #299, #309).
 	installResizeReflow(desktop, dialog, layer, func() tv.DialogSpec {
 		return permissionDialogSpec(app.Width(), app.Height(), requesterHdr != "", bodyLines)
 	})
 	desktop.SetFocus(deny)
 }
 
-// Sizing floors for the permission dialog (issue #299). Width fills the terminal
-// (PreferredW/MaxW = termW-2) so long commands and paths get room — the cramping
-// 92-column cap is gone — and height grows with the wrapped content up to the
-// terminal edge — the 16-row body cap is gone too — scrolling only when even the
-// full screen cannot hold it. The floors keep a prompt legible on a tiny terminal.
+// Sizing knobs for the permission dialog (issues #299, #309). Width is driven by
+// the content — wide enough to show the longest command/path line — capped at
+// permissionMaxWidth so a 3-line prompt is not near-full-screen (the old
+// full-width PreferredW=MaxW=termW-2 is gone), with the cramping 92-column cap
+// also gone. Height grows with the wrapped content up to permissionMaxHeight and
+// then scrolls, replacing the terminal-baked MaxH=termH-2 (which made the height
+// path-dependent on resize). The floors keep a prompt legible on a tiny terminal.
 const (
 	permissionMinWidth  = 52
+	permissionMaxWidth  = 110
 	permissionMinHeight = 8
+	permissionMaxHeight = 24
+	// permissionPad is the horizontal chrome around the body: 2 borders + 2 content
+	// margins + 1 reserved scrollbar column, so PreferredW = longest body line +
+	// permissionPad shows the widest line in full before it word-wraps.
+	permissionPad = 5
 )
 
 // permissionBodyLine is one coloured line of the dialog's scrollable body. The
@@ -375,26 +383,43 @@ func permissionBodyRows(bodyLines []permissionBodyLine, width int) int {
 	return rows
 }
 
-// permissionDialogSpec turns a permission request into a terminal-aware
-// DialogSpec: full-width (PreferredW/MaxW = termW-2, no 92-column cap) so long
-// commands and paths get room, and tall enough for the wrapped content (PrefH) up
-// to the terminal edge (MaxH, replacing the 16-row body cap) so nothing is hidden
-// behind "…". It is pure so the sizing can be tested without a live event loop
-// (issues #122, #299); the body origin/height and button row come from
-// permissionContentLayout applied to the resolved height.
+// permissionContentWidth is the dialog width that shows the longest body line in
+// full: the widest logical line plus the horizontal chrome. The resolver caps it
+// at permissionMaxWidth, so a long command grows the dialog only up to the cap and
+// then wraps/scrolls.
+func permissionContentWidth(bodyLines []permissionBodyLine) int {
+	longest := 0
+	for _, line := range bodyLines {
+		if w := tui.StringWidth(line.text); w > longest {
+			longest = w
+		}
+	}
+	return longest + permissionPad
+}
+
+// permissionDialogSpec turns a permission request into a content-driven DialogSpec:
+// wide enough to show the longest command/path line (PreferredW) up to
+// permissionMaxWidth, and tall enough for the wrapped content (PrefH) up to
+// permissionMaxHeight so nothing is hidden behind "…". The caps replace the old
+// full-width PreferredW/MaxW=termW-2 and terminal-baked MaxH=termH-2 (issue #309),
+// so a short prompt stays compact and a long one grows toward the cap and scrolls.
+// It is pure so the sizing can be tested without a live event loop (issues #122,
+// #299); the body origin/height and button row come from permissionContentLayout
+// applied to the resolved height.
 func permissionDialogSpec(termW, termH int, hasRequester bool, bodyLines []permissionBodyLine) tv.DialogSpec {
+	prefW := permissionContentWidth(bodyLines)
 	// Resolve the width first (height does not affect it) so the body-row count is
 	// measured against the real dialog width.
 	_, _, width, _ := tv.ResolveDialogRect(
-		tv.DialogSpec{MinW: permissionMinWidth, PreferredW: termW - 2, MaxW: termW - 2}, termW, termH)
+		tv.DialogSpec{MinW: permissionMinWidth, MaxW: permissionMaxWidth, PreferredW: prefW}, termW, termH)
 	bodyY := permissionBodyOffsetY(hasRequester)
 	return tv.DialogSpec{
 		MinW:       permissionMinWidth,
 		MinH:       permissionMinHeight,
-		PreferredW: termW - 2,
-		MaxW:       termW - 2,
+		MaxW:       permissionMaxWidth,
+		PreferredW: prefW,
 		PrefH:      bodyY + permissionBodyRows(bodyLines, width) + permissionContentVChrome,
-		MaxH:       termH - 2,
+		MaxH:       permissionMaxHeight,
 	}
 }
 

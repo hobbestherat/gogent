@@ -151,37 +151,61 @@ func resolvePermissionDialog(termW, termH int, hasReq bool, body []permissionBod
 	return width, height, bodyY, bodyH, btnY
 }
 
-// TestPermissionDialogFullWidthNoCap is the acceptance test for deleting
-// permissionMaxWidth (=92): on a wide terminal the dialog spans the whole width
-// (terminal minus the 2-cell margins), not 92 columns, so long commands and paths
-// get room.
-func TestPermissionDialogFullWidthNoCap(t *testing.T) {
-	body := []permissionBodyLine{{"Run?", tv.DefaultTheme.DialogFG}}
-	for _, termW := range []int{120, 160, 200} {
-		width, _, _, _, _ := resolvePermissionDialog(termW, 40, false, body)
-		if want := termW - 4; width != want {
-			t.Errorf("termW=%d: width = %d, want %d (the 92-col cap must be gone)", termW, width, want)
+// TestPermissionDialogContentWidthCapped is the #309 acceptance test: the dialog is
+// no longer forced to full width (the old PreferredW=MaxW=termW-2). A short prompt
+// stays at its content floor, and a long command grows the dialog only up to
+// permissionMaxWidth and then wraps/scrolls — it never spans the whole terminal.
+func TestPermissionDialogContentWidthCapped(t *testing.T) {
+	t.Run("short prompt stays compact, not full width", func(t *testing.T) {
+		body := []permissionBodyLine{{"Run?", tv.DefaultTheme.DialogFG}}
+		for _, termW := range []int{120, 160, 200} {
+			width, _, _, _, _ := resolvePermissionDialog(termW, 40, false, body)
+			if width != permissionMinWidth {
+				t.Errorf("termW=%d: short-prompt width = %d, want the %d floor (not full width)", termW, width, permissionMinWidth)
+			}
+			if width >= termW-4 {
+				t.Errorf("termW=%d: width %d still spans the terminal", termW, width)
+			}
 		}
-		if width <= 92 {
-			t.Errorf("termW=%d: width %d still looks capped near 92", termW, width)
+	})
+
+	t.Run("long command grows only to the width cap", func(t *testing.T) {
+		body := []permissionBodyLine{{"$ " + strings.Repeat("arg-", 80), colorTool}}
+		for _, termW := range []int{120, 160, 200} {
+			width, _, _, _, _ := resolvePermissionDialog(termW, 40, false, body)
+			// The binding cap is the tighter of permissionMaxWidth and the 80%
+			// percentage default (which is the limit on a 120-col terminal: 96 < 110).
+			wantW := permissionMaxWidth
+			if pct := termW * 80 / 100; pct < wantW {
+				wantW = pct
+			}
+			if width != wantW {
+				t.Errorf("termW=%d: long-command width = %d, want capped at %d", termW, width, wantW)
+			}
+			if width >= termW-4 {
+				t.Errorf("termW=%d: width %d spans the terminal; the cap must hold", termW, width)
+			}
 		}
-	}
+	})
 }
 
-// TestPermissionDialogNoBodyCap is the acceptance test for deleting
-// permissionMaxBodyRows (=16): given room, a tall body grows well past 16 rows
-// rather than truncating. The old cap would have pinned bodyH at 16.
-func TestPermissionDialogNoBodyCap(t *testing.T) {
+// TestPermissionDialogCapsHeightAndScrolls is the #309 acceptance for the new MaxH
+// cap: a tall body grows only to permissionMaxHeight and then the body scrolls
+// (bodyH < content rows), instead of growing without bound.
+func TestPermissionDialogCapsHeightAndScrolls(t *testing.T) {
 	body := make([]permissionBodyLine, 40)
 	for i := range body {
 		body[i] = permissionBodyLine{text: "line of output", color: colorTool}
 	}
-	_, height, _, bodyH, _ := resolvePermissionDialog(120, 60, false, body)
-	if bodyH < 40 {
-		t.Errorf("bodyH = %d, want >= 40 (the 16-row cap must be gone)", bodyH)
+	width, height, _, bodyH, _ := resolvePermissionDialog(120, 60, false, body)
+	if height > permissionMaxHeight {
+		t.Errorf("height = %d, want capped at permissionMaxHeight (%d)", height, permissionMaxHeight)
 	}
-	if height > 60 {
-		t.Errorf("height %d exceeds terminal 60", height)
+	if contentRows := permissionBodyRows(body, width); bodyH >= contentRows {
+		t.Errorf("bodyH = %d, want < content rows %d (a capped tall body must scroll)", bodyH, contentRows)
+	}
+	if bodyH < 1 {
+		t.Errorf("bodyH = %d, want >= 1", bodyH)
 	}
 }
 
@@ -249,15 +273,16 @@ func TestPermissionDialogLayout(t *testing.T) {
 	})
 }
 
-// TestPermissionDialogReResolvesOnResize locks the fix for the most severe resize
-// variant (issue #299): permissionDialogSpec bakes the open-time terminal into
-// PreferredW/MaxW (= termW-2) and MaxH (= termH-2), so dialog.Fit alone would pin
-// the dialog to the terminal it was opened on — staying ~78×22 on a 200×50 screen.
-// installResizeReflow recomputes the spec from the live terminal instead, so
-// growing the screen grows the dialog on BOTH axes, and a permission dialog
-// resized into a screen matches one opened fresh there (path-independent).
+// TestPermissionDialogReResolvesOnResize locks path-independent re-resolution
+// (issues #299, #309): permissionDialogSpec measures PrefH against the open-time
+// width, so dialog.Fit alone would pin the dialog to the terminal it was opened on.
+// installResizeReflow recomputes the spec from the live terminal instead, so a
+// permission dialog resized into a screen matches one opened fresh there.
+//
+// A long command makes the width re-resolution observable: on an 80-col terminal it
+// is held below the cap, on a 200-col terminal it reaches permissionMaxWidth.
 func TestPermissionDialogReResolvesOnResize(t *testing.T) {
-	req := permission.Request{Action: permission.ActionShell, Detail: "ls -la"}
+	req := permission.Request{Action: permission.ActionShell, Detail: strings.Repeat("arg-", 80)}
 
 	resized := newTestWorkbench(t)
 	resized.app.Resize(80, 24)
@@ -269,8 +294,8 @@ func TestPermissionDialogReResolvesOnResize(t *testing.T) {
 
 	resized.app.Resize(200, 50)
 	grown := dialogBounds(resized)
-	if grown.W <= small.W || grown.H <= small.H {
-		t.Fatalf("permission dialog did not grow on resize (both axes): small=%+v grown=%+v", small, grown)
+	if grown.W <= small.W {
+		t.Fatalf("permission width did not re-resolve on resize: small=%d grown=%d", small.W, grown.W)
 	}
 
 	fresh := newTestWorkbench(t)
@@ -279,11 +304,11 @@ func TestPermissionDialogReResolvesOnResize(t *testing.T) {
 	want := dialogBounds(fresh)
 
 	if grown.W != want.W || grown.H != want.H {
-		t.Errorf("permission resized into 200x50 = %dx%d, want %dx%d (fresh open); both axes must re-resolve",
+		t.Errorf("permission resized into 200x50 = %dx%d, want %dx%d (fresh open); the spec must re-resolve",
 			grown.W, grown.H, want.W, want.H)
 	}
-	if want.W != 200-4 {
-		t.Errorf("fresh permission width = %d, want 196 (full width, no 92-col cap)", want.W)
+	if want.W != permissionMaxWidth {
+		t.Errorf("fresh permission width for a long command = %d, want permissionMaxWidth %d", want.W, permissionMaxWidth)
 	}
 }
 

@@ -17,6 +17,13 @@ import (
 const (
 	modelEditorLabelW = 16
 	modelEditorBoxX   = 2 + modelEditorLabelW
+	// modelEditorMinWidth is the comfort floor when the widest option is short.
+	modelEditorMinWidth = 64
+	// modelEditorHeight is the editor's fixed footprint: the field rows (the Model
+	// select down to the Thinking row) plus the button row at height-3. The layout
+	// never grows vertically, so the height is pinned here rather than inflating to
+	// the 85% vertical default (issue #309).
+	modelEditorHeight = 18
 )
 
 // longestRuneLen returns the display width (in cells) of the widest string in ss,
@@ -75,11 +82,25 @@ func (w *Workbench) showModelEditor() {
 		names[i] = nameLabel(i)
 	}
 
-	// Large by default (≈80%×85% of the terminal) with a 64×18 floor; PreferredW
-	// keeps the widest option label fitting the boxed fields without clipping so a
-	// long model name still shows in full (issues #108, #299). The Select needs two
-	// extra cells (value padding + ▼) and boxW = width - boxX - 3.
-	spec := tv.DialogSpec{MinW: 64, MinH: 18, PreferredW: longestRuneLen(names) + 2 + boxX + 3}
+	// The boxed Select must show the widest model label in full (issue #108). After
+	// #309 the 80% percentage default is an upper CAP on PreferredW — only the Min
+	// floor, applied last, can lift the width back above it — so a content-driven
+	// PreferredW alone would be clamped down and a long model name would clip. When
+	// the widest option needs more than the 80% default, raise MinW to the content
+	// width (bounded by the usable screen so the floor never pushes the dialog past
+	// the edge); otherwise keep the comfort floor. The height is pinned to the fixed
+	// field layout (MinH == MaxH) so the editor sizes to its content instead of the
+	// 85% vertical default (issue #309). The Select needs two extra cells (value
+	// padding + ▼) and boxW = width - boxX - 3.
+	needed := longestRuneLen(names) + 2 + boxX + 3
+	minW := modelEditorMinWidth
+	if needed > minW {
+		minW = needed
+	}
+	if usable := w.app.Width() - 2*tv.DefaultDialogMargin; usable > modelEditorMinWidth && minW > usable {
+		minW = usable
+	}
+	spec := tv.DialogSpec{MinW: minW, MinH: modelEditorHeight, MaxH: modelEditorHeight, PreferredW: needed}
 	x, y, width, height := w.dialogRect(spec)
 	boxW := width - boxX - 3
 

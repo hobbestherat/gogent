@@ -5,6 +5,19 @@ import (
 	tv "github.com/hobbestherat/turbotui/turbotv"
 )
 
+// Sizing knobs for the single-field input dialog (issues #299, #309).
+const (
+	// inputMinWidth keeps a tiny prompt usable on a small terminal.
+	inputMinWidth = 40
+	// inputMaxWidth caps the width so a long label does not stretch the box to the
+	// full terminal width.
+	inputMaxWidth = 80
+	// inputDialogHeight pins the height to the fixed layout — a prompt row, the
+	// field, a gap and the button row — so the box never grows vertically: there is
+	// only ever one line of input.
+	inputDialogHeight = 7
+)
+
 // inputDialogConfig holds the optional behaviour of showInputDialog, populated
 // by the variadic inputDialogOption arguments.
 type inputDialogConfig struct {
@@ -38,9 +51,17 @@ func (w *Workbench) showInputDialog(title, label, initial string, onResult func(
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	// Large by default (≈80%×85% of the terminal); the floor keeps a tiny prompt
-	// usable and PreferredW grows to show a long label in full (issue #299).
-	spec := tv.DialogSpec{MinW: 40, MinH: 7, PreferredW: tui.StringWidth(label) + 4}
+	// A single label + one text field needs little room: PreferredW grows to show
+	// the label in full (down to inputMinWidth, up to inputMaxWidth) and the height
+	// is pinned to the fixed one-field layout, so a rename box is ~40×7 rather than
+	// inflating to the percentage default (issues #299, #309).
+	spec := tv.DialogSpec{
+		MinW:       inputMinWidth,
+		MaxW:       inputMaxWidth,
+		MinH:       inputDialogHeight,
+		MaxH:       inputDialogHeight,
+		PreferredW: tui.StringWidth(label) + 4,
+	}
 	x, y, width, height := w.dialogRect(spec)
 
 	dialog := tv.NewDialog(title, x, y, width, height)

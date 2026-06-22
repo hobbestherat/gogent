@@ -18,29 +18,36 @@ func resolveMessageDialog(termW, termH int, message string) (width, height, body
 	return width, height, bodyH
 }
 
-// TestMessageDialogLargeByDefault covers issue #299's central inversion: a short
-// confirm is no longer pinned to 54×8 — it fills ≈80% of the width and ≈85% of
-// the height of the terminal. The body height is always height-6 (borders +
+// TestMessageDialogSizedToContent covers #309's inversion of #299: a short confirm
+// is sized to its content (down to messageMinWidth) instead of being inflated to
+// the 80%×85% percentage default. The body height is always height-6 (borders +
 // paddings + gap + button row) and never below 1.
-func TestMessageDialogLargeByDefault(t *testing.T) {
+func TestMessageDialogSizedToContent(t *testing.T) {
 	for _, tc := range []struct {
-		name                    string
-		termW, termH            int
-		message                 string
-		wantW, wantH, wantBodyH int
+		name         string
+		termW, termH int
+		message      string
 	}{
-		// 80% of 80 = 64 wide; 85% of 25 = 21 tall; body = 21-6 = 15.
-		{"short message fills terminal", 80, 25, "Are you sure you want to quit?", 64, 21, 15},
-		{"empty message still large", 80, 25, "", 64, 21, 15},
-		{"two short lines still large", 80, 25, "Line one.\nLine two.", 64, 21, 15},
-		// On a big terminal it scales up, not stays small: 80% of 200 = 160, 85% of 50 = 42.
-		{"scales with a big terminal", 200, 50, "ok?", 160, 42, 36},
+		{"short message stays compact", 80, 25, "Are you sure you want to quit?"},
+		{"empty message is minimal", 80, 25, ""},
+		{"two short lines stay compact", 80, 25, "Line one.\nLine two."},
+		{"short message on a big terminal stays small", 200, 50, "ok?"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w, h, bodyH := resolveMessageDialog(tc.termW, tc.termH, tc.message)
-			if w != tc.wantW || h != tc.wantH || bodyH != tc.wantBodyH {
-				t.Errorf("resolveMessageDialog(%d,%d,%q) = (w=%d,h=%d,body=%d), want (w=%d,h=%d,body=%d)",
-					tc.termW, tc.termH, tc.message, w, h, bodyH, tc.wantW, tc.wantH, tc.wantBodyH)
+			defW, defH := tc.termW*80/100, tc.termH*85/100
+			// The crux of #309: short content does NOT fill the percentage default.
+			if w >= defW {
+				t.Errorf("width = %d, want smaller than the %d (80%%) default for short content", w, defW)
+			}
+			if h >= defH {
+				t.Errorf("height = %d, want smaller than the %d (85%%) default for short content", h, defH)
+			}
+			if w < messageMinWidth {
+				t.Errorf("width = %d, below the %d floor", w, messageMinWidth)
+			}
+			if h != bodyH+messageChrome && h-messageChrome >= 1 {
+				t.Errorf("height %d != bodyH %d + chrome %d", h, bodyH, messageChrome)
 			}
 			if bodyH < 1 {
 				t.Errorf("body height %d < 1", bodyH)
@@ -49,33 +56,55 @@ func TestMessageDialogLargeByDefault(t *testing.T) {
 	}
 }
 
-// TestMessageDialogNoBodyCap is the acceptance test for deleting messageMaxBodyRows
-// (=12): given vertical room, a tall message must grow the body well past 12 rows
-// instead of truncating. The old cap would have pinned bodyH at 12 here.
-func TestMessageDialogNoBodyCap(t *testing.T) {
+// TestMessageDialogCapsAndScrolls is the #309 acceptance for the new MaxH cap: a
+// very tall message no longer grows without bound (the old behaviour) nor fills the
+// whole terminal — it grows to messageMaxHeight and then scrolls (bodyH < content).
+func TestMessageDialogCapsAndScrolls(t *testing.T) {
 	msg := strings.Repeat("x\n", 39) + "x" // 40 hard lines
-	// A terminal tall enough to show all 40 lines plus chrome.
+	// A terminal tall enough that the cap, not the screen, is the binding limit.
 	_, height, bodyH := resolveMessageDialog(80, 60, msg)
-	if bodyH < 40 {
-		t.Errorf("bodyH = %d, want >= 40 (the 12-row cap must be gone)", bodyH)
+	if height > messageMaxHeight {
+		t.Errorf("height = %d, want capped at messageMaxHeight (%d)", height, messageMaxHeight)
 	}
-	if height > 60 {
-		t.Errorf("height %d exceeds terminal 60", height)
+	contentRows := messageBodyRows(msg, 80*80/100)
+	if bodyH >= contentRows {
+		t.Errorf("bodyH = %d, want < content rows %d (a capped tall message must scroll)", bodyH, contentRows)
+	}
+	if bodyH < 1 {
+		t.Errorf("bodyH = %d, want >= 1", bodyH)
 	}
 }
 
 // TestMessageDialogGrowsWithContentWidth checks a long single line widens the
-// dialog past the percentage default (PreferredW = longest line + pad), up to the
-// terminal edge.
+// dialog with its content but only up to messageMaxWidth — it does NOT span the
+// terminal. This guards the width cap added in #309.
 func TestMessageDialogGrowsWithContentWidth(t *testing.T) {
-	long := strings.Repeat("a", 150) // far wider than 80% of a 120-col terminal
+	short, _, _ := resolveMessageDialog(120, 40, "ok?")
+	long := strings.Repeat("a", 150) // far wider than messageMaxWidth
 	width, _, _ := resolveMessageDialog(120, 40, long)
-	def := 120 * 80 / 100 // 96
-	if width <= def {
-		t.Errorf("width = %d, want > %d (content wider than the 80%% default should widen it)", width, def)
+	if width <= short {
+		t.Errorf("long-line width %d did not grow past short-line width %d", width, short)
 	}
-	if width > 120-4 {
-		t.Errorf("width = %d, want <= terminal-2*margin (116)", width)
+	if width != messageMaxWidth {
+		t.Errorf("long-line width = %d, want capped at messageMaxWidth (%d)", width, messageMaxWidth)
+	}
+}
+
+// TestMessageDialogLongReachesCaps guards against the caps being set too tight: a
+// genuinely long message (wide and tall) on a roomy terminal must grow all the way
+// to BOTH messageMaxWidth and messageMaxHeight, not stall short of them. This is
+// the counterweight to TestMessageDialogSizedToContent — short content stays small,
+// but long content is still given the full cap to breathe in.
+func TestMessageDialogLongReachesCaps(t *testing.T) {
+	// One long wrapping paragraph: wide enough to hit the width cap and, once
+	// wrapped at that width, tall enough to hit the height cap.
+	long := strings.Repeat("wrap ", 400)
+	w, h, _ := resolveMessageDialog(200, 50, long)
+	if w != messageMaxWidth {
+		t.Errorf("width = %d, want messageMaxWidth %d (cap should be reachable)", w, messageMaxWidth)
+	}
+	if h != messageMaxHeight {
+		t.Errorf("height = %d, want messageMaxHeight %d (cap should be reachable)", h, messageMaxHeight)
 	}
 }
 

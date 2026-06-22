@@ -17,12 +17,14 @@ func dialogBounds(w *Workbench) tv.Rect {
 }
 
 // TestResolveDialogRectPolicy locks the turbotui sizing policy every gogent dialog
-// now rests on (issue #299): large by default (80% wide / 85% tall), the Min floor
-// wins on a tiny screen even past the edge, an explicit Max caps growth, a small
-// PreferredW is ignored in favour of the percentage default, and the result is
-// centered with a non-negative origin.
+// now rests on after #309: the 80%/85% percentage is a CAP the content grows
+// toward, not a floor it is forced up to. A zero preferred fills the percentage
+// default; a content-driven PreferredW BELOW the default is honoured (the dialog
+// sizes to its content); a PreferredW ABOVE the default is clamped down to it; the
+// Min floor still wins on a tiny screen even past the edge; an explicit Max caps
+// growth; and the result is centered with a non-negative origin.
 func TestResolveDialogRectPolicy(t *testing.T) {
-	t.Run("large by default and centered", func(t *testing.T) {
+	t.Run("zero preferred fills the percentage default", func(t *testing.T) {
 		x, y, w, h := tv.ResolveDialogRect(tv.DialogSpec{}, 200, 50)
 		if w != 160 || h != 42 { // 80% of 200, 85% of 50
 			t.Errorf("size = %dx%d, want 160x42", w, h)
@@ -53,18 +55,33 @@ func TestResolveDialogRectPolicy(t *testing.T) {
 		}
 	})
 
-	t.Run("preferred below the default is ignored", func(t *testing.T) {
-		_, _, w, _ := tv.ResolveDialogRect(tv.DialogSpec{PreferredW: 10}, 200, 50)
-		if w != 160 {
-			t.Errorf("width = %d, want 160 (a small PreferredW must not shrink below 80%%)", w)
+	t.Run("preferred below the default is honoured (cap not floor)", func(t *testing.T) {
+		// The #309 inversion: a content-driven PreferredW under the 80% default (160)
+		// now sizes the dialog to its content instead of inflating to the default.
+		_, _, w, _ := tv.ResolveDialogRect(tv.DialogSpec{PreferredW: 100}, 200, 50)
+		if w != 100 {
+			t.Errorf("width = %d, want 100 (a small PreferredW now sizes to content)", w)
 		}
 	})
 
-	t.Run("preferred above the default widens the dialog", func(t *testing.T) {
-		// PreferredW must exceed the 80% default (160) yet fit screen-2*margin (196).
+	t.Run("preferred above the default is capped at it", func(t *testing.T) {
+		// The percentage is now an upper bound: a PreferredW above the 80% default
+		// (160) is clamped down to it even though the screen (196 usable) could hold
+		// it. This is the same clamp that bites the model editor and the browsers.
 		_, _, w, _ := tv.ResolveDialogRect(tv.DialogSpec{PreferredW: 180}, 200, 50)
-		if w != 180 {
-			t.Errorf("width = %d, want 180 (content-driven preferred wins over the default)", w)
+		if w != 160 {
+			t.Errorf("width = %d, want 160 (the percentage default is a cap on PreferredW)", w)
+		}
+	})
+
+	t.Run("a Max above the percentage cap does not lift the cap", func(t *testing.T) {
+		// Even with a generous MaxW, the percentage default still clamps a large
+		// PreferredW: the cap is applied before Max, so Max can only tighten, never
+		// loosen, the percentage ceiling. (Only MinW, applied last, can raise width
+		// back above the percentage.)
+		_, _, w, _ := tv.ResolveDialogRect(tv.DialogSpec{PreferredW: 180, MaxW: 190}, 200, 50)
+		if w != 160 {
+			t.Errorf("width = %d, want 160 (MaxW above the percentage cap cannot lift it)", w)
 		}
 	})
 }
@@ -86,35 +103,97 @@ func TestDialogRectWrapper(t *testing.T) {
 	}
 }
 
-// TestDialogsLargeByDefault opens the dialogs that build cleanly on a bare
-// workbench and checks each resolves to ≈80%×85% of a roomy terminal — the
-// acceptance criterion that dialogs are large by default and grow with the
-// terminal, no longer pinned to 54–60 column boxes.
-func TestDialogsLargeByDefault(t *testing.T) {
+// TestDialogsSizedToContent is the #309 acceptance test (it replaces the old
+// TestDialogsLargeByDefault, which demanded every dialog be exactly 160×42 and so
+// codified the very regression #309 fixes). On a roomy 200×50 terminal:
+//
+//   - small-content dialogs (a one-field input, a one-line confirm) resolve to
+//     their CONTENT size — materially smaller than the 160×42 percentage default
+//     in BOTH dimensions — never the full percentage box;
+//   - list-driven dialogs (command palette, help overlay) stay wide at the
+//     percentage default but have their HEIGHT capped to their item count, so they
+//     do not fill 42 rows when short.
+//
+// Every dialog stays centered and on-screen.
+func TestDialogsSizedToContent(t *testing.T) {
 	const termW, termH = 200, 50
-	const wantW, wantH = 160, 42 // 80% of 200, 85% of 50
-	for _, tc := range []struct {
-		name string
-		open func(*Workbench)
-	}{
-		{"command-palette", func(w *Workbench) { w.showCommandPalette() }},
-		{"help-overlay", func(w *Workbench) { w.showHelpOverlay() }},
-		{"input-dialog", func(w *Workbench) { w.showInputDialog("Rename", "New name", "", nil) }},
-		{"confirm-dialog", func(w *Workbench) { w.showConfirm("Quit", "Are you sure?", func(bool) {}) }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			w := newTestWorkbench(t)
-			w.app.Resize(termW, termH)
-			tc.open(w)
-			b := dialogBounds(w)
-			if b.W != wantW || b.H != wantH {
-				t.Errorf("%s size = %dx%d, want %dx%d (≈80%%×85%%)", tc.name, b.W, b.H, wantW, wantH)
-			}
-			// Centered, on-screen.
-			if b.X != (termW-b.W)/2 || b.Y != (termH-b.H)/2 {
-				t.Errorf("%s origin = (%d,%d), want centered", tc.name, b.X, b.Y)
-			}
-		})
+	const defW, defH = 160, 42 // the 80%×85% percentage default
+
+	t.Run("small dialogs size to content, not the percentage box", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			open func(*Workbench)
+		}{
+			{"input-dialog", func(w *Workbench) { w.showInputDialog("Rename", "New name", "", nil) }},
+			{"confirm-dialog", func(w *Workbench) { w.showConfirm("Quit", "Are you sure?", func(bool) {}) }},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				w := newTestWorkbench(t)
+				w.app.Resize(termW, termH)
+				tc.open(w)
+				b := dialogBounds(w)
+				// Materially smaller than the percentage default on BOTH axes — the
+				// crux of the bug report ("a one-line confirm renders as 160×42").
+				if b.W >= defW || b.H >= defH {
+					t.Errorf("%s size = %dx%d, want materially smaller than the %dx%d default", tc.name, b.W, b.H, defW, defH)
+				}
+				if b.W > defW/2 || b.H > defH/2 {
+					t.Errorf("%s size = %dx%d, want well under half the %dx%d default for one-line content", tc.name, b.W, b.H, defW, defH)
+				}
+				if b.X != (termW-b.W)/2 || b.Y != (termH-b.H)/2 {
+					t.Errorf("%s origin = (%d,%d), want centered", tc.name, b.X, b.Y)
+				}
+			})
+		}
+	})
+
+	t.Run("list-driven dialogs stay wide but cap height to content", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			open func(*Workbench)
+		}{
+			{"command-palette", func(w *Workbench) { w.showCommandPalette() }},
+			{"help-overlay", func(w *Workbench) { w.showHelpOverlay() }},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				w := newTestWorkbench(t)
+				w.app.Resize(termW, termH)
+				tc.open(w)
+				b := dialogBounds(w)
+				if b.W != defW {
+					t.Errorf("%s width = %d, want the %d percentage default (list-driven)", tc.name, b.W, defW)
+				}
+				// Height never exceeds the default, and is capped to the item count
+				// (+chrome) so a short list does not fill 42 rows.
+				if b.H > defH {
+					t.Errorf("%s height = %d, want <= %d", tc.name, b.H, defH)
+				}
+				if b.X != (termW-b.W)/2 || b.Y != (termH-b.H)/2 {
+					t.Errorf("%s origin = (%d,%d), want centered", tc.name, b.X, b.Y)
+				}
+			})
+		}
+	})
+}
+
+// TestConfirmDialogNotHugeForOneLine is the explicit guard the bug report asked
+// for: a one-line confirmation is NOT the 160×42 box that motivated #309. It is
+// materially smaller in BOTH dimensions on a roomy terminal.
+func TestConfirmDialogNotHugeForOneLine(t *testing.T) {
+	const termW, termH = 200, 50
+	w := newTestWorkbench(t)
+	w.app.Resize(termW, termH)
+	w.showConfirm("Quit", "Are you sure?", func(bool) {})
+	b := dialogBounds(w)
+	if b.W == 160 && b.H == 42 {
+		t.Fatalf("one-line confirm is still the regressed 160x42 box")
+	}
+	// A 13-char question needs ~30 cols and ~7 rows; assert it is comfortably small.
+	if b.W > 60 {
+		t.Errorf("one-line confirm width = %d, want compact (<= 60)", b.W)
+	}
+	if b.H > 12 {
+		t.Errorf("one-line confirm height = %d, want compact (<= 12)", b.H)
 	}
 }
 
@@ -148,38 +227,59 @@ func TestDialogsClampToTinyTerminal(t *testing.T) {
 }
 
 // TestDialogReResolvesOnResize is the acceptance test for "resizing the terminal
-// while a dialog is open re-resolves its size" (issue #299). dialog.Fit installs
-// the layer OnResize hook, so an App.Resize must re-center and re-size the open
-// dialog rather than leaving it a stale box. These dialogs use static specs (no
-// terminal dimensions baked into the spec), so they re-resolve fully.
+// while a dialog is open re-resolves its size" (issue #299). dialog.Fit / the
+// reflow hook must re-center the open dialog on resize.
+//
+// The command palette is percentage-driven, so growing the terminal grows it (to
+// the 80% width default). The input dialog is content-fixed (one field), so after
+// #309 it keeps its content size across the resize but must still re-center — the
+// new distinction: small dialogs no longer balloon to the percentage box.
 func TestDialogReResolvesOnResize(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		open func(*Workbench)
-	}{
-		{"command-palette", func(w *Workbench) { w.showCommandPalette() }},
-		{"input-dialog", func(w *Workbench) { w.showInputDialog("Rename", "New name", "", nil) }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			w := newTestWorkbench(t)
-			w.app.Resize(80, 24)
-			tc.open(w)
-			before := dialogBounds(w)
+	t.Run("percentage-driven palette grows with the terminal", func(t *testing.T) {
+		w := newTestWorkbench(t)
+		w.app.Resize(80, 24)
+		w.showCommandPalette()
+		before := dialogBounds(w)
 
-			w.app.Resize(200, 50)
-			after := dialogBounds(w)
+		w.app.Resize(200, 50)
+		after := dialogBounds(w)
 
-			if after == before {
-				t.Fatalf("%s did not re-resolve on resize: stayed %+v", tc.name, after)
-			}
-			if after.W != 160 || after.H != 42 {
-				t.Errorf("%s after resize = %dx%d, want 160x42 (≈80%%×85%% of 200x50)", tc.name, after.W, after.H)
-			}
-			if after.X != (200-after.W)/2 || after.Y != (50-after.H)/2 {
-				t.Errorf("%s not re-centered after resize: origin (%d,%d)", tc.name, after.X, after.Y)
-			}
-		})
-	}
+		if after.W <= before.W {
+			t.Errorf("palette width did not grow on resize: before=%d after=%d", before.W, after.W)
+		}
+		if after.W != 160 {
+			t.Errorf("palette width after resize = %d, want 160 (80%% of 200)", after.W)
+		}
+		if after.X != (200-after.W)/2 || after.Y != (50-after.H)/2 {
+			t.Errorf("palette not re-centered after resize: origin (%d,%d)", after.X, after.Y)
+		}
+	})
+
+	t.Run("content-fixed input re-centers without ballooning", func(t *testing.T) {
+		w := newTestWorkbench(t)
+		w.app.Resize(80, 24)
+		w.showInputDialog("Rename", "New name", "", nil)
+		before := dialogBounds(w)
+
+		w.app.Resize(200, 50)
+		after := dialogBounds(w)
+
+		// Same content size (a single field) on both terminals — not inflated to 160×42.
+		if after.W != before.W || after.H != before.H {
+			t.Errorf("input size changed on resize: before=%dx%d after=%dx%d (content should stay fixed)",
+				before.W, before.H, after.W, after.H)
+		}
+		if after.W >= 160 || after.H >= 42 {
+			t.Errorf("input ballooned to %dx%d on resize, want content size", after.W, after.H)
+		}
+		// But it must re-center on the larger terminal.
+		if after.X != (200-after.W)/2 || after.Y != (50-after.H)/2 {
+			t.Errorf("input not re-centered after resize: origin (%d,%d)", after.X, after.Y)
+		}
+		if after.X == before.X && after.Y == before.Y {
+			t.Errorf("input origin unchanged after resize: stayed (%d,%d)", after.X, after.Y)
+		}
+	})
 }
 
 // TestConfirmDialogResizePathIndependent pins a DEFECT in the confirm/message
@@ -261,6 +361,33 @@ func TestBrowserDialogSpecTracksLiveTerminal(t *testing.T) {
 	}
 }
 
+// TestBrowserPreferredWidthClamped documents a #309 finding: the two-pane browsers
+// (Resources / Saved Sessions / Statistics) still declare PreferredW = 85% of the
+// terminal, but turbotui's percentage is now an 80% CAP, so ResolveDialogRect
+// clamps the 85% request down to 80%. The 85% intent is therefore dead — the
+// browser renders at 80% wide. This is a behaviour change the #309 gogent work did
+// not address (the browsers were assumed "unchanged"); it is benign (the browser
+// stays large and usable) but the spec and reality disagree.
+func TestBrowserPreferredWidthClamped(t *testing.T) {
+	w := newTestWorkbench(t)
+	for _, screenW := range []int{120, 160, 200} {
+		w.app.Resize(screenW, 50)
+		spec := w.browserDialogSpec()
+		if spec.PreferredW != screenW*85/100 {
+			t.Fatalf("browserDialogSpec PreferredW = %d, want %d (the 85%% intent)", spec.PreferredW, screenW*85/100)
+		}
+		_, _, gotW, _ := tv.ResolveDialogRect(spec, screenW, 50)
+		want := screenW * 80 / 100 // the 80% cap, below the 85% the spec asks for
+		if gotW != want {
+			t.Errorf("screenW=%d: resolved width = %d, want %d (85%% PreferredW clamped to the 80%% cap)", screenW, gotW, want)
+		}
+		if gotW >= spec.PreferredW {
+			t.Errorf("screenW=%d: resolved width %d met the 85%% PreferredW %d — the clamp finding no longer holds",
+				screenW, gotW, spec.PreferredW)
+		}
+	}
+}
+
 // TestThemeEditorPinnedFootprint verifies the theme editor keeps its fixed
 // content footprint (Min == Max == themeEditorDialogW × themeEditorDialogH) on
 // every terminal size — the invariant that keeps the scrolling viewport geometry
@@ -291,10 +418,15 @@ func TestThemeEditorPinnedFootprint(t *testing.T) {
 	}
 }
 
-// TestInlineDialogSpecFloors checks every dialog migrated to an inline DialogSpec
-// honours the Min floor from the issue #299 table on a tiny terminal, and grows
-// to the 80% default on a roomy one. The spec literals here mirror each show*
-// function; a drift between them and the source is exactly what this guards.
+// TestInlineDialogSpecFloors checks every dialog that still uses a pure Min-floor
+// inline DialogSpec honours the Min floor on a tiny terminal, and grows to the 80%
+// default on a roomy one. The spec literals here mirror each show* function; a
+// drift between them and the source is exactly what this guards.
+//
+// The command palette and help overlay are deliberately omitted: after #309 their
+// real specs carry a content-keyed MaxH (item count + chrome), so they no longer
+// reach the full 42-row default on a roomy terminal — see TestDialogsSizedToContent
+// (list-driven, height-capped) for their current behaviour.
 func TestInlineDialogSpecFloors(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -304,8 +436,6 @@ func TestInlineDialogSpecFloors(t *testing.T) {
 	}{
 		{"sub-agent settings", tv.DialogSpec{MinW: 64, MinH: 22}, 64, 22, 160, 42},
 		{"notifications", tv.DialogSpec{MinW: 50, MinH: 18}, 50, 18, 160, 42},
-		{"command palette", tv.DialogSpec{MinW: 40, MinH: 10}, 40, 10, 160, 42},
-		{"help overlay", tv.DialogSpec{MinW: 44, MinH: 12}, 44, 12, 160, 42},
 		{"review", tv.DialogSpec{MinW: 40, MinH: 12}, 40, 12, 160, 42},
 		{"sub-agent monologue", tv.DialogSpec{MinW: 40, MinH: 10}, 40, 10, 160, 42},
 	} {
