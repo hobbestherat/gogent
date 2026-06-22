@@ -2671,6 +2671,39 @@ func (g *Gogent) UpdateModel(updated config.ModelConfig) error {
 	return nil
 }
 
+// SetDefaultModel marks the named model as the default for new sessions and
+// persists it to config (issue #296). The name must match a configured model;
+// new sessions resolve their backend from it via defaultConnection().
+func (g *Gogent) SetDefaultModel(name string) error {
+	g.mu.Lock()
+	known := false
+	for _, m := range g.config.ModelConfigs {
+		if m != nil && m.Name == name {
+			known = true
+			break
+		}
+	}
+	if known {
+		g.config.DefaultModel = name
+	}
+	g.mu.Unlock()
+
+	if !known {
+		return fmt.Errorf("model %q not found", name)
+	}
+	if err := g.SaveConfig(); err != nil {
+		g.warnf("Failed to persist config: %v", err)
+	}
+	return nil
+}
+
+// DefaultModelName returns the configured default-model name for new sessions.
+func (g *Gogent) DefaultModelName() string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.config.DefaultModel
+}
+
 // ScanModels queries the given backend's model-listing endpoint and returns the
 // advertised model ids, so the model editor can offer a pick-list instead of a
 // free-text model id. The draft config need not be saved first; only its

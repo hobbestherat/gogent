@@ -68,13 +68,28 @@ func (w *Workbench) showModelEditor() {
 	const labelW = modelEditorLabelW
 	const boxX = modelEditorBoxX
 
-	names := make([]string, len(models))
-	for i, m := range models {
+	// The default model for new sessions (issue #296). The dropdown marks it, and a
+	// "Set as Default" button persists a new choice. Empty when the backend doesn't
+	// expose the default handlers — the control is then hidden.
+	defaultName := ""
+	if w.handlers.GetDefaultModel != nil {
+		defaultName = w.handlers.GetDefaultModel()
+	}
+	nameLabel := func(i int) string {
+		m := models[i]
 		label := m.DisplayName
 		if label == "" {
 			label = m.Name
 		}
-		names[i] = fmt.Sprintf("%s (%s)", label, m.Name)
+		s := fmt.Sprintf("%s (%s)", label, m.Name)
+		if m.Name == defaultName {
+			s += "  ✓ default"
+		}
+		return s
+	}
+	names := make([]string, len(models))
+	for i := range models {
+		names[i] = nameLabel(i)
 	}
 
 	// Size the dialog so the widest option label fits the boxed fields without
@@ -235,6 +250,28 @@ func (w *Workbench) showModelEditor() {
 
 	dialog.Window.AddContent(newButton("Save", tv.Rect{X: width - 24, Y: height - 3, W: 9, H: 1}, save))
 	dialog.Window.AddContent(newButton("Cancel", tv.Rect{X: width - 13, Y: height - 3, W: 10, H: 1}, cancel))
+
+	// "Set Default" marks the currently-selected model as the default for new
+	// sessions and persists it immediately (issue #296). Hidden when the backend
+	// doesn't expose the handler. Uses the model's stable Name, so unsaved field
+	// edits in the dialog don't affect which model becomes default.
+	if w.handlers.SetDefaultModel != nil {
+		setDefault := func() {
+			name := models[cur].Name
+			if err := w.handlers.SetDefaultModel(name); err != nil {
+				w.showConfirm("Default model", "Could not set default:\n"+err.Error(), nil)
+				return
+			}
+			defaultName = name
+			for i := range models {
+				names[i] = nameLabel(i)
+			}
+			sel.Options = names
+			w.desktop.Redraw()
+			w.showConfirm("Default model", fmt.Sprintf("%q is now the default for new sessions.", name), nil)
+		}
+		dialog.Window.AddContent(newButton("Set Default", tv.Rect{X: 2, Y: height - 3, W: 14, H: 1}, setDefault))
+	}
 
 	dialog.Root().OnTypeFn = func(_ *tv.VisualComponent, event tui.TypeEvent) bool {
 		if event.Key == tui.KeyEscape {

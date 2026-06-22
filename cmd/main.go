@@ -257,6 +257,12 @@ func main() {
 			ScanModels: func(m config.ModelConfig) ([]string, error) {
 				return g.ScanModels(m)
 			},
+			GetDefaultModel: func() string {
+				return g.DefaultModelName()
+			},
+			SetDefaultModel: func(name string) error {
+				return g.SetDefaultModel(name)
+			},
 			GetTranscript: func(sessionID, agentID string) []tuipkg.ChatMessage {
 				return toChatMessages(g.AgentTranscript(sessionID, agentID))
 			},
