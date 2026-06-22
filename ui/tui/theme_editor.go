@@ -20,49 +20,92 @@ type themeRole struct {
 	get   func(Theme) tui.Color
 }
 
-// themeRoles is the ordered list of roles the editor exposes: the seven semantic
-// transcript colours followed by the chrome colours. The keys must match the
-// names parsed in applyOverrides so a saved override round-trips on next launch.
-// The labels are screen-anchored descriptions (issue #243) — what the colour
-// actually paints on screen — rather than the struct field names, so a user can
-// tell each role apart at a glance.
+// themeGroup is a labelled section of related roles in the editor (issue #267).
+// Grouping the roles under named headings — Session output, UI chrome, Controls,
+// Buttons and inputs, Code — lets a user find "all transcript colours" or "all
+// dropdown colours" at a glance instead of scanning one flat two-column wall. The
+// groups only decide where each role is drawn on screen; the colour/override
+// machinery still works off the flattened themeRoles below, so every key
+// round-trips exactly as before.
+type themeGroup struct {
+	title string
+	roles []themeRole
+}
+
+// themeGroups is the editor's section layout: each group carries its heading and the
+// roles drawn beneath it (issue #267). The keys must match the names parsed in
+// applyOverrides so a saved override round-trips on next launch. The labels are
+// screen-anchored descriptions (issue #243) — what the colour actually paints on
+// screen — rather than the struct field names, so a user can tell each role apart at
+// a glance.
 //
-// The button/input roles (issue #265) expose the resting pair for each — button_fg/
-// button_bg and input_fg/input_bg, the most-seen state and the core ask of #265, with
-// full fg+bg control so a recoloured background stays legible. The focus pairs
-// (button_focus_*/input_focus_*) are deliberately omitted from the editor — they would
-// add a fourth row per column, and a height tall enough to hold them centres into the
-// always-on-top menu bar on the 24-row terminal this dialog targets — but they remain
-// first-class, config-overridable roles (applyOverrides/ResolveTheme/ApplyTheme) and
-// are audited by paletteContrast like every other role.
-var themeRoles = []themeRole{
-	{"user", "User messages", func(t Theme) tui.Color { return t.User }},
-	{"agent", "Agent replies", func(t Theme) tui.Color { return t.Agent }},
-	{"note", "Thoughts / idle", func(t Theme) tui.Color { return t.Note }},
-	{"tool", "Tool calls", func(t Theme) tui.Color { return t.Tool }},
-	{"result", "Tool results", func(t Theme) tui.Color { return t.Result }},
-	{"info", "System notes", func(t Theme) tui.Color { return t.Info }},
-	{"error", "Errors", func(t Theme) tui.Color { return t.Error }},
-	{"desktop_fg", "Desktop hint text", func(t Theme) tui.Color { return t.DesktopFG }},
-	{"desktop_bg", "Desktop background", func(t Theme) tui.Color { return t.DesktopBG }},
-	{"panel_fg", "Sidebar text", func(t Theme) tui.Color { return t.PanelFG }},
-	{"panel_bg", "Sidebar background", func(t Theme) tui.Color { return t.PanelBG }},
-	{"title", "Panel titles", func(t Theme) tui.Color { return t.Title }},
-	{"divider", "Borders / dividers", func(t Theme) tui.Color { return t.Divider }},
-	{"accent", "Indicators / badges", func(t Theme) tui.Color { return t.Accent }},
-	{"menu_bar_fg", "Menu bar text", func(t Theme) tui.Color { return t.MenuBarFG }},
-	{"menu_bar_bg", "Menu bar background", func(t Theme) tui.Color { return t.MenuBarBG }},
-	{"dropdown_fg", "Dropdown text", func(t Theme) tui.Color { return t.DropdownFG }},
-	{"dropdown_bg", "Dropdown background", func(t Theme) tui.Color { return t.DropdownBG }},
-	{"dropdown_focus_fg", "Focused dropdown fg", func(t Theme) tui.Color { return t.DropdownFocusFG }},
-	{"dropdown_focus_bg", "Focused dropdown bg", func(t Theme) tui.Color { return t.DropdownFocusBG }},
-	{"dropdown_select_fg", "Open row text", func(t Theme) tui.Color { return t.DropdownSelectFG }},
-	{"dropdown_select_bg", "Open row highlight", func(t Theme) tui.Color { return t.DropdownSelectBG }},
-	{"button_fg", "Button text", func(t Theme) tui.Color { return t.ButtonFG }},
-	{"button_bg", "Button background", func(t Theme) tui.Color { return t.ButtonBG }},
-	{"input_fg", "Input text", func(t Theme) tui.Color { return t.InputFG }},
-	{"input_bg", "Input background", func(t Theme) tui.Color { return t.InputBG }},
-	{"code_bg", "Code block background", func(t Theme) tui.Color { return t.CodeBG }},
+// The button/input roles (issue #265) live under "Buttons and inputs" and expose the
+// resting pair for each — button_fg/button_bg and input_fg/input_bg, the most-seen
+// state and the core ask of #265, with full fg+bg control so a recoloured background
+// stays legible. The focus pairs (button_focus_*/input_focus_*) are deliberately
+// omitted from the editor — a sixth section row would push the grid past the
+// always-on-top menu bar on the 24-row terminal this dialog targets (see the height
+// note in showThemeEditor) — but they remain first-class, config-overridable roles
+// (applyOverrides/ResolveTheme/ApplyTheme), are carried across a Save by
+// carryUnexposedOverrides, and are audited by paletteContrast like every other role.
+var themeGroups = []themeGroup{
+	{"Session output", []themeRole{
+		{"user", "User messages", func(t Theme) tui.Color { return t.User }},
+		{"agent", "Agent replies", func(t Theme) tui.Color { return t.Agent }},
+		{"note", "Thoughts / idle", func(t Theme) tui.Color { return t.Note }},
+		{"tool", "Tool calls", func(t Theme) tui.Color { return t.Tool }},
+		{"result", "Tool results", func(t Theme) tui.Color { return t.Result }},
+		{"info", "System notes", func(t Theme) tui.Color { return t.Info }},
+		{"error", "Errors", func(t Theme) tui.Color { return t.Error }},
+	}},
+	{"UI chrome", []themeRole{
+		{"desktop_fg", "Desktop hint text", func(t Theme) tui.Color { return t.DesktopFG }},
+		{"desktop_bg", "Desktop background", func(t Theme) tui.Color { return t.DesktopBG }},
+		{"panel_fg", "Sidebar text", func(t Theme) tui.Color { return t.PanelFG }},
+		{"panel_bg", "Sidebar background", func(t Theme) tui.Color { return t.PanelBG }},
+		{"title", "Panel titles", func(t Theme) tui.Color { return t.Title }},
+		{"divider", "Borders / dividers", func(t Theme) tui.Color { return t.Divider }},
+		{"accent", "Indicators / badges", func(t Theme) tui.Color { return t.Accent }},
+	}},
+	{"Controls", []themeRole{
+		{"menu_bar_fg", "Menu bar text", func(t Theme) tui.Color { return t.MenuBarFG }},
+		{"menu_bar_bg", "Menu bar background", func(t Theme) tui.Color { return t.MenuBarBG }},
+		{"dropdown_fg", "Dropdown text", func(t Theme) tui.Color { return t.DropdownFG }},
+		{"dropdown_bg", "Dropdown background", func(t Theme) tui.Color { return t.DropdownBG }},
+		{"dropdown_focus_fg", "Focused dropdown fg", func(t Theme) tui.Color { return t.DropdownFocusFG }},
+		{"dropdown_focus_bg", "Focused dropdown bg", func(t Theme) tui.Color { return t.DropdownFocusBG }},
+		{"dropdown_select_fg", "Open row text", func(t Theme) tui.Color { return t.DropdownSelectFG }},
+		{"dropdown_select_bg", "Open row highlight", func(t Theme) tui.Color { return t.DropdownSelectBG }},
+	}},
+	{"Buttons and inputs", []themeRole{
+		{"button_fg", "Button text", func(t Theme) tui.Color { return t.ButtonFG }},
+		{"button_bg", "Button background", func(t Theme) tui.Color { return t.ButtonBG }},
+		{"input_fg", "Input text", func(t Theme) tui.Color { return t.InputFG }},
+		{"input_bg", "Input background", func(t Theme) tui.Color { return t.InputBG }},
+	}},
+	{"Code", []themeRole{
+		{"code_bg", "Code block background", func(t Theme) tui.Color { return t.CodeBG }},
+	}},
+}
+
+// themeRoles is the flattened view of themeGroups in section order: the seven
+// transcript colours, the chrome colours, the controls, the button/input resting
+// pairs and the code-block background. applyOverrides, buildThemeConfig,
+// carryUnexposedOverrides, editedTheme and the round-trip/contrast tests all iterate
+// this flat list, so regrouping the editor into sections leaves them untouched —
+// fields[i] and swatches[i] stay keyed by this single role index; the groups only
+// change where each row is drawn. The flatten order equals the historical flat order,
+// so nothing that iterates themeRoles by index shifts.
+var themeRoles = flattenThemeGroups()
+
+// flattenThemeGroups concatenates every group's roles into the ordered themeRoles
+// view, preserving section order.
+func flattenThemeGroups() []themeRole {
+	var roles []themeRole
+	for _, g := range themeGroups {
+		roles = append(roles, g.roles...)
+	}
+	return roles
 }
 
 // themePresets are the selectable built-in palettes shown in the editor's preset
@@ -102,6 +145,27 @@ const swatchSample = "▉▉ Aa"
 // "Code block"). The longest label, "Code block background:", is 22 columns, so the
 // cell is 22 wide; keep it in step with the widest themeRoles label.
 const themeEditorLabelW = 22
+
+// themeEditorContentTop is the first row the grouped role sections occupy (issue
+// #267). The roles start here with no blank separator — the spec-format hint moved up
+// beside the toggles on row 2 — so the five sections' header-plus-role rows fit under
+// the height ceiling the menu bar imposes (see the note in showThemeEditor).
+const themeEditorContentTop = 3
+
+// themeSectionHeader builds a section heading for the grouped editor (issue #267): the
+// title followed by a horizontal rule that fills the rest of the column, so the
+// section reads as a divider above its roles. It is a dialog-coloured label like every
+// other dialog text, so it stays legible under every preset and the NO_COLOR toggle,
+// and is distinguished from the role rows by its own row, the fill rule, and the
+// absence of a trailing ":". The text is sized to exactly r.W columns so the 1-row
+// label never wraps the rule away.
+func themeSectionHeader(title string, r tv.Rect) *tv.Label {
+	text := title
+	if pad := r.W - len([]rune(title)) - 1; pad > 0 {
+		text = title + " " + strings.Repeat("─", pad)
+	}
+	return dialogLabel(text, r)
+}
 
 // swatchStyle computes a swatch's display from a spec field's current text and
 // the disable-colours toggle. It is the single source the live swatch is driven
@@ -215,20 +279,22 @@ func (w *Workbench) showThemeEditor() {
 	}
 	cur := w.handlers.GetTheme()
 
-	// Roomier than the original 72×15 (issue #243): a wider label column for the
-	// descriptive role names and a blank separator row under the header so the two
-	// columns of rows are not cramped. The width stays at 80 so the dialog fits a
-	// standard 80-column terminal (centeredDialog only clamps the origin, it does
-	// not scale an oversized dialog). The height grows with the role count: each
-	// column holds half the roles starting at Y=4, and the "Spec:" hint sits at
-	// height-4, so height must clear that last role row — the dropdown roles (#260)
-	// added three rows per column, lifting it from 18 to 21, and the button/input
-	// resting roles (#265) added one more per column, lifting it to 22. The 24-row
-	// terminal is the hard ceiling: this dialog is centred (centeredDialog), so on a
-	// 24-row terminal it sits at y=(24-height)/2, which must stay ≥1 to clear the
-	// always-on-top menu bar on row 0 — i.e. height ≤ 22. That ceiling is why #265's
-	// four focus roles are kept out of the editor (see themeRoles); a taller dialog
-	// would centre its top frame onto the menu bar.
+	// Width stays at 80 so the dialog fits a standard 80-column terminal
+	// (centeredDialog only clamps the origin, it does not scale an oversized dialog).
+	// The grouped layout (issue #267) draws the 27 roles as five labelled sections
+	// across two columns: the left column stacks Session output (7) and UI chrome (7),
+	// the right column stacks Controls (8), Buttons and inputs (4) and Code (1). Each
+	// section costs one header row plus its roles, so both columns are exactly 16 rows
+	// tall (8+8 left, 9+5+2 right) running from themeEditorContentTop (row 3) to row 18.
+	//
+	// The height is held at 22 — the 24-row terminal is the hard ceiling: this dialog
+	// is centred (centeredDialog), so on a 24-row terminal it sits at y=(24-22)/2=1,
+	// which clears the always-on-top menu bar on row 0. To fit five header rows under
+	// that ceiling the spec-format hint moved up beside the toggles (row 2) and the
+	// roles start at row 3 with no blank separator, leaving the last section row at 18,
+	// clear of the Save/Reset/Cancel buttons at height-3=19. That ceiling is also why
+	// #265's four focus roles stay out of the editor (see themeGroups): a sixth section
+	// row would centre the dialog's top frame onto the menu bar.
 	const width = 80
 	const height = 22
 	x, y := centeredDialog(w, width, height)
@@ -261,10 +327,17 @@ func (w *Workbench) showThemeEditor() {
 	noShadow.BG = tv.DefaultTheme.DialogBG
 	dialog.Window.AddContent(noShadow)
 
-	// One row per role across two columns; fields[i] edits themeRoles[i] and
-	// swatches[i] previews it. The roles split evenly: the first half fill the left
-	// column (the semantic transcript colours and the chrome roles), the remainder the
-	// right column (the menu-bar, dropdown, button/input and code-block roles).
+	// Spec-format hint, lifted up beside the toggles (issue #267) so the grouped role
+	// sections below can start at row 3 and still clear the menu-bar height ceiling. It
+	// sits in the free left half of row 2, left of the Disable-shadows checkbox at x=44.
+	dialog.Window.AddContent(dialogLabel(
+		"Spec: ANSI 0–255, #RRGGBB, or 'default'.",
+		tv.Rect{X: 2, Y: 2, W: 40, H: 1}))
+
+	// One row per role across two columns of labelled sections (issue #267); fields[i]
+	// edits themeRoles[i] and swatches[i] previews it. The placement loop below walks
+	// themeGroups in flatten order, so fields/swatches stay keyed by the single flat
+	// role index — the grouping only changes where each row is drawn.
 	fields := make([]*tv.TextBox, len(themeRoles))
 	swatches := make([]*tv.Label, len(themeRoles))
 
@@ -278,54 +351,60 @@ func (w *Workbench) showThemeEditor() {
 		swatches[i].FG = fg
 	}
 
-	// Two columns inside the width-80 dialog. turbotui insets window content by the
-	// border (one column each side), so the usable content area is 78 columns wide
-	// (relative cols 0..77) — a child running to relative col 78 lands on the right
-	// border and is clipped. Each column holds a label, a 7-wide spec field ("#RRGGBB"
-	// / "default") and a 7-wide swatch ("invalid"); the right column's swatch must end
-	// no later than relative col 77. The right column carries the longest labels so it
-	// gets the full themeEditorLabelW cell; the left column's labels top out at 19
-	// columns ("Desktop background:"), so a narrower cell there buys the gap the right
-	// column needs to keep its swatch (and the "invalid" marker) fully on screen.
-	// The left cell is 20 (not 19): the button/input roles (#265) grew each column, so
-	// the 19-column label "Indicators / badges" now falls in the left column and needs a
-	// 20-wide cell to hold its trailing ":". The left swatch then ends at
-	// x = 2+20+7+2+7-1 = 37, still clear of the right column at x=40.
+	// Two columns of labelled sections inside the width-80 dialog (issue #267).
+	// turbotui insets window content by the border (one column each side), so the usable
+	// content area is 78 columns wide (relative cols 0..77) — a child running to relative
+	// col 78 lands on the right border and is clipped. Each column holds a label, a
+	// 7-wide spec field ("#RRGGBB" / "default") and a 7-wide swatch ("invalid"); the right
+	// column's swatch must end no later than relative col 77.
+	//
+	// The split is by label width as much as balance: the right column carries the
+	// longest labels — "Code block background:" (22) and the dropdown/menu pairs (20) —
+	// so it gets the full themeEditorLabelW cell, while the left column's labels top out
+	// at "Indicators / badges:" (20). The left swatch ends at x = 2+20+7+2+7-1 = 37,
+	// clear of the right column at x=40; the right swatch ends at x = 40+22+7+2+7-1 = 77,
+	// just inside the border. Each column stacks whole groups (a header row then one role
+	// per row): the left holds Session output + UI chrome (8+8 = 16 rows), the right holds
+	// Controls + Buttons and inputs + Code (9+5+2 = 16 rows), so both fill rows 3..18.
 	const fieldW, swatchW = 7, 7
-	columns := [...]struct{ x, labelW int }{
-		{2, 20},                 // left column
-		{40, themeEditorLabelW}, // right column (longest labels)
+	columns := []struct {
+		x, labelW int
+		groups    []themeGroup
+	}{
+		{2, 20, themeGroups[:2]},                 // left: Session output, UI chrome
+		{40, themeEditorLabelW, themeGroups[2:]}, // right: Controls, Buttons and inputs, Code
 	}
-	half := (len(themeRoles) + 1) / 2
-	for i, role := range themeRoles {
-		col, row := 0, 4+i
-		if i >= half {
-			col, row = 1, 4+i-half
+	i := 0
+	for _, col := range columns {
+		rowY := themeEditorContentTop
+		for _, g := range col.groups {
+			dialog.Window.AddContent(themeSectionHeader(g.title,
+				tv.Rect{X: col.x, Y: rowY, W: col.labelW + fieldW + swatchW + 2, H: 1}))
+			rowY++
+			for _, role := range g.roles {
+				idx := i
+				dialog.Window.AddContent(dialogLabel(role.label+":", tv.Rect{X: col.x, Y: rowY, W: col.labelW, H: 1}))
+				box := tv.NewTextBox("", tv.Rect{X: col.x + col.labelW + 1, Y: rowY, W: fieldW, H: 1})
+				box.OnSubmit = func() { refresh() }
+				dialog.Window.AddContent(box)
+				fields[idx] = box
+				sw := tv.NewLabel(swatchSample, tv.Rect{X: col.x + col.labelW + fieldW + 2, Y: rowY, W: swatchW, H: 1})
+				sw.BG = tv.DefaultTheme.DialogBG
+				// Drive the swatch from the field's current value on every render (issue
+				// #243) so it tracks the field as the user types or moves focus away, not
+				// only on Enter. baseDraw is the Label's own renderer, run after the recolour.
+				baseDraw := sw.Component.DrawFn
+				sw.Component.DrawFn = func(c *tv.VisualComponent, surface tv.Surface) {
+					updateSwatch(idx)
+					baseDraw(c, surface)
+				}
+				dialog.Window.AddContent(sw)
+				swatches[idx] = sw
+				i++
+				rowY++
+			}
 		}
-		lx, labelW := columns[col].x, columns[col].labelW
-		dialog.Window.AddContent(dialogLabel(role.label+":", tv.Rect{X: lx, Y: row, W: labelW, H: 1}))
-		box := tv.NewTextBox("", tv.Rect{X: lx + labelW + 1, Y: row, W: fieldW, H: 1})
-		box.OnSubmit = func() { refresh() }
-		dialog.Window.AddContent(box)
-		fields[i] = box
-		sw := tv.NewLabel(swatchSample, tv.Rect{X: lx + labelW + fieldW + 2, Y: row, W: swatchW, H: 1})
-		sw.BG = tv.DefaultTheme.DialogBG
-		// Drive the swatch from the field's current value on every render (issue
-		// #243) so it tracks the field as the user types or moves focus away, not
-		// only on Enter. baseDraw is the Label's own renderer, run after the recolour.
-		idx := i
-		baseDraw := sw.Component.DrawFn
-		sw.Component.DrawFn = func(c *tv.VisualComponent, surface tv.Surface) {
-			updateSwatch(idx)
-			baseDraw(c, surface)
-		}
-		dialog.Window.AddContent(sw)
-		swatches[i] = sw
 	}
-
-	dialog.Window.AddContent(dialogLabel(
-		"Spec: ANSI 0–255, #RRGGBB, or 'default'. Swatch tracks the field live.",
-		tv.Rect{X: 2, Y: height - 4, W: width - 4, H: 1}))
 
 	// loadFields seeds every spec field from a Theme.
 	loadFields := func(t Theme) {
