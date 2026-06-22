@@ -764,7 +764,11 @@ func (g *Gogent) initializeToolRegistry() {
 								results[i].Error = fmt.Sprintf("subagent panicked: %v", r)
 							}
 						}()
-						text, err := session.SpawnSubAgent(loopCtx, ctx.AgentID, name, task, g.SubAgentOneShot())
+						// spawn_subagent is always the blocking one-shot primitive,
+						// even when the session also exposes the async launch_agent
+						// family (the "both" default, issue #284). Async, conversational
+						// workers go through launch_agent, not here.
+						text, err := session.SpawnSubAgent(loopCtx, ctx.AgentID, name, task, true)
 						if err != nil {
 							results[i].Error = err.Error()
 							return
@@ -773,7 +777,7 @@ func (g *Gogent) initializeToolRegistry() {
 					})
 				}
 				session.RunSubAgentsBounded(tasks)
-				return map[string]interface{}{"success": true, "mode": map[string]bool{"one_shot": g.SubAgentOneShot(), "interactive": !g.SubAgentOneShot()}, "results": results}, nil
+				return map[string]interface{}{"success": true, "mode": map[string]bool{"one_shot": true, "interactive": false}, "results": results}, nil
 			}
 
 			name, _ := args["name"].(string)
@@ -781,7 +785,7 @@ func (g *Gogent) initializeToolRegistry() {
 			if strings.TrimSpace(task) == "" {
 				return nil, fmt.Errorf("task is required")
 			}
-			result, err := session.SpawnSubAgent(loopCtx, ctx.AgentID, name, task, g.SubAgentOneShot())
+			result, err := session.SpawnSubAgent(loopCtx, ctx.AgentID, name, task, true)
 			if err != nil {
 				return nil, fmt.Errorf("spawn sub-agent: %w", err)
 			}
@@ -789,7 +793,7 @@ func (g *Gogent) initializeToolRegistry() {
 				"success": true,
 				"name":    name,
 				"task":    task,
-				"mode":    map[string]bool{"one_shot": g.SubAgentOneShot(), "interactive": !g.SubAgentOneShot()},
+				"mode":    map[string]bool{"one_shot": true, "interactive": false},
 				"result":  result,
 			}, nil
 		},
@@ -2435,21 +2439,29 @@ func (g *Gogent) ExecuteToolCall(toolCall *tool.ToolCall, sessionID, agentID, me
 	return result, nil
 }
 
-// oneShotOnlyTools are coordination tools that only make sense in one-shot mode.
-// interactiveOnlyTools only make sense in interactive mode. Each session is
-// handed a registry with the inactive mode's tools stripped out.
+// oneShotOnlyTools are the blocking coordination tools; interactiveOnlyTools are
+// the asynchronous (fire-and-forget) ones. A session is handed a registry with
+// the tools of any model it does NOT expose stripped out — the default "both"
+// model strips neither, so both sets coexist (issue #284).
 var (
 	interactiveOnlyTools = []string{"launch_agent", "agent_status", "agent_send", "agent_terminate", "wait_agent_event"}
 	oneShotOnlyTools     = []string{"spawn_subagent"}
 )
 
 // toolRegistryForMode returns a copy of the global tool registry tailored to the
-// given sub-agent execution model, exposing only that mode's coordination tools.
+// given sub-agent execution model. It strips only the coordination tools the
+// model does NOT expose, so the "both" model (the default, issue #284) keeps both
+// spawn_subagent and the launch_agent family registered in the same session, while
+// the one_shot / interactive models keep exactly one set as before.
 func (g *Gogent) toolRegistryForMode(cfg config.SubAgentConfig) *tool.ToolRegistry {
-	if cfg.IsOneShot() {
-		return g.toolRegistry.CloneWithout(interactiveOnlyTools...)
+	var strip []string
+	if !cfg.ExposesOneShotTools() {
+		strip = append(strip, oneShotOnlyTools...)
 	}
-	return g.toolRegistry.CloneWithout(oneShotOnlyTools...)
+	if !cfg.ExposesInteractiveTools() {
+		strip = append(strip, interactiveOnlyTools...)
+	}
+	return g.toolRegistry.CloneWithout(strip...)
 }
 
 // SubAgentSettings returns the current sub-agent execution-model settings.

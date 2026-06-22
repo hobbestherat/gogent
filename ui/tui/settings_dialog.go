@@ -57,13 +57,13 @@ func newNumField(text string, value, x, y, labelW, boxW int) *numField {
 	return f
 }
 
-// showSettingsDialog opens the modal sub-agent settings dialog. The execution
-// model is a mutually-exclusive Checkbox pair (one-shot vs interactive); below
-// it are independent toggles/fields for recursion, the fan-out and depth limits,
-// and the model / tool / sub-agent timeouts. Values are written back only on OK.
-//
-// One-shot agents stay the default until the interactive model is proven stable,
-// which is why the dialog opens reflecting the persisted config.
+// showSettingsDialog opens the modal sub-agent settings dialog. The delegation
+// style is a mutually-exclusive Checkbox radio group of three: Both (blocking +
+// fire-and-forget, the default — issue #284), One-shot only (blocking) and
+// Interactive only (async, experimental). Below it are independent toggles/fields
+// for recursion, the fan-out and depth limits, and the model / tool / sub-agent
+// timeouts. Values are written back only on OK. The dialog opens reflecting the
+// persisted config.
 func (w *Workbench) showSettingsDialog() {
 	if w.handlers.GetSettings == nil || w.handlers.SetSettings == nil {
 		w.showConfirm("Settings", "Sub-agent settings are unavailable.", nil)
@@ -75,8 +75,8 @@ func (w *Workbench) showSettingsDialog() {
 		timeouts = w.handlers.GetTimeouts()
 	}
 
-	const width = 56
-	const height = 20
+	const width = 64
+	const height = 22
 	x, y := centeredDialog(w, width, height)
 
 	dialog := tv.NewDialog("Sub-agent Settings", x, y, width, height)
@@ -89,42 +89,58 @@ func (w *Workbench) showSettingsDialog() {
 		return cb
 	}
 
-	modelLabel := dialogLabel("Execution model:", tv.Rect{X: 2, Y: 1, W: width - 4, H: 1})
-	oneShot := styleCheck(tv.NewCheckbox("&One-shot agents", tv.Rect{X: 4, Y: 2, W: width - 8, H: 1}, nil))
-	interactive := styleCheck(tv.NewCheckbox("&Interactive agents (experimental)", tv.Rect{X: 4, Y: 3, W: width - 8, H: 1}, nil))
-	recursive := styleCheck(tv.NewCheckbox("Allow &recursive agents", tv.Rect{X: 2, Y: 5, W: width - 4, H: 1}, nil))
+	modelLabel := dialogLabel("Delegation tools (blocking / fire-and-forget):", tv.Rect{X: 2, Y: 1, W: width - 4, H: 1})
+	// Three mutually-exclusive styles. "Both" (the default, issue #284) exposes the
+	// blocking spawn_subagent AND the async launch_agent family in one session, so
+	// the agent can wait on batched work or kick off background research and keep
+	// going. One-shot is blocking only; interactive is async only.
+	both := styleCheck(tv.NewCheckbox("&Both: block when you'll wait, fire-and-forget when you won't", tv.Rect{X: 4, Y: 2, W: width - 8, H: 1}, nil))
+	oneShot := styleCheck(tv.NewCheckbox("&One-shot only (blocking spawn_subagent)", tv.Rect{X: 4, Y: 3, W: width - 8, H: 1}, nil))
+	interactive := styleCheck(tv.NewCheckbox("&Interactive only (async launch_agent, experimental)", tv.Rect{X: 4, Y: 4, W: width - 8, H: 1}, nil))
+	recursive := styleCheck(tv.NewCheckbox("Allow &recursive agents", tv.Rect{X: 2, Y: 6, W: width - 4, H: 1}, nil))
 
 	// Diff-review approval gate (issue #64), an independent toggle below the
 	// timeout fields.
-	reviewEdits := styleCheck(tv.NewCheckbox("Re&view edits before applying (show diff)", tv.Rect{X: 2, Y: 14, W: width - 4, H: 1}, nil))
+	reviewEdits := styleCheck(tv.NewCheckbox("Re&view edits before applying (show diff)", tv.Rect{X: 2, Y: 15, W: width - 4, H: 1}, nil))
 	if w.handlers.GetReviewEdits != nil {
 		reviewEdits.SetChecked(w.handlers.GetReviewEdits())
 	}
 
-	oneShot.SetChecked(cur.IsOneShot())
-	interactive.SetChecked(!cur.IsOneShot())
-	recursive.SetChecked(cur.AllowRecursive)
+	// Reflect the persisted style: exactly one of the three is checked.
+	both.SetChecked(cur.ExposesOneShotTools() && cur.ExposesInteractiveTools())
+	oneShot.SetChecked(cur.ExposesOneShotTools() && !cur.ExposesInteractiveTools())
+	interactive.SetChecked(!cur.ExposesOneShotTools() && cur.ExposesInteractiveTools())
 
-	// Mutual exclusion: the execution-model checkboxes form a radio pair.
-	oneShot.OnToggle = func(checked bool) {
-		interactive.SetChecked(!checked)
-		w.desktop.Redraw()
-	}
-	interactive.OnToggle = func(checked bool) {
-		oneShot.SetChecked(!checked)
-		w.desktop.Redraw()
+	// Mutual exclusion: the three style checkboxes form a radio group. Selecting
+	// one clears the others; a checkbox cannot be unchecked into "none".
+	styles := []*tv.Checkbox{both, oneShot, interactive}
+	for _, cb := range styles {
+		sel := cb
+		sel.OnToggle = func(checked bool) {
+			if !checked {
+				sel.SetChecked(true) // keep one always selected
+				return
+			}
+			for _, other := range styles {
+				if other != sel {
+					other.SetChecked(false)
+				}
+			}
+			w.desktop.Redraw()
+		}
 	}
 
 	const labelW = 22
 	const boxW = 6
-	maxAgents := newNumField("Max sub-agents:", cur.MaxSubAgentsOrDefault(), 2, 6, labelW, boxW)
-	maxDepth := newNumField("Max recursion depth:", cur.MaxDepthOrDefault(), 2, 7, labelW, boxW)
-	timeoutsLabel := dialogLabel("Timeouts (seconds):", tv.Rect{X: 2, Y: 9, W: width - 4, H: 1})
-	modelTO := newNumField("Model timeout:", timeouts.ModelSecondsOrDefault(), 2, 10, labelW, boxW)
-	toolTO := newNumField("Tool timeout:", timeouts.ToolSecondsOrDefault(), 2, 11, labelW, boxW)
-	subTO := newNumField("Sub-agent timeout:", timeouts.SubAgentSecondsOrDefault(), 2, 12, labelW, boxW)
+	maxAgents := newNumField("Max sub-agents:", cur.MaxSubAgentsOrDefault(), 2, 7, labelW, boxW)
+	maxDepth := newNumField("Max recursion depth:", cur.MaxDepthOrDefault(), 2, 8, labelW, boxW)
+	timeoutsLabel := dialogLabel("Timeouts (seconds):", tv.Rect{X: 2, Y: 10, W: width - 4, H: 1})
+	modelTO := newNumField("Model timeout:", timeouts.ModelSecondsOrDefault(), 2, 11, labelW, boxW)
+	toolTO := newNumField("Tool timeout:", timeouts.ToolSecondsOrDefault(), 2, 12, labelW, boxW)
+	subTO := newNumField("Sub-agent timeout:", timeouts.SubAgentSecondsOrDefault(), 2, 13, labelW, boxW)
 
 	dialog.Window.AddContent(modelLabel)
+	dialog.Window.AddContent(both)
 	dialog.Window.AddContent(oneShot)
 	dialog.Window.AddContent(interactive)
 	dialog.Window.AddContent(recursive)
@@ -138,10 +154,13 @@ func (w *Workbench) showSettingsDialog() {
 	var layer *tv.Layer
 	apply := func() {
 		cfg := w.handlers.GetSettings()
-		if interactive.IsChecked() {
+		switch {
+		case interactive.IsChecked():
 			cfg.ExecutionModel = config.SubAgentInteractiveModel
-		} else {
+		case oneShot.IsChecked():
 			cfg.ExecutionModel = config.SubAgentOneShotModel
+		default:
+			cfg.ExecutionModel = config.SubAgentBothModel
 		}
 		cfg.AllowRecursive = recursive.IsChecked()
 		cfg.MaxSubAgents = atoiOr(maxAgents.box.GetText(), cur.MaxSubAgentsOrDefault())
@@ -181,5 +200,5 @@ func (w *Workbench) showSettingsDialog() {
 
 	layer = tv.NewModalLayer("settings-dialog", dialog)
 	w.desktop.AddLayer(layer)
-	w.desktop.SetFocus(oneShot)
+	w.desktop.SetFocus(both)
 }

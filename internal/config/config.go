@@ -92,12 +92,20 @@ const (
 	// return an id immediately and may ask the coordinator for clarification.
 	// Experimental.
 	SubAgentInteractiveModel SubAgentExecutionModel = "interactive"
+	// SubAgentBothModel exposes BOTH the blocking (spawn_subagent) and the
+	// asynchronous fire-and-forget (launch_agent family) coordination tools in the
+	// same session, letting the agent pick blocking delegation for "I need all
+	// results now" and fire-and-forget for "kick this off and keep working"
+	// (issue #284). This is the default so async delegation is reachable without a
+	// mode switch.
+	SubAgentBothModel SubAgentExecutionModel = "both"
 )
 
 // SubAgentConfig captures the user-facing execution-model settings for
 // sub-agents (see the "Settings" section of the sub-agent design).
 type SubAgentConfig struct {
-	// ExecutionModel is "one_shot" (default) or "interactive" (experimental).
+	// ExecutionModel is "both" (default — expose blocking and async tools),
+	// "one_shot" (blocking only) or "interactive" (async only, experimental).
 	ExecutionModel SubAgentExecutionModel `json:"execution_model"`
 	// AllowRecursive permits spawned sub-agents to themselves spawn sub-agents.
 	AllowRecursive bool `json:"allow_recursive"`
@@ -158,17 +166,36 @@ func (c SubAgentConfig) MaxConcurrentOrDefault() int {
 	return c.MaxConcurrent
 }
 
-// IsOneShot reports whether the configured execution model is one-shot. An empty
-// (unset) value defaults to one-shot, the stable mode.
+// IsOneShot reports whether the active model is one-shot ONLY (no async tools).
+// An empty (unset) value defaults to one-shot, the stable mode. The "both" and
+// "interactive" models are NOT one-shot. This drives the prompt-branch and the
+// UI mode label; tool exposure is decided by the Exposes* accessors below.
 func (c SubAgentConfig) IsOneShot() bool {
+	return c.ExecutionModel != SubAgentInteractiveModel && c.ExecutionModel != SubAgentBothModel
+}
+
+// ExposesOneShotTools reports whether the blocking spawn_subagent tool should be
+// available. True for one_shot, both, and the empty (unset) default — false only
+// when the session is restricted to the interactive model.
+func (c SubAgentConfig) ExposesOneShotTools() bool {
 	return c.ExecutionModel != SubAgentInteractiveModel
 }
 
-// DefaultSubAgentConfig returns the conservative defaults: one-shot agents, no
-// recursion. One-shot stays the default until the interactive model is proven.
+// ExposesInteractiveTools reports whether the asynchronous launch_agent family
+// should be available. True for interactive and both; false for one_shot and the
+// empty default. Combined with ExposesOneShotTools this lets a single session
+// expose both styles at once (issue #284).
+func (c SubAgentConfig) ExposesInteractiveTools() bool {
+	return c.ExecutionModel == SubAgentInteractiveModel || c.ExecutionModel == SubAgentBothModel
+}
+
+// DefaultSubAgentConfig returns the shipped defaults: BOTH delegation styles
+// available (issue #284) so fire-and-forget delegation is reachable without a
+// mode switch, with no recursion. One-shot semantics are unchanged — spawn_subagent
+// still blocks; "both" merely also exposes the async launch_agent family.
 func DefaultSubAgentConfig() SubAgentConfig {
 	return SubAgentConfig{
-		ExecutionModel: SubAgentOneShotModel,
+		ExecutionModel: SubAgentBothModel,
 		AllowRecursive: false,
 		MaxSubAgents:   defaultMaxSubAgents,
 		MaxDepth:       defaultMaxDepth,

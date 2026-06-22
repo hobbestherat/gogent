@@ -761,7 +761,9 @@ in parallel while you plan. Batch the independent lookups into a SINGLE
 spawn_subagent call's "subtasks" array (e.g. one sub-agent per module to
 summarize its structure, or diagnostics + grep together) so they run
 concurrently. The sub-agents are also read-only this turn: they investigate and
-report findings only — they must NOT write, edit, or otherwise change anything.`
+report findings only — they must NOT write, edit, or otherwise change anything.
+The asynchronous launch_agent family is NOT available this turn — use the blocking
+spawn_subagent only, and ignore any earlier guidance about launching async agents.`
 	} else {
 		// No delegation tool survived the plan-mode filter (interactive mode strips
 		// spawn_subagent and CloneForPlanMode drops the non-read-only interactive
@@ -1427,10 +1429,22 @@ Use the provided tools to inspect and modify files and run commands. Guidelines:
 
 // coordinatorInstructions describes how the agent may delegate work to
 // sub-agents, tailored to the enabled execution model. It is shared by the
-// top-level agent and (when recursion is enabled) by sub-agents.
+// top-level agent and (when recursion is enabled) by sub-agents. There are three
+// shapes: both styles available (the default, issue #284), interactive only, and
+// one-shot only.
 func coordinatorInstructions(cfg config.SubAgentConfig) string {
-	if cfg.IsOneShot() {
-		return `
+	switch {
+	case cfg.ExposesOneShotTools() && cfg.ExposesInteractiveTools():
+		return coordinatorInstructionsBoth
+	case cfg.ExposesInteractiveTools():
+		return coordinatorInstructionsInteractive
+	default:
+		return coordinatorInstructionsOneShot
+	}
+}
+
+// coordinatorInstructionsOneShot describes blocking spawn_subagent delegation.
+const coordinatorInstructionsOneShot = `
 
 ## Delegating work (one-shot sub-agents)
 Sub-agents are your tool for cutting wall-clock latency: a single spawn_subagent
@@ -1453,20 +1467,64 @@ three modules in parallel instead of reading them one after another, in ONE call
 Each sub-agent runs to completion and returns a result starting with "SUCCESS: "
 or "FAILURE: ". Use a single "name"/"task" pair only for a lone subtask; always
 batch two or more independent subtasks into the one call's "subtasks" array.`
-	}
-	return `
 
-## Delegating work (interactive sub-agents, experimental)
-You may launch asynchronous sub-agents that run concurrently:
-- launch_agent {name, task} starts a worker and returns its agent_id immediately.
+// coordinatorInstructionsInteractive describes asynchronous fire-and-forget
+// delegation with a concrete launch → continue → wait_agent_event → react recipe.
+const coordinatorInstructionsInteractive = `
+
+## Delegating work (interactive, fire-and-forget sub-agents)
+Launch asynchronous workers that run while you keep working, then harvest their
+results when they land:
+- launch_agent {name, task} starts a worker and returns its agent_id IMMEDIATELY —
+  you are NOT blocked, so keep editing/reasoning after it returns.
 - agent_status {agent_id} reports running/waiting/completed/failed and any result.
-- wait_agent_event blocks until a sub-agent finishes or asks a question.
+- wait_agent_event blocks until SOME sub-agent finishes or asks a question, and
+  returns that event (its agent_id, status, and result/question).
 - agent_send {agent_id, message} answers a sub-agent's CLARIFY question or gives
   it more direction.
 - agent_terminate {agent_id} stops a sub-agent you no longer need.
-After launching workers, call wait_agent_event and react to each event until all
-sub-agents have completed.`
-}
+Concrete recipe for "research X in the background while I work on Y":
+  1. launch_agent {name:"research", task:"<X>"}  -> get agent_id, DON'T wait.
+  2. Continue making progress on Y (read/edit/grep) for as long as you usefully can.
+  3. When you need the findings (or have nothing else to do), call wait_agent_event.
+  4. React to the returned event: if it's CLARIFY, answer with agent_send and loop
+     back to step 2; if it completed, fold the result into your work.
+  5. Repeat wait_agent_event until every launched agent has completed.
+Launch several investigations up front, keep working, and collect results as they
+finish — that is the latency win over blocking.`
+
+// coordinatorInstructionsBoth is shown when BOTH styles are available (the
+// default, issue #284). It teaches the choice — block when you must wait on
+// batched work, fire-and-forget when you can keep working — then gives the recipe
+// for each.
+const coordinatorInstructionsBoth = `
+
+## Delegating work (two styles available — pick by whether you'll wait)
+You have BOTH blocking and fire-and-forget delegation. Make delegation your default
+whenever a turn has two or more independent lookups; both styles cut wall-clock
+latency by running work concurrently. Choose the style by what you will do next:
+- BLOCKING (spawn_subagent): use when you need ALL results before you can continue
+  — batched independent work you will wait on (investigating several modules at
+  once, or running diagnostics + verify + grep together to validate a change). ONE
+  spawn_subagent call runs every entry of its "subtasks" array CONCURRENTLY and
+  blocks only until the slowest finishes:
+    {"tool":"spawn_subagent","args":{"subtasks":[
+      {"name":"modules","task":"Map internal/agent and internal/gogent: key types and flow"},
+      {"name":"verify","task":"Run diagnostics and the agent tests; report failures"}
+    ]}}
+  Always batch the independent parts into ONE call (never one spawn per part across
+  turns). Each child returns "SUCCESS: " or "FAILURE: ".
+- FIRE-AND-FORGET (launch_agent family): use when you want to kick work off and KEEP
+  WORKING — e.g. background research while you refactor. Recipe:
+    1. launch_agent {name, task} -> returns an agent_id IMMEDIATELY; you are NOT blocked.
+    2. Keep editing/reasoning on your main task.
+    3. When you need the findings, call wait_agent_event (blocks until some agent
+       finishes or asks a question) and react: answer a CLARIFY with agent_send,
+       fold a completed result into your work, agent_terminate one you no longer need.
+    4. Repeat wait_agent_event until every launched agent has completed.
+    agent_status {agent_id} reports a single worker's state on demand.
+Rule of thumb: "I need everything now" -> spawn_subagent; "start this and let me keep
+going" -> launch_agent then wait_agent_event later.`
 
 // recursionInstructions is appended to a sub-agent's prompt when it is itself
 // permitted to spawn sub-agents.
