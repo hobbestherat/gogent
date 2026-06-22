@@ -799,10 +799,11 @@ func (g *Gogent) initializeToolRegistry() {
 		},
 	})
 
-	// Interactive (experimental) sub-agent coordination tools. They are only
-	// surfaced to a session whose execution model is "interactive" (the registry
-	// is filtered per session in CreateUserSession), but are registered globally
-	// here so that filtering can include/exclude them by name.
+	// Interactive (fire-and-forget) sub-agent coordination tools. They are surfaced
+	// to any session whose execution model exposes the interactive style — the
+	// "both" default and "interactive" (the registry is filtered per session in
+	// CreateUserSession by toolRegistryForMode) — but are registered globally here
+	// so that filtering can include/exclude them by name.
 	g.toolRegistry.Register(&tool.Tool{
 		Name:        "launch_agent",
 		Description: "Launch an asynchronous interactive sub-agent. Returns an agent_id immediately; the agent keeps running concurrently.",
@@ -856,7 +857,7 @@ func (g *Gogent) initializeToolRegistry() {
 
 	g.toolRegistry.Register(&tool.Tool{
 		Name:        "agent_send",
-		Description: "Send a message to an interactive sub-agent, e.g. to answer its CLARIFY question or give more direction.",
+		Description: "Answer an interactive sub-agent's CLARIFY question. The agent must be awaiting input (status 'waiting'); drive this off a clarify event from wait_agent_event.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{

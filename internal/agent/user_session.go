@@ -1480,8 +1480,9 @@ results when they land:
 - agent_status {agent_id} reports running/waiting/completed/failed and any result.
 - wait_agent_event blocks until SOME sub-agent finishes or asks a question, and
   returns that event (its agent_id, status, and result/question).
-- agent_send {agent_id, message} answers a sub-agent's CLARIFY question or gives
-  it more direction.
+- agent_send {agent_id, message} answers a sub-agent's CLARIFY question. Only use
+  it once the agent has asked (it must be 'waiting'); send it in response to a
+  clarify event from wait_agent_event.
 - agent_terminate {agent_id} stops a sub-agent you no longer need.
 Concrete recipe for "research X in the background while I work on Y":
   1. launch_agent {name:"research", task:"<X>"}  -> get agent_id, DON'T wait.
@@ -1913,9 +1914,25 @@ type InteractiveAgent struct {
 // immediately. The worker runs concurrently; the coordinator observes its
 // progress via NextAgentEvent / InteractiveAgentStatus and can steer it with
 // SendToInteractiveAgent / TerminateInteractiveAgent.
+//
+// Fire-and-forget agents count against the shared SubAgentLimiter just like
+// one-shot batches, so the global MaxConcurrent cap bounds BOTH engines (issue
+// #284 — "both" is the default, so async launches must not be able to slip the
+// global ceiling). Because a launch must stay non-blocking, the slot is acquired
+// or the launch is rejected (rather than running inline as RunSubAgentsBounded
+// does): the coordinator can wait for a running agent to finish and retry. The
+// slot is released in runInteractive when the worker goroutine exits.
 func (s *UserSession) LaunchInteractiveAgent(parentAgentID, name, task string) (string, error) {
+	s.mu.RLock()
+	limiter := s.subAgentLimiter
+	s.mu.RUnlock()
+	if !limiter.tryAcquire() {
+		return "", fmt.Errorf("sub-agent concurrency limit reached: wait for a running agent to finish (via wait_agent_event) before launching another")
+	}
+
 	child, err := s.newSubAgent(parentAgentID, name, task, KindInteractive)
 	if err != nil {
+		limiter.release() // never started the worker; give the slot back
 		return "", err
 	}
 	parent := child.GetParent()
@@ -1942,6 +1959,14 @@ func (s *UserSession) LaunchInteractiveAgent(parentAgentID, name, task string) (
 // runInteractive drives an interactive sub-agent across one or more rounds,
 // pausing for coordinator input whenever the model replies CLARIFY:.
 func (s *UserSession) runInteractive(ia *InteractiveAgent, task string) {
+	// Release the global concurrency slot acquired in LaunchInteractiveAgent when
+	// this worker exits, on every terminal path (completion, failure, termination,
+	// panic). Exactly one release pairs with the one acquire at launch.
+	s.mu.RLock()
+	limiter := s.subAgentLimiter
+	s.mu.RUnlock()
+	defer limiter.release()
+
 	// This runs on its own background goroutine, so a panic here would crash the
 	// whole process. Contain it and finish the agent as failed instead (issue #8).
 	defer func() {
@@ -2090,14 +2115,23 @@ func (s *UserSession) NextAgentEvent(timeout time.Duration) (AgentEvent, bool) {
 	}
 }
 
-// SendToInteractiveAgent delivers a message (e.g. an answer to a CLARIFY) to a
-// running interactive sub-agent.
+// SendToInteractiveAgent delivers a message (an answer to a CLARIFY) to an
+// interactive sub-agent that is awaiting input. The interactive loop only reads
+// its inbox while paused at a CLARIFY, so a message sent to an agent that is busy
+// running (and may finish without ever pausing) would be silently discarded. To
+// avoid reporting a false success for a message that will never be consumed, this
+// rejects sends unless the agent is currently waiting; the coordinator should
+// drive sends off a CLARIFY event from wait_agent_event (by which point the agent
+// is waiting).
 func (s *UserSession) SendToInteractiveAgent(agentID, message string) error {
 	s.mu.RLock()
 	ia := s.interactive[agentID]
 	s.mu.RUnlock()
 	if ia == nil {
 		return &NotFoundError{ID: agentID}
+	}
+	if status := ia.agent.GetStatus(); status != StatusWaiting {
+		return fmt.Errorf("agent %s is not awaiting input (status %s); agent_send only answers a CLARIFY question", agentID, status)
 	}
 	select {
 	case ia.inbox <- message:
