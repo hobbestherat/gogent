@@ -65,11 +65,13 @@ func (w *Workbench) showSettingsDialog() {
 	// A fixed-form dialog (a static column of checkboxes and numeric fields plus an
 	// OK/Cancel row; no scrolling, no growing content), so it is PINNED to its content
 	// footprint rather than left to fill the 80%×85% box (issue #317). PreferredW=72
-	// fits the longest label ("&Both: …", 60 cells) with breathing room; MaxW caps it
-	// so it never balloons to 160; MinW keeps the label from clipping on a small
-	// terminal. The height is pinned at 20: the last field is at Y=15 and the button
-	// row at height-3, so 20 leaves one blank gap. The spec is static (no
-	// terminal-dependent fields), so dialog.Fit re-resolves it correctly on resize.
+	// fits the longest label ("&Both: …", 60 cells) with breathing room on any terminal
+	// wide enough to honour it (≥90 cols); MaxW caps it so it never balloons to 160. On a
+	// narrow 80-col terminal the 80% cap still forces width down to 64 and the longest
+	// label clips — inherent to the cap policy, as before — so MinW=64 is the floor. The
+	// height is pinned at 20: the last field is at Y=15 and the button row at height-3, so
+	// 20 leaves one blank gap. The spec is static (no terminal-dependent fields), so the
+	// dialog.Fit re-resolve of the frame on resize stays correct.
 	spec := tv.DialogSpec{MinW: 64, MaxW: 76, PreferredW: 72, MinH: 20, MaxH: 20}
 	x, y, width, height := w.dialogRect(spec)
 

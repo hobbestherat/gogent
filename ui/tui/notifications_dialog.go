@@ -22,10 +22,11 @@ func (w *Workbench) showNotificationsDialog() {
 	// A fixed-form dialog (two groups of checkboxes plus an OK/Cancel row; no
 	// scrolling, no growing content), so it is PINNED to its content footprint rather
 	// than left to fill the 80%×85% box (issue #317). PreferredW=54 fits the longest
-	// label ("Nati&ve (notify-send / terminal-notifier)", 41 cells) without clipping;
-	// MaxW caps it so it never balloons to 160; MinW keeps it usable on a small
-	// terminal. The height is pinned at 18: the last toggle is at Y=13 and the button
-	// row at height-3. The spec is static, so dialog.Fit re-resolves it on resize.
+	// label ("Nati&ve (notify-send / terminal-notifier)", 41 cells) without clipping on
+	// any terminal wide enough to honour it; MaxW caps it so it never balloons to 160;
+	// MinW keeps it usable on a small terminal. The height is pinned at 18: the last
+	// toggle is at Y=13 and the button row at height-3. The spec is static, so the
+	// dialog.Fit re-resolve of the frame on resize stays correct (issue #299).
 	spec := tv.DialogSpec{MinW: 50, MaxW: 58, PreferredW: 54, MinH: 18, MaxH: 18}
 	x, y, width, height := w.dialogRect(spec)
 

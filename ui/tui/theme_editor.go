@@ -642,33 +642,64 @@ func (w *Workbench) showThemeEditor() {
 	viewport := tv.NewComponent(tv.Rect{X: 0, Y: layout.contentTop, W: layout.scrollbarX, H: layout.visibleRows})
 	dialog.Window.AddContent(viewport)
 
-	// scrollRow couples a header/label/field/swatch component to its column-local logical
-	// row so reflow() can reposition and show/hide it as the viewport scrolls.
+	// rowKind tags which cell of a role row a component is, so its horizontal placement can be
+	// re-derived from the resolved column geometry both at build time and on resize (issue #317).
+	type rowKind int
+	const (
+		rowHeader rowKind = iota
+		rowLabel
+		rowField
+		rowSwatch
+	)
+	// cellRect is the x-origin and width of a row's cell within its column — the single place
+	// horizontal placement is computed, called when building the rows and again by relayout()
+	// when the dialog is resized.
+	cellRect := func(col themeEditorColumn, kind rowKind) (x, wdt int) {
+		switch kind {
+		case rowHeader:
+			return col.x, col.labelW + fieldW + swatchW + 2
+		case rowField:
+			return col.x + col.labelW + 1, fieldW
+		case rowSwatch:
+			return col.x + col.labelW + fieldW + 2, swatchW
+		default: // rowLabel
+			return col.x, col.labelW
+		}
+	}
+
+	// scrollRow couples a header/label/field/swatch component to its column-local logical row
+	// and the column/cell it belongs to, so reflow() can reposition and show/hide it as the
+	// viewport scrolls and relayout() can re-place it horizontally when the dialog is resized.
 	type scrollRow struct {
 		comp    *tv.VisualComponent
 		logical int
+		colIdx  int
+		kind    rowKind
 	}
 	var rows []scrollRow
-	addRow := func(comp *tv.VisualComponent, logical int) {
+	addRow := func(comp *tv.VisualComponent, logical, colIdx int, kind rowKind) {
 		viewport.AddChild(comp)
-		rows = append(rows, scrollRow{comp, logical})
+		rows = append(rows, scrollRow{comp, logical, colIdx, kind})
 	}
 
 	i := 0
-	for _, col := range layout.columns {
+	for colIdx, col := range layout.columns {
 		logical := 0 // column-local row; viewport-relative Y is logical-scrollY (set by reflow)
 		for _, g := range col.groups {
-			addRow(themeSectionHeader(g.title,
-				tv.Rect{X: col.x, Y: logical, W: col.labelW + fieldW + swatchW + 2, H: 1}).Root(), logical)
+			hx, hw := cellRect(col, rowHeader)
+			addRow(themeSectionHeader(g.title, tv.Rect{X: hx, Y: logical, W: hw, H: 1}).Root(), logical, colIdx, rowHeader)
 			logical++
 			for _, role := range g.roles {
 				idx := i
-				addRow(dialogLabel(role.label+":", tv.Rect{X: col.x, Y: logical, W: col.labelW, H: 1}).Root(), logical)
-				box := tv.NewTextBox("", tv.Rect{X: col.x + col.labelW + 1, Y: logical, W: fieldW, H: 1})
+				lx, lw := cellRect(col, rowLabel)
+				addRow(dialogLabel(role.label+":", tv.Rect{X: lx, Y: logical, W: lw, H: 1}).Root(), logical, colIdx, rowLabel)
+				fx, fw := cellRect(col, rowField)
+				box := tv.NewTextBox("", tv.Rect{X: fx, Y: logical, W: fw, H: 1})
 				box.OnSubmit = func() { refresh() }
-				addRow(box.Root(), logical)
+				addRow(box.Root(), logical, colIdx, rowField)
 				fields[idx] = box
-				sw := tv.NewLabel(swatchSample, tv.Rect{X: col.x + col.labelW + fieldW + 2, Y: logical, W: swatchW, H: 1})
+				sx, sWid := cellRect(col, rowSwatch)
+				sw := tv.NewLabel(swatchSample, tv.Rect{X: sx, Y: logical, W: sWid, H: 1})
 				sw.BG = tv.DefaultTheme.DialogBG
 				// Drive the swatch from the field's current value on every render (issue
 				// #243) so it tracks the field as the user types or moves focus away, not
@@ -678,7 +709,7 @@ func (w *Workbench) showThemeEditor() {
 					updateSwatch(idx)
 					baseDraw(c, surface)
 				}
-				addRow(sw.Root(), logical)
+				addRow(sw.Root(), logical, colIdx, rowSwatch)
 				swatches[idx] = sw
 				i++
 				logical++
@@ -731,23 +762,26 @@ func (w *Workbench) showThemeEditor() {
 		w.desktop.Redraw()
 	}
 
-	// The fixed vertical scrollbar, drawn only when the content overflows the viewport. Its
+	// The fixed vertical scrollbar and the wheel handler are always wired so they track the
+	// live viewport across a resize (issue #317): the bar's DrawFn paints nothing when the
+	// content fits the (grown) viewport, and scrollTo clamps to maxScroll (a no-op at 0). The
 	// DrawFn reads the live scrollY each frame, so the thumb tracks the current offset.
-	if layout.maxScroll() > 0 {
-		bar := tv.NewComponent(tv.Rect{X: layout.scrollbarX, Y: layout.contentTop, W: 1, H: layout.visibleRows})
-		bar.DrawFn = func(c *tv.VisualComponent, surface tv.Surface) {
-			drawThemeEditorScrollbar(surface, c.AbsoluteBounds(),
-				themeEditorContentRows(), layout.visibleRows, scrollY,
-				tv.DefaultTheme.DialogFG, tv.DefaultTheme.DialogBG)
+	bar := tv.NewComponent(tv.Rect{X: layout.scrollbarX, Y: layout.contentTop, W: 1, H: layout.visibleRows})
+	bar.DrawFn = func(c *tv.VisualComponent, surface tv.Surface) {
+		if layout.maxScroll() == 0 {
+			return // content fits the viewport — no scrollbar to draw
 		}
-		dialog.Window.AddContent(bar)
-		// Mouse wheel over the section content scrolls it. Delta is +1 for wheel-up and -1
-		// for wheel-down, so subtract it (scrollY -= Delta) to scroll the content the natural
-		// way — the same convention turbotui's own text view, tree and select use.
-		viewport.OnScrollFn = func(_ *tv.VisualComponent, event tui.ScrollEvent) bool {
-			scrollTo(scrollY - event.Delta)
-			return true
-		}
+		drawThemeEditorScrollbar(surface, c.AbsoluteBounds(),
+			themeEditorContentRows(), layout.visibleRows, scrollY,
+			tv.DefaultTheme.DialogFG, tv.DefaultTheme.DialogBG)
+	}
+	dialog.Window.AddContent(bar)
+	// Mouse wheel over the section content scrolls it. Delta is +1 for wheel-up and -1
+	// for wheel-down, so subtract it (scrollY -= Delta) to scroll the content the natural
+	// way — the same convention turbotui's own text view, tree and select use.
+	viewport.OnScrollFn = func(_ *tv.VisualComponent, event tui.ScrollEvent) bool {
+		scrollTo(scrollY - event.Delta)
+		return true
 	}
 
 	// loadFields seeds every spec field from a Theme.
@@ -805,9 +839,12 @@ func (w *Workbench) showThemeEditor() {
 	}
 	cancel := func() { w.desktop.RemoveLayer(layer) }
 
-	dialog.Window.AddContent(newButton("Reset", tv.Rect{X: 2, Y: height - 3, W: 9, H: 1}, reset))
-	dialog.Window.AddContent(newButton("Save", tv.Rect{X: width - 24, Y: height - 3, W: 9, H: 1}, save))
-	dialog.Window.AddContent(newButton("Cancel", tv.Rect{X: width - 13, Y: height - 3, W: 10, H: 1}, cancel))
+	resetBtn := newButton("Reset", tv.Rect{X: 2, Y: height - 3, W: 9, H: 1}, reset)
+	saveBtn := newButton("Save", tv.Rect{X: width - 24, Y: height - 3, W: 9, H: 1}, save)
+	cancelBtn := newButton("Cancel", tv.Rect{X: width - 13, Y: height - 3, W: 10, H: 1}, cancel)
+	dialog.Window.AddContent(resetBtn)
+	dialog.Window.AddContent(saveBtn)
+	dialog.Window.AddContent(cancelBtn)
 
 	dialog.Root().OnTypeFn = func(_ *tv.VisualComponent, event tui.TypeEvent) bool {
 		if event.Key == tui.KeyEscape {
@@ -836,8 +873,40 @@ func (w *Workbench) showThemeEditor() {
 		return true
 	}
 
+	// relayout re-derives the whole interior from the live dialog bounds when the terminal is
+	// resized (issue #317): it re-resolves and re-centres the outer frame, recomputes the
+	// layout, and re-places the viewport, every scrolling row, the scrollbar and the action
+	// buttons. Without it dialog.Fit would re-resolve only the outer frame and leave the
+	// controls clustered in the open-time box; with it a dialog opened small then enlarged
+	// matches one opened fresh at the new size. It reads the live bounds rather than the
+	// open-time ones, honouring "the renderer must read the live window bounds, not the
+	// constants".
+	relayout := func() {
+		nx, ny, nw, nh := w.dialogRect(spec)
+		dialog.Window.Component.SetBounds(tv.Rect{X: nx, Y: ny, W: nw, H: nh})
+		layout = resolveThemeEditorLayout(nw, nh)
+		viewport.SetBounds(tv.Rect{X: 0, Y: layout.contentTop, W: layout.scrollbarX, H: layout.visibleRows})
+		for _, r := range rows {
+			x, wdt := cellRect(layout.columns[r.colIdx], r.kind)
+			b := r.comp.Bounds
+			b.X, b.W = x, wdt
+			r.comp.SetBounds(b) // Y is set by reflow() below
+		}
+		bar.SetBounds(tv.Rect{X: layout.scrollbarX, Y: layout.contentTop, W: 1, H: layout.visibleRows})
+		resetBtn.Root().SetBounds(tv.Rect{X: 2, Y: nh - 3, W: 9, H: 1})
+		saveBtn.Root().SetBounds(tv.Rect{X: nw - 24, Y: nh - 3, W: 9, H: 1})
+		cancelBtn.Root().SetBounds(tv.Rect{X: nw - 13, Y: nh - 3, W: 10, H: 1})
+		scrollY = layout.clampScroll(scrollY)
+		reflow()
+		keepFocusVisible()
+	}
+
 	layer = tv.NewModalLayer("theme-editor", dialog)
 	w.desktop.AddLayer(layer)
-	dialog.Fit(spec) // re-resolve/re-center the floored dialog when the terminal is resized (issue #299)
+	// Re-resolve and re-flow the dialog (frame + interior) on terminal resize (issues #299/#317).
+	layer.OnResize = func(tv.Rect) {
+		relayout()
+		w.desktop.Redraw()
+	}
 	w.desktop.SetFocus(preset)
 }
