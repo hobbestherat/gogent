@@ -280,6 +280,47 @@ func helpText(cmds []command) string {
 	return b.String()
 }
 
+// paletteVChrome is the palette's non-list vertical cost: 2 borders + 1 search-box
+// row + 1 gap + 1 hint row + 1 bottom pad. A height of itemCount + paletteVChrome
+// shows every command without dead space, so it is the MaxH that keeps a short
+// palette compact (issue #309). It must track the listH math in showCommandPalette
+// (listH = height - listY - 3, listY = 3).
+const paletteVChrome = 6
+
+// helpVChrome is the help overlay's non-body vertical cost: 2 borders + 1 top pad +
+// 1 hint/button row + 1 bottom pad. A height of lineCount + helpVChrome shows the
+// whole cheatsheet without dead space, so it is the MaxH that keeps a short binding
+// list compact (issue #309). It must track the bodyH math in showHelpOverlay
+// (bodyH = height - 5).
+const helpVChrome = 5
+
+// availableCommandCount reports how many commands the palette will list with an
+// empty query — every command that carries an action and is visible in the current
+// configuration. It is the row count the palette's MaxH is keyed to.
+func availableCommandCount(cmds []command) int {
+	n := 0
+	for _, c := range cmds {
+		if c.available() {
+			n++
+		}
+	}
+	return n
+}
+
+// textLineCount reports how many display lines text occupies, counting a trailing
+// newline as a line terminator rather than an extra empty line. helpText ends every
+// line (including the last) with '\n', so this is the cheatsheet's row count.
+func textLineCount(text string) int {
+	if text == "" {
+		return 0
+	}
+	n := strings.Count(text, "\n")
+	if !strings.HasSuffix(text, "\n") {
+		n++
+	}
+	return n
+}
+
 // showCommandPalette opens the fuzzy command palette (issue #60): a filterable
 // list of every available action. Typing filters live; ↑/↓ move the selection
 // and Enter runs it (closing the palette first so the action's own dialog is not
@@ -297,9 +338,12 @@ func newCloseableDialog(title string, x, y, width, height int, closeFn func()) *
 }
 
 func (w *Workbench) showCommandPalette() {
-	// Large by default (≈80%×85% of the terminal) with a 40×10 floor; the list
-	// height/width derive from the dialog, so it grows with the terminal (#299).
-	spec := tv.DialogSpec{MinW: 40, MinH: 10}
+	all := w.commands()
+	// List-driven, so it benefits from width — keep it near the percentage default
+	// (no PreferredW) with a 40×10 floor — but cap the height to the actual command
+	// count (+ chrome) so a short palette does not fill 42 rows on a roomy terminal
+	// (issues #299, #309).
+	spec := tv.DialogSpec{MinW: 40, MinH: 10, MaxH: availableCommandCount(all) + paletteVChrome}
 	x, y, width, height := w.dialogRect(spec)
 
 	var layer *tv.Layer
@@ -326,7 +370,6 @@ func (w *Workbench) showCommandPalette() {
 	dialog.Window.AddContent(dialogLabel("Type to filter · ↑↓ move · Enter run · Esc close",
 		tv.Rect{X: 2, Y: height - 2, W: width - 4, H: 1}))
 
-	all := w.commands()
 	render := func() {
 		items := filterCommands(all, searchBox.GetText())
 		nodes := make([]*tv.TreeNode, 0, len(items))
@@ -394,9 +437,12 @@ func (w *Workbench) showCommandPalette() {
 // command table that drives the palette so the two can never disagree. Esc or
 // Close dismisses.
 func (w *Workbench) showHelpOverlay() {
-	// Large by default (≈80%×85% of the terminal) with a 44×12 floor; the body
-	// height/width derive from the dialog, so it grows with the terminal (#299).
-	spec := tv.DialogSpec{MinW: 44, MinH: 12}
+	help := helpText(w.commands())
+	// Read-only and list-driven, so keep it near the percentage default width (no
+	// PreferredW) with a 44×12 floor — but cap the height to the cheatsheet's line
+	// count (+ chrome) so a short binding list does not fill 42 rows (issues #299,
+	// #309).
+	spec := tv.DialogSpec{MinW: 44, MinH: 12, MaxH: textLineCount(help) + helpVChrome}
 	x, y, width, height := w.dialogRect(spec)
 
 	var layer *tv.Layer
@@ -407,7 +453,7 @@ func (w *Workbench) showHelpOverlay() {
 	if bodyH < 3 {
 		bodyH = 3
 	}
-	body := tv.NewTextView(helpText(w.commands()), tv.Rect{X: 2, Y: 1, W: width - 4, H: bodyH})
+	body := tv.NewTextView(help, tv.Rect{X: 2, Y: 1, W: width - 4, H: bodyH})
 	body.FG = tv.DefaultTheme.DialogFG
 	body.BG = tv.DefaultTheme.DialogBG
 	// Help is read top-down, so open anchored at the first binding (issue #174).

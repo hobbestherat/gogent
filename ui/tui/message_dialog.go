@@ -7,13 +7,21 @@ import (
 	tv "github.com/hobbestherat/turbotui/turbotv"
 )
 
-// Sizing knobs for the confirm/message dialog (issue #299). The dialog is large
-// by default (≈80%×85% of the terminal) and only grows past that when the message
-// itself is wider/taller, up to the terminal edge — the cramping 12-row body cap
-// is gone, so a long message is bounded only by the screen and scrolls beyond it.
+// Sizing knobs for the confirm/message dialog (issues #299, #309). The dialog is
+// sized to its message — wide enough for the longest line, tall enough for the
+// wrapped body — and only grows toward the MaxW/MaxH cap when the message is long.
+// A short confirmation ("Are you sure?") therefore stays compact (≈30×7) instead
+// of inflating to the percentage default, while a long message grows to the cap
+// and scrolls beyond it.
 const (
 	// messageMinWidth keeps a tiny confirmation legible on a small terminal.
 	messageMinWidth = 30
+	// messageMaxWidth caps how wide a long message grows before it word-wraps, so
+	// even a wide message stays a readable column rather than spanning the screen.
+	messageMaxWidth = 80
+	// messageMaxHeight caps how tall a long message grows before the body scrolls,
+	// so a wall of text does not fill the terminal (issue #309).
+	messageMaxHeight = 24
 	// messagePad is the chrome around the body text: 2 borders + 2 content
 	// margins, so PreferredW = longest line + messagePad shows the widest line in
 	// full before the body word-wraps.
@@ -43,22 +51,27 @@ func messageBodyRows(message string, width int) int {
 	return rows
 }
 
-// messageDialogSpec turns a confirm/message into a terminal-aware DialogSpec: at
+// messageDialogSpec turns a confirm/message into a content-driven DialogSpec: at
 // least messageMinWidth wide and wide enough to show the longest line in full
-// (PreferredW), large by default and grown vertically with the wrapped body
-// (PrefH) up to the terminal edge (MaxH, replacing the old 12-row cap). It is
-// pure so the sizing can be tested without a live event loop. The body height the
-// dialog ends up with is derived from the resolved height via messageBodyHeight.
+// (PreferredW), capped at messageMaxWidth; tall enough for the wrapped body
+// (PrefH), capped at messageMaxHeight. The caps replace the old terminal-baked
+// MaxH=termH-2 — which left the height path-dependent on resize (issue #309) — so
+// a short message stays compact and only a long one grows toward the cap and
+// scrolls. It is pure so the sizing can be tested without a live event loop; the
+// body height the dialog ends up with is derived from the resolved height via
+// messageBodyHeight.
 func messageDialogSpec(termW, termH int, message string) tv.DialogSpec {
 	prefW := tv.LongestLineWidth(message) + messagePad
 	// Resolve the width first (height does not affect it) so the body-row count
 	// is measured against the real dialog width.
-	_, _, width, _ := tv.ResolveDialogRect(tv.DialogSpec{MinW: messageMinWidth, PreferredW: prefW}, termW, termH)
+	_, _, width, _ := tv.ResolveDialogRect(
+		tv.DialogSpec{MinW: messageMinWidth, MaxW: messageMaxWidth, PreferredW: prefW}, termW, termH)
 	return tv.DialogSpec{
 		MinW:       messageMinWidth,
+		MaxW:       messageMaxWidth,
 		PreferredW: prefW,
 		PrefH:      messageBodyRows(message, width) + messageChrome,
-		MaxH:       termH - 2,
+		MaxH:       messageMaxHeight,
 	}
 }
 
@@ -134,9 +147,9 @@ func (w *Workbench) showConfirm(title, message string, onResult func(bool)) {
 
 	layer = tv.NewModalLayer("confirm-dialog", dialog)
 	w.desktop.AddLayer(layer)
-	// The spec encodes the open-time terminal (content-driven width/height), so
-	// re-resolve against the live terminal on resize rather than the stale spec
-	// dialog.Fit would remember (issue #299).
+	// The spec's PrefH is measured against the open-time width, so re-resolve
+	// against the live terminal on resize rather than the stale spec dialog.Fit
+	// would remember (issues #299, #309).
 	installResizeReflow(w.desktop, dialog, layer, func() tv.DialogSpec {
 		return messageDialogSpec(w.app.Width(), w.app.Height(), message)
 	})
