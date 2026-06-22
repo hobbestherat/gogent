@@ -43,14 +43,14 @@ func NormalizeTodoStatus(s string) TodoStatus {
 }
 
 // todoGlyph maps a status to a compact glyph for the system-prompt checklist
-// block. It mirrors the sidebar's glyphs (☐ pending, ◐ in-progress, ☑ completed)
-// so the model and the human see the same shape.
+// block. It mirrors the sidebar's glyphs (☐ pending, ◐ in-progress, ✔ completed)
+// so the model and the human see the same shape (issue #315).
 func todoGlyph(status TodoStatus) string {
 	switch status {
 	case TodoInProgress:
 		return "◐"
 	case TodoCompleted:
-		return "☑"
+		return "✔"
 	default:
 		return "☐"
 	}

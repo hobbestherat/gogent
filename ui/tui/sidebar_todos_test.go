@@ -322,7 +322,7 @@ func TestTodoStatusIconsDistinctFromAgentIcons(t *testing.T) {
 	}{
 		{agent.TodoPending, "☐"},
 		{agent.TodoInProgress, "◐"},
-		{agent.TodoCompleted, "☑"},
+		{agent.TodoCompleted, "✔"},
 	}
 	for _, tc := range cases {
 		if got := todoStatusIcon(tc.status); got != tc.glyph {
@@ -345,7 +345,7 @@ func TestTodoLabel(t *testing.T) {
 	}{
 		{"pending", agent.TodoItem{Content: "Read docs", Status: agent.TodoPending}, "☐ Read docs"},
 		{"in-progress", agent.TodoItem{Content: "Coding", Status: agent.TodoInProgress}, "◐ Coding"},
-		{"completed", agent.TodoItem{Content: "Done", Status: agent.TodoCompleted}, "☑ Done"},
+		{"completed", agent.TodoItem{Content: "Done", Status: agent.TodoCompleted}, "✔ Done"},
 		{"trims surrounding whitespace", agent.TodoItem{Content: "  padded  ", Status: agent.TodoPending}, "☐ padded"},
 		{"blank content shows placeholder", agent.TodoItem{Content: "   ", Status: agent.TodoPending}, "☐ (empty)"},
 		{"empty content shows placeholder", agent.TodoItem{Content: "", Status: agent.TodoPending}, "☐ (empty)"},
@@ -433,7 +433,7 @@ func anyRowInRangeContains(rows []string, from, to int, sub string) bool {
 }
 
 // todoGlyphs is the disambiguated glyph set the tree region must never show.
-var todoGlyphs = []string{"☐", "◐", "☑"}
+var todoGlyphs = []string{"☐", "◐", "✔"}
 
 // joinRows is a compact dump for failure messages: one "NN|<row>|" per line.
 func joinRows(rows []string) string {
