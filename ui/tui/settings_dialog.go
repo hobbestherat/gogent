@@ -20,19 +20,6 @@ func atoiOr(s string, def int) int {
 	return n
 }
 
-// centeredDialog returns the top-left corner that centers a width×height dialog.
-func centeredDialog(w *Workbench, width, height int) (int, int) {
-	x := (w.app.Width() - width) / 2
-	y := (w.app.Height() - height) / 2
-	if x < 0 {
-		x = 0
-	}
-	if y < 0 {
-		y = 0
-	}
-	return x, y
-}
-
 // dialogLabel builds a label coloured for a dialog background.
 func dialogLabel(text string, r tv.Rect) *tv.Label {
 	l := tv.NewLabel(text, r)
@@ -75,9 +62,10 @@ func (w *Workbench) showSettingsDialog() {
 		timeouts = w.handlers.GetTimeouts()
 	}
 
-	const width = 64
-	const height = 22
-	x, y := centeredDialog(w, width, height)
+	// Large by default (≈80%×85% of the terminal) with a 64×22 floor so the form
+	// never collapses (issue #299).
+	spec := tv.DialogSpec{MinW: 64, MinH: 22}
+	x, y, width, height := w.dialogRect(spec)
 
 	dialog := tv.NewDialog("Sub-agent Settings", x, y, width, height)
 	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
@@ -200,5 +188,6 @@ func (w *Workbench) showSettingsDialog() {
 
 	layer = tv.NewModalLayer("settings-dialog", dialog)
 	w.desktop.AddLayer(layer)
+	dialog.Fit(spec) // re-resolve the rect when the terminal is resized (issue #299)
 	w.desktop.SetFocus(both)
 }

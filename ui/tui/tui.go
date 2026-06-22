@@ -423,7 +423,7 @@ func (w *Workbench) SetModels(models []*config.ModelConfig) {
 func (w *Workbench) longestModelNameWidth() int {
 	max := 0
 	for _, n := range w.modelNames {
-		if l := runeLen(n); l > max {
+		if l := tui.StringWidth(n); l > max {
 			max = l
 		}
 	}

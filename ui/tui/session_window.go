@@ -2423,12 +2423,12 @@ func formatStatusLine(state string, stats agent.SessionStats, live liveStats, bu
 		return state
 	}
 	line := state
-	if runeLen(line) > width {
+	if tui.StringWidth(line) > width {
 		return truncateRunes(line, width)
 	}
 	for _, seg := range statusSegments(stats, live, budget) {
 		add := statusSep + seg
-		if runeLen(line)+runeLen(add) <= width {
+		if tui.StringWidth(line)+tui.StringWidth(add) <= width {
 			line += add
 		} else {
 			break
@@ -2614,9 +2614,6 @@ func headerSelectWidth(longestName, windowWidth int) int {
 	}
 	return w
 }
-
-// runeLen returns the number of display cells (runes) in s.
-func runeLen(s string) int { return utf8.RuneCountInString(s) }
 
 // maximizeGlyph / restoreGlyph are the title-bar maximize button's two states:
 // [□] invites expanding the window to the available area, [▣] marks it expanded

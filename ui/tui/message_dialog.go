@@ -7,74 +7,69 @@ import (
 	tv "github.com/hobbestherat/turbotui/turbotv"
 )
 
-// Sizing knobs for the confirm/message dialog. The width is a fixed preferred
-// value clamped to the terminal; the height grows with the wrapped message up
-// to messageMaxBodyRows, beyond which (and on short terminals) the body scrolls
-// rather than overflowing — the original turbotui helper used a fixed 2-row,
-// non-wrapping label, so long messages were silently clipped (issue #98).
+// Sizing knobs for the confirm/message dialog (issue #299). The dialog is large
+// by default (≈80%×85% of the terminal) and only grows past that when the message
+// itself is wider/taller, up to the terminal edge — the cramping 12-row body cap
+// is gone, so a long message is bounded only by the screen and scrolls beyond it.
 const (
-	messageWidth       = 54
-	messageMinWidth    = 30
-	messageMaxBodyRows = 12
+	// messageMinWidth keeps a tiny confirmation legible on a small terminal.
+	messageMinWidth = 30
+	// messagePad is the chrome around the body text: 2 borders + 2 content
+	// margins, so PreferredW = longest line + messagePad shows the widest line in
+	// full before the body word-wraps.
+	messagePad = 4
+	// messageChrome is the non-body vertical cost: 2 borders + top pad + 1 gap +
+	// 1 button row + 1 bottom pad. bodyH = height - messageChrome.
+	messageChrome = 6
 )
 
-// messageDialogLayout sizes a confirm/message dialog for the terminal and the
-// wrapped message, returning the dialog width/height and the body view height.
-// Width is the preferred width clamped to the terminal; height grows with the
-// wrapped body up to messageMaxBodyRows, then the body scrolls. It is pure so
-// the grow-with-content / clamp-to-terminal / scroll-on-overflow behaviour can
-// be tested without a live event loop.
-func messageDialogLayout(termW, termH int, message string) (width, height, bodyH int) {
-	width = messageWidth
-	if width > termW-2 {
-		width = termW - 2
-	}
-	if width < messageMinWidth {
-		width = messageMinWidth
-	}
-	if width > termW {
-		width = termW
-	}
-	if width < 1 {
-		width = 1
-	}
-
-	// The body spans width-4 columns (X:2 … width-3) and turbotui reserves the
-	// last column for the scrollbar, so text wraps at width-5.
+// messageBodyRows reports how many display rows the message occupies when wrapped
+// inside a dialog of the given outer width, matching what the body TextView
+// renders: each hard line wraps independently at width-5 (the body spans width-4
+// columns and turbotui reserves the last for the scrollbar). It delegates to
+// turbotui's WrapText so the prediction can never drift from the real render.
+func messageBodyRows(message string, width int) int {
 	wrapW := width - 5
 	if wrapW < 1 {
 		wrapW = 1
 	}
 	rows := 0
 	for _, line := range strings.Split(message, "\n") {
-		rows += wrapRowCount(line, wrapW)
+		rows += len(tv.WrapText(line, wrapW))
 	}
 	if rows < 1 {
 		rows = 1
 	}
-	bodyH = rows
-	if bodyH > messageMaxBodyRows {
-		bodyH = messageMaxBodyRows
-	}
+	return rows
+}
 
-	// height = 2 borders + top pad + body + 1 gap + 1 button row + 1 bottom pad.
-	height = bodyH + 6
-	if maxH := termH - 2; height > maxH {
-		height = maxH
+// messageDialogSpec turns a confirm/message into a terminal-aware DialogSpec: at
+// least messageMinWidth wide and wide enough to show the longest line in full
+// (PreferredW), large by default and grown vertically with the wrapped body
+// (PrefH) up to the terminal edge (MaxH, replacing the old 12-row cap). It is
+// pure so the sizing can be tested without a live event loop. The body height the
+// dialog ends up with is derived from the resolved height via messageBodyHeight.
+func messageDialogSpec(termW, termH int, message string) tv.DialogSpec {
+	prefW := tv.LongestLineWidth(message) + messagePad
+	// Resolve the width first (height does not affect it) so the body-row count
+	// is measured against the real dialog width.
+	_, _, width, _ := tv.ResolveDialogRect(tv.DialogSpec{MinW: messageMinWidth, PreferredW: prefW}, termW, termH)
+	return tv.DialogSpec{
+		MinW:       messageMinWidth,
+		PreferredW: prefW,
+		PrefH:      messageBodyRows(message, width) + messageChrome,
+		MaxH:       termH - 2,
 	}
-	if height < 1 {
-		height = 1
-	}
-	if height > termH {
-		height = termH
-	}
+}
 
-	// Derive the body height from the final (possibly clamped) dialog height.
-	bodyH = height - 6
+// messageBodyHeight is the body TextView's row count for a resolved dialog
+// height: the height minus the fixed chrome, floored at one visible row.
+func messageBodyHeight(height int) int {
+	bodyH := height - messageChrome
 	if bodyH < 1 {
 		bodyH = 1
 	}
-	return width, height, bodyH
+	return bodyH
 }
 
 // showConfirm opens a modal confirm/message dialog. When onResult is non-nil the
@@ -84,8 +79,9 @@ func messageDialogLayout(termW, termH int, message string) (width, height, bodyH
 // when it overflows, and it renders with the dialog's own high-contrast palette
 // (issue #98).
 func (w *Workbench) showConfirm(title, message string, onResult func(bool)) {
-	width, height, bodyH := messageDialogLayout(w.app.Width(), w.app.Height(), message)
-	x, y := centeredDialog(w, width, height)
+	spec := messageDialogSpec(w.app.Width(), w.app.Height(), message)
+	x, y, width, height := w.dialogRect(spec)
+	bodyH := messageBodyHeight(height)
 
 	dialog := tv.NewDialog(title, x, y, width, height)
 	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
@@ -138,6 +134,7 @@ func (w *Workbench) showConfirm(title, message string, onResult func(bool)) {
 
 	layer = tv.NewModalLayer("confirm-dialog", dialog)
 	w.desktop.AddLayer(layer)
+	dialog.Fit(spec) // re-resolve the rect when the terminal is resized (issue #299)
 	w.desktop.SetFocus(focus)
 }
 
@@ -146,8 +143,8 @@ func (w *Workbench) showConfirm(title, message string, onResult func(bool)) {
 // clamped to the content margins so it never escapes a narrow dialog.
 func confirmButtonRow(width, btnY int) (yes, no tv.Rect) {
 	const gap = 4
-	yesW := buttonLabelWidth("Yes")
-	noW := buttonLabelWidth("No")
+	yesW := tv.ButtonLabelWidth("Yes")
+	noW := tv.ButtonLabelWidth("No")
 	total := yesW + gap + noW
 	startX := (width - total) / 2
 	if startX < 2 {
@@ -161,7 +158,7 @@ func confirmButtonRow(width, btnY int) (yes, no tv.Rect) {
 
 // centeredButton centres a single button labelled by label on row btnY.
 func centeredButton(width, btnY int, label string) tv.Rect {
-	w := buttonLabelWidth(label)
+	w := tv.ButtonLabelWidth(label)
 	x := (width - w) / 2
 	if x < 2 {
 		x = 2

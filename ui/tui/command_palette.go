@@ -297,8 +297,10 @@ func newCloseableDialog(title string, x, y, width, height int, closeFn func()) *
 }
 
 func (w *Workbench) showCommandPalette() {
-	width, height := paletteSize(w.app.Width(), w.app.Height())
-	x, y := centeredDialog(w, width, height)
+	// Large by default (≈80%×85% of the terminal) with a 40×10 floor; the list
+	// height/width derive from the dialog, so it grows with the terminal (#299).
+	spec := tv.DialogSpec{MinW: 40, MinH: 10}
+	x, y, width, height := w.dialogRect(spec)
 
 	var layer *tv.Layer
 	closeFn := func() { w.desktop.RemoveLayer(layer) }
@@ -382,6 +384,7 @@ func (w *Workbench) showCommandPalette() {
 
 	layer = tv.NewModalLayer("command-palette", dialog)
 	w.desktop.AddLayer(layer)
+	dialog.Fit(spec) // re-resolve the rect when the terminal is resized (issue #299)
 	render()
 	w.desktop.SetFocus(searchBox)
 }
@@ -391,8 +394,10 @@ func (w *Workbench) showCommandPalette() {
 // command table that drives the palette so the two can never disagree. Esc or
 // Close dismisses.
 func (w *Workbench) showHelpOverlay() {
-	width, height := helpSize(w.app.Width(), w.app.Height())
-	x, y := centeredDialog(w, width, height)
+	// Large by default (≈80%×85% of the terminal) with a 44×12 floor; the body
+	// height/width derive from the dialog, so it grows with the terminal (#299).
+	spec := tv.DialogSpec{MinW: 44, MinH: 12}
+	x, y, width, height := w.dialogRect(spec)
 
 	var layer *tv.Layer
 	closeFn := func() { w.desktop.RemoveLayer(layer) }
@@ -425,43 +430,6 @@ func (w *Workbench) showHelpOverlay() {
 
 	layer = tv.NewModalLayer("help-overlay", dialog)
 	w.desktop.AddLayer(layer)
+	dialog.Fit(spec) // re-resolve the rect when the terminal is resized (issue #299)
 	w.desktop.SetFocus(body)
-}
-
-// paletteSize picks a palette size: tall enough to show a useful slice of the
-// command list on a large terminal, clamped to fit a small one.
-func paletteSize(screenW, screenH int) (width, height int) {
-	width, height = 60, 20
-	if w := screenW - 4; width > w {
-		width = w
-	}
-	if h := screenH - 4; height > h {
-		height = h
-	}
-	if width < 40 {
-		width = 40
-	}
-	if height < 10 {
-		height = 10
-	}
-	return width, height
-}
-
-// helpSize picks a cheatsheet size: wide enough for the "key  description"
-// columns, tall enough to show the whole table on a roomy terminal.
-func helpSize(screenW, screenH int) (width, height int) {
-	width, height = 56, 30
-	if w := screenW - 4; width > w {
-		width = w
-	}
-	if h := screenH - 4; height > h {
-		height = h
-	}
-	if width < 44 {
-		width = 44
-	}
-	if height < 12 {
-		height = 12
-	}
-	return width, height
 }

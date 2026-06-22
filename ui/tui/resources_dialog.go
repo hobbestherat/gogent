@@ -43,8 +43,11 @@ type resourceItem struct {
 // support lands (#36), at which point it will list configured servers and their
 // discovered tools.
 func (w *Workbench) showResourcesDialog() {
-	width, height := resourcesDialogSize(w.app.Width(), w.app.Height())
-	x, y := centeredDialog(w, width, height)
+	// Large by default (≈85% of the terminal) with a 60×14 floor so the two-pane
+	// browser stays usable on a small terminal; the list/detail split is derived
+	// from width below, so the panes grow with the dialog (issue #299).
+	spec := tv.DialogSpec{MinW: 60, MinH: 14, PreferredW: w.app.Width() * 85 / 100}
+	x, y, width, height := w.dialogRect(spec)
 
 	dialog := tv.NewDialog("Resources", x, y, width, height)
 	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
@@ -225,29 +228,9 @@ func (w *Workbench) showResourcesDialog() {
 
 	layer = tv.NewModalLayer("resources-dialog", dialog)
 	w.desktop.AddLayer(layer)
+	dialog.Fit(spec) // re-resolve the rect when the terminal is resized (issue #299)
 	render()
 	w.desktop.SetFocus(list)
-}
-
-// resourcesDialogSize picks a browser size that fills a good chunk of a large
-// terminal while still fitting (and staying useful) on a small one. The cap is
-// generous so the detail pane has room to show a full SKILL.md legibly; small
-// terminals clamp down to the floors.
-func resourcesDialogSize(screenW, screenH int) (width, height int) {
-	width, height = 96, 32
-	if w := screenW - 2; width > w {
-		width = w
-	}
-	if h := screenH - 2; height > h {
-		height = h
-	}
-	if width < 60 {
-		width = 60
-	}
-	if height < 14 {
-		height = 14
-	}
-	return width, height
 }
 
 // selectionColorsFor returns the list's selection colours given the dialog's and

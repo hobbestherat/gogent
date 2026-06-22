@@ -19,9 +19,10 @@ func (w *Workbench) showNotificationsDialog() {
 	}
 	cur := w.handlers.GetNotifyConfig()
 
-	const width = 58
-	const height = 18
-	x, y := centeredDialog(w, width, height)
+	// Large by default (≈80%×85% of the terminal) with a 50×18 floor so the form
+	// never collapses (issue #299).
+	spec := tv.DialogSpec{MinW: 50, MinH: 18}
+	x, y, width, height := w.dialogRect(spec)
 
 	dialog := tv.NewDialog("Notifications", x, y, width, height)
 	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
@@ -104,5 +105,6 @@ func (w *Workbench) showNotificationsDialog() {
 
 	layer = tv.NewModalLayer("notifications-dialog", dialog)
 	w.desktop.AddLayer(layer)
+	dialog.Fit(spec) // re-resolve the rect when the terminal is resized (issue #299)
 	w.desktop.SetFocus(enabled)
 }
