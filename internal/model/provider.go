@@ -77,7 +77,7 @@ const (
 // them is recommended for every request. See
 // https://openrouter.ai/docs/api/reference/overview.
 const (
-	openRouterReferer = "https://github.com/gogent/gogent"
+	openRouterReferer = "https://github.com/hobbestherat/gogent"
 	openRouterTitle   = "gogent"
 )
 
