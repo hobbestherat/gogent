@@ -42,6 +42,20 @@ func (w *Workbench) browserDialogSpec() tv.DialogSpec {
 	return tv.DialogSpec{MinW: 60, MinH: 14, PreferredW: w.app.Width() * 85 / 100}
 }
 
+// sessionsDialogSpec is the content-driven size of the Saved Sessions browser
+// (issue #322). Unlike browserDialogSpec it expresses a content footprint rather
+// than a share of the terminal: a list + small metadata detail pane needs ~90
+// cols and ~20 rows, so it grows toward — but is capped well below — the 80%/85%
+// browser balloon (120×30 cap) instead of always filling it. The 60×14 floor
+// keeps it usable on a small terminal. The spec is static (no terminal-share
+// term), so it is path-independent and the dialog uses dialog.Fit on resize.
+func (w *Workbench) sessionsDialogSpec() tv.DialogSpec {
+	return tv.DialogSpec{
+		MinW: 60, MaxW: 120, PreferredW: 90,
+		MinH: 14, MaxH: 30, PrefH: 20,
+	}
+}
+
 func installResizeReflow(desktop *tv.Desktop, dialog *tv.Dialog, layer *tv.Layer, specFn func() tv.DialogSpec) {
 	layer.OnResize = func(tv.Rect) {
 		app := desktop.App()
