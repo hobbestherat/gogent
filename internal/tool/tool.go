@@ -52,6 +52,12 @@ type Tool struct {
 	// the safe choice. It is the property the parallel tool-call fast-path keys on
 	// (issue #50).
 	ReadOnly bool
+	// InputExamples are optional, schema-conformant example argument objects for
+	// format-sensitive tools (Anthropic's input_examples guidance, issue #361).
+	// They are surfaced verbatim in the human-readable tool docs (RenderToolDocs)
+	// to steer the model toward the right call shape; they do not affect
+	// validation or execution and are omitted when empty.
+	InputExamples []map[string]interface{}
 }
 
 type ToolRegistry struct {
@@ -87,6 +93,10 @@ type toolCounts struct {
 	success     map[string]int
 	failure     map[string]int
 	totalMs     map[string]int64
+	// resultBytes accumulates the serialized byte size of every tool result, so
+	// the Statistics view can surface which tools dump the most context (issue
+	// #361). It is a diagnostic counter only.
+	resultBytes map[string]int64
 }
 
 func newToolCounts() *toolCounts {
@@ -96,6 +106,7 @@ func newToolCounts() *toolCounts {
 		success:     make(map[string]int),
 		failure:     make(map[string]int),
 		totalMs:     make(map[string]int64),
+		resultBytes: make(map[string]int64),
 	}
 }
 
@@ -206,6 +217,10 @@ func (tr *ToolRegistry) RenderToolDocs() string {
 			b.WriteString(line)
 			b.WriteString("\n")
 		}
+		for _, line := range renderInputExamples(t.InputExamples) {
+			b.WriteString(line)
+			b.WriteString("\n")
+		}
 		b.WriteString("\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
@@ -269,12 +284,44 @@ func renderSchemaParams(rawSchema interface{}) []string {
 	return lines
 }
 
+// renderInputExamples turns a tool's optional InputExamples into stable
+// "  {...}" lines under an "Examples:" header, each example compact-JSON encoded
+// (Go sorts object keys, so the output is deterministic). It returns nil when the
+// tool declares no examples, so unchanged tools render exactly as before.
+func renderInputExamples(examples []map[string]interface{}) []string {
+	if len(examples) == 0 {
+		return nil
+	}
+	lines := make([]string, 0, len(examples)+1)
+	lines = append(lines, "Examples:")
+	for _, ex := range examples {
+		b, err := json.Marshal(ex)
+		if err != nil {
+			continue
+		}
+		lines = append(lines, "  "+string(b))
+	}
+	// All examples failed to marshal: drop the dangling header.
+	if len(lines) == 1 {
+		return nil
+	}
+	return lines
+}
+
 // Invocations returns how many times a tool has been invoked through the
 // registry (validated calls only).
 func (tr *ToolRegistry) Invocations(name string) int {
 	tr.counts.mu.RLock()
 	defer tr.counts.mu.RUnlock()
 	return tr.counts.invocations[name]
+}
+
+// ResultBytes returns the cumulative serialized byte size of a tool's results
+// (issue #361). It is 0 for a tool that has never produced a result.
+func (tr *ToolRegistry) ResultBytes(name string) int64 {
+	tr.counts.mu.RLock()
+	defer tr.counts.mu.RUnlock()
+	return tr.counts.resultBytes[name]
 }
 
 // LastUsed returns the time of a tool's most recent invocation, or the zero
@@ -296,9 +343,11 @@ func (tr *ToolRegistry) recordInvocation(name string) {
 
 // recordOutcome records the result and duration of a tool execution that already
 // passed validation. success follows the returned ToolCallResponse.Success flag
-// (an error or a non-success response counts as a failure). It pairs with
+// (an error or a non-success response counts as a failure). resultBytes is the
+// serialized size of the tool's result (0 for a failure/panic with no result),
+// accumulated per tool for the Statistics view (issue #361). It pairs with
 // recordInvocation, which bumped the invocation count just before execution.
-func (tr *ToolRegistry) recordOutcome(name string, success bool, durationMs int64) {
+func (tr *ToolRegistry) recordOutcome(name string, success bool, durationMs, resultBytes int64) {
 	tr.counts.mu.Lock()
 	defer tr.counts.mu.Unlock()
 	if success {
@@ -307,6 +356,20 @@ func (tr *ToolRegistry) recordOutcome(name string, success bool, durationMs int6
 		tr.counts.failure[name]++
 	}
 	tr.counts.totalMs[name] += durationMs
+	tr.counts.resultBytes[name] += resultBytes
+}
+
+// resultByteLen measures the serialized byte size of a tool result the way it is
+// handed to the model: JSON encoding, falling back to fmt for the rare value that
+// does not marshal. A nil result (a failed or panicking call) is zero bytes.
+func resultByteLen(result interface{}) int64 {
+	if result == nil {
+		return 0
+	}
+	if b, err := json.Marshal(result); err == nil {
+		return int64(len(b))
+	}
+	return int64(len(fmt.Sprintf("%v", result)))
 }
 
 // ToolStats is a point-in-time view of one tool's usage: how many times it ran,
@@ -318,6 +381,9 @@ type ToolStats struct {
 	Success     int
 	Failure     int
 	TotalMs     int64
+	// ResultBytes is the cumulative serialized size of this tool's results, a
+	// diagnostic for which tools dump the most context (issue #361).
+	ResultBytes int64
 }
 
 // AvgMs returns the mean execution time per invocation, or 0 when the tool has
@@ -347,6 +413,7 @@ func (tr *ToolRegistry) GetAllToolStats() []ToolStats {
 			Success:     tr.counts.success[name],
 			Failure:     tr.counts.failure[name],
 			TotalMs:     tr.counts.totalMs[name],
+			ResultBytes: tr.counts.resultBytes[name],
 		})
 	}
 	return out
@@ -488,13 +555,13 @@ func (tr *ToolRegistry) ExecuteToolCall(toolCall *ToolCall, ctx ToolContext) (re
 	// instead of crashing the process and every concurrent session (issue #8).
 	defer func() {
 		if r := recover(); r != nil {
-			tr.recordOutcome(name, false, time.Since(start).Milliseconds())
+			tr.recordOutcome(name, false, time.Since(start).Milliseconds(), 0)
 			err = fmt.Errorf("tool %q panicked: %v", name, r)
 			resp = &ToolCallResponse{Success: false, Error: err.Error()}
 		}
 	}()
 	result, err := tool.Execute(toolCall.Args, ctx)
-	tr.recordOutcome(name, err == nil, time.Since(start).Milliseconds())
+	tr.recordOutcome(name, err == nil, time.Since(start).Milliseconds(), resultByteLen(result))
 	if err != nil {
 		return &ToolCallResponse{
 			Success: false,

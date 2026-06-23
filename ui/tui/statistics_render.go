@@ -104,18 +104,19 @@ func renderStatsTools(r stats.Report) string {
 		return b.String()
 	}
 	const (
-		cName, cCalls, cOK, cFail, cAvg = 22, 7, 7, 7, 9
+		cName, cCalls, cOK, cFail, cAvg, cBytes = 22, 7, 7, 7, 9, 11
 	)
-	fmt.Fprintf(&b, "%s %s %s %s %s\n",
+	fmt.Fprintf(&b, "%s %s %s %s %s %s\n",
 		padName("Name", cName), padName("Calls", cCalls), padName("OK", cOK),
-		padName("Fail", cFail), padName("Avg ms", cAvg))
+		padName("Fail", cFail), padName("Avg ms", cAvg), padName("Bytes", cBytes))
 	for _, t := range r.Tools {
-		fmt.Fprintf(&b, "%s %s %s %s %s\n",
+		fmt.Fprintf(&b, "%s %s %s %s %s %s\n",
 			padName(t.Name, cName),
 			padName(fmt.Sprintf("%d", t.Invocations), cCalls),
 			padName(fmt.Sprintf("%d", t.Success), cOK),
 			padName(fmt.Sprintf("%d", t.Failure), cFail),
 			padName(formatMs(t.AvgMs()), cAvg),
+			padName(fmt.Sprintf("%d", t.ResultBytes), cBytes),
 		)
 	}
 	return b.String()
