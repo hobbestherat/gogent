@@ -139,6 +139,17 @@ func issue366ActivateSwatchByClick(t *testing.T, w *Workbench, key string) *tv.V
 	return top.Root
 }
 
+func issue366ClickPopupPaletteCell(popup *tv.VisualComponent, swatchX, swatchY, index, cols int) {
+	const colorSwatchW = 2
+	popupX := swatchX
+	popupY := swatchY + 1
+	gridX := popupX + 1
+	gridY := popupY + 1
+	x := gridX + (index%cols)*colorSwatchW
+	y := gridY + index/cols
+	issue366ClickComponent(popup, x, y)
+}
+
 func issue366ActivateSwatchByKey(t *testing.T, w *Workbench, key string, ev tui.TypeEvent) *tv.VisualComponent {
 	t.Helper()
 	_, _, target := issue366RoleSwatch(t, w, key)
@@ -192,6 +203,24 @@ func TestIssue366SwatchClickOpensPickerAndEscapeCancels(t *testing.T) {
 	}
 }
 
+func TestIssue366PopupOutsideClickCancelsWithoutChangingField(t *testing.T) {
+	withIssue366ColorLevel(t, tui.ColorLevel16)
+	w := issue366OpenEditor(t, config.ThemeConfig{
+		Overrides: map[string]string{"user": "3"},
+	}, nil)
+
+	popup := issue366ActivateSwatchByClick(t, w, "user")
+	popup.BubbleType(tui.TypeEvent{Key: tui.KeyEnd})
+	issue366ClickComponent(popup, 0, 0)
+
+	if top := w.desktop.TopLayer(); top == nil || top.Name != "theme-editor" {
+		t.Fatalf("outside click should close only the picker and return to theme editor; top layer=%v", top)
+	}
+	if got := issue366RenderedField(t, w, "user"); got != "3" {
+		t.Fatalf("outside click changed the field: got %q, want original %q", got, "3")
+	}
+}
+
 func TestIssue366SwatchKeyboardCommitANSIUpdatesFieldAndSavePath(t *testing.T) {
 	withIssue366ColorLevel(t, tui.ColorLevel16)
 	var saved config.ThemeConfig
@@ -216,6 +245,38 @@ func TestIssue366SwatchKeyboardCommitANSIUpdatesFieldAndSavePath(t *testing.T) {
 	}
 	if got := saved.Overrides["user"]; got != "15" {
 		t.Fatalf("saved user override = %q, want %q (picker must feed normal buildThemeConfig path)", got, "15")
+	}
+}
+
+func TestIssue366PopupMouseCommitANSIUpdatesFieldAndSavePath(t *testing.T) {
+	withIssue366ColorLevel(t, tui.ColorLevel16)
+	var saved config.ThemeConfig
+	var saves int
+	w := issue366OpenEditor(t, config.ThemeConfig{
+		Overrides: map[string]string{"user": "3"},
+	}, func(cfg config.ThemeConfig) {
+		saved = cfg
+		saves++
+	})
+
+	swatchX, swatchY, target := issue366RoleSwatch(t, w, "user")
+	issue366ClickComponent(target, swatchX, swatchY)
+	popup := w.desktop.TopLayer()
+	if popup == nil || popup.Name != "color-picker-popup" {
+		t.Fatalf("clicking swatch did not open color picker popup; top layer=%v", popup)
+	}
+	// Palette index 0 is terminal default; index 10 is ANSI 9 in the 8-column 16-colour grid.
+	issue366ClickPopupPaletteCell(popup.Root, swatchX, swatchY, 10, 8)
+
+	if got := issue366RenderedField(t, w, "user"); got != "9" {
+		t.Fatalf("mouse picker commit wrote field %q, want %q", got, "9")
+	}
+	issue366ClickSave(t, w)
+	if saves != 1 {
+		t.Fatalf("Save callback count = %d, want 1", saves)
+	}
+	if got := saved.Overrides["user"]; got != "9" {
+		t.Fatalf("saved user override = %q, want %q (mouse picker commit must feed normal buildThemeConfig path)", got, "9")
 	}
 }
 
@@ -287,7 +348,6 @@ func TestIssue366CommittingCurrentSelectionCanonicalizesField(t *testing.T) {
 		level      tui.ColorLevel
 		field      string
 		want       string
-		afterOpen  func(*tv.VisualComponent)
 		wantSeeded string
 	}{
 		{
@@ -337,9 +397,6 @@ func TestIssue366CommittingCurrentSelectionCanonicalizesField(t *testing.T) {
 				if screen := screenText(w); !containsOnScreen(screen, tc.wantSeeded) {
 					t.Fatalf("picker did not seed from current field; preview lacked %q\n%s", tc.wantSeeded, screen)
 				}
-			}
-			if tc.afterOpen != nil {
-				tc.afterOpen(popup)
 			}
 			popup.BubbleType(tui.TypeEvent{Key: tui.KeyEnter})
 			issue366ClickSave(t, w)
