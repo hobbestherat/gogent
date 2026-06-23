@@ -189,10 +189,12 @@ type FunctionDef struct {
 	// author its schema that way (see the read/grep/git/list tools and
 	// validateArgs, which treats a nullable property as optional). On OpenAI a strict
 	// tool also forces parallel tool calls off — see buildRequest, which sets
-	// parallel_tool_calls:false whenever any advertised tool is strict. The flag is
-	// emitted only where the provider spec supports it (OpenAI-compatible); Anthropic
-	// and Gemini have no per-tool strict field and drop it, but still receive the
-	// closed schema.
+	// parallel_tool_calls:false whenever any advertised tool is strict. Both the
+	// OpenAI-compatible wire and the Anthropic wire serialize the flag (Anthropic
+	// supports per-tool strict tool use on the modern models gogent targets — see
+	// anthropicTool.Strict). Gemini's functionDeclarations have no per-tool strict
+	// field (structured output there is request-level via responseSchema), so the
+	// Gemini adapter drops the flag but still receives the closed schema.
 	Strict bool `json:"strict,omitempty"`
 }
 

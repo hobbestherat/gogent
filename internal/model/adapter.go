@@ -171,6 +171,14 @@ type anthropicTool struct {
 	Name        string      `json:"name"`
 	Description string      `json:"description,omitempty"`
 	InputSchema interface{} `json:"input_schema"`
+	// Strict opts the tool into Anthropic's strict tool use (structured outputs):
+	// the model's arguments are guaranteed to validate against input_schema rather
+	// than merely prompted to. Anthropic accepts it on the tool definition the same
+	// way OpenAI does (supported on the modern models gogent targets), so a tool
+	// marked strict gets the guarantee on Anthropic too, not only on the
+	// OpenAI-compatible wire (issue #359). Omitted when false so non-strict tools
+	// and older callers are byte-identical to before.
+	Strict bool `json:"strict,omitempty"`
 }
 
 func (anthropicAdapter) buildBody(req CompletionRequest, buf *bytes.Buffer) error {
@@ -227,6 +235,7 @@ func (anthropicAdapter) buildBody(req CompletionRequest, buf *bytes.Buffer) erro
 			Name:        t.Function.Name,
 			Description: t.Function.Description,
 			InputSchema: schema,
+			Strict:      t.Function.Strict,
 		})
 	}
 
