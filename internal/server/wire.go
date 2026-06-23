@@ -127,6 +127,7 @@ type createWatcherRequest struct {
 	Model           string                `json:"model,omitempty"`
 	Enabled         *bool                 `json:"enabled,omitempty"`
 	ReportToSession *string               `json:"report_to_session,omitempty"`
+	Output          *config.WatcherOutput `json:"on_complete,omitempty"`
 }
 
 // watcherListQuery binds the ?session_id= query parameter of GET /watchers. An

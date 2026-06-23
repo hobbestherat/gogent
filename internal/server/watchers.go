@@ -56,8 +56,10 @@ func (svc watchersSvc) List(r *http.Request, q watcherListQuery) (interface{}, e
 	return out, nil
 }
 
-// Get handles GET /watchers/:id — one watcher by id or name (either kind), 404
-// if unknown.
+// Get handles GET /watchers/:id — one watcher by id or name (either kind). It
+// shares the backend resolver semantics of the mutate endpoints: an unknown
+// id/name is 404 and an ambiguous name (duplicate display names are valid, since
+// identity is the stable id) is 409.
 func (svc watchersSvc) Get(r *http.Request, id string) (interface{}, error) {
 	if err := requireHuman(r, svc.s.provider); err != nil {
 		return nil, err
@@ -65,10 +67,11 @@ func (svc watchersSvc) Get(r *http.Request, id string) (interface{}, error) {
 	if err := svc.ensureEnabled(); err != nil {
 		return nil, err
 	}
-	if info, ok := svc.findWatcher(id); ok {
-		return watcherToView(info), nil
+	info, err := svc.s.g.GetWatcher(id)
+	if err != nil {
+		return nil, watcherHTTPError(err)
 	}
-	return nil, webapi.NewHTTPError(http.StatusNotFound, "watcher not found")
+	return watcherToView(info), nil
 }
 
 // Create handles POST /watchers. report_to_session nil/omitted ⇒ free-running;
@@ -97,6 +100,7 @@ func (svc watchersSvc) Create(r *http.Request, req createWatcherRequest) (interf
 		Model:           strings.TrimSpace(req.Model),
 		Enabled:         enabled,
 		ReportToSession: req.ReportToSession,
+		Output:          req.Output,
 	}
 	info, err := svc.s.g.CreateWatcher(cfg, "")
 	if err != nil {
@@ -200,26 +204,6 @@ func (svc watchersSvc) Delete(r *http.Request, id string) (interface{}, error) {
 }
 
 // --- helpers ----------------------------------------------------------------
-
-// findWatcher resolves a watcher by id or name across every visibility scope:
-// the free-running set plus the attached watchers of every live session. The
-// gogent ListWatchers wrapper has no global "all watchers" view (it is always
-// session-scoped by design), so an attached watcher can only be reached through
-// its owning session; this scans those scopes so Get works regardless of kind.
-// The free-running scope ("") is searched first, then each live session, and the
-// first match wins — a free-running watcher (present in every per-session list)
-// is therefore resolved from the "" scope, never duplicated.
-func (svc watchersSvc) findWatcher(idOrName string) (watcher.WatcherInfo, bool) {
-	scopes := append([]string{""}, svc.s.g.SessionIDs()...)
-	for _, sid := range scopes {
-		for _, info := range svc.s.g.ListWatchers(sid) {
-			if info.ID == idOrName || info.Name == idOrName {
-				return info, true
-			}
-		}
-	}
-	return watcher.WatcherInfo{}, false
-}
 
 // watcherToView maps a backend watcher snapshot to its wire view, matching the
 // agent tools' watcherInfoMap shape (target = owning session id for attached
