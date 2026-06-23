@@ -9,12 +9,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"gogent/internal/agent"
+	"gogent/internal/config"
 	"gogent/internal/model"
 )
 
@@ -85,6 +87,11 @@ type sessionIndex struct {
 	TokensOut int         `json:"tokens_out,omitempty"`
 	Model     string      `json:"model,omitempty"`
 	Shards    []shardMeta `json:"shards"`
+	// Watchers holds the session's attached (session-scoped) watcher definitions so
+	// they are restored with the session via OnSessionRestored (issue #329 Phase 3).
+	// Free-running watchers live in ~/.gogent/watchers.json, never here. Older index
+	// files predating the field decode as nil (no attached watchers).
+	Watchers []config.WatcherConfig `json:"attached_watchers,omitempty"`
 }
 
 // sessionSummary is the lightweight per-session usage summary persisted in the
@@ -122,6 +129,24 @@ type SessionStore struct {
 	dirty   map[string]struct{}
 	timer   *time.Timer
 	stopped bool
+
+	// attachedWatchersFn, when set, supplies a session's attached (session-scoped)
+	// watcher configs to persist in its index so they restore with the session
+	// (issue #329 Phase 3). The host (gogent) installs it via
+	// SetAttachedWatchersProvider; nil persists no watchers. It is read under the
+	// store lock during Save, so it must not call back into the store.
+	attachedWatchersFn func(sessionID string) []config.WatcherConfig
+}
+
+// SetAttachedWatchersProvider installs the callback Save consults for a session's
+// attached (session-scoped) watcher configs, so they are written into the session
+// index and restored with it (issue #329 Phase 3). A nil fn persists none. The
+// provider is invoked while the store lock is held and must not re-enter the
+// store.
+func (s *SessionStore) SetAttachedWatchersProvider(fn func(sessionID string) []config.WatcherConfig) {
+	s.mu.Lock()
+	s.attachedWatchersFn = fn
+	s.mu.Unlock()
 }
 
 // persistState records, for one session, how much of each agent's transcript is
@@ -132,9 +157,10 @@ type SessionStore struct {
 // persisted indices no longer line up, so the next save falls back to a full
 // atomic rewrite of the shard set.
 type persistState struct {
-	title     string            // session title as last written to the index
-	persisted map[string]int    // agentID -> count of its messages already on disk
-	epoch     map[string]uint64 // agentID -> transcript epoch observed at last save
+	title     string                 // session title as last written to the index
+	persisted map[string]int         // agentID -> count of its messages already on disk
+	epoch     map[string]uint64      // agentID -> transcript epoch observed at last save
+	watchers  []config.WatcherConfig // attached watcher set as last written to the index
 }
 
 // LoadedSession is a session transcript read back from disk.
@@ -154,6 +180,10 @@ type LoadedSession struct {
 	// from the index so a restored session resumes on that model (issue #266).
 	// Empty for older sessions persisted before the model was recorded.
 	Model string
+	// Watchers are the session's attached (session-scoped) watcher definitions read
+	// back from the index, re-registered with the watcher manager via
+	// OnSessionRestored (issue #329 Phase 3). nil when the session has none.
+	Watchers []config.WatcherConfig
 }
 
 // NewSessionStore creates (and ensures the directory for) a session store.
@@ -275,15 +305,23 @@ func (s *SessionStore) Save(us *agent.UserSession, title string) error {
 		tokensOut: snap.TokensOut,
 		model:     us.PrimaryModel(),
 	}
+	// Capture the session's attached watcher configs once so every index write
+	// (first save, compaction rewrite, delta) carries the same set (issue #329).
+	var watchers []config.WatcherConfig
+	if s.attachedWatchersFn != nil {
+		watchers = s.attachedWatchersFn(us.ID)
+	}
 
 	// First save: build the whole shard set.
 	if st == nil {
-		sms, err := s.writeFullTranscript(base, us.ID, title, created, sum, agents)
+		sms, err := s.writeFullTranscript(base, us.ID, title, created, sum, watchers, agents)
 		if err != nil {
 			return err
 		}
 		s.shards[us.ID] = sms
-		s.state[us.ID] = newPersistFrontier(title, agents)
+		st := newPersistFrontier(title, agents)
+		st.watchers = watchers
+		s.state[us.ID] = st
 		s.markDirty(append(shardFilePaths(base, sms), indexFilePath(base))...)
 		return nil
 	}
@@ -294,12 +332,13 @@ func (s *SessionStore) Save(us *agent.UserSession, title string) error {
 			continue
 		}
 		if prev, ok := st.epoch[a.ID]; ok && prev != a.ThoughtTrain.TranscriptEpoch() {
-			sms, err := s.writeFullTranscript(base, us.ID, title, created, sum, agents)
+			sms, err := s.writeFullTranscript(base, us.ID, title, created, sum, watchers, agents)
 			if err != nil {
 				return err
 			}
 			s.shards[us.ID] = sms
 			st.title = title
+			st.watchers = watchers
 			recordFrontier(st, agents)
 			s.markDirty(append(shardFilePaths(base, sms), indexFilePath(base))...)
 			return nil
@@ -317,8 +356,12 @@ func (s *SessionStore) Save(us *agent.UserSession, title string) error {
 	}
 	lines := splitJSONLLines(buf.Bytes())
 	titleChanged := st.title != title
+	// An attached watcher created/removed/updated since the last save changes only
+	// the index (it lives there, not in the shards), so a watcher-set change must
+	// still rewrite the index even with no new transcript lines (issue #329).
+	watchersChanged := !watchersEqual(st.watchers, watchers)
 
-	if len(lines) == 0 && !titleChanged {
+	if len(lines) == 0 && !titleChanged && !watchersChanged {
 		// True no-op: nothing to write. Still refresh the captured epochs so a
 		// later compaction is detected.
 		recordFrontier(st, agents)
@@ -338,15 +381,32 @@ func (s *SessionStore) Save(us *agent.UserSession, title string) error {
 		s.shards[us.ID] = sms
 		s.cache.evictPrefix(base) // the active shard(s) changed
 	}
-	if err := writeIndexFile(base, indexFrom(us.ID, title, created, sum, sms)); err != nil {
+	if err := writeIndexFile(base, indexFrom(us.ID, title, created, sum, watchers, sms)); err != nil {
 		delete(s.state, us.ID)
 		delete(s.shards, us.ID)
 		return err
 	}
 	st.title = title
+	st.watchers = watchers
 	recordFrontier(st, agents)
 	s.markDirty(append(written, indexFilePath(base))...)
 	return nil
+}
+
+// watchersEqual reports whether two attached-watcher sets are identical for the
+// purpose of deciding whether the index needs rewriting. It compares by value so
+// a created/removed/edited watcher is detected; order is treated as significant
+// (the manager preserves insertion order via gogent's per-session slice).
+func watchersEqual(a, b []config.WatcherConfig) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !reflect.DeepEqual(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // writeFullTranscript rebuilds the whole shard set atomically: it encodes every
@@ -354,7 +414,7 @@ func (s *SessionStore) Save(us *agent.UserSession, title string) error {
 // temp file + rename so a crash can't leave a half-written shard behind), drops
 // any leftover shards from a previously larger layout, then rewrites the index
 // last so the on-disk state stays consistent.
-func (s *SessionStore) writeFullTranscript(base, id, title, created string, sum sessionSummary, agents []*agent.Agent) ([]shardMeta, error) {
+func (s *SessionStore) writeFullTranscript(base, id, title, created string, sum sessionSummary, watchers []config.WatcherConfig, agents []*agent.Agent) ([]shardMeta, error) {
 	var buf bytes.Buffer
 	if _, err := encodeMessages(json.NewEncoder(&buf), agents, func(string) int { return 0 }); err != nil {
 		return nil, err
@@ -371,7 +431,7 @@ func (s *SessionStore) writeFullTranscript(base, id, title, created string, sum 
 		_ = os.Remove(shardFilePath(base, i))
 	}
 	s.cache.evictPrefix(base)
-	if err := writeIndexFile(base, indexFrom(id, title, created, sum, sms)); err != nil {
+	if err := writeIndexFile(base, indexFrom(id, title, created, sum, watchers, sms)); err != nil {
 		return nil, err
 	}
 	return sms, nil
@@ -379,7 +439,7 @@ func (s *SessionStore) writeFullTranscript(base, id, title, created string, sum 
 
 // indexFrom assembles the index document from its parts. Centralising it keeps
 // the summary fields (issue #58) populated consistently across every write site.
-func indexFrom(id, title, created string, sum sessionSummary, sms []shardMeta) sessionIndex {
+func indexFrom(id, title, created string, sum sessionSummary, watchers []config.WatcherConfig, sms []shardMeta) sessionIndex {
 	return sessionIndex{
 		SessionID: id,
 		Title:     title,
@@ -389,6 +449,7 @@ func indexFrom(id, title, created string, sum sessionSummary, sms []shardMeta) s
 		TokensOut: sum.tokensOut,
 		Model:     sum.model,
 		Shards:    sms,
+		Watchers:  watchers,
 	}
 }
 
@@ -575,6 +636,7 @@ func (s *SessionStore) ListActive() ([]LoadedSession, error) {
 			Transcripts: transcripts,
 			AgentOrder:  order,
 			Model:       idx.Model,
+			Watchers:    idx.Watchers,
 		})
 	}
 	return sessions, nil
@@ -802,6 +864,7 @@ func (s *SessionStore) LoadSession(file string) (LoadedSession, error) {
 		Transcripts: transcripts,
 		AgentOrder:  order,
 		Model:       idx.Model,
+		Watchers:    idx.Watchers,
 	}, nil
 }
 

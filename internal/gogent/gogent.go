@@ -98,6 +98,13 @@ type Gogent struct {
 	// until StartWatchers builds it (only when Experimental.Watchers is on) and is
 	// torn down by StopWatchers. See watcher.go.
 	watchers *watcher.Manager
+	// attachedWatchers holds the config-level definitions of session-scoped
+	// (attached) watchers, keyed by owning session id (issue #329 Phase 3). The
+	// watcher.Manager owns the live Runners; this map owns the persistable
+	// WatcherConfig form so a session's attached watchers can be serialized into its
+	// index (SessionStore provider) and re-registered on restore (OnSessionRestored).
+	// Guarded by g.mu.
+	attachedWatchers map[string][]config.WatcherConfig
 	// notifier emits desktop/terminal notifications for backend-originated events
 	// — currently free-running watcher completions (issue #329). It is the
 	// fallback delivery path used in headless mode (no TUI owns the screen); when
@@ -175,14 +182,15 @@ func NewGogentWithWorkspace(homeDir, workspaceRoot string) *Gogent {
 	}
 
 	g := &Gogent{
-		userSessions:  make(map[string]*agent.UserSession),
-		hooks:         make(map[string]func(event HookEvent)),
-		toolRegistry:  tool.NewToolRegistry(),
-		config:        cfg,
-		workspaceRoot: workspaceRoot,
-		homeDir:       homeDir,
-		sessionTitles: make(map[string]string),
-		ephemeral:     make(map[string]bool),
+		userSessions:     make(map[string]*agent.UserSession),
+		hooks:            make(map[string]func(event HookEvent)),
+		toolRegistry:     tool.NewToolRegistry(),
+		config:           cfg,
+		workspaceRoot:    workspaceRoot,
+		homeDir:          homeDir,
+		sessionTitles:    make(map[string]string),
+		ephemeral:        make(map[string]bool),
+		attachedWatchers: make(map[string][]config.WatcherConfig),
 
 		reviewApprovedAll: make(map[string]bool),
 		log:               log,
@@ -195,6 +203,9 @@ func NewGogentWithWorkspace(homeDir, workspaceRoot string) *Gogent {
 	// Session transcript persistence (best-effort; a nil store disables it).
 	if store, err := NewSessionStore(filepath.Join(homeDir, ".gogent", "sessions")); err == nil {
 		g.store = store
+		// Persist each session's attached (session-scoped) watcher configs into its
+		// index so they are restored with the session (issue #329 Phase 3).
+		store.SetAttachedWatchersProvider(g.attachedWatchersFor)
 	} else {
 		log.Warnf("session persistence disabled: %v", err)
 	}
@@ -1076,6 +1087,29 @@ func (g *Gogent) initializeToolRegistry() {
 			},
 		})
 	}
+
+	// Register the agent-facing watcher tools (create_watcher/list_watchers/...)
+	// only when the experimental feature is on (issue #329 Phase 3).
+	g.enableWatcherTools()
+}
+
+// enableWatcherTools registers the agent-facing watcher tools when
+// Experimental.Watchers is on (issue #329 Phase 3). In the current product it is
+// called once from initializeToolRegistry at construction; it is written to be
+// idempotent and to re-clone the registry into existing sessions
+// (refreshSessionRegistries) so that, should a future runtime toggle of the
+// feature call it again, an already-running session still gains create_watcher/
+// list_watchers/update_watcher/enable_watcher/disable_watcher/delete_watcher. It
+// is a no-op when the feature is off.
+func (g *Gogent) enableWatcherTools() {
+	g.mu.RLock()
+	on := g.config != nil && g.config.Experimental.Watchers
+	g.mu.RUnlock()
+	if !on {
+		return
+	}
+	g.toolRegistry.RegisterWatcherTools(g)
+	g.refreshSessionRegistries()
 }
 
 // grepToolResult renders a fileops.GrepResult as the grep tool's model-facing
@@ -1290,6 +1324,11 @@ func (g *Gogent) RemoveSession(id string) {
 		us.Stop()
 	}
 
+	// Tear down the session's attached (session-scoped) watchers: they die with the
+	// session, like its sub-agents (issue #329 Phase 3). Free-running watchers are
+	// global and unaffected.
+	g.OnSessionClosed(id)
+
 	// Archive the on-disk transcript so it is not auto-restored next start.
 	// Ephemeral (HTTP) sessions were never persisted, so there is nothing to
 	// archive (issue #25).
@@ -1425,6 +1464,10 @@ func (g *Gogent) adoptLoaded(ls LoadedSession) (LoadedSession, bool) {
 	if g.store != nil {
 		g.store.Adopt(ls.ID, ls.File, rootAgent.ListAllAgents()) // continue appending to the active shard
 	}
+	// Re-register the session's attached (session-scoped) watchers so they resume
+	// their schedules with the session (issue #329 Phase 3). Shared by startup
+	// RestoreSessions and on-demand ContinueSession.
+	g.OnSessionRestored(ls.ID, ls.Watchers)
 	return ls, true
 }
 

@@ -678,6 +678,15 @@ type WatcherConfig struct {
 	Task string `json:"task"`
 	// Model is the model config name used for the fire; empty = the default model.
 	Model string `json:"model,omitempty"`
+	// ReportToSession decides the watcher's kind (issue #329 Phase 3). nil/omitted
+	// = free-running: the watcher is a process-global resource fired into its own
+	// dedicated watcher:<name> session and persisted to ~/.gogent/watchers.json. A
+	// non-nil session id = attached: the watcher is session-scoped, fires into that
+	// session's transcript, is visible only to it, dies with it, and is stored with
+	// the session (NOT in watchers.json). The create_watcher tool defaults this to
+	// the calling session so a conversational "watch X and report back here"
+	// attaches to the conversation.
+	ReportToSession *string `json:"report_to_session,omitempty"`
 	// Output configures completion delivery (notification). nil = notify on.
 	Output *WatcherOutput `json:"on_complete,omitempty"`
 }
