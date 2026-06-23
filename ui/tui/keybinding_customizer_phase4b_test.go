@@ -306,6 +306,8 @@ func TestKeybindingCustomizerRejectsUndeliverableChord(t *testing.T) {
 func TestKeybindingCustomizerBackspaceClearsBinding(t *testing.T) {
 	w := newTestWorkbench(t)
 	sw := w.openWindow("s", "S")
+	var persisted config.KeybindingsConfig
+	w.handlers.SetKeybindings = func(k config.KeybindingsConfig) { persisted = k }
 
 	w.showKeybindingCustomizer()
 	selectCustomizerRow(t, w, 3) // Toggle messages.
@@ -319,8 +321,17 @@ func TestKeybindingCustomizerBackspaceClearsBinding(t *testing.T) {
 	if _, fired := dispatchAtFocus(w, sw.history.Component, runeEv('a')); fired {
 		t.Fatal("cleared Toggle messages binding still fires on its old default key")
 	}
-	if b, ok := w.desktop.ScopedBindings().BindingFor(actionTranscriptToggleMsg); ok && sameChord(b.Chord, tv.Chord{Rune: 'a'}) {
-		t.Fatalf("cleared Toggle messages binding still reports default chord %+v", b.Chord)
+	if b, ok := w.desktop.ScopedBindings().BindingFor(actionTranscriptToggleMsg); ok {
+		t.Fatalf("cleared Toggle messages binding still has live registry entry %+v", b)
+	}
+	if got := persisted.Overrides[string(actionTranscriptToggleMsg)]; got != "none" {
+		t.Fatalf("cleared Toggle messages persisted override = %q, want none in %+v", got, persisted)
+	}
+
+	pressBottomButton(t, w, 0) // Reset selected row.
+	assertChord(t, chordForAction(t, w, actionTranscriptToggleMsg), tv.Chord{Rune: 'a'})
+	if _, ok := persisted.Overrides[string(actionTranscriptToggleMsg)]; ok {
+		t.Fatalf("reset after clear still persisted Toggle messages override: %+v", persisted)
 	}
 }
 
@@ -376,6 +387,30 @@ func TestKeybindingsConfigRoundTripAndLoadAppliesRegistry(t *testing.T) {
 	assertChord(t, chordForAction(t, reloaded, actionTranscriptToggleTool), tv.Chord{Rune: 't'})
 }
 
+func TestClearedKeybindingPersistsAndReloadsAsUnbound(t *testing.T) {
+	w := newTestWorkbench(t)
+	w.openWindow("s", "S")
+	w.clearBinding(actionTranscriptToggleMsg)
+
+	cfg := w.buildKeybindingsConfig()
+	if got := cfg.Overrides[string(actionTranscriptToggleMsg)]; got != "none" {
+		t.Fatalf("cleared override = %q, want none in %+v", got, cfg)
+	}
+
+	reloaded := newTestWorkbench(t)
+	reloaded.LoadKeybindings(cfg)
+	sw := reloaded.openWindow("s", "S")
+	if _, ok := reloaded.desktop.ScopedBindings().BindingFor(actionTranscriptToggleMsg); ok {
+		t.Fatal("reloaded cleared Toggle messages still has a live registry binding")
+	}
+	if _, fired := dispatchAtFocus(reloaded, sw.history.Component, runeEv('a')); fired {
+		t.Fatal("reloaded cleared Toggle messages still fires on default key")
+	}
+	if got := reloaded.buildKeybindingsConfig().Overrides[string(actionTranscriptToggleMsg)]; got != "none" {
+		t.Fatalf("reloaded cleared override reserialized as %q, want none", got)
+	}
+}
+
 func TestLoadKeybindingsDropsConflictingPersistedOverride(t *testing.T) {
 	w := newTestWorkbench(t)
 	w.LoadKeybindings(config.KeybindingsConfig{Overrides: map[string]string{
@@ -388,6 +423,37 @@ func TestLoadKeybindingsDropsConflictingPersistedOverride(t *testing.T) {
 	}
 	if got := w.buildKeybindingsConfig().Overrides[string(actionHelpOverlay)]; got != "" {
 		t.Fatalf("conflicting rejected override was re-serialized as %q", got)
+	}
+}
+
+func TestKeybindingCustomizerClearEscapeHatchRequiresConfirmation(t *testing.T) {
+	w := newTestWorkbench(t)
+	var persisted config.KeybindingsConfig
+	w.handlers.SetKeybindings = func(k config.KeybindingsConfig) { persisted = k }
+
+	w.showKeybindingCustomizer()
+	selectCustomizerRow(t, w, 11) // App / Keybinding help.
+	typeFocused(w, tui.TypeEvent{Key: tui.KeyEnter})
+	typeFocused(w, tui.TypeEvent{Key: tui.KeyBackspace})
+	if top := w.desktop.TopLayer(); top == nil || top.Name != "confirm-dialog" {
+		t.Fatalf("top layer after help clear = %v, want self-lockout confirm-dialog", top)
+	}
+	pressConfirm(t, w, false)
+	assertChord(t, chordForAction(t, w, actionHelpOverlay), tv.Chord{Rune: '?'})
+	if len(persisted.Overrides) != 0 {
+		t.Fatalf("cancelled clear persisted overrides: %+v", persisted)
+	}
+
+	w.showKeybindingCustomizer()
+	selectCustomizerRow(t, w, 11) // App / Keybinding help.
+	typeFocused(w, tui.TypeEvent{Key: tui.KeyEnter})
+	typeFocused(w, tui.TypeEvent{Key: tui.KeyBackspace})
+	pressConfirm(t, w, true)
+	if b, ok := w.desktop.ScopedBindings().BindingFor(actionHelpOverlay); ok {
+		t.Fatalf("confirmed clear left help overlay registered as %+v", b)
+	}
+	if got := persisted.Overrides[string(actionHelpOverlay)]; got != "none" {
+		t.Fatalf("confirmed help clear persisted override = %q, want none in %+v", got, persisted)
 	}
 }
 
