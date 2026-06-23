@@ -200,6 +200,51 @@ func TestKeybindingCustomizerCaptureAppliesLivePersistsAndUpdatesDisplay(t *test
 	}
 }
 
+func TestKeybindingRebindAppliesToEveryOpenTranscriptWindow(t *testing.T) {
+	w := newTestWorkbench(t)
+	w1 := w.openWindow("s1", "S1")
+	w2 := w.openWindow("s2", "S2")
+
+	w.applyBinding(actionTranscriptToggleMsg, tv.Chord{Rune: 'm'})
+
+	if _, fired := dispatchAtFocus(w, w1.history.Component, runeEv('m')); !fired {
+		t.Fatal("new binding did not fire in first open transcript window")
+	}
+	if w1.transcript.hidden&kindAssistant.bit() == 0 {
+		t.Fatal("first window did not toggle messages on new binding")
+	}
+	if _, fired := dispatchAtFocus(w, w2.history.Component, runeEv('m')); !fired {
+		t.Fatal("new binding did not fire in second open transcript window")
+	}
+	if w2.transcript.hidden&kindAssistant.bit() == 0 {
+		t.Fatal("second window did not toggle messages on new binding")
+	}
+
+	before := w2.transcript.hidden
+	if _, fired := dispatchAtFocus(w, w2.history.Component, runeEv('a')); fired {
+		t.Fatal("old binding still fired in second open transcript window after live rebind")
+	}
+	if w2.transcript.hidden != before {
+		t.Fatal("old binding changed second window state after live rebind")
+	}
+}
+
+func TestCommandPaletteDisplayTracksReboundPaletteBinding(t *testing.T) {
+	w := newTestWorkbench(t)
+	w.applyBinding(actionCommandPalette, tv.Chord{Key: tui.KeyF3})
+	if !w.desktop.ScopedBindings().DispatchFallthrough(tui.TypeEvent{Key: tui.KeyF3}) {
+		t.Fatal("rebuilt command-palette binding does not dispatch from registry")
+	}
+
+	c, ok := findCommand(w.commands(), "Command palette")
+	if !ok {
+		t.Fatal("Command palette command missing")
+	}
+	if !strings.Contains(c.keys, "F3") || strings.Contains(c.keys, ":") {
+		t.Fatalf("Command palette display = %q, want rebound F3 and no stale ':' hint", c.keys)
+	}
+}
+
 func TestKeybindingCustomizerConflictCancelLeavesBindings(t *testing.T) {
 	w := newTestWorkbench(t)
 	w.openWindow("s", "S")
@@ -258,6 +303,27 @@ func TestKeybindingCustomizerRejectsUndeliverableChord(t *testing.T) {
 	}
 }
 
+func TestKeybindingCustomizerBackspaceClearsBinding(t *testing.T) {
+	w := newTestWorkbench(t)
+	sw := w.openWindow("s", "S")
+
+	w.showKeybindingCustomizer()
+	selectCustomizerRow(t, w, 3) // Toggle messages.
+	if !typeFocused(w, tui.TypeEvent{Key: tui.KeyEnter}) {
+		t.Fatal("Enter did not enter capture mode")
+	}
+	if !typeFocused(w, tui.TypeEvent{Key: tui.KeyBackspace}) {
+		t.Fatal("Backspace clear was not consumed")
+	}
+
+	if _, fired := dispatchAtFocus(w, sw.history.Component, runeEv('a')); fired {
+		t.Fatal("cleared Toggle messages binding still fires on its old default key")
+	}
+	if b, ok := w.desktop.ScopedBindings().BindingFor(actionTranscriptToggleMsg); ok && sameChord(b.Chord, tv.Chord{Rune: 'a'}) {
+		t.Fatalf("cleared Toggle messages binding still reports default chord %+v", b.Chord)
+	}
+}
+
 func TestKeybindingCustomizerResetSelectedAndResetAll(t *testing.T) {
 	w := newTestWorkbench(t)
 	w.openWindow("s", "S")
@@ -308,6 +374,21 @@ func TestKeybindingsConfigRoundTripAndLoadAppliesRegistry(t *testing.T) {
 	assertChord(t, chordForAction(t, reloaded, actionHelpOverlay), tv.Chord{Key: tui.KeyF2})
 	assertChord(t, chordForAction(t, reloaded, actionTranscriptToggleMsg), tv.Chord{Rune: 'm'})
 	assertChord(t, chordForAction(t, reloaded, actionTranscriptToggleTool), tv.Chord{Rune: 't'})
+}
+
+func TestLoadKeybindingsDropsConflictingPersistedOverride(t *testing.T) {
+	w := newTestWorkbench(t)
+	w.LoadKeybindings(config.KeybindingsConfig{Overrides: map[string]string{
+		string(actionHelpOverlay): ":",
+	}})
+
+	assertChord(t, chordForAction(t, w, actionHelpOverlay), tv.Chord{Rune: '?'})
+	if w.isOverridden(actionHelpOverlay) {
+		t.Fatal("conflicting hand-edited override remains marked as active after registry rejected it")
+	}
+	if got := w.buildKeybindingsConfig().Overrides[string(actionHelpOverlay)]; got != "" {
+		t.Fatalf("conflicting rejected override was re-serialized as %q", got)
+	}
 }
 
 func TestKeybindingScopeRulesRejectPlainGlobalButAllowScopedPlainKeys(t *testing.T) {
