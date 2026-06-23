@@ -512,6 +512,13 @@ type ModelConnection struct {
 	adapter   adapter
 	client    *http.Client
 
+	// configErr, when non-nil, is a construction-time configuration error that
+	// could not be returned (NewModelConnectionFromConfig has no error result).
+	// It is surfaced — clearly, before any network I/O — on the first completion
+	// call. Used for misconfigurations a request would otherwise turn into an
+	// opaque DNS/HTTP failure, e.g. a Vertex model missing Project/Location.
+	configErr error
+
 	// Retry policy for transient completion failures. Defaults are set by the
 	// constructors; tests may override them to keep backoff deterministic/fast.
 	maxAttempts    int           // total request attempts (including the first)
@@ -618,7 +625,8 @@ func NewModelConnectionFromConfig(modelConfig *config.ModelConfig) *ModelConnect
 	// its host and path from Project/Location) supply a baseURLFunc. Use it only
 	// when the user left Endpoint empty, so an explicit endpoint still overrides
 	// (and normalizeBaseURL above already trimmed any chat path off it).
-	if spec.baseURLFunc != nil && strings.TrimSpace(modelConfig.Endpoint) == "" {
+	usingDerivedBase := spec.baseURLFunc != nil && strings.TrimSpace(modelConfig.Endpoint) == ""
+	if usingDerivedBase {
 		base = spec.baseURLFunc(modelConfig)
 	}
 
@@ -634,6 +642,20 @@ func NewModelConnectionFromConfig(modelConfig *config.ModelConfig) *ModelConnect
 		maxAttempts:    defaultMaxAttempts,
 		retryBaseDelay: defaultRetryBaseDelay,
 		retryMaxDelay:  defaultRetryMaxDelay,
+	}
+
+	// A Vertex base URL is derived from Project + Location; without both, the URL
+	// is malformed (empty host segment / empty path segments) and a request would
+	// fail as an opaque DNS/HTTP error. Catch it here as a clear, deferred config
+	// error instead. Skipped when the user supplied an explicit Endpoint, which
+	// overrides the derived base and needs neither field.
+	if usingDerivedBase {
+		if strings.TrimSpace(modelConfig.Project) == "" || strings.TrimSpace(modelConfig.Location) == "" {
+			conn.configErr = &ModelError{
+				Type:    ErrorGeneric,
+				Message: "vertex: project and location are required (set them on the model, or supply an explicit endpoint)",
+			}
+		}
 	}
 
 	// Attach the provider's auth when a key is present. The exact scheme is
@@ -1056,6 +1078,9 @@ func parallelToolCallsMustBeDisabled(spec providerSpec, tools []ToolDef) bool {
 }
 
 func (c *ModelConnection) complete(ctx context.Context, messages []Message, stream bool, tools []ToolDef, format *ResponseFormat) (*CompletionResponse, error) {
+	if c.configErr != nil {
+		return nil, c.configErr
+	}
 	reqBody := c.buildRequest(messages, stream, tools, format)
 
 	// Marshal the request body ONCE, before the retry loop. Only the socket send
@@ -1170,6 +1195,9 @@ func (c *ModelConnection) complete(ctx context.Context, messages []Message, stre
 // APIKeyRoundTripper (auth header) and configured timeout apply exactly as on
 // the blocking path, and asks for include_usage so token stats are populated.
 func (c *ModelConnection) completeStream(ctx context.Context, messages []Message, tools []ToolDef, streamCh chan<- StreamResponse) (string, error) {
+	if c.configErr != nil {
+		return "", c.configErr
+	}
 	reqBody := c.buildRequest(messages, true, tools, nil)
 
 	// Marshal into a pooled buffer (issue #20): the bytes stay live through the
@@ -1527,6 +1555,14 @@ func (c *ModelConnection) modelsURL() string {
 // do not implement the endpoint simply return an error, which callers can treat
 // as "unknown / use configured model".
 func (c *ModelConnection) ListModels() ([]ModelInfo, error) {
+	// A configured provider that deliberately exposes no model-listing endpoint
+	// (empty modelsPath alongside a real chatPath, e.g. Vertex AI's OpenAI-compat
+	// layer) cannot be scanned: fail fast with a clear message instead of sending
+	// a known-bad GET to the chat base resource. The empty/zero spec (chatPath
+	// also empty) still falls back to the OpenAI convention via modelsURL().
+	if c.spec.chatPath != "" && c.spec.modelsPath == "" {
+		return nil, &ModelError{Type: ErrorGeneric, Message: "model listing is not supported for this provider; set the model id manually"}
+	}
 	req, err := http.NewRequest("GET", c.modelsURL(), nil)
 	if err != nil {
 		return nil, &ModelError{Type: ErrorConnection, Message: fmt.Sprintf("failed to create models request: %v", err)}

@@ -253,8 +253,13 @@ func vertexAIHost(location string) string {
 // (host prefix dropped for "global"; see vertexAIHost). The concrete chat path
 // (chatPath) is appended by chatURL. Location appears in both the host and the
 // path and must match.
+//
+// Location is lower-cased: GCP region IDs are canonically lowercase, so this
+// makes the "global" host special case (and the host/path generally) robust to a
+// user typing "Global" or "US-CENTRAL1" rather than silently building a bad host
+// like "Global-aiplatform.googleapis.com".
 func vertexOpenAIBaseURL(c *config.ModelConfig) string {
-	loc := strings.TrimSpace(c.Location)
+	loc := strings.ToLower(strings.TrimSpace(c.Location))
 	return fmt.Sprintf("https://%s/v1beta1/projects/%s/locations/%s",
 		vertexAIHost(loc), strings.TrimSpace(c.Project), loc)
 }
