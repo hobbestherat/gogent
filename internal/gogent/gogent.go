@@ -18,11 +18,13 @@ import (
 	"gogent/internal/fileops"
 	"gogent/internal/mcp"
 	"gogent/internal/model"
+	"gogent/internal/notify"
 	"gogent/internal/permission"
 	"gogent/internal/skill"
 	"gogent/internal/stats"
 	"gogent/internal/tool"
 	"gogent/internal/vcs"
+	"gogent/internal/watcher"
 )
 
 // Gogent is the main entry point for the agent system
@@ -92,6 +94,23 @@ type Gogent struct {
 	// created once at startup from the configured RateLimit. Nil/unbounded when
 	// throttling is disabled.
 	rateLimiter *agent.RateLimiter
+	// watchers owns the scheduled free-running watchers (issue #329). It is nil
+	// until StartWatchers builds it (only when Experimental.Watchers is on) and is
+	// torn down by StopWatchers. See watcher.go.
+	watchers *watcher.Manager
+	// notifier emits desktop/terminal notifications for backend-originated events
+	// — currently free-running watcher completions (issue #329). It is the
+	// fallback delivery path used in headless mode (no TUI owns the screen); when
+	// a TUI is running the entry point installs notifySink instead so terminal
+	// escapes are not written to os.Stdout from a background goroutine. Built in
+	// NewGogentWithWorkspace.
+	notifier *notify.Notifier
+	// notifySink, when set, takes over backend notification delivery from notifier
+	// (issue #329). The TUI entry point points it at a workbench callback that
+	// posts the notification onto the UI thread and reuses the TUI's single
+	// notifier, so a watcher completion is render-coordinated and focus-gated
+	// rather than racing the alternate-screen draw loop. nil = use notifier.
+	notifySink func(reason, title, body string)
 }
 
 // HookEvent represents an event that triggers hooks
@@ -170,6 +189,7 @@ func NewGogentWithWorkspace(homeDir, workspaceRoot string) *Gogent {
 		audit:             audit,
 		subAgentLimiter:   agent.NewSubAgentLimiter(cfg.SubAgents.MaxConcurrentOrDefault()),
 		rateLimiter:       agent.NewRateLimiter(cfg.RateLimit.RequestsPerMinute, cfg.RateLimit.Burst),
+		notifier:          notify.New(cfg.NotifyConfig(), os.Stdout),
 	}
 
 	// Session transcript persistence (best-effort; a nil store disables it).
@@ -2605,7 +2625,13 @@ func (g *Gogent) Notifications() config.NotifyConfig {
 func (g *Gogent) SetNotifications(n config.NotifyConfig) {
 	g.mu.Lock()
 	g.config.SetNotifyConfig(n)
+	notifier := g.notifier
 	g.mu.Unlock()
+	// Keep the backend notifier (watcher completions, issue #329) in sync with
+	// the live config so a toggled on_watcher / enabled takes effect immediately.
+	if notifier != nil {
+		notifier.SetConfig(n)
+	}
 	if err := g.SaveConfig(); err != nil {
 		g.warnf("Failed to persist config: %v", err)
 	}

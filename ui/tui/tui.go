@@ -1852,6 +1852,25 @@ func (w *Workbench) maybeNotify(id string, ev agent.SessionEvent) {
 	}
 }
 
+// NotifyFromBackend delivers a backend-originated notification (a free-running
+// watcher completion, issue #329) through the TUI's single notifier. It posts
+// onto the UI thread via desktop.Post so the terminal escapes are written
+// coordinated with the render loop — never interleaved mid-frame from a watcher
+// goroutine — and reuses the one notifier instance (so there is no second,
+// uncoordinated notification path). reason is the stable wire token ("watcher");
+// a backend event has no owning window, so it is never focus-suppressed. A stray
+// Post after the desktop has quit is benign.
+func (w *Workbench) NotifyFromBackend(reason, title, body string) {
+	w.desktop.Post(func() {
+		if w.notify == nil {
+			return
+		}
+		if w.notify.ShouldNotify(notify.Reason(reason), false) {
+			w.notify.Notify(title, body)
+		}
+	})
+}
+
 // QuitFunc returns a function that requests the UI to shut down.
 func (w *Workbench) QuitFunc() func() {
 	return func() {

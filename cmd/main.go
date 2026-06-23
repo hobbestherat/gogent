@@ -469,6 +469,11 @@ func main() {
 		// Push the persisted notification config into the workbench's live
 		// notifier so the very first notification respects the user's settings.
 		wb.SetNotifyConfig(g.Notifications())
+		// Route backend-originated notifications (free-running watcher completions,
+		// issue #329) through the workbench's UI-thread notifier instead of the
+		// backend's fallback os.Stdout notifier, so they never write terminal
+		// escapes mid-frame from a watcher goroutine.
+		g.SetNotifySink(wb.NotifyFromBackend)
 		// Push the persisted token-budget config so the status gauge's budget
 		// alert (if any) is active from the first turn.
 		wb.SetBudgetConfig(g.Budget())
@@ -485,6 +490,11 @@ func main() {
 	// Done after the permission prompter is installed above so the launch gate can
 	// prompt interactively rather than defaulting to deny.
 	g.StartMCPServers()
+
+	// Start the scheduled free-running watchers (issue #329). After StartMCPServers
+	// so the permission prompter is installed for the ActionWatcher gate; a no-op
+	// unless Experimental.Watchers is enabled.
+	g.StartWatchers()
 
 	// Keep running with graceful shutdown
 	sigChan := make(chan os.Signal, 1)
@@ -511,6 +521,10 @@ func main() {
 	case <-httpShutdownCh:
 		fmt.Printf("\nShutdown requested via /exit, shutting down...\n")
 	}
+
+	// Stop the scheduled watchers (cancel in-flight fires, stop schedule loops)
+	// before releasing MCP servers, since a watcher fire may use MCP tools.
+	g.StopWatchers()
 
 	// Release any MCP servers (terminates stdio subprocesses).
 	g.CloseMCPServers()

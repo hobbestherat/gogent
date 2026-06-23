@@ -115,6 +115,7 @@
     "on_error": true,
     "on_approval": true,
     "on_clarify": true,
+    "on_watcher": true,
     "suppress_when_focused": false
   },
   "mcp_servers": [],
@@ -133,9 +134,14 @@
   },
   "experimental": {
     "supervisor": false,
-    "stream_thinking": false
+    "stream_thinking": false,
+    "watchers": false
   },
   "supervisor": {
     "max_nudges": 3
+  },
+  "watchers": {
+    "max_concurrent": 4,
+    "default_skip_if_running": true
   }
 }
