@@ -128,8 +128,8 @@ func TestIssue379SidebarRenderedChromeFollowsResolvedPresets(t *testing.T) {
 			// session row is the tree's unfocused selection bar; child rows and empty
 			// row fill are sidebar body text on PanelFG/PanelBG. Both paths must be
 			// reseeded.
-			issue379AssertCell(t, w, "session selected row text", left+2, 2, resolved.WindowFG, w.sidebar.tree.SelBGUnfocused)
-			issue379AssertCell(t, w, "session selected row fill", left+20, 2, resolved.WindowFG, w.sidebar.tree.SelBGUnfocused)
+			issue379AssertCell(t, w, "session selected row text", left+2, 2, resolved.PanelBG, resolved.PanelFG)
+			issue379AssertCell(t, w, "session selected row fill", left+20, 2, resolved.PanelBG, resolved.PanelFG)
 			issue379AssertCell(t, w, "agent row text", left+4, 3, resolved.PanelFG, resolved.PanelBG)
 			issue379AssertCell(t, w, "watcher row text", left+4, 4, resolved.PanelFG, resolved.PanelBG)
 
@@ -184,7 +184,7 @@ func TestIssue379WorkbenchRefreshThemeReseedsSidebarFrozenWidgets(t *testing.T) 
 	issue379RenderSidebar(t, w)
 	left := w.sidebar.panel.AbsoluteBounds().X
 	issue379AssertCell(t, w, "live dark header title", left+2, 1, resolved.Title, resolved.PanelBG)
-	issue379AssertCell(t, w, "live dark selected tree row", left+20, 2, resolved.WindowFG, w.sidebar.tree.SelBGUnfocused)
+	issue379AssertCell(t, w, "live dark selected tree row", left+20, 2, resolved.PanelBG, resolved.PanelFG)
 	issue379AssertCell(t, w, "live dark agent row", left+4, 3, resolved.PanelFG, resolved.PanelBG)
 	issue379AssertCell(t, w, "live dark watcher row", left+4, 4, resolved.PanelFG, resolved.PanelBG)
 	if got := w.app.ReadCell(left+20, 2).BG; got == tui.ANSIColor(4) {
@@ -229,10 +229,56 @@ func TestIssue379SidebarTreeUsesPanelRolesWhenWindowRolesDiffer(t *testing.T) {
 	issue379RenderSidebar(t, w)
 	left := w.sidebar.panel.AbsoluteBounds().X
 	issue379AssertCell(t, w, "override header title", left+2, 1, resolved.Title, resolved.PanelBG)
+	issue379AssertCell(t, w, "override selected row", left+20, 2, resolved.PanelBG, resolved.PanelFG)
 	issue379AssertCell(t, w, "override agent row", left+4, 3, resolved.PanelFG, resolved.PanelBG)
 	issue379AssertCell(t, w, "override watcher row", left+4, 4, resolved.PanelFG, resolved.PanelBG)
 	issue379AssertCell(t, w, "override divider grip", left, 1, resolved.Accent, resolved.PanelBG)
 	if got := w.app.ReadCell(left+4, 3).BG; got == resolved.WindowBG {
 		t.Fatalf("override agent row used window_bg %+v instead of panel_bg %+v", resolved.WindowBG, resolved.PanelBG)
 	}
+}
+
+func TestIssue379SidebarLiveNoColorNeutralizesAllRenderedChrome(t *testing.T) {
+	issue379SaveTheme(t)
+	ApplyTheme(issue379ResolveTheme(themeDefault))
+	w := issue379NewWorkbench()
+
+	resolved := ResolveTheme(config.ThemeConfig{NoColor: true}, envOf(map[string]string{
+		"TERM":      "xterm",
+		"COLORTERM": "truecolor",
+	}), false)
+	ApplyTheme(resolved)
+	w.RefreshTheme()
+
+	def := tui.DefaultColor()
+	for name, got := range map[string]tui.Color{
+		"tree.FG":             w.sidebar.tree.FG,
+		"tree.BG":             w.sidebar.tree.BG,
+		"tree.SelFG":          w.sidebar.tree.SelFG,
+		"tree.SelBG":          w.sidebar.tree.SelBG,
+		"tree.SelFGUnfocused": w.sidebar.tree.SelFGUnfocused,
+		"tree.SelBGUnfocused": w.sidebar.tree.SelBGUnfocused,
+		"overallSelect.FG":    w.sidebar.overallSelect.FG,
+		"overallSelect.BG":    w.sidebar.overallSelect.BG,
+	} {
+		if got != def {
+			t.Fatalf("%s = %+v after live NO_COLOR switch, want DefaultColor", name, got)
+		}
+	}
+
+	issue379RenderSidebar(t, w)
+	left := w.sidebar.panel.AbsoluteBounds().X
+	abs := w.sidebar.panel.AbsoluteBounds()
+	todoTop := abs.Y + abs.H - w.sidebar.overallBandH - w.sidebar.todosBandH
+	overallTop := abs.Y + abs.H - w.sidebar.overallBandH
+	overallTitleY := overallTop + overallSeparatorLines + overallSelectorLines
+	issue379AssertCell(t, w, "no-color header title", left+2, 1, def, def)
+	issue379AssertCell(t, w, "no-color divider grip", left, 1, def, def)
+	issue379AssertCell(t, w, "no-color selected row", left+20, 2, def, def)
+	issue379AssertCell(t, w, "no-color agent row", left+4, 3, def, def)
+	issue379AssertCell(t, w, "no-color watcher row", left+4, 4, def, def)
+	issue379AssertCell(t, w, "no-color todos title", left+2, todoTop, def, def)
+	issue379AssertCell(t, w, "no-color todo row", left+2, todoTop+todoRegionTitleLines, def, def)
+	issue379AssertCell(t, w, "no-color overall separator", left+1, overallTop, def, def)
+	issue379AssertCell(t, w, "no-color overall title", left+2, overallTitleY, def, def)
 }
