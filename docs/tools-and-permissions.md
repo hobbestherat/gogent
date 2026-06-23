@@ -66,7 +66,7 @@ File access is gated by `fileops.CheckFileAccess`: in-workspace uses `read`/`wri
 | `shell` | ❌ | `shell` (session-wide) + `external` per external root dir | Execute a shell command, cwd=workspace root; 5-min timeout, 1 MB cap |
 | `git` | ❌ mutating / ✅-ish read | `shell` only for mutating ops (`commit`/`create_branch`/`restore`) | Run native git via explicit arg vectors; `status`/`diff`/`log` run free |
 | `web_fetch` | ✅ | `network` (host) | Fetch an http(s) URL, return readability-extracted Markdown; size-capped, short-TTL cached |
-| `calc` | ✅ | none | Evaluate a mathematical expression via the hardened `mathexpr` evaluator |
+| `calc` | ✅ | none | Evaluate a math expression via the hardened `mathexpr` evaluator (`github.com/expr-lang/expr` + a curated math env): operators `+ - * / %`, power (`**`/`^`), unary minus, parentheses; functions (sqrt, trig, log, abs/round, factorial/gcd/lcm, …) and constants (`pi`, `e`, physics `c`/`G`/`g`/…). Integer results print cleanly, fractionals at full precision |
 | `diagnostics` | ❌ | `diagnostics` | Run configured compiler/linter (default `go vet ./...`); returns structured `file:line:col` findings |
 | `verify` | ❌ | `verify` | Run configured test command (default `go test ./...`); returns structured pass/fail + parsed failures |
 
