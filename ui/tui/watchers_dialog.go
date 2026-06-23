@@ -12,8 +12,14 @@ import (
 // watchersFooterLabels are the action-button captions showWatchersDialog hands
 // footerButtonRects, in display order (left to right). They are a package var so a
 // test can reuse the exact labels rather than hard-coding (and re-typing) them.
+//
+// Six buttons, deliberately. Seven (with a footer "Close") need ~89 columns, which
+// cannot fit on an 80-column terminal at all — so Close moved to the window's
+// title-bar [■] (and Esc), and "Open Session" was shortened to "Open", leaving a
+// row that fits a standard terminal once the dialog width is floored to it (see
+// showWatchersDialog). The order is fixed: Open, then the schedule/run controls.
 var watchersFooterLabels = []string{
-	"Open &Session", "&Enable", "&Disable", "&Run", "S&top", "De&lete", "Close",
+	"&Open", "&Enable", "&Disable", "&Run", "S&top", "De&lete",
 }
 
 // showWatchersDialog opens the Watchers dialog (issue #329 Phase 4): the
@@ -24,11 +30,12 @@ var watchersFooterLabels = []string{
 // running one. The detail pane shows the selected watcher's configured task text,
 // its target and its last-run/result/error.
 //
-// The footer buttons drive the workbench's watcher handlers: Enable/Disable
-// (re-arm / stop the schedule), Run (fire now), Stop (cancel the in-flight fire),
-// Delete (remove entirely) and Open Session (raise the watcher's session window);
-// Close (or Esc) dismisses the dialog. Every action re-renders the list so the
-// new state is reflected immediately.
+// The footer buttons drive the workbench's watcher handlers: Open (open/raise the
+// watcher's session window), Enable/Disable (re-arm / stop the schedule), Run (fire
+// now), Stop (cancel the in-flight fire) and Delete (remove entirely). The dialog
+// is dismissed by Esc or the title-bar [■] (there is no footer Close — seven
+// controls do not fit an 80-column terminal). Every action re-renders the list so
+// the new state is reflected immediately.
 //
 // The dialog lists exactly what ListWatchers returns for the active session: every
 // free-running watcher plus that session's attached watchers. It stays open after
@@ -39,12 +46,26 @@ func (w *Workbench) showWatchersDialog() {
 		return
 	}
 
+	// Floor the dialog width at the footer's need so the action row never clamps
+	// into overlap on a narrow terminal (#321) — the same pattern the Statistics
+	// dialog uses. The content spec's 80%-of-screen resolution can fall below the
+	// footer width on a standard terminal, so a local copy with a raised MinW is
+	// used for sizing (the watchersDialogSpec method itself is left untouched, since
+	// its resolved size is asserted directly). dialog.Fit re-applies this same spec
+	// on resize, so the floor holds there too.
 	spec := w.watchersDialogSpec()
+	if need := footerRowMinWidth(watchersFooterLabels, tv.DefaultButtonGap); spec.MinW < need {
+		spec.MinW = need
+	}
 	x, y, width, height := w.dialogRect(spec)
 
 	dialog := tv.NewDialog("Watchers", x, y, width, height)
 	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
-	dialog.Window.ShowClose = false
+	// The footer has no Close button (it would not fit a standard terminal with the
+	// other six controls), so the window keeps its title-bar [■] close affordance;
+	// Esc also dismisses. Its OnClose tears down the modal layer (wired below once
+	// closeFn exists).
+	dialog.Window.ShowClose = true
 
 	listX := 2
 	headerY := 1
@@ -92,6 +113,8 @@ func (w *Workbench) showWatchersDialog() {
 
 	var layer *tv.Layer
 	closeFn := func() { w.desktop.RemoveLayer(layer) }
+	// Route the title-bar [■] through closeFn so it removes the modal layer.
+	dialog.Window.OnClose = func(*tv.Window) { closeFn() }
 
 	// selectedWatcher returns the WatcherInfo behind the current list selection.
 	selectedWatcher := func() (WatcherInfo, bool) {
@@ -166,7 +189,10 @@ func (w *Workbench) showWatchersDialog() {
 	list.OnActivate = func(*tv.TreeNode) { openSession() }
 
 	// Action buttons are sized from their labels and right-aligned to the dialog
-	// interior so they never overlap or clip, at any width (issue #321 pattern).
+	// interior so they never overlap or clip, at any width (issue #321 pattern); the
+	// dialog width is floored to their total above so the group fits even on a narrow
+	// terminal. Order matches watchersFooterLabels: Open, Enable, Disable, Run, Stop,
+	// Delete (Close lives on the window chrome).
 	footer := footerButtonRects(watchersFooterLabels, 2, width-3, buttonY, tv.DefaultButtonGap)
 	dialog.Window.AddContent(newButton(watchersFooterLabels[0], footer[0], openSession))
 	dialog.Window.AddContent(newButton(watchersFooterLabels[1], footer[1], func() { act("enable", w.handlers.EnableWatcher) }))
@@ -174,7 +200,6 @@ func (w *Workbench) showWatchersDialog() {
 	dialog.Window.AddContent(newButton(watchersFooterLabels[3], footer[3], func() { act("run", w.handlers.RunWatcher) }))
 	dialog.Window.AddContent(newButton(watchersFooterLabels[4], footer[4], func() { act("stop", w.handlers.StopWatcher) }))
 	dialog.Window.AddContent(newButton(watchersFooterLabels[5], footer[5], func() { act("delete", w.handlers.DeleteWatcher) }))
-	dialog.Window.AddContent(newButton(watchersFooterLabels[6], footer[6], closeFn))
 
 	dialog.Root().OnTypeFn = func(_ *tv.VisualComponent, event tui.TypeEvent) bool {
 		if event.Key == tui.KeyEscape {
@@ -189,6 +214,24 @@ func (w *Workbench) showWatchersDialog() {
 	dialog.Fit(spec) // static, content-driven spec: Fit re-resolves it on resize
 	render()
 	w.desktop.SetFocus(list)
+}
+
+// footerRowMinWidth is the smallest dialog width at which footerButtonRects can lay
+// labels out (separated by gap) without clamping any button into overlap: the sum
+// of the buttons' rendered widths plus the inter-button gaps, plus the 4 columns
+// footerButtonRects reserves at the dialog edges (the leftX=2 inset and the width-3
+// right margin). showWatchersDialog floors the dialog width at this so the action
+// row always fits, mirroring how the Statistics dialog floors its width above its
+// button group (issue #321).
+func footerRowMinWidth(labels []string, gap int) int {
+	total := 0
+	for i, l := range labels {
+		if i > 0 {
+			total += gap
+		}
+		total += tv.ButtonLabelWidth(l)
+	}
+	return total + 4
 }
 
 // loadWatcherItems fetches the watchers visible to sessionID and orders them
