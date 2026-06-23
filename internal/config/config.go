@@ -553,6 +553,14 @@ type Config struct {
 	// Any non-positive value (0 or, defensively, a negative typo) means unlimited.
 	// Resolve it through MaxStepsOrDefault rather than reading the pointer directly.
 	MaxSteps *int `json:"max_steps,omitempty"`
+	// ShowWelcome controls whether the startup welcome/onboarding dialog is shown
+	// (issues #339/#341/#342). It is a pointer for the same reason MaxSteps is:
+	// "unset in an older config.json" (nil) must be distinguishable from an explicit
+	// false, so a current user who has never seen the dialog still gets it. nil is
+	// treated as true ("show"); GetDefaultConfig sets it to true so a freshly written
+	// config documents the setting. Resolve it through the nil-tolerant
+	// Gogent.GetShowWelcome accessor rather than reading the pointer directly.
+	ShowWelcome *bool `json:"show_welcome,omitempty"`
 }
 
 // DefaultMaxSteps is the built-in per-turn step (model round-trip) cap applied
@@ -889,6 +897,9 @@ func DefaultEndpoint() string {
 // The default LAN endpoint honors the GOGENT_MODEL_URL environment variable (via
 // DefaultEndpoint) so the same binary works across machines.
 func GetDefaultConfig() *Config {
+	// Local so its address can be taken for the ShowWelcome pointer field (issue
+	// #339); a literal can't be addressed inline in the struct below.
+	showWelcome := true
 	return &Config{
 		DefaultModel: "local-lan",
 		SubAgents:    DefaultSubAgentConfig(),
@@ -898,6 +909,9 @@ func GetDefaultConfig() *Config {
 		// config.json documents the setting (issue #249); 0 here would mean
 		// unlimited, so the default is the historical fixed bound.
 		MaxSteps: intPtr(DefaultMaxSteps),
+		// Show the welcome/onboarding dialog by default (issue #339); the "Don't show
+		// again" checkbox persists false to opt out.
+		ShowWelcome: &showWelcome,
 		Window: WindowConfig{
 			Resizable:   true,
 			Minimizable: true,

@@ -239,6 +239,14 @@ func main() {
 			SetReviewEdits: func(enabled bool) {
 				g.SetReviewEdits(enabled)
 			},
+			// Welcome/onboarding dialog preference (issues #339/#341/#342): gates the
+			// startup trigger and persists the "Don't show again" opt-out.
+			GetShowWelcome: func() bool {
+				return g.GetShowWelcome()
+			},
+			SetShowWelcome: func(show bool) {
+				_ = g.SetShowWelcome(show)
+			},
 			GetTheme: func() config.ThemeConfig {
 				return g.Theme()
 			},

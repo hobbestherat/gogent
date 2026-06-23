@@ -73,6 +73,15 @@ type Handlers struct {
 	// #64). May be nil.
 	GetReviewEdits func() bool
 	SetReviewEdits func(bool)
+	// GetShowWelcome / SetShowWelcome read and persist whether the startup
+	// welcome/onboarding dialog is shown (issues #339/#341/#342). GetShowWelcome
+	// gates the startup trigger and seeds the dialog's "Don't show this on startup
+	// again" checkbox; SetShowWelcome persists the opt-out (false) or re-enable
+	// (true) when the dialog is closed. Both may be nil, in which case the dialog
+	// is still re-openable from the palette/Help menu but never auto-shows and the
+	// checkbox is inert.
+	GetShowWelcome func() bool
+	SetShowWelcome func(bool)
 	// GetTheme / SetTheme read and persist the TUI colour palette (issue #103).
 	// SetTheme also re-applies the resolved palette to the live UI so the change
 	// takes effect without a restart. May be nil, in which case the Theme editor
@@ -736,6 +745,7 @@ func (w *Workbench) rebuildMenu() {
 			tv.NewMenuItem("Command &Palette…", func() { w.showCommandPalette() }).
 				WithShortcut("Ctrl+K", tui.KeyRune, 'k', true),
 			tv.NewMenuItem("&Keybindings (?)…", func() { w.showHelpOverlay() }),
+			tv.NewMenuItem("&Welcome…", func() { w.showWelcomeDialog() }),
 			tv.NewMenuItem("----------", nil),
 			tv.NewMenuItem("&About", func() {
 				w.showConfirm("Gogent",
@@ -2070,6 +2080,16 @@ func (w *Workbench) Run() error {
 	// Populate the Overall panel's first frame from the current aggregate so it
 	// is not blank before the first session event arrives.
 	w.refreshOverall()
+	// Show the welcome/onboarding dialog over the rendered UI on first run (issues
+	// #341/#342), gated on the persisted preference. The handler itself resolves the
+	// true/nil ("show") vs explicit-false ("skip") semantics; a nil handler means
+	// the preference is unavailable, so the dialog is skipped (it can't be opted out
+	// of persistently) rather than nagging every launch. The modal layer is added
+	// before the loop starts so the main UI renders behind it, and it stays
+	// re-openable from the palette and Help menu regardless of this preference.
+	if w.handlers.GetShowWelcome != nil && w.handlers.GetShowWelcome() {
+		w.showWelcomeDialog()
+	}
 	err := w.desktop.Run(w.shutdown)
 	w.app.Close()
 	if err != nil {

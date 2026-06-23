@@ -2741,6 +2741,33 @@ func (g *Gogent) SetBudget(b config.BudgetConfig) {
 	}
 }
 
+// GetShowWelcome reports whether the startup welcome/onboarding dialog should be
+// shown (issues #339/#341/#342). An unset preference (nil — an older config.json
+// without the key, or no config at all) is treated as "show" so current users who
+// have never opted out still see the dialog; only an explicit false suppresses it.
+func (g *Gogent) GetShowWelcome() bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.config == nil || g.config.ShowWelcome == nil || *g.config.ShowWelcome
+}
+
+// SetShowWelcome records whether the startup welcome dialog should be shown and
+// persists the preference (issue #339). The welcome dialog's "Don't show this on
+// startup again" checkbox calls this with false to opt out; re-opening the dialog
+// from the palette/Help menu and unchecking it calls this with true to re-enable.
+func (g *Gogent) SetShowWelcome(show bool) error {
+	g.mu.Lock()
+	if g.config != nil {
+		g.config.ShowWelcome = &show
+	}
+	g.mu.Unlock()
+	if err := g.SaveConfig(); err != nil {
+		g.warnf("Failed to persist config: %v", err)
+		return err
+	}
+	return nil
+}
+
 // Models returns deep copies of the configured models so callers (e.g. the UI
 // model editor) can edit them without mutating the live config.
 func (g *Gogent) Models() []config.ModelConfig {
