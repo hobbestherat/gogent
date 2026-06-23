@@ -509,6 +509,15 @@ func TestGeminiAdapterParseStreamMalformedChunkReturnsError(t *testing.T) {
 	}
 }
 
+func TestGeminiAdapterParseStreamFunctionCallArgsMustBeObject(t *testing.T) {
+	ch := make(chan StreamResponse, 10)
+	stream := strings.NewReader(`data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":["not","object"],"id":"call_1"}}],"role":"model"},"finishReason":"STOP"}]}` + "\n\n")
+	content, usage, err := (geminiAdapter{}).parseStream(stream, ch)
+	if err == nil {
+		t.Fatalf("parseStream error = nil, want malformed functionCall args error; content=%q usage=%+v", content, usage)
+	}
+}
+
 func TestVertexNativeConnectionCompleteAndStreamUseNativeURLsAndADC(t *testing.T) {
 	withFakeADCTokenSource(t, func(ctx context.Context, scopes ...string) (oauth2.TokenSource, error) {
 		return &staticTokenSource{token: "native-token"}, nil
