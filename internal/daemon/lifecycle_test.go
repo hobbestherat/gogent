@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -126,6 +127,73 @@ func TestListenProbeAndQuery(t *testing.T) {
 	}
 }
 
+func TestListenLockIsReleasedOnClose(t *testing.T) {
+	p := PathsFor(t.TempDir())
+
+	ln, err := Listen(p.Sock)
+	if err != nil {
+		t.Fatalf("Listen first: %v", err)
+	}
+	if _, err := Listen(p.Sock); !errors.Is(err, ErrAlreadyRunning) {
+		t.Fatalf("Listen while lock held error = %v, want ErrAlreadyRunning", err)
+	}
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close first listener: %v", err)
+	}
+
+	ln2, err := Listen(p.Sock)
+	if err != nil {
+		t.Fatalf("Listen after close: %v", err)
+	}
+	if err := ln2.Close(); err != nil {
+		t.Fatalf("close second listener: %v", err)
+	}
+	if _, err := os.Stat(p.Lock); err != nil {
+		t.Fatalf("lock file after close = %v, want persistent lock file", err)
+	}
+}
+
+func TestListenConcurrentStartOnlyOneWins(t *testing.T) {
+	p := PathsFor(t.TempDir())
+
+	const workers = 16
+	start := make(chan struct{})
+	results := make(chan listenResult, workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			<-start
+			ln, err := Listen(p.Sock)
+			results <- listenResult{ln: ln, err: err}
+		}()
+	}
+	close(start)
+
+	var winners []net.Listener
+	var alreadyRunning int
+	for i := 0; i < workers; i++ {
+		res := <-results
+		switch {
+		case res.err == nil:
+			winners = append(winners, res.ln)
+		case errors.Is(res.err, ErrAlreadyRunning):
+			alreadyRunning++
+		default:
+			t.Fatalf("Listen concurrent unexpected error: %v", res.err)
+		}
+	}
+	for _, ln := range winners {
+		if err := ln.Close(); err != nil {
+			t.Fatalf("close winning listener: %v", err)
+		}
+	}
+	if len(winners) != 1 {
+		t.Fatalf("winners = %d, want 1", len(winners))
+	}
+	if alreadyRunning != workers-1 {
+		t.Fatalf("ErrAlreadyRunning count = %d, want %d", alreadyRunning, workers-1)
+	}
+}
+
 func TestProbeRejectsNonHealthySocket(t *testing.T) {
 	p := PathsFor(t.TempDir())
 	ln, err := net.Listen("unix", p.Sock)
@@ -191,6 +259,111 @@ func TestStopCleansStaleWhenNotRunning(t *testing.T) {
 	}
 	assertMissing(t, p.Pid)
 	assertMissing(t, p.Sock)
+}
+
+func TestStopUsesSocketExitWhenPidfileIsBad(t *testing.T) {
+	cases := []struct {
+		name       string
+		writeSetup func(t *testing.T, p Paths)
+	}{
+		{
+			name: "missing pidfile",
+			writeSetup: func(t *testing.T, p Paths) {
+				t.Helper()
+			},
+		},
+		{
+			name: "stale pidfile",
+			writeSetup: func(t *testing.T, p Paths) {
+				t.Helper()
+				if err := WritePidfile(p.Pid, 99999999); err != nil {
+					t.Fatalf("WritePidfile stale: %v", err)
+				}
+			},
+		},
+		{
+			name: "corrupt pidfile",
+			writeSetup: func(t *testing.T, p Paths) {
+				t.Helper()
+				if err := os.WriteFile(p.Pid, []byte("not-a-pid\n"), 0o600); err != nil {
+					t.Fatalf("write corrupt pidfile: %v", err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := PathsFor(t.TempDir())
+			ln, err := Listen(p.Sock)
+			if err != nil {
+				t.Fatalf("Listen: %v", err)
+			}
+			srv := serveHealthAndExit(t, ln, http.StatusOK, true)
+			defer closeServer(t, srv)
+			if err := writeAddr(p, "unix://"+p.Sock); err != nil {
+				t.Fatalf("writeAddr: %v", err)
+			}
+			tc.writeSetup(t, p)
+
+			if err := Stop(p, 2*time.Second, false); err != nil {
+				t.Fatalf("Stop: %v", err)
+			}
+			assertMissing(t, p.Pid)
+			assertMissing(t, p.Sock)
+			assertMissing(t, p.Addr)
+		})
+	}
+}
+
+func TestStopDoesNotCleanLiveSocketWhenExitFailsAndPidIsUnusable(t *testing.T) {
+	cases := []struct {
+		name       string
+		writeSetup func(t *testing.T, p Paths)
+	}{
+		{
+			name: "missing pidfile",
+			writeSetup: func(t *testing.T, p Paths) {
+				t.Helper()
+			},
+		},
+		{
+			name: "dead pidfile",
+			writeSetup: func(t *testing.T, p Paths) {
+				t.Helper()
+				if err := WritePidfile(p.Pid, 99999999); err != nil {
+					t.Fatalf("WritePidfile stale: %v", err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := PathsFor(t.TempDir())
+			ln, err := Listen(p.Sock)
+			if err != nil {
+				t.Fatalf("Listen: %v", err)
+			}
+			srv := serveHealthAndExit(t, ln, http.StatusForbidden, false)
+			defer closeServer(t, srv)
+			if err := writeAddr(p, "unix://"+p.Sock); err != nil {
+				t.Fatalf("writeAddr: %v", err)
+			}
+			tc.writeSetup(t, p)
+
+			err = Stop(p, 50*time.Millisecond, false)
+			if err == nil || !strings.Contains(err.Error(), "pidfile is missing or invalid") {
+				t.Fatalf("Stop error = %v, want invalid pidfile/live socket error", err)
+			}
+			if !Probe(p.Sock) {
+				t.Fatal("socket was cleaned or stopped after failed /exit with unusable pid; want live socket preserved")
+			}
+			if _, err := os.Stat(p.Sock); err != nil {
+				t.Fatalf("socket file after failed Stop: %v", err)
+			}
+		})
+	}
 }
 
 func TestStopGracefulAndForced(t *testing.T) {
@@ -295,6 +468,36 @@ func serveHealth(t *testing.T, ln net.Listener, status int) *http.Server {
 	return srv
 }
 
+func serveHealthAndExit(t *testing.T, ln net.Listener, exitStatus int, closeOnExit bool) *http.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc(healthPath, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintln(w, "ok")
+	})
+
+	var srv *http.Server
+	var once sync.Once
+	mux.HandleFunc(exitPath, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(exitStatus)
+		if closeOnExit {
+			once.Do(func() {
+				go func() {
+					_ = srv.Close()
+				}()
+			})
+		}
+	})
+
+	srv = &http.Server{Handler: mux, ReadHeaderTimeout: time.Second}
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("Serve: %v", err)
+		}
+	}()
+	return srv
+}
+
 func closeServer(t *testing.T, srv *http.Server) {
 	t.Helper()
 	if err := srv.Close(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -362,6 +565,11 @@ func assertMissing(t *testing.T, path string) {
 	}
 }
 
+type listenResult struct {
+	ln  net.Listener
+	err error
+}
+
 func TestPathsFor(t *testing.T) {
 	dir := t.TempDir()
 	p := PathsFor(dir)
@@ -373,6 +581,7 @@ func TestPathsFor(t *testing.T) {
 		"Sock": p.Sock,
 		"Addr": p.Addr,
 		"Log":  p.Log,
+		"Lock": p.Lock,
 	} {
 		if !strings.HasPrefix(got, dir+string(filepath.Separator)) {
 			t.Fatalf("%s path = %q, want under %q", name, got, dir)
