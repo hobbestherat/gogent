@@ -245,24 +245,35 @@ func runDaemonForeground(p daemon.Paths, opts daemonStartOpts) error {
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
-	addr := "unix://" + p.Sock
-	if err := daemon.Acquire(p, addr); err != nil {
-		_ = ln.Close()
-		return fmt.Errorf("acquire lifecycle: %w", err)
-	}
 
 	// When --tcp is requested, bind the TCP listener now (synchronously) so a
 	// failure — port in use, or a non-loopback host without auth — fails the
 	// whole start instead of being swallowed in a goroutine while we report
-	// success on the Unix socket alone.
+	// success on the Unix socket alone. Bind before Acquire so a failure leaves
+	// no pidfile/addr behind (closing ln releases the lock and unlinks the
+	// socket).
 	var tcpLn net.Listener
 	if opts.tcp {
 		tcpLn, err = tcpListener(opts.httpHost, opts.httpPort, resolveHTTPPassword(opts.password))
 		if err != nil {
 			_ = ln.Close()
-			_ = daemon.Release(p)
 			return fmt.Errorf("tcp transport: %w", err)
 		}
+	}
+
+	// Record the discovery address. The Unix socket is always the primary local
+	// transport; when --tcp is bound, append the TCP endpoint so daemon.addr (and
+	// `daemon status`) reflect the HTTP/curl endpoint too, not just the socket.
+	addr := "unix://" + p.Sock
+	if tcpLn != nil {
+		addr += " " + fmt.Sprintf("http://%s:%d", opts.httpHost, opts.httpPort)
+	}
+	if err := daemon.Acquire(p, addr); err != nil {
+		_ = ln.Close()
+		if tcpLn != nil {
+			_ = tcpLn.Close()
+		}
+		return fmt.Errorf("acquire lifecycle: %w", err)
 	}
 	fmt.Printf("daemon listening on %s (pid %d)\n", addr, os.Getpid())
 
