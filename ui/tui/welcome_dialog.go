@@ -25,8 +25,10 @@ Useful slash commands (type in the input box)
   /plan       Research & propose a plan without making changes
   /act        Approve and execute the pending plan
   /undo       Undo the last turn
+  /rewind     Rewind N turns
   /stop       Stop the running turn
   /goal       Set a supervisor goal for the session
+  /thinking   Toggle live chain-of-thought streaming
 
 Tips
   • Open the command palette (Ctrl+K) to discover everything gogent can do.
