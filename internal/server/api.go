@@ -133,6 +133,7 @@ func (s *Server) buildAPI() *webapi.API {
 	skills := skillsSvc{s: s}
 	settings := settingsSvc{s: s}
 	sys := systemSvc{s: s}
+	watchers := watchersSvc{s: s}
 
 	// AuthLevel: AuthRequired for everything except the auth/login flow and the
 	// public health check. webapi's provider authenticates loopback, password
@@ -200,6 +201,18 @@ func (s *Server) buildAPI() *webapi.API {
 			{Path: "/settings/notifications", Method: http.MethodPut, Handler: settings.NotificationsSet, AuthLevel: req},
 			{Path: "/settings/review-edits", Method: http.MethodGet, Handler: settings.ReviewEditsGet, AuthLevel: req},
 			{Path: "/settings/review-edits", Method: http.MethodPut, Handler: settings.ReviewEditsSet, AuthLevel: req},
+
+			// --- watchers (issue #329 Phase 5) ---
+			{Path: "/watchers", Method: http.MethodGet, Handler: watchers.List, AuthLevel: req},
+			{Path: "/watchers", Method: http.MethodPost, Handler: watchers.Create, AuthLevel: req},
+			{Path: "/watchers/:id", Method: http.MethodGet, Handler: watchers.Get, AuthLevel: req},
+			{Path: "/watchers/:id", Method: http.MethodPut, Handler: watchers.Update, AuthLevel: req},
+			{Path: "/watchers/:id", Method: http.MethodPatch, Handler: watchers.Update, AuthLevel: req},
+			{Path: "/watchers/:id", Method: http.MethodDelete, Handler: watchers.Delete, AuthLevel: req},
+			{Path: "/watchers/:id/enabled", Method: http.MethodPut, Handler: watchers.SetEnabled, AuthLevel: req},
+			{Path: "/watchers/:id/toggle", Method: http.MethodPost, Handler: watchers.Toggle, AuthLevel: req},
+			{Path: "/watchers/:id/run", Method: http.MethodPost, Handler: watchers.Run, AuthLevel: req},
+			{Path: "/watchers/:id/stop", Method: http.MethodPost, Handler: watchers.Stop, AuthLevel: req},
 
 			// --- system ---
 			{Path: "/health", Method: http.MethodGet, Handler: sys.Health, AuthLevel: pub},
