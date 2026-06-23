@@ -157,7 +157,25 @@ const swatchSample = "▉▉ Aa"
 // differs from the picker's current Color — reports a change on every explicit
 // commit, including a re-pick of the seeded colour or a non-canonical spec. It is
 // never drawn or committed, only used as an always-different baseline (issue #366).
+//
+// This depends on the sentinel's mode staying outside the set ColorPicker can
+// commit; checkPickerCommitSentinel makes that invariant explicit and fails loudly
+// at init (and so in every test run) if a turbotui ColorMode change ever made it
+// committable, rather than letting a same-colour commit silently stop writing back.
 var pickerCommitSentinel = tui.Color{Mode: 0xFF}
+
+// checkPickerCommitSentinel panics at package init if pickerCommitSentinel uses a
+// ColorMode the picker can actually commit. ColorPicker.currentColor only ever
+// returns ColorDefault/ColorANSI/ColorRGB, so the sentinel must use none of them
+// for "every explicit commit differs from the parked Color" to hold.
+func checkPickerCommitSentinel() {
+	switch pickerCommitSentinel.Mode {
+	case tui.ColorDefault, tui.ColorANSI, tui.ColorRGB:
+		panic("theme editor: pickerCommitSentinel uses a committable ColorMode — pick an unused tui.ColorMode")
+	}
+}
+
+func init() { checkPickerCommitSentinel() }
 
 // themeEditorLabelW is the MINIMUM width of the right column's role-label cell — the
 // column that carries the longest labels. It must hold the longest descriptive label
