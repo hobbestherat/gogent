@@ -72,6 +72,19 @@
       "reasoning_effort": "high",
       "effort_options": ["high", "max"],
       "free": false
+    },
+    {
+      "name": "claude-vertex",
+      "display_name": "Claude on Vertex AI (GCP ADC; no API key)",
+      "api_type": "vertex-anthropic",
+      "endpoint": "",
+      "project": "your-gcp-project",
+      "location": "global",
+      "model": "claude-opus-4-8",
+      "max_tokens": 8192,
+      "context_window": 1000000,
+      "thinking": true,
+      "free": false
     }
   ],
   "fast_model": "",

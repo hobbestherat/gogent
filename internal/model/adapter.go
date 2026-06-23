@@ -48,6 +48,12 @@ func adapterFor(t APIType) adapter {
 	switch t {
 	case APITypeAnthropic:
 		return anthropicAdapter{}
+	case APITypeVertexAnthropic:
+		// Claude on Vertex AI speaks the Anthropic Messages wire format, so it
+		// reuses anthropicAdapter; the vertex flag switches on the Vertex-specific
+		// body shape (model in URL not body, anthropic_version in body, ADC auth, no
+		// sampling params, prompt caching). See anthropicAdapter.buildBody.
+		return anthropicAdapter{vertex: true}
 	case APITypeVertex:
 		// Vertex AI's OpenAI-compatible endpoint speaks the standard OpenAI wire
 		// format, so it reuses the shared adapter; only its providerSpec (ADC auth
@@ -118,20 +124,67 @@ func (openAIAdapter) parseStream(body io.Reader, streamCh chan<- StreamResponse)
 // an extra header (see providerSpecs).
 const anthropicVersion = "2023-06-01"
 
-type anthropicAdapter struct{}
+// anthropicAdapter speaks the Anthropic Messages wire format. The same adapter
+// serves both the direct Anthropic API and Claude on Google Vertex AI; the
+// vertex flag selects the Vertex body shape — the model name is omitted (it
+// rides in the URL path), the API version is sent as the anthropic_version body
+// field instead of a header, sampling params are dropped (modern Claude rejects
+// temperature/top_p), the system prompt and last turn carry cache_control
+// breakpoints (prompt caching), and extended thinking is emitted as adaptive
+// thinking. See buildBody.
+type anthropicAdapter struct{ vertex bool }
+
+// anthropicThinking is the Messages-API thinking control. For Claude on Vertex,
+// gogent emits adaptive thinking ({"type":"adaptive"}), which lets the model
+// decide when and how much to reason and is the only mode current Claude models
+// accept (the older {"type":"enabled","budget_tokens":N} form is rejected). The
+// display field opts the streamed reasoning back in as a summary so gogent's
+// live thinking view (issue #217) keeps working.
+type anthropicThinking struct {
+	Type    string `json:"type"`
+	Display string `json:"display,omitempty"`
+}
+
+// anthropicCacheControl marks a content block as a prompt-cache breakpoint.
+// Vertex AI supports manual (cache_control) prompt caching; gogent places a
+// 5-minute ephemeral breakpoint on the system prompt and on the last turn so a
+// growing agent transcript is largely served from cache across turns.
+type anthropicCacheControl struct {
+	Type string `json:"type"`
+}
+
+// anthropicSystemBlock is one system-prompt text block. The Vertex body sends
+// the system prompt as a block array (rather than a bare string) so a
+// cache_control breakpoint can ride on it; the direct Anthropic body keeps the
+// scalar string form.
+type anthropicSystemBlock struct {
+	Type         string                 `json:"type"`
+	Text         string                 `json:"text"`
+	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
+}
 
 // anthropicRequest is the POST /v1/messages body. Unlike chat-completions it
 // hoists the system prompt to the top level, requires max_tokens, and carries
 // content-block arrays per message.
 type anthropicRequest struct {
-	Model       string             `json:"model"`
-	MaxTokens   int                `json:"max_tokens"`
-	System      string             `json:"system,omitempty"`
+	// Model is omitted on Vertex (the model name lives in the URL path); on the
+	// direct API it is always set, so omitempty is byte-identical there.
+	Model string `json:"model,omitempty"`
+	// AnthropicVersion carries the Messages-API version in the body. It is set
+	// only on Vertex (value "vertex-2023-10-16"); the direct API pins the version
+	// via the anthropic-version header instead, leaving this empty.
+	AnthropicVersion string `json:"anthropic_version,omitempty"`
+	MaxTokens        int    `json:"max_tokens"`
+	// System is either a scalar string (direct API) or a []anthropicSystemBlock
+	// (Vertex, so a cache_control breakpoint can ride on it). interface{} keeps
+	// both shapes; nil is omitted.
+	System      interface{}        `json:"system,omitempty"`
 	Messages    []anthropicMessage `json:"messages"`
 	Tools       []anthropicTool    `json:"tools,omitempty"`
 	ToolChoice  interface{}        `json:"tool_choice,omitempty"`
 	Temperature *float32           `json:"temperature,omitempty"`
 	TopP        *float32           `json:"top_p,omitempty"`
+	Thinking    *anthropicThinking `json:"thinking,omitempty"`
 	Stream      bool               `json:"stream,omitempty"`
 }
 
@@ -146,6 +199,9 @@ type anthropicContent struct {
 	Type string `json:"type"`
 	// text
 	Text string `json:"text,omitempty"`
+	// thinking (replayed assistant reasoning; signature must be unmodified)
+	Thinking  string `json:"thinking,omitempty"`
+	Signature string `json:"signature,omitempty"`
 	// tool_use
 	ID    string          `json:"id,omitempty"`
 	Name  string          `json:"name,omitempty"`
@@ -155,6 +211,8 @@ type anthropicContent struct {
 	Content   string `json:"content,omitempty"`
 	// image
 	Source *anthropicImageSource `json:"source,omitempty"`
+	// prompt-cache breakpoint (Vertex; placed on the last block of the last turn)
+	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
 }
 
 // anthropicImageSource is the source of an Anthropic image block: an inline
@@ -181,12 +239,25 @@ type anthropicTool struct {
 	Strict bool `json:"strict,omitempty"`
 }
 
-func (anthropicAdapter) buildBody(req CompletionRequest, buf *bytes.Buffer) error {
+func (a anthropicAdapter) buildBody(req CompletionRequest, buf *bytes.Buffer) error {
 	out := anthropicRequest{
-		Model:       req.Model,
-		Stream:      req.Stream,
-		Temperature: req.Temperature,
-		TopP:        req.TopP,
+		Stream: req.Stream,
+	}
+
+	if a.vertex {
+		// Vertex shape: the model name rides in the URL path (so it is omitted from
+		// the body), the API version travels in the body, and modern Claude rejects
+		// temperature/top_p — so sampling params are dropped entirely (Anthropic
+		// recommends steering with prompting rather than sampling on these models).
+		// Extended thinking, when enabled, is emitted as adaptive thinking.
+		out.AnthropicVersion = vertexAnthropicVersion
+		if req.Thinking != nil && req.Thinking.Type == "enabled" {
+			out.Thinking = &anthropicThinking{Type: "adaptive", Display: "summarized"}
+		}
+	} else {
+		out.Model = req.Model
+		out.Temperature = req.Temperature
+		out.TopP = req.TopP
 	}
 
 	// max_tokens is mandatory for Anthropic. buildRequest always sets one of the
@@ -214,6 +285,20 @@ func (anthropicAdapter) buildBody(req CompletionRequest, buf *bytes.Buffer) erro
 			continue
 		}
 		role, blocks := anthropicBlocks(m)
+		// On Vertex, replay the assistant turn's extended-thinking block (text +
+		// signature) ahead of its text/tool_use blocks. When thinking is enabled
+		// and the turn made tool calls, Anthropic requires the original thinking
+		// block — unmodified, signature included, and preceding the tool_use — to be
+		// present on the resent turn, or it rejects the follow-up request. The
+		// blocks are captured from the response and round-tripped via the transcript
+		// (see ModelSession and CompletionResponse.Thinking).
+		if a.vertex && role == "assistant" && (m.Thinking != "" || m.ThinkingSignature != "") {
+			blocks = append([]anthropicContent{{
+				Type:      "thinking",
+				Thinking:  m.Thinking,
+				Signature: m.ThinkingSignature,
+			}}, blocks...)
+		}
 		if len(blocks) == 0 {
 			continue
 		}
@@ -223,7 +308,32 @@ func (anthropicAdapter) buildBody(req CompletionRequest, buf *bytes.Buffer) erro
 			out.Messages = append(out.Messages, anthropicMessage{Role: role, Content: blocks})
 		}
 	}
-	out.System = strings.Join(systemParts, "\n\n")
+
+	// System prompt. On Vertex it is sent as a text-block array carrying a
+	// cache_control breakpoint (prompt caching); on the direct API it stays a bare
+	// string. Assigning interface{} only when non-empty keeps the direct body
+	// byte-identical (an empty string would otherwise marshal as "system":"").
+	if system := strings.Join(systemParts, "\n\n"); system != "" {
+		if a.vertex {
+			out.System = []anthropicSystemBlock{{
+				Type:         "text",
+				Text:         system,
+				CacheControl: &anthropicCacheControl{Type: "ephemeral"},
+			}}
+		} else {
+			out.System = system
+		}
+	}
+
+	// Prompt-cache breakpoint on the last turn: on a multi-turn agent loop this
+	// lets the whole prior transcript be served from cache on the next request.
+	// Placed on the last content block of the last message (Vertex only).
+	if a.vertex && len(out.Messages) > 0 {
+		last := &out.Messages[len(out.Messages)-1]
+		if n := len(last.Content); n > 0 {
+			last.Content[n-1].CacheControl = &anthropicCacheControl{Type: "ephemeral"}
+		}
+	}
 
 	for _, t := range req.Tools {
 		schema := t.Function.Parameters
@@ -376,11 +486,13 @@ func (u anthropicUsage) toTokenUsage(outputTokens int) *TokenUsage {
 
 type anthropicResponse struct {
 	Content []struct {
-		Type  string          `json:"type"`
-		Text  string          `json:"text"`
-		ID    string          `json:"id"`
-		Name  string          `json:"name"`
-		Input json.RawMessage `json:"input"`
+		Type      string          `json:"type"`
+		Text      string          `json:"text"`
+		Thinking  string          `json:"thinking"`
+		Signature string          `json:"signature"`
+		ID        string          `json:"id"`
+		Name      string          `json:"name"`
+		Input     json.RawMessage `json:"input"`
 	} `json:"content"`
 	StopReason string         `json:"stop_reason"`
 	Usage      anthropicUsage `json:"usage"`
@@ -397,6 +509,14 @@ func (anthropicAdapter) parseResponse(body []byte) (*CompletionResponse, error) 
 		switch b.Type {
 		case "text":
 			text.WriteString(b.Text)
+		case "thinking":
+			// Capture the extended-thinking block so it can be replayed unmodified
+			// on the next turn (required for tool use with thinking enabled). The
+			// first thinking block of the turn is the one that precedes any tool_use.
+			if resp.Thinking == "" && resp.ThinkingSignature == "" {
+				resp.Thinking = b.Thinking
+				resp.ThinkingSignature = b.Signature
+			}
 		case "tool_use":
 			args := string(b.Input)
 			if strings.TrimSpace(args) == "" {
@@ -449,6 +569,7 @@ type anthropicStreamEvent struct {
 		Type        string `json:"type"`
 		Text        string `json:"text"`
 		Thinking    string `json:"thinking"`
+		Signature   string `json:"signature"`
 		PartialJSON string `json:"partial_json"`
 		StopReason  string `json:"stop_reason"`
 	} `json:"delta"`
@@ -472,6 +593,16 @@ func (anthropicAdapter) parseStream(body io.Reader, streamCh chan<- StreamRespon
 	outputTokens := 0
 	var finishReason *string
 
+	// Capture the first extended-thinking block (text + signature) so it can be
+	// replayed unmodified on the next turn — required for tool use with thinking
+	// enabled (see buildBody). thinkingIdx pins the first thinking content block;
+	// only its deltas are accumulated, so a later thinking block can't corrupt the
+	// captured signature/text pairing. Live reasoning is still surfaced for every
+	// thinking block regardless (issue #217).
+	var thinkingBuf strings.Builder
+	var thinkingSig string
+	thinkingIdx := -1
+
 	for {
 		line, readErr := reader.ReadString('\n')
 		if data, ok := strings.CutPrefix(strings.TrimSpace(line), "data:"); ok {
@@ -485,9 +616,16 @@ func (anthropicAdapter) parseStream(body io.Reader, streamCh chan<- StreamRespon
 							promptUsage = *ev.Message.Usage
 						}
 					case "content_block_start":
-						if ev.ContentBlock != nil && ev.ContentBlock.Type == "tool_use" {
-							toolsByBlock[ev.Index] = &accTool{id: ev.ContentBlock.ID, name: ev.ContentBlock.Name}
-							order = append(order, ev.Index)
+						if ev.ContentBlock != nil {
+							switch ev.ContentBlock.Type {
+							case "tool_use":
+								toolsByBlock[ev.Index] = &accTool{id: ev.ContentBlock.ID, name: ev.ContentBlock.Name}
+								order = append(order, ev.Index)
+							case "thinking":
+								if thinkingIdx == -1 {
+									thinkingIdx = ev.Index
+								}
+							}
 						}
 					case "content_block_delta":
 						if ev.Delta != nil {
@@ -499,9 +637,21 @@ func (anthropicAdapter) parseStream(body io.Reader, streamCh chan<- StreamRespon
 								}
 							case "thinking_delta":
 								// Extended-thinking reasoning delta — surfaced as live
-								// thinking, kept out of the visible answer (issue #217).
+								// thinking, kept out of the visible answer (issue #217),
+								// and accumulated for the first block so it can be
+								// replayed next turn.
 								if ev.Delta.Thinking != "" {
 									streamCh <- StreamResponse{Reasoning: ev.Delta.Thinking, Role: RoleAssistant}
+									if ev.Index == thinkingIdx {
+										thinkingBuf.WriteString(ev.Delta.Thinking)
+									}
+								}
+							case "signature_delta":
+								// The thinking block's signature; must be preserved
+								// verbatim for replay. Captured for the first thinking
+								// block only.
+								if ev.Index == thinkingIdx {
+									thinkingSig += ev.Delta.Signature
 								}
 							case "input_json_delta":
 								if acc := toolsByBlock[ev.Index]; acc != nil {
@@ -548,10 +698,12 @@ func (anthropicAdapter) parseStream(body io.Reader, streamCh chan<- StreamRespon
 
 	usage := promptUsage.toTokenUsage(outputTokens)
 	streamCh <- StreamResponse{
-		ToolCalls:    toolCalls,
-		FinishReason: finishReason,
-		Usage:        usage,
-		Done:         true,
+		ToolCalls:         toolCalls,
+		FinishReason:      finishReason,
+		Usage:             usage,
+		Thinking:          thinkingBuf.String(),
+		ThinkingSignature: thinkingSig,
+		Done:              true,
 	}
 	return content.String(), usage, nil
 }
