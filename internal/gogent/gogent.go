@@ -1442,9 +1442,11 @@ func (g *Gogent) NewSession(id string) *agent.UserSession {
 // live ModelSession (via GetTranscript — mutex-guarded, returns a copy) rather
 // than from disk. The fork runs on the SAME model backend the parent is using
 // (the connector is stateless HTTP, safe to share, exactly as sub-agents do).
-// ReplaceTranscript copies again on the way in, so the two sessions share no
-// backing array and diverge independently from the fork point — mutating one
-// (further turns, undo, rewind) never affects the other.
+// The transcript is deep-cloned (cloneTranscript) before seeding, so parent and
+// child share no backing array at any level — neither the outer []Message nor a
+// message's nested Images/ToolCalls slices — and diverge fully from the fork
+// point: appending/undoing/rewinding turns or editing a message in place in one
+// never affects the other.
 //
 // The live todo checklist (session-scoped, not part of the transcript) is copied
 // too, so the fork continues with the same active checklist. The fork is a normal
@@ -1468,7 +1470,7 @@ func (g *Gogent) ForkSession(parentID, newID string) (*agent.UserSession, error)
 	parentTrain := parent.RootAgent.ThoughtTrain
 	// Continue on the parent's current model backend (shared stateless connector).
 	sess := model.NewModelSession("main", parentTrain.Model)
-	if msgs := parentTrain.GetTranscript(); len(msgs) > 0 {
+	if msgs := cloneTranscript(parentTrain.GetTranscript()); len(msgs) > 0 {
 		sess.ReplaceTranscript(msgs)
 	}
 	rootAgent := agent.NewAgent("root", sess)
@@ -1486,6 +1488,28 @@ func (g *Gogent) ForkSession(parentID, newID string) (*agent.UserSession, error)
 		forked.SetTodos(todos)
 	}
 	return forked, nil
+}
+
+// cloneTranscript returns a fully independent copy of a transcript. GetTranscript
+// and ReplaceTranscript each copy only the outer []Message slice, leaving every
+// message's Images and ToolCalls slices still aliasing the source backing arrays.
+// A fork must diverge from its parent at every level (issue #349), so this also
+// clones those two nested slices — after it, mutating a forked message's
+// attachments or tool calls in place can never write through to the parent. The
+// element types (ImageURL, ToolCall/FunctionCall) hold only scalar fields, so a
+// shallow slice copy of each is a complete clone.
+func cloneTranscript(msgs []model.Message) []model.Message {
+	out := make([]model.Message, len(msgs))
+	for i, m := range msgs {
+		if m.Images != nil {
+			m.Images = append([]model.ImageURL(nil), m.Images...)
+		}
+		if m.ToolCalls != nil {
+			m.ToolCalls = append([]model.ToolCall(nil), m.ToolCalls...)
+		}
+		out[i] = m
+	}
+	return out
 }
 
 // NewEphemeralSession is like NewSession but marks the session as ephemeral, so
