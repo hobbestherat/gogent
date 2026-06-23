@@ -47,6 +47,15 @@ var (
 )
 
 func main() {
+	// Subcommand dispatch: `gogent daemon <start|stop|status|restart>` runs the
+	// userspace daemon lifecycle (issue #358). It is intercepted before
+	// flag.Parse so the global flags (which describe the embedded/foreground
+	// invocation) do not consume the subcommand's own arguments. Any other
+	// invocation falls through to the unchanged default behaviour below.
+	if len(os.Args) > 1 && os.Args[1] == "daemon" {
+		os.Exit(runDaemon(os.Args[2:]))
+	}
+
 	flag.Parse()
 
 	// Get home directory
@@ -881,6 +890,17 @@ func sanitizeSessionID(s string) string {
 	return b.String()
 }
 
+// isUnixConn reports whether the request arrived over a Unix-domain-socket
+// listener, by inspecting the listener address the http server records in the
+// connection context. Such a connection is inherently local (the daemon socket
+// is 0600), so it is treated like a loopback caller for the /exit gate.
+func isUnixConn(r *http.Request) bool {
+	if la, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok {
+		return la.Network() == "unix"
+	}
+	return false
+}
+
 // isLoopbackAddr reports whether a RemoteAddr ("host:port") is a loopback
 // address, used to gate the /exit kill switch to local callers.
 func isLoopbackAddr(remoteAddr string) bool {
@@ -977,8 +997,11 @@ func newHTTPHandler(backend httpBackend, exitToken string, shutdown func()) http
 			return
 		}
 		// Gate the kill switch: local callers always pass; remote callers must
-		// present the configured token. Without either, refuse.
-		authorized := isLoopbackAddr(r.RemoteAddr)
+		// present the configured token. Without either, refuse. A connection over
+		// the daemon's Unix socket counts as local — the socket is 0600 and
+		// filesystem-permission gated, and it carries no IP RemoteAddr — so the
+		// `gogent daemon stop` /exit fallback can shut the daemon down over it.
+		authorized := isLoopbackAddr(r.RemoteAddr) || isUnixConn(r)
 		if !authorized && exitToken != "" {
 			tok := r.Header.Get("X-Gogent-Token")
 			authorized = subtle.ConstantTimeCompare([]byte(tok), []byte(exitToken)) == 1
@@ -1013,18 +1036,13 @@ func resolveHTTPPassword(flagValue string) string {
 	return ""
 }
 
-func startHTTPServer(host string, port int, g *gogent.Gogent, apiServer *server.Server, password string) {
-	// A non-loopback host requires a password or token so the instance is not
-	// exposed on the network without an identity gate. Loopback binds need none.
-	if !isLoopbackHost(host) && password == "" && os.Getenv("GOGENT_HTTP_TOKEN") == "" {
-		fmt.Printf("Refusing to bind HTTP server to non-loopback host %q without a password or token.\n", host)
-		fmt.Println("Set --http-password (or GOGENT_HTTP_PASSWORD / GOGENT_HTTP_TOKEN) to authorize it.")
-		return
-	}
-
-	// Build the root mux: the new /api surface (webapi, reflection-bound + SSE)
-	// alongside the legacy form-encoded handlers (/message, /status, /exit) for
-	// backward compatibility.
+// buildRootHandler assembles the daemon/server's full HTTP surface: the new
+// /api surface (webapi, reflection-bound + SSE) alongside the legacy form-encoded
+// handlers (/message, /status, /exit, /health) kept for backward compatibility.
+// It is shared by the TCP server (startHTTPServer) and the daemon's Unix-socket
+// listener so both expose an identical surface. /exit triggers the same graceful
+// shutdown path as an OS interrupt via httpShutdownCh.
+func buildRootHandler(g *gogent.Gogent, apiServer *server.Server) http.Handler {
 	root := http.NewServeMux()
 	root.Handle("/api/", apiServer.Handler())
 
@@ -1047,10 +1065,36 @@ func startHTTPServer(host string, port int, g *gogent.Gogent, apiServer *server.
 	root.Handle("/status", authed)
 	root.Handle("/exit", legacy)
 	root.Handle("/health", legacy)
+	return root
+}
+
+// tcpListener validates and binds the HTTP API's TCP listener. It enforces the
+// same rule as the embedded server — a non-loopback host requires a password or
+// token — and returns an error (rather than binding) when that is unmet or the
+// bind itself fails. Returning the error lets the daemon surface an explicitly
+// requested --tcp transport that could not be brought up, instead of silently
+// reporting success on the Unix socket alone.
+func tcpListener(host string, port int, password string) (net.Listener, error) {
+	if !isLoopbackHost(host) && password == "" && os.Getenv("GOGENT_HTTP_TOKEN") == "" {
+		return nil, fmt.Errorf("refusing to bind HTTP server to non-loopback host %q without a password or token (set --http-password / GOGENT_HTTP_PASSWORD / GOGENT_HTTP_TOKEN)", host)
+	}
+	addr := fmt.Sprintf("%s:%d", host, port)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen tcp %s: %w", addr, err)
+	}
+	return ln, nil
+}
+
+func startHTTPServer(host string, port int, g *gogent.Gogent, apiServer *server.Server, password string) {
+	ln, err := tcpListener(host, port, password)
+	if err != nil {
+		fmt.Printf("HTTP server not started: %v\n", err)
+		return
+	}
 
 	srv := &http.Server{
-		Addr:              fmt.Sprintf("%s:%d", host, port),
-		Handler:           root,
+		Handler:           buildRootHandler(g, apiServer),
 		ReadHeaderTimeout: httpReadHeaderTimeout,
 		ReadTimeout:       httpReadTimeout,
 		IdleTimeout:       httpIdleTimeout,
@@ -1064,7 +1108,7 @@ func startHTTPServer(host string, port int, g *gogent.Gogent, apiServer *server.
 	fmt.Println("  GET  /status  - Tool logs + stats  [legacy; prefer GET /api/sessions/:id/stats]")
 	fmt.Println("  POST /exit    - Exit server (local-only, or X-Gogent-Token)")
 
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		log.Printf("HTTP server error: %v", err)
 	}
 }
