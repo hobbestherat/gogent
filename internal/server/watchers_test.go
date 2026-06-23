@@ -185,6 +185,31 @@ func TestWatchersAPICreatePersistsFullWatcherConfig(t *testing.T) {
 	}
 }
 
+func TestWatchersAPICreateIndependentSentinelIsFreeRunning(t *testing.T) {
+	srv := newWatcherTestServer(t)
+
+	created := postWatcher(t, srv, `{
+		"name": "independent-sentinel",
+		"task": "Run independently.",
+		"schedule": {"every": "45m"},
+		"report_to_session": "independent"
+	}`)
+	if created.Kind != "free" || created.Target != "free" {
+		t.Fatalf("created watcher = %+v, want free-running watcher for report_to_session=independent", created)
+	}
+	store := srv.g.LoadWatchers()
+	for _, item := range store.Items {
+		if item.ID != created.ID {
+			continue
+		}
+		if item.ReportToSession != nil {
+			t.Fatalf("persisted watcher report_to_session = %q, want nil for free-running", *item.ReportToSession)
+		}
+		return
+	}
+	t.Fatalf("created free-running watcher %q was not persisted", created.ID)
+}
+
 func TestWatchersAPICreateAttachedGetAndScopedList(t *testing.T) {
 	srv := newWatcherTestServer(t)
 
