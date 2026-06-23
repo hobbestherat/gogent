@@ -27,6 +27,7 @@ import (
 	"gogent/internal/server"
 	"gogent/internal/stats"
 	"gogent/internal/tool"
+	"gogent/internal/watcher"
 	tuipkg "gogent/ui/tui"
 )
 
@@ -464,6 +465,38 @@ func main() {
 				}
 				return content, true
 			},
+			// Watchers (issue #329 Phase 4). The TUI dialog, sidebar and /watcher
+			// command read through ListWatchers and drive the controls below, which
+			// map onto the Phase-3 gogent wrappers. Enable/Disable are the two
+			// directions of SetWatcherEnabled (idempotent); the rest are 1:1.
+			ListWatchers: func(sessionID string) []tuipkg.WatcherInfo {
+				infos := g.ListWatchers(sessionID)
+				out := make([]tuipkg.WatcherInfo, 0, len(infos))
+				for _, info := range infos {
+					out = append(out, toWatcherInfo(info))
+				}
+				return out
+			},
+			CreateWatcher: func(cfg tuipkg.WatcherConfig, sessionID string) (tuipkg.WatcherInfo, error) {
+				wc := config.WatcherConfig{
+					Name:            cfg.Name,
+					Task:            cfg.Task,
+					Model:           cfg.Model,
+					Enabled:         true,
+					Schedule:        config.ScheduleConfig{Every: cfg.Every, DailyAt: cfg.DailyAt, Timezone: cfg.Timezone},
+					ReportToSession: cfg.ReportToSession,
+				}
+				info, err := g.CreateWatcher(wc, sessionID)
+				if err != nil {
+					return tuipkg.WatcherInfo{}, fmt.Errorf("create watcher: %w", err)
+				}
+				return toWatcherInfo(info), nil
+			},
+			EnableWatcher:  func(idOrName string) error { return g.SetWatcherEnabled(idOrName, true) },
+			DisableWatcher: func(idOrName string) error { return g.SetWatcherEnabled(idOrName, false) },
+			RunWatcher:     func(idOrName string) error { return g.RunWatcherNow(idOrName) },
+			StopWatcher:    func(idOrName string) error { return g.StopWatcher(idOrName) },
+			DeleteWatcher:  func(idOrName string) error { return g.DeleteWatcher(idOrName) },
 		})
 
 		// Push the persisted notification config into the workbench's live
@@ -536,6 +569,45 @@ func main() {
 
 	// Give time for shutdown to complete
 	time.Sleep(100 * time.Millisecond)
+}
+
+// watcherSessionPrefix mirrors internal/gogent's unexported prefix for the
+// dedicated, persistent session a free-running watcher fires into ("watcher:<name>").
+// The dialog's Open Session button raises that session, so the UI layer needs the
+// same id the backend uses.
+const watcherSessionPrefix = "watcher:"
+
+// toWatcherInfo maps a backend watcher snapshot to the UI-facing view the Watchers
+// dialog and the sidebar render (issue #329 Phase 4). It resolves the session the
+// watcher reports into (the target session for an attached watcher, the dedicated
+// watcher:<name> session for a free-running one) and formats the timestamps.
+func toWatcherInfo(info watcher.WatcherInfo) tuipkg.WatcherInfo {
+	free := info.Kind == watcher.KindFree
+	sessionID := info.TargetSession
+	if free {
+		sessionID = watcherSessionPrefix + info.Name
+	}
+	out := tuipkg.WatcherInfo{
+		ID:            info.ID,
+		Name:          info.Name,
+		Free:          free,
+		TargetSession: info.TargetSession,
+		SessionID:     sessionID,
+		Enabled:       info.Enabled,
+		Status:        info.Status.String(),
+		Running:       info.Status == watcher.StatusRunning,
+		Task:          info.Task,
+		Schedule:      info.Schedule,
+		LastResult:    info.LastResult,
+		LastError:     info.LastError,
+	}
+	if !info.NextFire.IsZero() {
+		out.NextFire = info.NextFire.Format("2006-01-02 15:04")
+	}
+	if !info.LastRun.IsZero() {
+		out.LastRun = info.LastRun.Format("2006-01-02 15:04")
+	}
+	return out
 }
 
 // toChatMessages converts backend transcript messages into the UI-facing chat

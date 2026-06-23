@@ -49,6 +49,20 @@ func (w *Workbench) sessionsDialogSpec() tv.DialogSpec {
 	}
 }
 
+// watchersDialogSpec is the content-driven size of the Watchers dialog (issue
+// #329 Phase 4). Like sessionsDialogSpec it expresses a content footprint rather
+// than a share of the terminal: a watcher list beside a detail pane that shows the
+// task text needs a touch more width and height than the sessions browser, so it
+// grows toward — but is capped below — the browser balloon (130×32 cap) with the
+// usual 60×16 floor to stay usable on a small terminal. The spec is static (no
+// terminal-share term), so the dialog uses dialog.Fit on resize.
+func (w *Workbench) watchersDialogSpec() tv.DialogSpec {
+	return tv.DialogSpec{
+		MinW: 60, MaxW: 130, PreferredW: 104,
+		MinH: 16, MaxH: 32, PrefH: 24,
+	}
+}
+
 // installResizeReflow makes an open dialog re-resolve against the CURRENT terminal
 // on every resize by recomputing its spec from scratch via specFn, then applying
 // the new centered bounds. Dialogs whose spec encodes the terminal dimensions —
