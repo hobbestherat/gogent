@@ -16,12 +16,39 @@ import (
 // entry grouped by category, so the cheatsheet can never drift from the real
 // bindings.
 type command struct {
-	category string      // help-overlay grouping, e.g. "Session"
-	name     string      // human description shown in both views
-	keys     string      // key hint shown in both views ("" when unbound)
+	category string // help-overlay grouping, e.g. "Session"
+	name     string // human description shown in both views
+	keys     string // key hint shown in both views ("" when unbound)
+	// actionID ties this entry to its turbotui BindingRegistry binding (issue #269,
+	// phase 4a). When set and the binding resolves, commands() overwrites keys with
+	// the registry's real chord (registry.BindingFor(actionID).Chord.String()) so the
+	// palette and cheatsheet can never drift from the live binding. Empty leaves the
+	// hardcoded keys hint in place (slash commands, menu accelerators, and the
+	// composite "Ctrl+F, /" / "Ctrl+K, :" hints that name more than one chord).
+	actionID tv.ActionID
 	run      func()      // palette action; nil marks a reference-only binding
 	enabled  func() bool // availability predicate; nil means always available
 }
+
+// Action identifiers (issue #269, phase 4a). These are the opaque keys gogent shares
+// with turbotui's BindingRegistry: the transcript-context keys are registered at
+// ScopeFocus (scoped to a session window's transcript) and the help/palette keys at
+// ScopeFallthrough. They are the contract a tester targets, so they are stable
+// strings, not generated.
+const (
+	actionTranscriptFind        tv.ActionID = "transcript.find"
+	actionTranscriptShowAll     tv.ActionID = "transcript.showAll"
+	actionTranscriptToggleMsg   tv.ActionID = "transcript.toggle.messages"
+	actionTranscriptToggleTool  tv.ActionID = "transcript.toggle.tools"
+	actionTranscriptToggleThink tv.ActionID = "transcript.toggle.thinking"
+	actionTranscriptToggleErr   tv.ActionID = "transcript.toggle.errors"
+	actionTranscriptFoldAll     tv.ActionID = "transcript.foldAll"
+	actionTranscriptUnfoldAll   tv.ActionID = "transcript.unfoldAll"
+	actionTranscriptCopyAnswer  tv.ActionID = "transcript.copyAnswer"
+
+	actionHelpOverlay    tv.ActionID = "app.help"
+	actionCommandPalette tv.ActionID = "app.commandPalette"
+)
 
 // visible reports whether the command should appear in the help overlay: a
 // command gated behind an unwired handler is hidden so the cheatsheet only lists
@@ -55,7 +82,7 @@ func (w *Workbench) commands() []command {
 			w.desktop.Redraw()
 		}
 	}
-	return []command{
+	cmds := []command{
 		// Session lifecycle and arrangement.
 		{category: "Session", name: "New session", keys: "Ctrl+N", run: func() { w.NewSession() }},
 		{category: "Session", name: "Next session", keys: "Ctrl+]", run: func() { w.cycle(1) }},
@@ -100,17 +127,17 @@ func (w *Workbench) commands() []command {
 		// help overlay exists to provide.
 		{category: "Transcript", name: "Find in transcript", keys: "Ctrl+F, /",
 			run: func() { w.withActiveTranscript((*SessionWindow).promptFind) }},
-		{category: "Transcript", name: "Show all (clear filter)", keys: "Esc",
+		{category: "Transcript", name: "Show all (clear filter)", keys: "Esc", actionID: actionTranscriptShowAll,
 			run: func() { w.transcriptDo((*transcriptModel).showAll) }},
-		{category: "Transcript", name: "Toggle messages", keys: "a", run: toggle(kindAssistant)},
-		{category: "Transcript", name: "Toggle tool calls", keys: "t", run: toggle(kindTool)},
-		{category: "Transcript", name: "Toggle thinking", keys: "r", run: toggle(kindThinking)},
-		{category: "Transcript", name: "Toggle errors", keys: "e", run: toggle(kindError)},
-		{category: "Transcript", name: "Fold all", keys: "f",
+		{category: "Transcript", name: "Toggle messages", keys: "a", actionID: actionTranscriptToggleMsg, run: toggle(kindAssistant)},
+		{category: "Transcript", name: "Toggle tool calls", keys: "t", actionID: actionTranscriptToggleTool, run: toggle(kindTool)},
+		{category: "Transcript", name: "Toggle thinking", keys: "r", actionID: actionTranscriptToggleThink, run: toggle(kindThinking)},
+		{category: "Transcript", name: "Toggle errors", keys: "e", actionID: actionTranscriptToggleErr, run: toggle(kindError)},
+		{category: "Transcript", name: "Fold all", keys: "f", actionID: actionTranscriptFoldAll,
 			run: func() { w.transcriptDo(func(m *transcriptModel) { m.setFold(true) }) }},
-		{category: "Transcript", name: "Unfold all", keys: "u",
+		{category: "Transcript", name: "Unfold all", keys: "u", actionID: actionTranscriptUnfoldAll,
 			run: func() { w.transcriptDo(func(m *transcriptModel) { m.setFold(false) }) }},
-		{category: "Transcript", name: "Copy last answer", keys: "y",
+		{category: "Transcript", name: "Copy last answer", keys: "y", actionID: actionTranscriptCopyAnswer,
 			run: func() { w.withActiveTranscript((*SessionWindow).copyLastAnswer) }},
 		{category: "Transcript", name: "Copy last code block",
 			run: func() { w.withActiveTranscript((*SessionWindow).copyLastCode) }},
@@ -131,9 +158,62 @@ func (w *Workbench) commands() []command {
 		// already in it); the sidebar pin and help/quit are runnable.
 		{category: "App", name: "Pin / unpin sidebar", run: w.ToggleSidebarPin},
 		{category: "App", name: "Command palette", keys: "Ctrl+K, :"},
-		{category: "App", name: "Keybinding help", keys: "?", run: w.showHelpOverlay},
+		{category: "App", name: "Keybinding help", keys: "?", actionID: actionHelpOverlay, run: w.showHelpOverlay},
 		{category: "App", name: "Quit", keys: "Ctrl+Q", run: w.confirmQuit},
 	}
+	// Derive the key hint from the live registry for every entry that names an action
+	// (issue #269, phase 4a): the binding is the single source of truth, so the
+	// palette and cheatsheet can never drift from what the key actually does. Entries
+	// without an actionID (slash commands, menu accelerators, composite hints) keep
+	// their hardcoded keys.
+	for i := range cmds {
+		if cmds[i].actionID == "" {
+			continue
+		}
+		if disp, ok := w.chordDisplay(cmds[i].actionID); ok {
+			cmds[i].keys = disp
+		}
+	}
+	return cmds
+}
+
+// chordDisplay returns the conventional display string for the chord bound to
+// actionID in the desktop's scoped BindingRegistry (issue #269, phase 4a), and false
+// when there is no desktop yet or no binding carries the action. Callers fall back to
+// the hardcoded keys hint on false, so a workbench built without a desktop (e.g. the
+// zero value used by unit tests) renders the catalog's default hints unchanged.
+func (w *Workbench) chordDisplay(id tv.ActionID) (string, bool) {
+	if w.desktop == nil {
+		return "", false
+	}
+	reg := w.desktop.ScopedBindings()
+	if reg == nil {
+		return "", false
+	}
+	if b, ok := reg.BindingFor(id); ok {
+		return displayChord(b.Chord), true
+	}
+	return "", false
+}
+
+// displayChord renders a chord as the keys the user actually presses, for the
+// palette/cheatsheet hint. It is tv.Chord.String() except for a bare letter chord
+// (a single ASCII letter with no modifier and no named key), which is shown
+// lowercase: Chord.String() upper-cases letters so "Ctrl+R" reads naturally, but an
+// unmodified transcript key like 'a' must display as the unshifted "a" the user
+// presses, not a Shift-looking "A". This keeps the derived hint equivalent to the
+// pre-4a hardcoded string (issue #269) while still tracking the real binding — a
+// rebind to another letter, or to a modified chord, flows straight through.
+func displayChord(c tv.Chord) string {
+	if c.Key == tui.KeyUnknown && !c.Ctrl && !c.Shift && !c.Alt {
+		if c.Rune >= 'a' && c.Rune <= 'z' {
+			return string(c.Rune)
+		}
+		if c.Rune >= 'A' && c.Rune <= 'Z' {
+			return string(c.Rune - 'A' + 'a')
+		}
+	}
+	return c.String()
 }
 
 // editActiveGoal is the palette's "Set / show goal" action (issue #201): it opens

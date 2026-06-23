@@ -437,7 +437,25 @@ func NewWorkbench(models []*config.ModelConfig) *Workbench {
 		w.sidebar.reposition(w.app.Width(), w.app.Height())
 	})
 	w.rebuildMenu()
+	w.registerFallthroughBindings()
 	return w
+}
+
+// registerFallthroughBindings registers the app-fallthrough keys ('?' opens the
+// keybinding help, ':' opens the command palette) as Fallthrough-scope bindings on
+// the desktop's BindingRegistry (issue #269, phase 4a). The toolkit consults them at
+// the unhandledKeyFn dispatch position — after the focused widget and focus
+// navigation decline the key — so they fire only when '?'/':' reach the desktop
+// unconsumed (focus on a transcript/sidebar, not a text input where they are literal
+// characters), exactly as the old SetUnhandledKeyFn cases did. Ctrl+C is deliberately
+// left in SetUnhandledKeyFn (see Run): its quit-only-when-unconsumed rule must run at
+// that tail position.
+func (w *Workbench) registerFallthroughBindings() {
+	reg := w.desktop.ScopedBindings()
+	reg.Register(tv.KeyBinding{Chord: tv.Chord{Rune: '?'}, ActionID: actionHelpOverlay, Scope: tv.ScopeFallthrough},
+		func() bool { w.showHelpOverlay(); return true })
+	reg.Register(tv.KeyBinding{Chord: tv.Chord{Rune: ':'}, ActionID: actionCommandPalette, Scope: tv.ScopeFallthrough},
+		func() bool { w.showCommandPalette(); return true })
 }
 
 // SetModels updates the list of available models offered in each session window.
@@ -1922,23 +1940,16 @@ func (w *Workbench) Run() error {
 		w.NewSession()
 	}
 	w.desktop.SetUnhandledKeyFn(func(event tui.TypeEvent) {
-		if event.Key != tui.KeyRune || event.Alt {
+		// '?' and ':' are handled one step earlier, at the Fallthrough dispatch stage
+		// (registerFallthroughBindings), which runs before this callback. Only Ctrl+C
+		// remains here: it must stay at the unhandledKeyFn tail so it requests quit
+		// confirmation only when no focused widget consumed it (the quit-only-when-
+		// unconsumed rule).
+		if event.Key != tui.KeyRune || event.Alt || !event.Ctrl {
 			return
 		}
-		if event.Ctrl {
-			if event.Rune == 'c' || event.Rune == 'C' {
-				w.confirmQuit()
-			}
-			return
-		}
-		// '?' and ':' open the help overlay and command palette respectively, but
-		// only when they reach the desktop unconsumed — i.e. focus is on a
-		// transcript/sidebar, not a text input where they are literal characters.
-		switch event.Rune {
-		case '?':
-			w.showHelpOverlay()
-		case ':':
-			w.showCommandPalette()
+		if event.Rune == 'c' || event.Rune == 'C' {
+			w.confirmQuit()
 		}
 	})
 	// Live-status ticker: while any session is generating, refresh its status
