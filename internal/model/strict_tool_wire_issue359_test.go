@@ -66,20 +66,23 @@ func TestIssue359StrictToolWireFormatOpenAI(t *testing.T) {
 	}
 }
 
-func TestIssue359StrictToolWireFormatAnthropicDropsUnsupportedStrictField(t *testing.T) {
+func TestIssue359StrictToolWireFormatAnthropicEmitsStrictField(t *testing.T) {
+	// Anthropic's Messages API supports strict tool use via a top-level
+	// "strict": true property on the tool definition, alongside name/description/
+	// input_schema (https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/
+	// strict-tool-use). So a strict tool MUST carry strict:true on the Anthropic
+	// wire — it is not dropped (unlike Gemini, which has no per-tool strict field).
 	conn := NewModelConnectionFromConfig(&config.ModelConfig{APIType: "anthropic", Model: "claude-x"})
 	req := conn.buildRequest([]Message{{Role: RoleUser, Content: "hi"}}, false, []ToolDef{issue359StrictToolDef()}, nil)
 	raw, err := buildBodyBytes(anthropicAdapter{}, req)
 	if err != nil {
 		t.Fatalf("buildBody: %v", err)
 	}
-	if strings.Contains(string(raw), `"strict"`) {
-		t.Fatalf("Anthropic wire body leaked unsupported strict field: %s", raw)
-	}
 
 	var got struct {
 		Tools []struct {
 			Name        string                 `json:"name"`
+			Strict      bool                   `json:"strict"`
 			InputSchema map[string]interface{} `json:"input_schema"`
 		} `json:"tools"`
 	}
@@ -92,8 +95,27 @@ func TestIssue359StrictToolWireFormatAnthropicDropsUnsupportedStrictField(t *tes
 	if got.Tools[0].Name != "read" {
 		t.Errorf("tool name = %q, want read", got.Tools[0].Name)
 	}
+	if !got.Tools[0].Strict {
+		t.Fatalf("Anthropic tool.strict = false, want true (strict tool use is supported): %s", raw)
+	}
 	if got := got.Tools[0].InputSchema["additionalProperties"]; got != false {
 		t.Fatalf("Anthropic input_schema.additionalProperties = %v, want false", got)
+	}
+}
+
+func TestIssue359NonStrictToolOmitsStrictFieldAnthropic(t *testing.T) {
+	// A non-strict tool (the default, e.g. spawn_subagent) must omit strict on the
+	// Anthropic wire so it is not advertised as strict — strict:omitempty.
+	def := issue359StrictToolDef()
+	def.Function.Strict = false
+	conn := NewModelConnectionFromConfig(&config.ModelConfig{APIType: "anthropic", Model: "claude-x"})
+	req := conn.buildRequest([]Message{{Role: RoleUser, Content: "hi"}}, false, []ToolDef{def}, nil)
+	raw, err := buildBodyBytes(anthropicAdapter{}, req)
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+	if strings.Contains(string(raw), `"strict"`) {
+		t.Fatalf("non-strict Anthropic tool should omit strict field: %s", raw)
 	}
 }
 
