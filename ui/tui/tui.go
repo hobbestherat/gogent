@@ -190,6 +190,49 @@ type Handlers struct {
 	// It returns the resulting state. It backs the /thinking command's live toggle.
 	// May be nil, in which case the command reports the feature as unavailable.
 	StreamThinking func(sessionID string, set *bool) bool
+	// --- Watchers (issue #329 Phase 4) ---
+	// ListWatchers returns the watchers visible to sessionID: every free-running
+	// watcher plus that session's own attached watchers (sessionID "" yields the
+	// free-running ones only). It backs the Watchers dialog, the /watcher list
+	// command and the sidebar's watcher nodes. May be nil, in which case the
+	// Watchers dialog and menu item are hidden and the sidebar renders no watcher
+	// nodes.
+	ListWatchers func(sessionID string) []WatcherInfo
+	// CreateWatcher registers a new watcher from cfg and reports the created
+	// watcher (or an error). sessionID is the calling session, used as the owning
+	// session for an attached watcher. May be nil.
+	CreateWatcher func(cfg WatcherConfig, sessionID string) (WatcherInfo, error)
+	// EnableWatcher / DisableWatcher drive a watcher (by id or name) to a specific
+	// schedule state: enabling re-arms it, disabling stops future fires (a running
+	// fire finishes). Both back the dialog's Enable/Disable buttons and the
+	// /watcher enable|disable commands. May be nil.
+	EnableWatcher  func(idOrName string) error
+	DisableWatcher func(idOrName string) error
+	// RunWatcher fires a watcher (by id or name) immediately, ignoring its
+	// schedule and enabled state. Backs the dialog Run button and /watcher run.
+	// May be nil.
+	RunWatcher func(idOrName string) error
+	// StopWatcher cancels a watcher's in-flight fire (by id or name) without
+	// stopping its schedule. Backs the dialog Stop button and /watcher stop. May
+	// be nil.
+	StopWatcher func(idOrName string) error
+	// DeleteWatcher unregisters a watcher (by id or name) entirely. Backs the
+	// dialog Delete button. May be nil.
+	DeleteWatcher func(idOrName string) error
+}
+
+// WatcherConfig is the UI-facing description of a watcher to create (issue #329
+// Phase 4), kept free of internal/config so ui/tui stays decoupled from the
+// backend types. ReportToSession nil makes a free-running watcher; a non-nil
+// (possibly empty) value makes an attached watcher owned by that session.
+type WatcherConfig struct {
+	Name            string
+	Task            string
+	Model           string
+	Every           string // interval form, e.g. "5m" (mutually exclusive with DailyAt)
+	DailyAt         string // "HH:MM" form
+	Timezone        string // IANA tz for DailyAt; "" means UTC
+	ReportToSession *string
 }
 
 // RestoredSession describes a session to be re-opened from persisted state.
@@ -247,6 +290,42 @@ type ToolInfo struct {
 	Enabled     bool
 	Invocations int
 	LastUsed    string // human-readable, empty when never used
+}
+
+// WatcherInfo is the UI-facing snapshot of one scheduled watcher (issue #329
+// Phase 4), assembled by the backend from the watcher manager's state plus its
+// stored config. It is deliberately self-contained so ui/tui does not depend on
+// internal/watcher: the Watchers dialog and the sidebar render entirely from this
+// view.
+type WatcherInfo struct {
+	ID   string
+	Name string
+	// Free reports the watcher's kind: true for a free-running (global) watcher
+	// that owns its own watcher:<name> session and renders as a top-level sidebar
+	// entry; false for an attached (session-scoped) watcher that renders as a
+	// child of its target session.
+	Free bool
+	// TargetSession is the owning session id for an attached watcher, or "" for a
+	// free-running watcher. It backs the dialog's Target column ("free" badge when
+	// empty) and the sidebar's child-node placement.
+	TargetSession string
+	// SessionID is the session the watcher reports into and that the dialog's Open
+	// Session button raises: TargetSession for attached watchers, watcher:<name>
+	// for free-running ones.
+	SessionID string
+	Enabled   bool
+	// Status is the lowercase status token ("idle"/"running"/"skipped"/"failed").
+	Status string
+	// Running is true while a fire is in flight, driving the live busy marker in
+	// both the dialog list and the sidebar node (independent of Status so a test
+	// can set it directly).
+	Running    bool
+	Task       string // configured task prompt (shown in the dialog detail pane)
+	Schedule   string // human-readable schedule ("every 5m"), may be empty
+	NextFire   string // formatted next-fire time, empty when none/disabled
+	LastRun    string // formatted last-run time, empty when never run
+	LastResult string
+	LastError  string
 }
 
 // Workbench is the top-level multi-session TUI.
@@ -573,6 +652,13 @@ func (w *Workbench) rebuildMenu() {
 		sessionItems = append(sessionItems,
 			tv.NewMenuItem("----------", nil),
 			tv.NewMenuItem("Saved &Sessions…", func() { w.showSessionsDialog() }),
+		)
+	}
+	// The Watchers dialog (issue #329 Phase 4) is surfaced only when the backend
+	// wires the watcher listing handler.
+	if w.handlers.ListWatchers != nil {
+		sessionItems = append(sessionItems,
+			tv.NewMenuItem("&Watchers…", func() { w.showWatchersDialog() }),
 		)
 	}
 	// Per-active-session operations (rename / pin / reorder) only make sense when
@@ -2130,7 +2216,16 @@ func (w *Workbench) tickBusyStatuses() {
 	// all-idle early return, so the busy→idle transition that empties the set still
 	// clears the last ● — and redraw once if any marker moved, since an otherwise
 	// idle tick does no other work.
-	if w.sidebar != nil && w.sidebar.syncBusy(busyIDs) {
+	redraw := w.sidebar != nil && w.sidebar.syncBusy(busyIDs)
+	// Refresh the sidebar's watcher nodes on the same tick so a fire's busy marker,
+	// a watcher created/deleted from the dialog or a tool, and a schedule change all
+	// surface live (issue #329 Phase 4). It re-pulls the watcher list and reconciles
+	// the nodes, reporting whether anything moved so an otherwise-idle tick still
+	// redraws on a watcher transition.
+	if w.refreshWatcherNodes() {
+		redraw = true
+	}
+	if redraw {
 		w.desktop.Redraw()
 	}
 	if len(busy) == 0 {
@@ -2143,6 +2238,42 @@ func (w *Workbench) tickBusyStatuses() {
 	// refresh the Overall panel on the same 1s tick as the status lines.
 	w.refreshOverall()
 	w.desktop.Redraw()
+}
+
+// refreshWatcherNodes re-pulls the watcher list and reconciles the sidebar's
+// watcher nodes (issue #329 Phase 4): free-running watchers as top-level entries
+// and each session's attached watchers as children of its node. It returns
+// whether the node set or any busy marker changed, so the caller redraws exactly
+// on a watcher transition. It is a no-op (returning false) before the sidebar is
+// built or when no ListWatchers handler is wired. Runs on the UI thread.
+//
+// The visibility API is per-session (ListWatchers(sessionID) yields free-running
+// watchers plus that session's attached ones), so the free set is fetched once
+// with the empty session id and each open session is queried for its own attached
+// watchers — the local user's sidebar sees every session's watchers, unlike the
+// session-private list_watchers tool.
+func (w *Workbench) refreshWatcherNodes() bool {
+	if w.sidebar == nil || w.handlers.ListWatchers == nil {
+		return false
+	}
+	free := make([]WatcherInfo, 0)
+	for _, info := range w.handlers.ListWatchers("") {
+		if info.Free {
+			free = append(free, info)
+		}
+	}
+	w.mu.Lock()
+	order := append([]string(nil), w.order...)
+	w.mu.Unlock()
+	attached := make(map[string][]WatcherInfo, len(order))
+	for _, sid := range order {
+		for _, info := range w.handlers.ListWatchers(sid) {
+			if !info.Free && info.TargetSession == sid {
+				attached[sid] = append(attached[sid], info)
+			}
+		}
+	}
+	return w.sidebar.setWatchers(free, attached)
 }
 
 // childLines splits text into lines for foldable children, preserving structure.

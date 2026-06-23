@@ -107,7 +107,13 @@ type Spec struct {
 	Kind      Kind
 	SessionID string // owning/target session for KindAttached; "" for KindFree
 	Schedule  Schedule
-	Enabled   bool
+	// ScheduleDesc is a short human-readable rendering of Schedule ("every 5m",
+	// "daily 07:00 Europe/Zurich") supplied by the host, since the Schedule
+	// interface itself carries no display form. It is surfaced verbatim on
+	// WatcherInfo for the Watchers dialog / sidebar (issue #329 Phase 4) and is
+	// purely informational — the engine never parses it.
+	ScheduleDesc string
+	Enabled      bool
 	// SuppressNotify opts a free-running watcher out of the completion
 	// notification the manager otherwise emits on every successful free-running
 	// fire. The zero value (false) keeps the default-on behaviour, so a watcher
@@ -129,6 +135,7 @@ type Runner struct {
 	kind           Kind
 	sessionID      string
 	schedule       Schedule
+	scheduleDesc   string
 	suppressNotify bool
 
 	mu         sync.Mutex
@@ -156,6 +163,7 @@ func NewRunner(spec Spec) *Runner {
 		kind:           spec.Kind,
 		sessionID:      spec.SessionID,
 		schedule:       spec.Schedule,
+		scheduleDesc:   spec.ScheduleDesc,
 		suppressNotify: spec.SuppressNotify,
 		enabled:        spec.Enabled,
 		status:         StatusIdle,
@@ -195,6 +203,8 @@ type WatcherInfo struct {
 	Name          string
 	Kind          Kind
 	TargetSession string // session id for attached watchers; "" for free-running
+	Task          string // the configured task prompt (for the dialog detail pane)
+	Schedule      string // human-readable schedule (Spec.ScheduleDesc), may be ""
 	Enabled       bool
 	Status        Status
 	LastRun       time.Time
@@ -215,6 +225,8 @@ func (r *Runner) snapshot() WatcherInfo {
 		Name:          r.name,
 		Kind:          r.kind,
 		TargetSession: target,
+		Task:          r.task,
+		Schedule:      r.scheduleDesc,
 		Enabled:       r.enabled,
 		Status:        r.status,
 		LastRun:       r.lastRun,

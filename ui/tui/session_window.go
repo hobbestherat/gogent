@@ -1718,8 +1718,92 @@ func (sw *SessionWindow) handleSlashCommand(text string) bool {
 	case "/thinking":
 		sw.handleThinkingCommand(fields[1:])
 		return true
+	case "/watcher":
+		sw.handleWatcherCommand(fields[1:])
+		return true
 	}
 	return false
+}
+
+// handleWatcherCommand implements /watcher (issue #329 Phase 4): a client-side
+// control surface for the session's watchers mirroring the Watchers dialog
+// buttons. Sub-commands:
+//
+//	/watcher list                 list the watchers visible to this session
+//	/watcher enable  <name|id>    re-arm a watcher's schedule
+//	/watcher disable <name|id>    stop future fires (a running fire finishes)
+//	/watcher run     <name|id>    fire now, ignoring schedule/enabled state
+//	/watcher stop    <name|id>    cancel the in-flight fire
+//
+// Each control dispatches to the matching workbench handler and echoes the
+// outcome; an unwired handler is reported as unavailable rather than silently
+// ignored.
+func (sw *SessionWindow) handleWatcherCommand(args []string) {
+	if sw.wb == nil {
+		return
+	}
+	if len(args) == 0 {
+		sw.addNote("usage: /watcher list|enable|disable|run|stop [name]")
+		return
+	}
+	sub := strings.ToLower(args[0])
+	if sub == "list" {
+		if sw.wb.handlers.ListWatchers == nil {
+			sw.addNote("watchers are unavailable")
+			return
+		}
+		infos := sw.wb.handlers.ListWatchers(sw.id)
+		if len(infos) == 0 {
+			sw.echoCommand("/watcher list", "no watchers", nil)
+			return
+		}
+		var b strings.Builder
+		for i, info := range infos {
+			if i > 0 {
+				b.WriteString("\n")
+			}
+			target := "free"
+			if !info.Free {
+				target = info.TargetSession
+			}
+			status := info.Status
+			if !info.Enabled {
+				status += ", disabled"
+			}
+			fmt.Fprintf(&b, "• %s [%s] %s — %s (%s)", info.Name, target, info.Schedule, status, info.NextFire)
+		}
+		sw.echoCommand("/watcher list", b.String(), nil)
+		return
+	}
+
+	// The remaining sub-commands act on a named watcher.
+	if len(args) < 2 {
+		sw.addNote("usage: /watcher " + sub + " <name|id>")
+		return
+	}
+	name := strings.Join(args[1:], " ")
+	var (
+		fn    func(string) error
+		label string
+	)
+	switch sub {
+	case "enable":
+		fn, label = sw.wb.handlers.EnableWatcher, "/watcher enable"
+	case "disable":
+		fn, label = sw.wb.handlers.DisableWatcher, "/watcher disable"
+	case "run":
+		fn, label = sw.wb.handlers.RunWatcher, "/watcher run"
+	case "stop":
+		fn, label = sw.wb.handlers.StopWatcher, "/watcher stop"
+	default:
+		sw.addNote("usage: /watcher list|enable|disable|run|stop [name]")
+		return
+	}
+	if fn == nil {
+		sw.addNote("watcher control is unavailable")
+		return
+	}
+	sw.echoCommand(label, name, fn(name))
 }
 
 // handleThinkingCommand implements /thinking (issue #217): it toggles live

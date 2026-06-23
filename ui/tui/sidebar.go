@@ -47,6 +47,16 @@ const todoRegionTitleLines = 1
 // there is no global header counter (issue #230 removed the phantom aggregate).
 const approvalBadge = "⏳"
 
+// watcherGlyph is the shared badge for a scheduled watcher in the session tree
+// (issue #329 Phase 4): ◷ (U+25F7, "clock with three o'clock"). It is a single
+// cell and deliberately distinct from every other sidebar glyph set — the session
+// idle/active markers (○/●), the sub-agent lifecycle icons (▶/‖/✓/✗/•) and the
+// todo icons (☐/◐/✔) — so a watcher row reads as a watcher at a glance, whether it
+// is a free-running top-level entry or an attached child node. Both placements use
+// this same glyph; only the tree position (root vs nested) tells the two kinds
+// apart, mirroring the dialog's Target column.
+const watcherGlyph = "◷"
+
 // clarifyBadge marks a session whose interactive sub-agent is blocked waiting
 // for the user (a CLARIFY question, issue #207). It is the clarify counterpart
 // of approvalBadge: a distinct glyph appended to the owning session's node label.
@@ -65,6 +75,14 @@ type sidebar struct {
 
 	sessions map[string]*tv.TreeNode // sessionID -> root node
 	agents   map[string]*tv.TreeNode // agentID  -> sub-agent node
+	// watchers maps a watcher id to its tree node, and watcherParents records each
+	// watcher node's placement (issue #329 Phase 4): "" for a free-running watcher
+	// rendered as a top-level root, or the target session id for an attached
+	// watcher rendered as a child of that session's node. setWatchers reconciles
+	// both against the live watcher list; the parent map is what lets a placement
+	// change (or a vanished watcher) be detached from the right container.
+	watchers       map[string]*tv.TreeNode
+	watcherParents map[string]string
 	// todos is the source of truth for each session's checklist (issue #43),
 	// keyed by session id. It is no longer embedded in the session tree (issue
 	// #190): the focused session's list is drawn in its own middle region by
@@ -148,26 +166,32 @@ type sidebar struct {
 	overallModelKeys []string
 }
 
-// nodeRef identifies what a tree node points at: a session (agentID empty) or a
-// sub-agent within a session.
+// nodeRef identifies what a tree node points at: a session (agentID empty), a
+// sub-agent within a session, or a watcher (watcher set). For a watcher node
+// sessionID is the session the watcher reports into — the target session for an
+// attached watcher (so selecting it focuses the parent window) or the dedicated
+// watcher:<name> session for a free-running one (issue #329 Phase 4).
 type nodeRef struct {
 	sessionID string
 	agentID   string
 	name      string
+	watcher   bool
 }
 
 // newSidebar builds the pinned sidebar panel and its tree.
 func newSidebar(wb *Workbench) *sidebar {
 	s := &sidebar{
-		wb:           wb,
-		sessions:     make(map[string]*tv.TreeNode),
-		agents:       make(map[string]*tv.TreeNode),
-		todos:        make(map[string][]agent.TodoItem),
-		approvals:    make(map[string]bool),
-		busy:         make(map[string]bool),
-		clarify:      make(map[string]bool),
-		clarifyCount: make(map[string]int),
-		overallBandH: overallBandHeight,
+		wb:             wb,
+		sessions:       make(map[string]*tv.TreeNode),
+		agents:         make(map[string]*tv.TreeNode),
+		watchers:       make(map[string]*tv.TreeNode),
+		watcherParents: make(map[string]string),
+		todos:          make(map[string][]agent.TodoItem),
+		approvals:      make(map[string]bool),
+		busy:           make(map[string]bool),
+		clarify:        make(map[string]bool),
+		clarifyCount:   make(map[string]int),
+		overallBandH:   overallBandHeight,
 	}
 
 	panel := tv.NewComponent(tv.Rect{})
@@ -420,6 +444,16 @@ func (s *sidebar) removeSession(id string) {
 				}
 				delete(s.wb.clarifyWaiting, key)
 			}
+		}
+	}
+	// Drop bookkeeping for the session's attached watcher children (issue #329
+	// Phase 4): the nodes themselves vanish with the parent node removed below, but
+	// their entries in the watcher maps would otherwise dangle. Free-running
+	// watchers are independent roots and are left untouched.
+	for wid, parent := range s.watcherParents {
+		if parent == id {
+			delete(s.watchers, wid)
+			delete(s.watcherParents, wid)
 		}
 	}
 	roots := s.tree.Roots[:0]
@@ -725,6 +759,111 @@ func (s *sidebar) applySubAgent(sessionID string, ev agent.SessionEvent) {
 	node.Label = agentLabel(ev.Name, ev.Status, ev.Kind)
 }
 
+// setWatchers reconciles the sidebar's watcher nodes against the current watcher
+// list (issue #329 Phase 4): free-running watchers render as top-level roots and
+// each session's attached watchers render as children of that session's node. It
+// is incremental — nodes that vanished or moved are detached, surviving nodes have
+// their busy marker relabelled in place, and new ones are inserted — so it can run
+// every status tick without churning the tree's selection or expansion state. It
+// returns whether any node was added, removed, re-placed or relabelled, so the
+// caller redraws only on a real change. An attached watcher whose target session
+// has no node yet is skipped (it appears once the session node exists). Runs on
+// the UI thread.
+func (s *sidebar) setWatchers(free []WatcherInfo, attached map[string][]WatcherInfo) bool {
+	// Desired placement: watcher id -> (info, parent session id; "" = top-level).
+	type placement struct {
+		info   WatcherInfo
+		parent string
+	}
+	desired := make(map[string]placement, len(free))
+	for _, info := range free {
+		desired[info.ID] = placement{info, ""}
+	}
+	for sid, list := range attached {
+		if s.sessions[sid] == nil {
+			continue // cannot nest under a session that has no node yet
+		}
+		for _, info := range list {
+			desired[info.ID] = placement{info, sid}
+		}
+	}
+
+	changed := false
+	// Detach watcher nodes that are gone, or whose parent placement changed (an
+	// attached watcher re-pointed, or a kind flip) — they are re-added below.
+	for id, node := range s.watchers {
+		if p, ok := desired[id]; !ok || p.parent != s.watcherParents[id] {
+			s.detachWatcherNode(id, node)
+			changed = true
+		}
+	}
+	// Add new nodes and relabel survivors in place.
+	for id, p := range desired {
+		ref := nodeRef{sessionID: p.info.SessionID, name: p.info.Name, watcher: true}
+		label := watcherLabel(p.info)
+		if node, ok := s.watchers[id]; ok {
+			if node.Label != label {
+				node.Label = label
+				changed = true
+			}
+			node.Data = ref // keep the focus target / name fresh
+			continue
+		}
+		node := tv.NewTreeNode(label)
+		node.Data = ref
+		if p.parent == "" {
+			s.tree.AddRoot(node)
+		} else {
+			s.sessions[p.parent].Add(node)
+		}
+		s.watchers[id] = node
+		s.watcherParents[id] = p.parent
+		changed = true
+	}
+	return changed
+}
+
+// detachWatcherNode removes a watcher node from its container (the tree roots for
+// a free-running watcher, or its parent session's children for an attached one)
+// and drops its bookkeeping. Caller has already decided the node should go.
+func (s *sidebar) detachWatcherNode(id string, node *tv.TreeNode) {
+	if parent := s.watcherParents[id]; parent == "" {
+		roots := s.tree.Roots[:0]
+		for _, r := range s.tree.Roots {
+			if r != node {
+				roots = append(roots, r)
+			}
+		}
+		s.tree.Roots = roots
+	} else if pnode := s.sessions[parent]; pnode != nil {
+		kids := pnode.Children[:0]
+		for _, c := range pnode.Children {
+			if c != node {
+				kids = append(kids, c)
+			}
+		}
+		pnode.Children = kids
+	}
+	delete(s.watchers, id)
+	delete(s.watcherParents, id)
+}
+
+// watcherLabel renders a watcher tree row: the shared ◷ glyph, a live busy marker
+// (●) while a fire runs, then the watcher's name. Free-running watchers are shown
+// with their watcher:<name> session label (matching their dedicated session id);
+// attached watchers use the bare name. The placement in the tree (root vs child),
+// not the label, is what distinguishes the two kinds.
+func watcherLabel(info WatcherInfo) string {
+	name := info.Name
+	if info.Free {
+		name = "watcher:" + info.Name
+	}
+	if info.Running {
+		return fmt.Sprintf("%s %s %s", watcherGlyph, sessionStatusIcon(true), name)
+	}
+	return fmt.Sprintf("%s %s", watcherGlyph, name)
+}
+
 // applyTodo records a session's checklist from a todo update (issue #43). Since
 // issue #190 the todos are no longer embedded as session-tree children: this
 // only updates s.todos (the source of truth), and the focused session's list is
@@ -793,6 +932,10 @@ func (s *sidebar) relabelSession(id, title string, pinned bool) {
 
 // reorder reorders the tree's roots to match order. Sessions absent from order
 // keep their relative positions at the tail; unknown ids in order are skipped.
+// Free-running watcher roots (issue #329 Phase 4) are always preserved at the
+// tail — they are keyed on their watcher:<name> session id, which order never
+// lists, and the watcher flag keeps them even in the pathological case where a
+// real session id collides with one.
 func (s *sidebar) reorder(order []string) {
 	if len(order) == 0 {
 		return
@@ -808,7 +951,7 @@ func (s *sidebar) reorder(order []string) {
 		seen[id] = true
 	}
 	for _, node := range s.tree.Roots {
-		if ref, ok := node.Data.(nodeRef); ok && !seen[ref.sessionID] {
+		if ref, ok := node.Data.(nodeRef); ok && (ref.watcher || !seen[ref.sessionID]) {
 			roots = append(roots, node)
 		}
 	}

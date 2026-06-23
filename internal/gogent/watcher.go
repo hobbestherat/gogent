@@ -81,6 +81,7 @@ func (g *Gogent) StartWatchers() {
 			Model:          wc.Model,
 			Kind:           watcher.KindFree,
 			Schedule:       sched,
+			ScheduleDesc:   scheduleSummary(wc.Schedule),
 			Enabled:        true,
 			SuppressNotify: suppressWatcherNotify(wc.Output),
 		})
@@ -204,14 +205,15 @@ func (g *Gogent) registerAttachedRunner(mgr *watcher.Manager, wc config.WatcherC
 		return
 	}
 	runner := watcher.NewRunner(watcher.Spec{
-		ID:        wc.ID,
-		Name:      wc.Name,
-		Task:      wc.Task,
-		Model:     wc.Model,
-		Kind:      watcher.KindAttached,
-		SessionID: sessionID,
-		Schedule:  sched,
-		Enabled:   wc.Enabled,
+		ID:           wc.ID,
+		Name:         wc.Name,
+		Task:         wc.Task,
+		Model:        wc.Model,
+		Kind:         watcher.KindAttached,
+		SessionID:    sessionID,
+		Schedule:     sched,
+		ScheduleDesc: scheduleSummary(wc.Schedule),
+		Enabled:      wc.Enabled,
 	})
 	if err := mgr.Add(runner); err != nil && !errors.Is(err, watcher.ErrDuplicate) {
 		g.logger().Warn("attached watcher not registered", "name", wc.Name, "error", err)
@@ -275,14 +277,15 @@ func (g *Gogent) CreateWatcher(cfg config.WatcherConfig, sessionID string) (watc
 		t := target
 		cfg.ReportToSession = &t
 		runner := watcher.NewRunner(watcher.Spec{
-			ID:        cfg.ID,
-			Name:      cfg.Name,
-			Task:      cfg.Task,
-			Model:     cfg.Model,
-			Kind:      watcher.KindAttached,
-			SessionID: target,
-			Schedule:  sched,
-			Enabled:   cfg.Enabled,
+			ID:           cfg.ID,
+			Name:         cfg.Name,
+			Task:         cfg.Task,
+			Model:        cfg.Model,
+			Kind:         watcher.KindAttached,
+			SessionID:    target,
+			Schedule:     sched,
+			ScheduleDesc: scheduleSummary(cfg.Schedule),
+			Enabled:      cfg.Enabled,
 		})
 		if err := mgr.Add(runner); err != nil {
 			return watcher.WatcherInfo{}, fmt.Errorf("register attached watcher: %w", err)
@@ -303,6 +306,7 @@ func (g *Gogent) CreateWatcher(cfg config.WatcherConfig, sessionID string) (watc
 			Model:          cfg.Model,
 			Kind:           watcher.KindFree,
 			Schedule:       sched,
+			ScheduleDesc:   scheduleSummary(cfg.Schedule),
 			Enabled:        cfg.Enabled,
 			SuppressNotify: suppressWatcherNotify(cfg.Output),
 		})
@@ -379,6 +383,7 @@ func (g *Gogent) UpdateWatcher(patch config.WatcherConfig, sessionID string) (wa
 		Kind:           kind,
 		SessionID:      owner,
 		Schedule:       sched,
+		ScheduleDesc:   scheduleSummary(cur.Schedule),
 		Enabled:        cur.Enabled,
 		SuppressNotify: suppressWatcherNotify(cur.Output),
 	})
