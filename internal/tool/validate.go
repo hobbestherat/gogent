@@ -84,23 +84,24 @@ func validateEnum(value interface{}, allowed []interface{}, path string) error {
 
 // enumEqual reports whether a provided value matches an allowed enum entry.
 //
-// String members are matched case-insensitively: the gate's job is to reject
-// values the tool could never honor, not to be stricter than the tool itself.
-// The enum-typed fields tolerate loose case downstream (e.g. todo.status is run
-// through NormalizeTodoStatus, which lower-cases before matching), so rejecting
-// "IN_PROGRESS" at the gate would block input the tool would otherwise accept,
-// while genuinely out-of-set values ("blocked", "rebase") are still rejected.
+// Matching is exact: JSON Schema enum members are case-sensitive, so "CONTENT"
+// does not match "content". This is what lets the gate reject case-variants
+// uniformly (naming the field and allowed set) instead of letting them slip
+// through to a later, tool-specific error. Any downstream convenience
+// normalization (e.g. NormalizeTodoStatus) runs after validation and must not
+// weaken the advertised constraint.
 //
-// For non-string members it compares directly, then falls back to comparing
-// string forms so a JSON number (float64) matches a Go integer literal.
+// Only when neither side is a string does it fall back to comparing string
+// forms, so a JSON number (float64) still matches a Go integer literal in the
+// schema — a defensive equivalence for non-JSON arg sources.
 func enumEqual(value, allowed interface{}) bool {
 	if value == allowed {
 		return true
 	}
-	if sv, ok := value.(string); ok {
-		if sa, ok := allowed.(string); ok {
-			return strings.EqualFold(sv, sa)
-		}
+	_, valueIsString := value.(string)
+	_, allowedIsString := allowed.(string)
+	if valueIsString || allowedIsString {
+		return false
 	}
 	return fmt.Sprintf("%v", value) == fmt.Sprintf("%v", allowed)
 }
