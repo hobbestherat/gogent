@@ -44,6 +44,20 @@ func validateValue(value, schema interface{}, path string) error {
 			}
 		}
 	}
+	// Array items: walk each element against the "items" subschema so constraints
+	// nested inside arrays (e.g. todo.status under todos.items.properties) are
+	// enforced too. A schema may omit "type" (the todos schema deliberately
+	// permits array-or-null), so this is gated on the value actually being an
+	// array rather than on a declared "array" type.
+	if items, ok := schemaMap["items"].(map[string]interface{}); ok {
+		if arr, ok := value.([]interface{}); ok {
+			for i, elem := range arr {
+				if err := validateValue(elem, items, fmt.Sprintf("%s[%d]", path, i)); err != nil {
+					return err
+				}
+			}
+		}
+	}
 	// An "enum" subschema constrains the value to a fixed allowed set. Enforce it
 	// generically for any property that declares one, so advertised enums
 	// (git.operation, grep.output_mode, todo.status, and any future field) are
@@ -68,12 +82,25 @@ func validateEnum(value interface{}, allowed []interface{}, path string) error {
 	return fmt.Errorf("%s: value must be one of %s, got %s", path, formatEnumAllowed(allowed), formatEnumGot(value))
 }
 
-// enumEqual reports whether a provided value matches an allowed enum entry. It
-// compares directly first, then falls back to comparing string forms so a JSON
-// number (float64) matches a Go integer literal in the schema.
+// enumEqual reports whether a provided value matches an allowed enum entry.
+//
+// String members are matched case-insensitively: the gate's job is to reject
+// values the tool could never honor, not to be stricter than the tool itself.
+// The enum-typed fields tolerate loose case downstream (e.g. todo.status is run
+// through NormalizeTodoStatus, which lower-cases before matching), so rejecting
+// "IN_PROGRESS" at the gate would block input the tool would otherwise accept,
+// while genuinely out-of-set values ("blocked", "rebase") are still rejected.
+//
+// For non-string members it compares directly, then falls back to comparing
+// string forms so a JSON number (float64) matches a Go integer literal.
 func enumEqual(value, allowed interface{}) bool {
 	if value == allowed {
 		return true
+	}
+	if sv, ok := value.(string); ok {
+		if sa, ok := allowed.(string); ok {
+			return strings.EqualFold(sv, sa)
+		}
 	}
 	return fmt.Sprintf("%v", value) == fmt.Sprintf("%v", allowed)
 }
