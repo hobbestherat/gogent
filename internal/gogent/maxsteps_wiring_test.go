@@ -122,6 +122,28 @@ func TestGlobalYoloWiresUnlimitedStepsAndPermissionAutoApprove(t *testing.T) {
 	}
 }
 
+func TestConfigYoloWiresUnlimitedStepsAndPermissionAutoApprove(t *testing.T) {
+	home := t.TempDir()
+	cfg := config.GetDefaultConfig()
+	cfg.Yolo = true
+	cfg.MaxSteps = intptr(7)
+	if err := config.SaveConfig(home, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	g := NewGogentWithWorkspace(home, t.TempDir())
+	us := g.NewSession("s-config-yolo")
+	if us == nil {
+		t.Fatal("NewSession returned nil")
+	}
+	if got := us.MaxSteps(); got != 0 {
+		t.Fatalf("config yolo session MaxSteps = %d, want 0 (unlimited)", got)
+	}
+	if err := g.GetPermissionService().CheckWithContext(permission.RequestContext{SessionID: "s-config-yolo"}, permission.ActionShell, "", "echo hi"); err != nil {
+		t.Fatalf("config yolo should auto-approve otherwise-ask shell permission, got %v", err)
+	}
+}
+
 func TestSetYoloModeTogglesSessionStepCapAndPermissions(t *testing.T) {
 	g := newMaxStepsGogent(t, intptr(9))
 	us := g.NewSession("s-toggle")

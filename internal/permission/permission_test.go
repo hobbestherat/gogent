@@ -424,15 +424,16 @@ func TestMalformedRulesAreSkippedButValidRulesStillLoad(t *testing.T) {
 		"rules": [
 			{"action":"shell","resource":"*","effect":"deny","detail_pattern":"["},
 			{"action":"network","resource":"blocked.test","effect":"deny"},
-			{"action":"shell","resource":"*","effect":"bogus"}
+			{"action":"shell","resource":"*","effect":"bogus"},
+			{"action":"shel","resource":"*","effect":"deny","detail_pattern":"rm\\s+-rf\\s+/"}
 		]
 	}`), 0600); err != nil {
 		t.Fatalf("write rules.json: %v", err)
 	}
 
 	s := New(dir)
-	if errs := s.LoadRules(dir); len(errs) != 2 {
-		t.Fatalf("LoadRules errors = %d %v, want 2 malformed-rule errors", len(errs), errs)
+	if errs := s.LoadRules(dir); len(errs) != 3 {
+		t.Fatalf("LoadRules errors = %d %v, want 3 malformed-rule errors", len(errs), errs)
 	}
 	s.SetYolo(true)
 	if err := s.Check(ActionNetwork, "blocked.test"); err == nil {
@@ -440,6 +441,19 @@ func TestMalformedRulesAreSkippedButValidRulesStillLoad(t *testing.T) {
 	}
 	if err := s.CheckWithDetail(ActionShell, "", "rm -rf /"); err != nil {
 		t.Fatalf("invalid shell guardrail should have been skipped; yolo should allow ask, got %v", err)
+	}
+}
+
+func TestAddRuleRejectsUnknownAction(t *testing.T) {
+	s := New("")
+	if err := s.AddRule(Rule{Action: "shel", Resource: "*", Effect: "deny"}); err == nil {
+		t.Fatal("expected unknown action to be rejected")
+	}
+	if err := s.AddRule(Rule{Action: "*", Resource: "*", Effect: "deny"}); err != nil {
+		t.Fatalf("wildcard action should be valid, got %v", err)
+	}
+	if err := s.AddRule(Rule{Action: string(ActionShell), Resource: "*", Effect: "deny"}); err != nil {
+		t.Fatalf("known action should be valid, got %v", err)
 	}
 }
 
