@@ -493,7 +493,7 @@ func (g *Gogent) initializeToolRegistry() {
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"path": map[string]interface{}{"type": "string"},
+				"path": map[string]interface{}{"type": "string", "description": "File path to edit, relative to the workspace root or absolute."},
 				"edits": map[string]interface{}{
 					"type":        "array",
 					"description": "Edits applied in order. Each is {find, replace, replace_all?}.",

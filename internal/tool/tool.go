@@ -180,8 +180,10 @@ func (tr *ToolRegistry) ListEnabled() []*Tool {
 }
 
 // RenderToolDocs renders a deterministic, registry-derived plain-text listing of
-// the enabled tools — each tool's name, full Description, and per-parameter
-// schema descriptions. It exists so that any prompt wanting an inline tool
+// the enabled tools — each tool's name, full Description, and its top-level
+// schema parameters with their descriptions (nested array-item fields are
+// summarized by the parameter's own description, not expanded). It exists so
+// that any prompt wanting an inline tool
 // summary can generate it from the registry instead of hand-maintaining a list
 // that drifts from Tool.Description/InputSchema (issue #357). The authoritative
 // contract sent to the model is still the native function definitions built from
