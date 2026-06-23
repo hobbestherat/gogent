@@ -646,6 +646,12 @@ type geminiToolConfig struct {
 type geminiFunctionCallingConfig struct {
 	Mode                 string   `json:"mode,omitempty"`
 	AllowedFunctionNames []string `json:"allowedFunctionNames,omitempty"`
+	// ParallelFunctionCalls advertises whether the model may emit several
+	// functionCall parts in one turn. Gemini enables this by default; it is a
+	// pointer so it is always surfaced explicitly (the native wire reference lists
+	// it) while still letting an explicit gogent override (parallel_tool_calls:false
+	// for strict tool sets) pass through. See geminiToolConfigFor.
+	ParallelFunctionCalls *bool `json:"parallelFunctionCalls,omitempty"`
 }
 
 type geminiGenConfig struct {
@@ -711,7 +717,7 @@ func (geminiAdapter) buildBody(req CompletionRequest, buf *bytes.Buffer) error {
 		}
 		out.Tools = []geminiTool{{FunctionDeclarations: decls}}
 		if req.ToolChoice != nil {
-			out.ToolConfig = geminiToolConfigFor(*req.ToolChoice)
+			out.ToolConfig = geminiToolConfigFor(*req.ToolChoice, req.ParallelToolCalls)
 		}
 	}
 
@@ -776,9 +782,15 @@ func geminiParts(m Message) (string, []geminiPart) {
 			parts = append(parts, geminiPart{Text: m.Content})
 		}
 		for _, tc := range m.ToolCalls {
+			// Gemini requires functionCall.args to be a JSON object; forward it only
+			// when it parses as one, so a malformed/non-object arguments string from
+			// persisted history is dropped rather than emitted as invalid wire format.
 			var args json.RawMessage
-			if a := strings.TrimSpace(tc.Function.Arguments); a != "" && json.Valid([]byte(a)) {
-				args = json.RawMessage(a)
+			if a := strings.TrimSpace(tc.Function.Arguments); a != "" {
+				var obj map[string]interface{}
+				if json.Unmarshal([]byte(a), &obj) == nil {
+					args = json.RawMessage(a)
+				}
 			}
 			parts = append(parts, geminiPart{FunctionCall: &geminiFunctionCall{
 				Name: tc.Function.Name,
@@ -848,7 +860,7 @@ func geminiImagePart(img ImageURL) (geminiPart, bool) {
 // functionCallingConfig: AUTO (model decides), ANY (must call some tool — the
 // "required" analogue), NONE (no calls), or ANY restricted to a single
 // allowedFunctionNames entry for a forced specific tool.
-func geminiToolConfigFor(tc ToolChoice) *geminiToolConfig {
+func geminiToolConfigFor(tc ToolChoice, parallel *bool) *geminiToolConfig {
 	cfg := &geminiFunctionCallingConfig{}
 	switch tc.Mode {
 	case ToolChoiceNone:
@@ -861,6 +873,13 @@ func geminiToolConfigFor(tc ToolChoice) *geminiToolConfig {
 	default:
 		cfg.Mode = "AUTO"
 	}
+	// Default to Gemini's native behavior (parallel calls allowed), honoring an
+	// explicit gogent override when one is present.
+	par := true
+	if parallel != nil {
+		par = *parallel
+	}
+	cfg.ParallelFunctionCalls = &par
 	return &geminiToolConfig{FunctionCallingConfig: cfg}
 }
 
@@ -1046,34 +1065,42 @@ func (geminiAdapter) parseStream(body io.Reader, streamCh chan<- StreamResponse)
 			data = strings.TrimSpace(data)
 			if data != "" {
 				var chunk geminiResponse
-				if err := json.Unmarshal([]byte(data), &chunk); err == nil {
-					if chunk.UsageMetadata != nil {
-						usage = chunk.UsageMetadata.toTokenUsage()
+				// A data: frame is a complete JSON GenerateContentResponse; a frame
+				// that fails to parse is a malformed/corrupt response, so surface it
+				// as an error rather than silently dropping it (eval-safety: never
+				// turn broken provider output into a successful empty stream).
+				if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+					return content.String(), usage, &ModelError{
+						Type:    ErrorGeneric,
+						Message: fmt.Sprintf("malformed Gemini SSE chunk: %v", err),
 					}
-					if len(chunk.Candidates) > 0 {
-						cand := chunk.Candidates[0]
-						for _, p := range cand.Content.Parts {
-							switch {
-							case p.FunctionCall != nil:
-								// functionCall arrives complete in one chunk; accumulate
-								// and emit only in the terminal Done event (as the
-								// OpenAI/Anthropic adapters do).
-								toolCalls = append(toolCalls, geminiToolCall(p.FunctionCall))
-							case p.Thought:
-								if p.Text != "" {
-									streamCh <- StreamResponse{Reasoning: p.Text, Role: RoleAssistant}
-								}
-							default:
-								if p.Text != "" {
-									content.WriteString(p.Text)
-									streamCh <- StreamResponse{Content: p.Text, Role: RoleAssistant}
-								}
+				}
+				if chunk.UsageMetadata != nil {
+					usage = chunk.UsageMetadata.toTokenUsage()
+				}
+				if len(chunk.Candidates) > 0 {
+					cand := chunk.Candidates[0]
+					for _, p := range cand.Content.Parts {
+						switch {
+						case p.FunctionCall != nil:
+							// functionCall arrives complete in one chunk; accumulate
+							// and emit only in the terminal Done event (as the
+							// OpenAI/Anthropic adapters do).
+							toolCalls = append(toolCalls, geminiToolCall(p.FunctionCall))
+						case p.Thought:
+							if p.Text != "" {
+								streamCh <- StreamResponse{Reasoning: p.Text, Role: RoleAssistant}
+							}
+						default:
+							if p.Text != "" {
+								content.WriteString(p.Text)
+								streamCh <- StreamResponse{Content: p.Text, Role: RoleAssistant}
 							}
 						}
-						if cand.FinishReason != "" {
-							r := geminiFinishReason(cand.FinishReason, len(toolCalls) > 0)
-							finishReason = &r
-						}
+					}
+					if cand.FinishReason != "" {
+						r := geminiFinishReason(cand.FinishReason, len(toolCalls) > 0)
+						finishReason = &r
 					}
 				}
 			}
