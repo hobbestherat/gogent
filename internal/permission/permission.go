@@ -33,6 +33,22 @@ const (
 	ActionWatcher     Action = "watcher"     // start/manage a scheduled watcher (issue #329)
 )
 
+// knownActions is the set of Action constants a rule may target. A rule's action
+// must be one of these or the "*" wildcard; anything else (e.g. a typo like
+// "shel") is rejected by AddRule so a guardrail that could never match is not
+// silently loaded (issue #355).
+var knownActions = map[Action]bool{
+	ActionRead: true, ActionWrite: true, ActionShell: true, ActionExternal: true,
+	ActionNetwork: true, ActionSubagent: true, ActionMCP: true, ActionDiagnostics: true,
+	ActionVerify: true, ActionWatcher: true,
+}
+
+// validRuleAction reports whether a is a legal rule action: a known Action
+// constant or the "*" wildcard.
+func validRuleAction(a string) bool {
+	return a == "*" || knownActions[Action(a)]
+}
+
 // Effect is the resolved policy for a request.
 type Effect string
 
@@ -178,11 +194,17 @@ func (s *Service) SetAuditSink(sink AuditSink) {
 	s.mu.Unlock()
 }
 
-// AddRule appends a static policy rule. A rule whose Effect is not "allow" or
-// "deny", or whose DetailPattern is not a valid Go regex, is rejected and an
-// error returned (the rule is not registered) so callers can log and skip it.
+// AddRule appends a static policy rule. A rule whose Action is not a known
+// Action constant or "*", whose Effect is not "allow" or "deny", or whose
+// DetailPattern is not a valid Go regex, is rejected and an error returned (the
+// rule is not registered) so callers can log and skip it. Rejecting unknown
+// actions keeps a typo'd guardrail (e.g. "shel") from silently loading as a rule
+// that could never match (issue #355).
 func (s *Service) AddRule(r Rule) error {
 	cr := compiledRule{Rule: r}
+	if !validRuleAction(r.Action) {
+		return fmt.Errorf("invalid action %q (want an Action constant or \"*\")", r.Action)
+	}
 	switch Effect(r.Effect) {
 	case EffectAllow, EffectDeny:
 	default:
