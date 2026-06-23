@@ -279,6 +279,111 @@ func TestGeminiAdapterBuildBodyFunctionResponseObjectHandling(t *testing.T) {
 	}
 }
 
+func TestGeminiAdapterBuildBodyToolChoiceModesAndParallelOverride(t *testing.T) {
+	baseReq := func(choice ToolChoice, parallel *bool) CompletionRequest {
+		return CompletionRequest{
+			Messages: []Message{{Role: RoleUser, Content: "use a tool"}},
+			Tools: []ToolDef{{
+				Type: "function",
+				Function: FunctionDef{
+					Name:        "lookup",
+					Description: "Look up data",
+					Parameters:  map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
+				},
+			}},
+			ToolChoice:        &choice,
+			ParallelToolCalls: parallel,
+		}
+	}
+
+	off := false
+	cases := []struct {
+		name         string
+		req          CompletionRequest
+		wantMode     string
+		wantAllowed  []interface{}
+		wantParallel bool
+	}{
+		{
+			name:         "auto defaults parallel true",
+			req:          baseReq(ToolChoice{Mode: ToolChoiceAuto}, nil),
+			wantMode:     "AUTO",
+			wantParallel: true,
+		},
+		{
+			name:         "none",
+			req:          baseReq(ToolChoice{Mode: ToolChoiceNone}, nil),
+			wantMode:     "NONE",
+			wantParallel: true,
+		},
+		{
+			name:         "required",
+			req:          baseReq(ToolChoice{Mode: ToolChoiceRequired}, nil),
+			wantMode:     "ANY",
+			wantParallel: true,
+		},
+		{
+			name:         "forced tool with strict parallel override",
+			req:          baseReq(ToolChoice{Mode: ToolChoiceTool, Name: "lookup"}, &off),
+			wantMode:     "ANY",
+			wantAllowed:  []interface{}{"lookup"},
+			wantParallel: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := buildBodyBytes(geminiAdapter{}, tc.req)
+			if err != nil {
+				t.Fatalf("buildBody: %v", err)
+			}
+			var got map[string]interface{}
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatalf("unmarshal body: %v", err)
+			}
+			cfg := got["toolConfig"].(map[string]interface{})["functionCallingConfig"].(map[string]interface{})
+			if cfg["mode"] != tc.wantMode {
+				t.Errorf("mode = %v, want %s", cfg["mode"], tc.wantMode)
+			}
+			if cfg["parallelFunctionCalls"] != tc.wantParallel {
+				t.Errorf("parallelFunctionCalls = %v, want %v", cfg["parallelFunctionCalls"], tc.wantParallel)
+			}
+			if tc.wantAllowed == nil {
+				if _, ok := cfg["allowedFunctionNames"]; ok {
+					t.Errorf("allowedFunctionNames = %v, want omitted", cfg["allowedFunctionNames"])
+				}
+			} else if !jsonEqual(mustMarshal(t, cfg["allowedFunctionNames"]), mustMarshal(t, tc.wantAllowed)) {
+				t.Errorf("allowedFunctionNames = %v, want %v", cfg["allowedFunctionNames"], tc.wantAllowed)
+			}
+		})
+	}
+}
+
+func TestGeminiAdapterBuildBodyDropsNonObjectFunctionCallArgs(t *testing.T) {
+	raw, err := buildBodyBytes(geminiAdapter{}, CompletionRequest{
+		Messages: []Message{{
+			Role: RoleAssistant,
+			ToolCalls: []ToolCall{{
+				ID:       "call_1",
+				Type:     "function",
+				Function: FunctionCall{Name: "lookup", Arguments: `["not","object"]`},
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	contents := got["contents"].([]interface{})
+	fc := contents[0].(map[string]interface{})["parts"].([]interface{})[0].(map[string]interface{})["functionCall"].(map[string]interface{})
+	if _, ok := fc["args"]; ok {
+		t.Fatalf("functionCall args = %v, want omitted for non-object arguments", fc["args"])
+	}
+}
+
 func TestGeminiAdapterParseResponseTextFunctionCallThoughtAndUsage(t *testing.T) {
 	body := []byte(`{
 		"candidates":[{
@@ -329,6 +434,19 @@ func TestGeminiAdapterParseResponseTextFunctionCallThoughtAndUsage(t *testing.T)
 func TestGeminiAdapterParseResponseMalformedJSONReturnsError(t *testing.T) {
 	if _, err := (geminiAdapter{}).parseResponse([]byte(`{"candidates":[`)); err == nil {
 		t.Fatal("parseResponse error = nil, want malformed JSON error")
+	}
+}
+
+func TestGeminiAdapterParseResponseNoCandidatesReturnsError(t *testing.T) {
+	if _, err := (geminiAdapter{}).parseResponse([]byte(`{"usageMetadata":{"promptTokenCount":1}}`)); err == nil {
+		t.Fatal("parseResponse error = nil, want malformed response error for missing candidates")
+	}
+}
+
+func TestGeminiAdapterParseResponseFunctionCallArgsMustBeObject(t *testing.T) {
+	body := []byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":["not","object"],"id":"call_1"}}],"role":"model"},"finishReason":"STOP"}]}`)
+	if _, err := (geminiAdapter{}).parseResponse(body); err == nil {
+		t.Fatal("parseResponse error = nil, want malformed response error for non-object functionCall args")
 	}
 }
 
@@ -483,6 +601,15 @@ func jsonEqual(a, b []byte) bool {
 	aa, _ := json.Marshal(av)
 	bb, _ := json.Marshal(bv)
 	return bytes.Equal(aa, bb)
+}
+
+func mustMarshal(t *testing.T, v interface{}) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal %T: %v", v, err)
+	}
+	return b
 }
 
 func assertNativeBodyHasNoModel(t *testing.T, raw []byte) {
