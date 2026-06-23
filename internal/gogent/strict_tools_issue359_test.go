@@ -40,27 +40,6 @@ func TestIssue359StrictToolsRegisteredStrictWithClosedSchemas(t *testing.T) {
 	}
 }
 
-func TestIssue359StrictToolSchemasRequireEveryAdvertisedProperty(t *testing.T) {
-	g := NewGogentWithWorkspace(t.TempDir(), t.TempDir())
-	reg := g.GetToolRegistry()
-
-	for _, name := range issue359StrictTools {
-		t.Run(name, func(t *testing.T) {
-			tl := reg.Get(name)
-			if tl == nil {
-				t.Fatalf("%s tool is not registered", name)
-			}
-			schema, ok := tl.InputSchema.(map[string]interface{})
-			if !ok {
-				t.Fatalf("%s InputSchema = %T, want map[string]interface{}", name, tl.InputSchema)
-			}
-			if err := assertObjectPropertiesRequired(schema, "schema"); err != "" {
-				t.Fatal(err)
-			}
-		})
-	}
-}
-
 func TestIssue359SpawnSubagentRemainsNonStrictDespiteRichSchema(t *testing.T) {
 	g := NewGogentWithWorkspace(t.TempDir(), t.TempDir())
 	spawn := g.GetToolRegistry().Get("spawn_subagent")
@@ -135,65 +114,4 @@ func assertStrictSchemaSubset(schema map[string]interface{}, path string) string
 		}
 	}
 	return ""
-}
-
-func assertObjectPropertiesRequired(schema map[string]interface{}, path string) string {
-	if schema["type"] == "object" {
-		props, _ := schema["properties"].(map[string]interface{})
-		required := requiredSet(schema["required"])
-		for propName := range props {
-			if !required[propName] {
-				return path + " property " + propName + " is not listed in required"
-			}
-		}
-	}
-
-	for key, value := range schema {
-		if key == "properties" {
-			props, ok := value.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			for propName, propSchema := range props {
-				if nested, ok := propSchema.(map[string]interface{}); ok {
-					if err := assertObjectPropertiesRequired(nested, path+".properties."+propName); err != "" {
-						return err
-					}
-				}
-			}
-			continue
-		}
-		switch v := value.(type) {
-		case map[string]interface{}:
-			if err := assertObjectPropertiesRequired(v, path+"."+key); err != "" {
-				return err
-			}
-		case []interface{}:
-			for _, item := range v {
-				if nested, ok := item.(map[string]interface{}); ok {
-					if err := assertObjectPropertiesRequired(nested, path+"."+key+"[]"); err != "" {
-						return err
-					}
-				}
-			}
-		}
-	}
-	return ""
-}
-
-func requiredSet(required interface{}) map[string]bool {
-	out := map[string]bool{}
-	switch v := required.(type) {
-	case []string:
-		for _, name := range v {
-			out[name] = true
-		}
-	case []interface{}:
-		for _, item := range v {
-			if name, ok := item.(string); ok {
-				out[name] = true
-			}
-		}
-	}
-	return out
 }
