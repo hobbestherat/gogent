@@ -291,18 +291,72 @@ func TestValidateArgsEnumConstraintsNestedArrayItems(t *testing.T) {
 		t.Fatalf("valid nested enum args rejected: %v", err)
 	}
 
-	err := validateArgs(map[string]interface{}{
-		"todos": []interface{}{
-			map[string]interface{}{"content": "write tests", "status": "blocked"},
+	tests := []struct {
+		name    string
+		args    map[string]interface{}
+		wantErr []string
+	}{
+		{
+			name: "invalid nested enum value rejected",
+			args: map[string]interface{}{
+				"todos": []interface{}{
+					map[string]interface{}{"content": "write tests", "status": "blocked"},
+				},
+			},
+			wantErr: []string{"args.todos[0].status", "[pending in_progress completed]", `"blocked"`},
 		},
-	}, schema)
-	if err == nil {
-		t.Fatal("expected nested array item enum value to be rejected, got nil")
+		{
+			name: "nested item required key still enforced",
+			args: map[string]interface{}{
+				"todos": []interface{}{
+					map[string]interface{}{"status": "pending"},
+				},
+			},
+			wantErr: []string{`args.todos[0]: missing required property "content"`},
+		},
+		{
+			name: "nested item type still enforced before enum",
+			args: map[string]interface{}{
+				"todos": []interface{}{
+					map[string]interface{}{"content": "write tests", "status": 42.0},
+				},
+			},
+			wantErr: []string{"args.todos[0].status: expected string, got number"},
+		},
 	}
-	for _, want := range []string{"args.todos", "status", "[pending in_progress completed]", `"blocked"`} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("nested enum error %q does not contain %q", err.Error(), want)
-		}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateArgs(tc.args, schema)
+			if err == nil {
+				t.Fatalf("expected error containing %v, got nil", tc.wantErr)
+			}
+			for _, want := range tc.wantErr {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("nested validation error %q does not contain %q", err.Error(), want)
+				}
+			}
+		})
+	}
+
+	nullOKSchema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"todos": map[string]interface{}{
+				"items": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"status": map[string]interface{}{
+							"type": "string",
+							"enum": []string{"pending", "in_progress", "completed"},
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := validateArgs(map[string]interface{}{"todos": nil}, nullOKSchema); err != nil {
+		t.Fatalf("items schema should not reject null when property has no type: %v", err)
 	}
 }
 
