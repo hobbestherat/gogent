@@ -318,22 +318,33 @@ func TestStopUsesSocketExitWhenPidfileIsBad(t *testing.T) {
 
 func TestStopDoesNotCleanLiveSocketWhenExitFailsAndPidIsUnusable(t *testing.T) {
 	cases := []struct {
-		name       string
-		writeSetup func(t *testing.T, p Paths)
+		name        string
+		exitStatus  int
+		closeOnExit bool
+		writeSetup  func(t *testing.T, p Paths)
 	}{
 		{
-			name: "missing pidfile",
+			name:       "exit forbidden and missing pidfile",
+			exitStatus: http.StatusForbidden,
 			writeSetup: func(t *testing.T, p Paths) {
 				t.Helper()
 			},
 		},
 		{
-			name: "dead pidfile",
+			name:       "exit forbidden and dead pidfile",
+			exitStatus: http.StatusForbidden,
 			writeSetup: func(t *testing.T, p Paths) {
 				t.Helper()
 				if err := WritePidfile(p.Pid, 99999999); err != nil {
 					t.Fatalf("WritePidfile stale: %v", err)
 				}
+			},
+		},
+		{
+			name:       "exit accepted but socket stays live",
+			exitStatus: http.StatusOK,
+			writeSetup: func(t *testing.T, p Paths) {
+				t.Helper()
 			},
 		},
 	}
@@ -345,7 +356,7 @@ func TestStopDoesNotCleanLiveSocketWhenExitFailsAndPidIsUnusable(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Listen: %v", err)
 			}
-			srv := serveHealthAndExit(t, ln, http.StatusForbidden, false)
+			srv := serveHealthAndExit(t, ln, tc.exitStatus, tc.closeOnExit)
 			defer closeServer(t, srv)
 			if err := writeAddr(p, "unix://"+p.Sock); err != nil {
 				t.Fatalf("writeAddr: %v", err)

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -123,6 +124,61 @@ func TestDaemonStatusRejectsUnexpectedFlags(t *testing.T) {
 	if !strings.Contains(stderr, "flag provided but not defined") {
 		t.Fatalf("stderr = %q, want flag error", stderr)
 	}
+}
+
+func TestTCPListenerAuthAndBindValidation(t *testing.T) {
+	t.Run("loopback allowed without auth", func(t *testing.T) {
+		t.Setenv("GOGENT_HTTP_TOKEN", "")
+		ln, err := tcpListener("127.0.0.1", 0, "")
+		if err != nil {
+			t.Fatalf("tcpListener loopback: %v", err)
+		}
+		if err := ln.Close(); err != nil {
+			t.Fatalf("close listener: %v", err)
+		}
+	})
+
+	t.Run("non-loopback rejected without auth", func(t *testing.T) {
+		t.Setenv("GOGENT_HTTP_TOKEN", "")
+		ln, err := tcpListener("0.0.0.0", 0, "")
+		if err == nil {
+			_ = ln.Close()
+			t.Fatal("tcpListener non-loopback without auth succeeded, want error")
+		}
+		if !strings.Contains(err.Error(), "refusing to bind HTTP server to non-loopback host") {
+			t.Fatalf("error = %v, want non-loopback auth refusal", err)
+		}
+	})
+
+	t.Run("non-loopback allowed with password", func(t *testing.T) {
+		t.Setenv("GOGENT_HTTP_TOKEN", "")
+		ln, err := tcpListener("0.0.0.0", 0, "secret")
+		if err != nil {
+			t.Fatalf("tcpListener non-loopback with password: %v", err)
+		}
+		if err := ln.Close(); err != nil {
+			t.Fatalf("close listener: %v", err)
+		}
+	})
+
+	t.Run("occupied port returns bind error", func(t *testing.T) {
+		t.Setenv("GOGENT_HTTP_TOKEN", "")
+		held, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("hold listener: %v", err)
+		}
+		defer func() { _ = held.Close() }()
+		port := held.Addr().(*net.TCPAddr).Port
+
+		ln, err := tcpListener("127.0.0.1", port, "")
+		if err == nil {
+			_ = ln.Close()
+			t.Fatal("tcpListener on occupied port succeeded, want error")
+		}
+		if !strings.Contains(err.Error(), fmt.Sprintf("listen tcp 127.0.0.1:%d", port)) {
+			t.Fatalf("error = %v, want occupied bind address", err)
+		}
+	})
 }
 
 func captureDaemonOutput(t *testing.T, fn func() int) (int, string, string) {
