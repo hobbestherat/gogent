@@ -232,8 +232,9 @@ type rulesFile struct {
 //
 // It is deliberately lenient (mirroring config loading): a missing file adds
 // nothing and returns no error; a corrupt/unreadable file adds nothing and
-// returns a single error; individual rules with an unknown effect or an invalid
-// detail_pattern regex are skipped and reported. It never panics. The caller
+// returns a single error; individual rules that AddRule rejects — an unknown
+// action (not an Action constant or "*"), an unknown effect, or an invalid
+// detail_pattern regex — are skipped and reported. It never panics. The caller
 // (gogent) logs the returned errors. dir "" is a no-op.
 //
 // Because deny rules are hard guardrails resolved before everything else in

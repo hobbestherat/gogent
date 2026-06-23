@@ -84,7 +84,10 @@ func (g *Gogent) SetReviewEdits(enabled bool) {
 // guardrails (issue #355) still apply, since they gate at the permission layer the
 // write must clear first.
 func (g *Gogent) reviewActive(sessionID string) bool {
-	if g.permissions.EffectiveYolo(sessionID) {
+	// Nil-guard the permission service to match this function's existing
+	// defensive style (it already tolerates a nil g.config below); a nil service
+	// simply means "not in yolo", so the gate falls through to the config check.
+	if g.permissions != nil && g.permissions.EffectiveYolo(sessionID) {
 		return false
 	}
 	g.mu.RLock()
