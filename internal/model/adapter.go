@@ -48,6 +48,11 @@ func adapterFor(t APIType) adapter {
 	switch t {
 	case APITypeAnthropic:
 		return anthropicAdapter{}
+	case APITypeVertex:
+		// Vertex AI's OpenAI-compatible endpoint speaks the standard OpenAI wire
+		// format, so it reuses the shared adapter; only its providerSpec (ADC auth
+		// and a dynamic, project/location-derived base URL) differs.
+		return openAIAdapter{}
 	default:
 		return openAIAdapter{}
 	}

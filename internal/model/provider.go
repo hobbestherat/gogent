@@ -1,9 +1,12 @@
 package model
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
+
+	"gogent/internal/config"
 )
 
 // APIType identifies which provider/wire conventions a backend speaks. It
@@ -33,6 +36,14 @@ const (
 	// default base URL and the recommended HTTP-Referer / X-Title attribution
 	// headers it sends for app ranking and free-tier prioritization.
 	APITypeOpenRouter APIType = "openrouter"
+	// APITypeVertex is Google Vertex AI's OpenAI-compatible endpoint
+	// (/endpoints/openapi/chat/completions). It speaks the standard OpenAI wire
+	// format — so it reuses openAIAdapter — but differs in two ways: its base URL
+	// is derived from the config's Project/Location rather than a static default
+	// (see providerSpec.baseURLFunc), and it authenticates with Google Application
+	// Default Credentials (a bearer token injected by ADCRoundTripper) instead of
+	// an API key (see authADC).
+	APITypeVertex APIType = "vertex"
 )
 
 var stringToAPITypeMap = map[string]APIType{
@@ -42,6 +53,7 @@ var stringToAPITypeMap = map[string]APIType{
 	"anthropic":  APITypeAnthropic,
 	"claude":     APITypeAnthropic,
 	"openrouter": APITypeOpenRouter,
+	"vertex":     APITypeVertex,
 }
 
 // StringToAPIType resolves a config string to an APIType, defaulting to the
@@ -70,6 +82,12 @@ const (
 	// authQuery carries the key in a URL query parameter named authQueryParam
 	// rather than a header (Gemini's native ?key=).
 	authQuery authMode = "query"
+	// authADC authenticates with a Google Application Default Credentials bearer
+	// token, injected per request (and auto-refreshed) by an ADCRoundTripper
+	// rather than from a configured API key (Vertex AI). The constructor builds
+	// the ADC round-tripper when a spec selects this mode; see
+	// NewModelConnectionFromConfig.
+	authADC authMode = "adc"
 )
 
 // OpenRouter app-attribution headers. OpenRouter uses these (both optional) to
@@ -87,6 +105,13 @@ type providerSpec struct {
 	// defaultBaseURL is used when the config endpoint is left empty, so simple
 	// providers only need an API key.
 	defaultBaseURL string
+	// baseURLFunc derives the base URL from the model config when the provider's
+	// endpoint is not a single static default but depends on per-model settings —
+	// Vertex AI builds its host and path from Project/Location. It is nil for
+	// every provider with a static defaultBaseURL; when set, the constructor uses
+	// it in place of defaultBaseURL but only when the user leaves Endpoint empty,
+	// so an explicit endpoint still overrides. See NewModelConnectionFromConfig.
+	baseURLFunc func(*config.ModelConfig) string
 	// chatPath and modelsPath are appended to the base URL to reach the
 	// chat-completions and model-listing endpoints.
 	chatPath   string
@@ -190,6 +215,53 @@ var providerSpecs = map[APIType]providerSpec{
 		},
 		supportsResponseFormat: true,
 	},
+	APITypeVertex: {
+		// Vertex AI's OpenAI-compatible endpoint. The base URL is dynamic — built
+		// from the config's Project/Location by baseURLFunc — so defaultBaseURL is
+		// empty. The OpenAI-compat layer is preview-only and lives under v1beta1
+		// (folded into the base URL); chatPath reaches the chat-completions route.
+		// Auth is ADC (no API key). modelsPath is left empty: the compat endpoint
+		// does not expose a usable /models listing, so users name the model
+		// explicitly (e.g. "google/gemini-2.5-flash").
+		chatPath:    "/endpoints/openapi/chat/completions",
+		baseURLFunc: vertexOpenAIBaseURL,
+		authMode:    authADC,
+		// OpenAI-compatible capability surface: response_format (structured
+		// output) is supported; reasoning_effort / thinking are not exposed
+		// through the compat layer (those are native-Gemini features).
+		supportsResponseFormat: true,
+	},
+}
+
+// vertexAIHost returns the Vertex AI API host for a region. Every location is
+// reached through a regional host ("{location}-aiplatform.googleapis.com")
+// EXCEPT the special "global" location, which uses the unprefixed host
+// (aiplatform.googleapis.com) — though its URL path still carries
+// /locations/global/.
+func vertexAIHost(location string) string {
+	if location == "global" {
+		return "aiplatform.googleapis.com"
+	}
+	return location + "-aiplatform.googleapis.com"
+}
+
+// vertexOpenAIBaseURL builds the Vertex AI OpenAI-compatible base URL from a
+// model config's Project and Location:
+//
+//	https://{LOCATION}-aiplatform.googleapis.com/v1beta1/projects/{PROJECT}/locations/{LOCATION}
+//
+// (host prefix dropped for "global"; see vertexAIHost). The concrete chat path
+// (chatPath) is appended by chatURL. Location appears in both the host and the
+// path and must match.
+//
+// Location is lower-cased: GCP region IDs are canonically lowercase, so this
+// makes the "global" host special case (and the host/path generally) robust to a
+// user typing "Global" or "US-CENTRAL1" rather than silently building a bad host
+// like "Global-aiplatform.googleapis.com".
+func vertexOpenAIBaseURL(c *config.ModelConfig) string {
+	loc := strings.ToLower(strings.TrimSpace(c.Location))
+	return fmt.Sprintf("https://%s/v1beta1/projects/%s/locations/%s",
+		vertexAIHost(loc), strings.TrimSpace(c.Project), loc)
 }
 
 // specFor returns the providerSpec for an APIType, falling back to OpenAI.
@@ -208,6 +280,7 @@ func APITypeIDs() []string {
 		string(APITypeZAI),
 		string(APITypeAnthropic),
 		string(APITypeOpenRouter),
+		string(APITypeVertex),
 	}
 }
 
