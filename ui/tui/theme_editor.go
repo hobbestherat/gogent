@@ -68,6 +68,10 @@ var themeGroups = []themeGroup{
 		// first-class, editable role rather than turbotui's fixed ANSI-4 blue.
 		{"window_fg", "Window text", func(t Theme) tui.Color { return t.WindowFG }},
 		{"window_bg", "Window background", func(t Theme) tui.Color { return t.WindowBG }},
+		// Dialog-list background (issue #327): the inset behind the filterable lists.
+		// Only the background is exposed (matching code_bg); list_fg stays a first-class
+		// config-overridable role carried across a Save by carryUnexposedOverrides.
+		{"list_bg", "List background", func(t Theme) tui.Color { return t.ListBG }},
 		{"title", "Panel titles", func(t Theme) tui.Color { return t.Title }},
 		{"divider", "Borders / dividers", func(t Theme) tui.Color { return t.Divider }},
 		{"accent", "Indicators / badges", func(t Theme) tui.Color { return t.Accent }},

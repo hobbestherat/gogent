@@ -225,7 +225,7 @@ Each entry in `mcp_servers[]` is an `MCPServerConfig`:
 
 **`overrides` keys:** `user`, `agent`, `note`, `tool`, `result`, `info`,
 `error`, `desktop_fg`, `desktop_bg`, `panel_fg`, `panel_bg`, `window_fg`,
-`window_bg`, `title`, `divider`, `accent`, `code_bg`.
+`window_bg`, `title`, `divider`, `accent`, `code_bg`, `list_bg`, `list_fg`.
 
 ```json
 "theme": {

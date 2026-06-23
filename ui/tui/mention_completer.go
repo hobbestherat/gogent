@@ -108,10 +108,10 @@ func (mc *mentionCompleter) render(matches []string) {
 	mc.container.SetBounds(tv.Rect{X: x, Y: y, W: boxW, H: boxH})
 
 	list := tv.NewTree(tv.Rect{X: 1, Y: 1, W: boxW - 2, H: rows})
-	list.FG = tv.DefaultTheme.DialogFG
-	list.BG = tv.DefaultTheme.DialogBG
+	list.FG = tv.DefaultTheme.ListFG
+	list.BG = tv.DefaultTheme.ListBG
 	list.SelFG, list.SelBG = selectionColorsFor(
-		tv.DefaultTheme.DialogFG, tv.DefaultTheme.DialogBG,
+		tv.DefaultTheme.ListFG, tv.DefaultTheme.ListBG,
 		tv.DefaultTheme.SelectionFG, tv.DefaultTheme.SelectionBG)
 	nodes := make([]*tv.TreeNode, len(matches))
 	for i, p := range matches {

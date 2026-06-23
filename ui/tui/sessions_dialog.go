@@ -71,10 +71,15 @@ func (w *Workbench) showSessionsDialog() {
 	dialog.Window.AddContent(dialogLabel("Detail", tv.Rect{X: detailX, Y: headerY, W: detailW, H: 1}))
 
 	list := tv.NewTree(tv.Rect{X: listX, Y: listY, W: listW, H: paneH})
-	list.FG = tv.DefaultTheme.DialogFG
-	list.BG = tv.DefaultTheme.DialogBG
-	list.SelFG = tv.DefaultTheme.SelectionFG
-	list.SelBG = tv.DefaultTheme.SelectionBG
+	list.FG = tv.DefaultTheme.ListFG
+	list.BG = tv.DefaultTheme.ListBG
+	// The stock default theme paints the selection with the same colours as the
+	// list background, so the focused row is invisible; fall back to an inverted
+	// list bar in that case (themes with an already-distinct selection pass through
+	// unchanged) — matching the other dialog lists (issue #327).
+	list.SelFG, list.SelBG = selectionColorsFor(
+		tv.DefaultTheme.ListFG, tv.DefaultTheme.ListBG,
+		tv.DefaultTheme.SelectionFG, tv.DefaultTheme.SelectionBG)
 	dialog.Window.AddContent(list)
 
 	detail := tv.NewTextView("", tv.Rect{X: detailX, Y: listY, W: detailW, H: paneH})

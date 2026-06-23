@@ -254,6 +254,10 @@ func TestIssue202DefaultPaletteFindingsContract(t *testing.T) {
 		{"button-focus", def.ButtonFocusFG, def.ButtonFocusBG, minContrastText},
 		{"input", def.InputFG, def.InputBG, minContrastText},
 		{"input-focus", def.InputFocusFG, def.InputFocusBG, minContrastText},
+		// Dialog-list role (issue #327): the four filterable lists paint ListFG on
+		// ListBG, audited against each other at the body-text tier. paletteContrast
+		// emits it last, after the input roles, so it is appended here.
+		{"list", def.ListFG, def.ListBG, minContrastText},
 	}
 	if len(findings) != len(want) {
 		t.Fatalf("paletteContrast returned %d findings, want %d", len(findings), len(want))
