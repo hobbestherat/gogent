@@ -150,6 +150,15 @@ func colorSpec(c tui.Color) string {
 // a letter pair, so both a fill and text rendering of the colour are visible.
 const swatchSample = "▉▉ Aa"
 
+// pickerCommitSentinel is a colour with an invalid ColorMode (turbotui defines
+// only ColorDefault/ColorANSI/ColorRGB == 0/1/2), so it equals no colour the
+// ColorPicker can ever commit. The theme editor parks it in a picker after it
+// opens so turbotui's commit — which fires OnChange only when the committed colour
+// differs from the picker's current Color — reports a change on every explicit
+// commit, including a re-pick of the seeded colour or a non-canonical spec. It is
+// never drawn or committed, only used as an always-different baseline (issue #366).
+var pickerCommitSentinel = tui.Color{Mode: 0xFF}
+
 // themeEditorLabelW is the MINIMUM width of the right column's role-label cell — the
 // column that carries the longest labels. It must hold the longest descriptive label
 // (issue #243) plus its trailing ":" on a single row: the labels live in 1-row Labels,
@@ -715,11 +724,19 @@ func (w *Workbench) showThemeEditor() {
 					surface.Fill(abs, tui.Cell{Ch: ' ', FG: fg, BG: bg})
 					surface.WriteStringClipped(abs.X, abs.Y, abs.W, text, tui.Cell{Ch: ' ', FG: fg, BG: bg})
 				}
-				// Seed the picker from the field's current colour just before it opens, and
-				// gate on the gogent "Disable colours" toggle (when colours are off there is
-				// nothing to pick). The wrappers delegate to the picker's own open handlers,
-				// so its keyboard/mouse model (Enter/Space/click → open) is unchanged.
-				seedPicker := func() {
+				// Seed the picker from the field's current colour just before it opens (so its
+				// cursor lands on that colour), gate on the gogent "Disable colours" toggle
+				// (when colours are off there is nothing to pick), and — once open — park an
+				// impossible sentinel colour in the picker. turbotui's ColorPicker.commit fires
+				// OnChange only when the committed colour differs from the picker's current
+				// Color; seeding Color to the field colour would therefore swallow a commit of
+				// that same colour (Enter on the highlighted cell, or re-picking a non-canonical
+				// spec like "003"/"none"). open() has already read the seed to position the
+				// cursor by the time armPicker runs, and the closed swatch renders from the field
+				// (not picker.Color), so a colour no real pick can equal (an invalid ColorMode)
+				// makes every explicit commit report a change while staying invisible. Cancelling
+				// (Escape/outside click) never commits, so the field is left untouched.
+				armPicker := func() {
 					if c, ok := parseColor(fields[idx].GetText()); ok {
 						pk.SetColor(c)
 					} else {
@@ -731,15 +748,23 @@ func (w *Workbench) showThemeEditor() {
 					if noColor.IsChecked() {
 						return false // colours off: leave the key to focus navigation
 					}
-					seedPicker()
-					return openType(c, ev)
+					armPicker()
+					handled := openType(c, ev)
+					if pk.IsOpen() {
+						pk.SetColor(pickerCommitSentinel)
+					}
+					return handled
 				}
 				pk.Component.OnClickFn = func(c *tv.VisualComponent, ev tui.ClickEvent) bool {
 					if noColor.IsChecked() {
 						return true // colours off: swallow the click, nothing to pick
 					}
-					seedPicker()
-					return openClick(c, ev)
+					armPicker()
+					handled := openClick(c, ev)
+					if pk.IsOpen() {
+						pk.SetColor(pickerCommitSentinel)
+					}
+					return handled
 				}
 				// A committed colour is written back as the canonical spec for this role and
 				// the editor refreshed, so the swatch updates and Save reads it from the field
