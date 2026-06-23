@@ -988,43 +988,57 @@ func (geminiAdapter) parseResponse(body []byte) (*CompletionResponse, error) {
 	if err := json.Unmarshal(body, &gr); err != nil {
 		return nil, fmt.Errorf("unmarshal response: %w", err)
 	}
+	// A well-formed :generateContent response always carries at least one
+	// candidate; none means a malformed (or prompt-blocked) provider response, so
+	// surface it as an error rather than a silent blank completion (eval-safety),
+	// mirroring how parseStream rejects a corrupt SSE chunk.
+	if len(gr.Candidates) == 0 {
+		return nil, fmt.Errorf("gemini response has no candidates")
+	}
 	resp := &CompletionResponse{Role: RoleAssistant}
 	var text strings.Builder
-	rawFinish := ""
-	if len(gr.Candidates) > 0 {
-		cand := gr.Candidates[0]
-		rawFinish = cand.FinishReason
-		for _, p := range cand.Content.Parts {
-			switch {
-			case p.FunctionCall != nil:
-				resp.ToolCalls = append(resp.ToolCalls, geminiToolCall(p.FunctionCall))
-			case p.Thought:
-				// Reasoning summary — not part of the visible answer; its token cost
-				// is reported via usageMetadata.thoughtsTokenCount (ReasoningTokens).
-			default:
-				text.WriteString(p.Text)
+	cand := gr.Candidates[0]
+	for _, p := range cand.Content.Parts {
+		switch {
+		case p.FunctionCall != nil:
+			tc, err := geminiToolCall(p.FunctionCall)
+			if err != nil {
+				return nil, err
 			}
+			resp.ToolCalls = append(resp.ToolCalls, tc)
+		case p.Thought:
+			// Reasoning summary — not part of the visible answer; its token cost
+			// is reported via usageMetadata.thoughtsTokenCount (ReasoningTokens).
+		default:
+			text.WriteString(p.Text)
 		}
 	}
 	resp.Content = text.String()
-	resp.FinishReason = geminiFinishReason(rawFinish, len(resp.ToolCalls) > 0)
+	resp.FinishReason = geminiFinishReason(cand.FinishReason, len(resp.ToolCalls) > 0)
 	resp.Usage = gr.UsageMetadata.toTokenUsage()
 	return resp, nil
 }
 
 // geminiToolCall converts a Gemini functionCall part into a gogent ToolCall,
-// marshaling the JSON-object args back to the OpenAI arguments-as-string form and
-// defaulting empty args to "{}".
-func geminiToolCall(fc *geminiRespFunctionCall) ToolCall {
-	args := string(fc.Args)
-	if strings.TrimSpace(args) == "" {
+// carrying the JSON-object args through as the OpenAI arguments-as-string form.
+// Empty args default to "{}" (a no-argument call); a non-empty args that is not a
+// JSON object is malformed provider output and is rejected as an error rather
+// than propagated into a gogent tool call (eval-safety).
+func geminiToolCall(fc *geminiRespFunctionCall) (ToolCall, error) {
+	args := strings.TrimSpace(string(fc.Args))
+	if args == "" {
 		args = "{}"
+	} else {
+		var obj map[string]interface{}
+		if err := json.Unmarshal([]byte(args), &obj); err != nil {
+			return ToolCall{}, fmt.Errorf("gemini functionCall args is not a JSON object: %s", args)
+		}
 	}
 	return ToolCall{
 		ID:       fc.ID,
 		Type:     "function",
 		Function: FunctionCall{Name: fc.Name, Arguments: args},
-	}
+	}, nil
 }
 
 // geminiFinishReason maps a Gemini finishReason onto the OpenAI-style
@@ -1086,7 +1100,14 @@ func (geminiAdapter) parseStream(body io.Reader, streamCh chan<- StreamResponse)
 							// functionCall arrives complete in one chunk; accumulate
 							// and emit only in the terminal Done event (as the
 							// OpenAI/Anthropic adapters do).
-							toolCalls = append(toolCalls, geminiToolCall(p.FunctionCall))
+							tc, err := geminiToolCall(p.FunctionCall)
+							if err != nil {
+								return content.String(), usage, &ModelError{
+									Type:    ErrorGeneric,
+									Message: err.Error(),
+								}
+							}
+							toolCalls = append(toolCalls, tc)
 						case p.Thought:
 							if p.Text != "" {
 								streamCh <- StreamResponse{Reasoning: p.Text, Role: RoleAssistant}
