@@ -455,13 +455,24 @@ func (s *sidebar) refreshTheme() {
 		// was the lone hold-out on the brighter WindowFG), and is the pair the
 		// paletteContrast "panel-body" audit (PanelFG/PanelBG) actually certifies.
 		s.tree.FG, s.tree.BG = chromePanelFG, chromePanelBG
-		// The selection bar is a highlight, not body text, so it keeps the toolkit's
-		// selection treatment: the active bar from the theme's Selection* roles, and the
-		// unfocused bar as a bright foreground over the ANSI 8 dim grey (tv.NewTree's
-		// convention, shared by every other tree in the app) so the focused-session row
-		// stays legible on the dim bar rather than dropping to the dim PanelFG.
+		// Selection bars. The sidebar tree never takes keyboard focus — every
+		// SetFocus target is a session window's input, never the tree — so the
+		// FOCUSED bar (SelFG/SelBG) is never actually painted here; it is still
+		// seeded from the theme's Selection* roles for correctness should that ever
+		// change. What the user always sees on the active session's row is the
+		// UNFOCUSED bar, which tv.NewTree hard-codes as WindowFG over ANSI 8 — a fixed
+		// grey that ignores the sidebar palette, follows window chrome rather than
+		// panel chrome when a custom theme repoints them independently, and emits a
+		// stray ANSI 8 under NO_COLOR (issue #379). Reseed it instead as a reverse-
+		// video of the panel chrome: panel-background text on a panel-foreground bar.
+		// That keeps the highlight on the sidebar's own palette (so it tracks panel_fg/
+		// panel_bg and every preset), stays distinct from the plain PanelBG fill so the
+		// active row still reads as selected, is legible by the same symmetry the
+		// paletteContrast "panel-body" audit already certifies for PanelFG/PanelBG, and
+		// flattens to the terminal default under NO_COLOR (no stray ANSI 8) — the bar
+		// simply disappears there, as a colour-based highlight must.
 		s.tree.SelFG, s.tree.SelBG = th.SelectionFG, th.SelectionBG
-		s.tree.SelFGUnfocused, s.tree.SelBGUnfocused = th.WindowFG, tui.ANSIColor(8)
+		s.tree.SelFGUnfocused, s.tree.SelBGUnfocused = chromePanelBG, chromePanelFG
 	}
 	// The Overall band's model selector is a closed control seeded once from the
 	// dropdown palette (issue #260); reseed it like every other live Select.
