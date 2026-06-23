@@ -6,14 +6,12 @@ import (
 	"gogent/internal/tool"
 )
 
-// Issue #282, E1: the agent loop advertises every tool as NON-strict. This is
-// the invariant the narrowed parallel_tool_calls trigger relies on — if any
-// registry tool became strict, a batched-spawn turn would silently be forced
-// serial on OpenAI-compatible providers. These tests lock that down.
+// Issue #282 / #359: strictness is now opt-in per tool. Eligible read-only
+// tools may advertise strict schemas, but spawn_subagent must stay non-strict so
+// batched sub-agent fan-out is not suppressed by OpenAI's strict-tool
+// parallel_tool_calls invariant.
 
-// closedSchema is the kind of schema a future author might think should be
-// advertised "strict" (additionalProperties:false + required). toolDefsFromRegistry
-// must still emit it as non-strict.
+// closedSchema is the shape required by strict tool-use.
 func closedSchema() map[string]interface{} {
 	return map[string]interface{}{
 		"type": "object",
@@ -25,22 +23,33 @@ func closedSchema() map[string]interface{} {
 	}
 }
 
-func TestToolDefsFromRegistryNeverStrict(t *testing.T) {
+func TestToolDefsFromRegistryMirrorsToolStrictFlag(t *testing.T) {
 	reg := tool.NewToolRegistry()
 	reg.Register(&tool.Tool{
 		Name:        "spawn_subagent",
 		Description: "Delegate work to sub-agents.",
 		InputSchema: closedSchema(),
 	})
+	strictIssue359Tools := []string{"read", "glob", "list", "calc", "git", "grep", "verify", "diagnostics"}
+	for _, name := range strictIssue359Tools {
+		reg.Register(&tool.Tool{
+			Name:        name,
+			Description: name + " strict tool.",
+			ReadOnly:    true,
+			Strict:      true,
+			InputSchema: closedSchema(),
+		})
+	}
 	reg.Register(&tool.Tool{
-		Name:        "read_file",
-		Description: "Read a file.",
+		Name:        "legacy_read_only",
+		Description: "Read something without opting into strict mode.",
 		ReadOnly:    true,
 		InputSchema: map[string]interface{}{"type": "object"},
 	})
 	reg.Register(&tool.Tool{
 		Name:        "structured_output",
 		Description: "Closed schema tool.",
+		Strict:      true,
 		InputSchema: closedSchema(),
 	})
 
@@ -48,23 +57,33 @@ func TestToolDefsFromRegistryNeverStrict(t *testing.T) {
 	if len(defs) == 0 {
 		t.Fatal("expected tool defs, got none")
 	}
-	sawSpawn := false
+	got := make(map[string]bool, len(defs))
 	for _, d := range defs {
-		if d.Function.Strict {
-			t.Errorf("tool %q advertised with Strict=true; the agent loop must advertise all tools non-strict", d.Function.Name)
-		}
 		if d.Type != "function" {
 			t.Errorf("tool %q: Type = %q, want function", d.Function.Name, d.Type)
 		}
+		got[d.Function.Name] = d.Function.Strict
 		if d.Function.Name == "spawn_subagent" {
-			sawSpawn = true
 			if d.Function.Parameters == nil {
 				t.Error("spawn_subagent: Parameters not carried through to the def")
 			}
 		}
 	}
-	if !sawSpawn {
-		t.Error("spawn_subagent missing from tool defs")
+
+	want := map[string]bool{
+		"spawn_subagent":    false,
+		"legacy_read_only":  false,
+		"structured_output": true,
+	}
+	for _, name := range strictIssue359Tools {
+		want[name] = true
+	}
+	for name, strict := range want {
+		if gotStrict, ok := got[name]; !ok {
+			t.Errorf("%s missing from tool defs", name)
+		} else if gotStrict != strict {
+			t.Errorf("%s Strict = %v, want %v", name, gotStrict, strict)
+		}
 	}
 }
 
@@ -99,5 +118,44 @@ func TestAllSpawnSubAgent(t *testing.T) {
 				t.Errorf("allSpawnSubAgent(%v) = %v, want %v", tc.calls, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestStrictReadOnlyToolsStillQualifyForParallelFastPath(t *testing.T) {
+	reg := tool.NewToolRegistry()
+	reg.Register(&tool.Tool{
+		Name:        "read",
+		Description: "Read a file.",
+		ReadOnly:    true,
+		Strict:      true,
+		InputSchema: closedSchema(),
+		Execute: func(map[string]interface{}, tool.ToolContext) (interface{}, error) {
+			return "", nil
+		},
+	})
+	reg.Register(&tool.Tool{
+		Name:        "grep",
+		Description: "Search files.",
+		ReadOnly:    true,
+		Strict:      true,
+		InputSchema: closedSchema(),
+		Execute: func(map[string]interface{}, tool.ToolContext) (interface{}, error) {
+			return "", nil
+		},
+	})
+	reg.Register(&tool.Tool{
+		Name:        "spawn_subagent",
+		Description: "Delegate work.",
+		InputSchema: closedSchema(),
+		Execute: func(map[string]interface{}, tool.ToolContext) (interface{}, error) {
+			return "", nil
+		},
+	})
+
+	if !allReadOnly(reg, []tool.ToolCall{{Tool: "read"}, {Tool: "grep"}}) {
+		t.Fatal("strict read-only tools should remain eligible for the parallel read-only fast path")
+	}
+	if allReadOnly(reg, []tool.ToolCall{{Tool: "read"}, {Tool: "spawn_subagent"}}) {
+		t.Fatal("non-read-only spawn_subagent should not become eligible just because other tools are strict")
 	}
 }

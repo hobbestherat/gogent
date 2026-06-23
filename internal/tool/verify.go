@@ -41,9 +41,11 @@ func (tr *ToolRegistry) RegisterVerifyTool(cmd []string) {
 			"into actionable items, and a passing result means the suite is green. " +
 			"Call it after edits to confirm they did not break anything, and to get " +
 			"the exact failures to fix.",
+		Strict: true,
 		InputSchema: map[string]interface{}{
-			"type":       "object",
-			"properties": map[string]interface{}{},
+			"type":                 "object",
+			"properties":           map[string]interface{}{},
+			"additionalProperties": false,
 		},
 		Execute: func(args map[string]interface{}, ctx ToolContext) (interface{}, error) {
 			// Gate the run through a dedicated action so an "always" grant scopes

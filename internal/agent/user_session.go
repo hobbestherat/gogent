@@ -1573,13 +1573,16 @@ func makeToolResultMessage(call tool.ToolCall, result string) model.Message {
 // advertising only the currently enabled tools (a disabled tool is hidden from
 // the model so it neither sees nor attempts to call it).
 //
-// Tools are advertised as NON-strict: FunctionDef.Strict is intentionally left
-// false for every tool, including spawn_subagent. That is what keeps the OpenAI
-// structured-outputs invariant (a strict tool forces parallel_tool_calls:false,
-// see model.parallelToolCallsMustBeDisabled) from ever suppressing a batched
-// spawn turn — the model is free to emit several spawn_subagent calls, or one
-// spawn_subagent carrying a "subtasks" batch, in a single turn so they execute
-// concurrently (issue #282).
+// Strictness is per tool: FunctionDef.Strict mirrors the tool's opt-in
+// Tool.Strict flag (issue #359). Read-only tools with simple closed schemas
+// (read, glob, list, calc, git, grep, verify, diagnostics) opt in, eliminating
+// type-coercion errors and validate-and-retry rounds. spawn_subagent — and any
+// tool whose schema uses a union type or otherwise needs parallel-tool-call
+// freedom — stays non-strict: a strict tool forces parallel_tool_calls:false on
+// OpenAI-compatible providers (see model.parallelToolCallsMustBeDisabled), which
+// would suppress a batched-spawn turn where the model emits several
+// spawn_subagent calls, or one spawn_subagent carrying a "subtasks" batch, to
+// run concurrently (issue #282).
 func toolDefsFromRegistry(reg *tool.ToolRegistry) []model.ToolDef {
 	if reg == nil {
 		return nil
@@ -1593,6 +1596,7 @@ func toolDefsFromRegistry(reg *tool.ToolRegistry) []model.ToolDef {
 				Name:        t.Name,
 				Description: t.Description,
 				Parameters:  t.InputSchema,
+				Strict:      t.Strict,
 			},
 		})
 	}

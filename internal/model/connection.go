@@ -182,11 +182,19 @@ type FunctionDef struct {
 	Parameters  interface{} `json:"parameters"`
 	// Strict marks the parameter schema as strictly enforced (OpenAI structured
 	// outputs / constrained decoding): the model's arguments are guaranteed to
-	// validate against Parameters rather than merely prompted to. It requires a
-	// closed schema (additionalProperties:false, every property listed in
-	// required) and, on OpenAI, that parallel tool calls be disabled — see
-	// buildRequest, which sets parallel_tool_calls:false whenever any advertised
-	// tool is strict. Emitted only where the provider spec supports it.
+	// validate against Parameters rather than merely prompted to. This requires the
+	// schema to be in the strict subset — a closed object (additionalProperties:false)
+	// that lists EVERY property in "required", with optional properties expressed as
+	// nullable (type union including "null") rather than omitted. A strict tool must
+	// author its schema that way (see the read/grep/git/list tools and
+	// validateArgs, which treats a nullable property as optional). On OpenAI a strict
+	// tool also forces parallel tool calls off — see buildRequest, which sets
+	// parallel_tool_calls:false whenever any advertised tool is strict. Both the
+	// OpenAI-compatible wire and the Anthropic wire serialize the flag (Anthropic
+	// supports per-tool strict tool use on the modern models gogent targets — see
+	// anthropicTool.Strict). Gemini's functionDeclarations have no per-tool strict
+	// field (structured output there is request-level via responseSchema), so the
+	// Gemini adapter drops the flag but still receives the closed schema.
 	Strict bool `json:"strict,omitempty"`
 }
 

@@ -331,6 +331,7 @@ func (g *Gogent) initializeToolRegistry() {
 	g.toolRegistry.Register(&tool.Tool{
 		Name:     "read",
 		ReadOnly: true,
+		Strict:   true,
 		Description: "Read a file from the workspace and return its contents. Use it before reasoning about, " +
 			"quoting, or editing a file — never assume a file's contents without reading it first, and always read a " +
 			"file before editing so your find text matches what is actually there. The path may be relative to the " +
@@ -346,11 +347,12 @@ func (g *Gogent) initializeToolRegistry() {
 			"type": "object",
 			"properties": map[string]interface{}{
 				"path":       map[string]interface{}{"type": "string", "description": "File path to read, relative to the workspace root or absolute."},
-				"offset":     map[string]interface{}{"type": "integer", "description": "1-based line number to start reading from. Omit (or pass 0) for the default of 1; a value below 1 is treated as 1. Set it to a previous read's next_offset to page through a large file."},
-				"limit":      map[string]interface{}{"type": "integer", "description": "Maximum number of lines to return. Omit (or pass 0) for the default of 2000. The read is also bounded by max_length, whichever limit is reached first."},
-				"max_length": map[string]interface{}{"type": "integer", "description": "Maximum number of characters of content to return. Omit (or pass 0) for the default of 102400. The slice is cut on a character (UTF-8 rune) boundary; raise it to pull more of a dense file in one call."},
+				"offset":     map[string]interface{}{"type": []string{"integer", "null"}, "description": "1-based line number to start reading from. Omit/null (or pass 0) for the default of 1; a value below 1 is treated as 1. Set it to a previous read's next_offset to page through a large file."},
+				"limit":      map[string]interface{}{"type": []string{"integer", "null"}, "description": "Maximum number of lines to return. Omit/null (or pass 0) for the default of 2000. The read is also bounded by max_length, whichever limit is reached first."},
+				"max_length": map[string]interface{}{"type": []string{"integer", "null"}, "description": "Maximum number of characters of content to return. Omit/null (or pass 0) for the default of 102400. The slice is cut on a character (UTF-8 rune) boundary; raise it to pull more of a dense file in one call."},
 			},
-			"required": []string{"path"},
+			"required":             []string{"path", "offset", "limit", "max_length"},
+			"additionalProperties": false,
 		},
 		Execute: func(args map[string]interface{}, ctx tool.ToolContext) (interface{}, error) {
 			path, ok := args["path"].(string)
@@ -636,6 +638,7 @@ func (g *Gogent) initializeToolRegistry() {
 	g.toolRegistry.Register(&tool.Tool{
 		Name:     "grep",
 		ReadOnly: true,
+		Strict:   true,
 		Description: "Search file contents across the workspace for a regular expression (Go regex syntax). " +
 			"Read-only and workspace-confined, so it runs without a permission prompt — prefer it over " +
 			"shelling out to grep/rg. It returns file:line references the read tool can open. " +
@@ -645,13 +648,14 @@ func (g *Gogent) initializeToolRegistry() {
 			"type": "object",
 			"properties": map[string]interface{}{
 				"pattern":          map[string]interface{}{"type": "string", "description": "Go regular expression to search for."},
-				"path":             map[string]interface{}{"type": "string", "description": "File or directory to search, relative to the workspace root (default: whole workspace)."},
-				"output_mode":      map[string]interface{}{"type": "string", "enum": []string{"content", "files_with_matches", "count"}, "description": "Result shape (default content)."},
-				"include":          map[string]interface{}{"type": "string", "description": "Only search files whose name matches this glob, e.g. \"*.go\"."},
-				"case_insensitive": map[string]interface{}{"type": "boolean", "description": "Match regardless of letter case."},
-				"max_results":      map[string]interface{}{"type": "integer", "description": "Cap on returned matches/files (default 200)."},
+				"path":             map[string]interface{}{"type": []string{"string", "null"}, "description": "File or directory to search, relative to the workspace root (default/null: whole workspace)."},
+				"output_mode":      map[string]interface{}{"type": []string{"string", "null"}, "enum": []string{"content", "files_with_matches", "count"}, "description": "Result shape (default/null content)."},
+				"include":          map[string]interface{}{"type": []string{"string", "null"}, "description": "Only search files whose name matches this glob, e.g. \"*.go\"."},
+				"case_insensitive": map[string]interface{}{"type": []string{"boolean", "null"}, "description": "Match regardless of letter case."},
+				"max_results":      map[string]interface{}{"type": []string{"integer", "null"}, "description": "Cap on returned matches/files (default 200)."},
 			},
-			"required": []string{"pattern"},
+			"required":             []string{"pattern", "path", "output_mode", "include", "case_insensitive", "max_results"},
+			"additionalProperties": false,
 		},
 		Execute: func(args map[string]interface{}, ctx tool.ToolContext) (interface{}, error) {
 			pattern, ok := args["pattern"].(string)
@@ -678,13 +682,15 @@ func (g *Gogent) initializeToolRegistry() {
 	g.toolRegistry.Register(&tool.Tool{
 		Name:        "glob",
 		ReadOnly:    true,
+		Strict:      true,
 		Description: "List files in the workspace whose path matches a glob pattern (shell-style *, ?, [abc]; it does not cross directory boundaries, so prefer grep for recursive content search). Read-only and workspace-confined, so it runs without a permission prompt. Use it to discover files by name before reading them.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"pattern": map[string]interface{}{"type": "string", "description": "Glob pattern relative to the workspace root, e.g. \"*.txt\" or \"src/*.go\"."},
 			},
-			"required": []string{"pattern"},
+			"required":             []string{"pattern"},
+			"additionalProperties": false,
 		},
 		Execute: func(args map[string]interface{}, ctx tool.ToolContext) (interface{}, error) {
 			pattern, ok := args["pattern"].(string)
@@ -707,12 +713,15 @@ func (g *Gogent) initializeToolRegistry() {
 	g.toolRegistry.Register(&tool.Tool{
 		Name:        "list",
 		ReadOnly:    true,
+		Strict:      true,
 		Description: "List the files and subdirectories immediately inside a workspace directory. Read-only and workspace-confined, so it runs without a permission prompt. Use it to explore a directory's layout before reading specific files.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"path": map[string]interface{}{"type": "string", "description": "Directory to list, relative to the workspace root (default: the workspace root)."},
+				"path": map[string]interface{}{"type": []string{"string", "null"}, "description": "Directory to list, relative to the workspace root (default/null: the workspace root)."},
 			},
+			"required":             []string{"path"},
+			"additionalProperties": false,
 		},
 		Execute: func(args map[string]interface{}, ctx tool.ToolContext) (interface{}, error) {
 			path := stringArg(args, "path")
@@ -776,6 +785,12 @@ func (g *Gogent) initializeToolRegistry() {
 	}
 	g.toolRegistry.RegisterVerifyTool(verifyCmd)
 
+	// spawn_subagent is deliberately left non-strict (Strict defaults false).
+	// Its "subtasks" items use a union type (object|string), which is outside the
+	// strict supported subset; and a strict tool forces parallel_tool_calls:false
+	// on OpenAI-compatible providers, which would suppress the batched-spawn turn
+	// this tool exists to enable (issue #282). Eligible read-only tools opt into
+	// strict mode individually (issue #359); this one must not.
 	g.toolRegistry.Register(&tool.Tool{
 		Name: "spawn_subagent",
 		Description: "Delegate work to sub-agents to cut wall-clock latency. A SINGLE call " +
