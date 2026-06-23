@@ -63,13 +63,13 @@ func TestBoundContentIssue352MaxLength(t *testing.T) {
 		}
 	})
 
-	t.Run("byte cap keeps valid utf8", func(t *testing.T) {
+	t.Run("character cap keeps valid utf8", func(t *testing.T) {
 		got := BoundContent("αβγ\nnext\n", 1, 10, 3)
 		if !utf8.ValidString(got.Content) {
 			t.Fatalf("content is not valid utf8: %q", got.Content)
 		}
-		if got.Content != "α" {
-			t.Fatalf("content = %q, want a prefix cut on a rune boundary", got.Content)
+		if got.Content != "αβγ" {
+			t.Fatalf("content = %q, want a 3-character prefix cut on a rune boundary", got.Content)
 		}
 		if got.LinesShown != 0 || got.NextOffset != 1 {
 			t.Fatalf("lines/next = %d/%d, want 0/1 so caller can retry with a larger max_length", got.LinesShown, got.NextOffset)
@@ -130,11 +130,22 @@ func TestBoundContentIssue352DefaultCapAndSmallFile(t *testing.T) {
 		}
 	})
 
-	t.Run("default byte cap bounds dense file", func(t *testing.T) {
+	t.Run("default character cap bounds dense ascii file", func(t *testing.T) {
 		content := strings.Repeat("a", DefaultReadMaxBytes+10)
 		got := BoundContent(content, 0, 0, 0)
 		if len(got.Content) != DefaultReadMaxBytes {
 			t.Fatalf("content bytes = %d, want default byte cap %d", len(got.Content), DefaultReadMaxBytes)
+		}
+		if !got.Truncated || got.NextOffset != 1 {
+			t.Fatalf("paging = truncated %v next %d, want true/1", got.Truncated, got.NextOffset)
+		}
+	})
+
+	t.Run("default character cap counts utf8 runes", func(t *testing.T) {
+		content := strings.Repeat("α", DefaultReadMaxBytes+1)
+		got := BoundContent(content, 0, 0, 0)
+		if got.Content != strings.Repeat("α", DefaultReadMaxBytes) {
+			t.Fatalf("content rune count = %d, want default cap %d", utf8.RuneCountInString(got.Content), DefaultReadMaxBytes)
 		}
 		if !got.Truncated || got.NextOffset != 1 {
 			t.Fatalf("paging = truncated %v next %d, want true/1", got.Truncated, got.NextOffset)
