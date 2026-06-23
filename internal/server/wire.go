@@ -354,6 +354,14 @@ func sessionToView(g *gogent.Gogent, id string, us *agent.UserSession, title str
 			v.State = "waiting"
 		}
 	}
+	// While async sub-agents run in the background the session must not read as idle,
+	// even after the main loop's turn has ended (issue #353). Surface a third
+	// "background" state when the root loop is otherwise idle but background work is
+	// still in flight. A root that is actively thinking/waiting already reads as busy,
+	// so only the idle case is overridden.
+	if v.State == "idle" && us.HasBackgroundWork() {
+		v.State = "background"
+	}
 	return v
 }
 

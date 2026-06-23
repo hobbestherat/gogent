@@ -1990,6 +1990,14 @@ func (w *Workbench) deliverSessionEvent(id string, ev agent.SessionEvent) bool {
 		if w.sidebar != nil && w.sidebar.busy[id] != sw.busy {
 			w.sidebar.setBusy(id, title, pinned, sw.busy)
 		}
+		// Push the background marker (◐, issue #353) on the same event-driven edge as
+		// the busy marker, so the glyph flips the instant a SessionEventBackground
+		// settles sw.background rather than waiting up to one tick for tickBusyStatuses.
+		// sw.apply has just settled sw.background, which (like sw.busy) is UI-thread-only,
+		// so the read needs no lock; relabel only on a real transition.
+		if w.sidebar != nil && w.sidebar.background[id] != sw.background {
+			w.sidebar.setBackground(id, title, pinned, sw.background)
+		}
 	} else if eventNeedsWindow(ev.Type) {
 		// Only count a missing window as a dropped event when the window was actually
 		// needed: sub-agent and todo events are fully serviced by the sidebar above,
@@ -2345,20 +2353,33 @@ func (w *Workbench) runStatusTicker(ctx context.Context) {
 // session is busy — an idle workbench is left untouched. Runs on the UI thread.
 func (w *Workbench) tickBusyStatuses() {
 	w.mu.Lock()
-	busy := make([]*SessionWindow, 0, len(w.sessions))
 	busyIDs := make(map[string]bool, len(w.sessions))
+	bgIDs := make(map[string]bool, len(w.sessions))
+	// active collects every session with ANY work in flight — a foreground turn OR
+	// background sub-agents — so the status-line/Overall refresh below keeps ticking
+	// the elapsed timer for a session that is only working in the background (#353).
+	active := make([]*SessionWindow, 0, len(w.sessions))
 	for id, sw := range w.sessions {
 		if sw.busy {
-			busy = append(busy, sw)
 			busyIDs[id] = true
+		}
+		if sw.background {
+			bgIDs[id] = true
+		}
+		if sw.busy || sw.background {
+			active = append(active, sw)
 		}
 	}
 	w.mu.Unlock()
 	// Reconcile the sidebar's per-session idle/active markers (issue #236) before the
 	// all-idle early return, so the busy→idle transition that empties the set still
 	// clears the last ● — and redraw once if any marker moved, since an otherwise
-	// idle tick does no other work.
+	// idle tick does no other work. The background marker (◐, issue #353) is
+	// reconciled on the same tick from the parallel bgIDs set.
 	redraw := w.sidebar != nil && w.sidebar.syncBusy(busyIDs)
+	if w.sidebar != nil && w.sidebar.syncBackground(bgIDs) {
+		redraw = true
+	}
 	// Refresh the sidebar's watcher nodes on the same tick so a fire's busy marker,
 	// a watcher created/deleted from the dialog or a tool, and a schedule change all
 	// surface live (issue #329 Phase 4). It re-pulls the watcher list and reconciles
@@ -2370,10 +2391,10 @@ func (w *Workbench) tickBusyStatuses() {
 	if redraw {
 		w.desktop.Redraw()
 	}
-	if len(busy) == 0 {
+	if len(active) == 0 {
 		return
 	}
-	for _, sw := range busy {
+	for _, sw := range active {
 		sw.refreshStatus()
 	}
 	// While work is in flight the aggregate keeps moving (tokens stream in), so
