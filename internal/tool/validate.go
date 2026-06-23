@@ -133,7 +133,10 @@ func validateObject(value interface{}, schemaMap map[string]interface{}, path st
 		return nil // a type mismatch is already reported by validateType
 	}
 
-	for _, key := range requiredKeys(schemaMap) {
+	required := requiredKeys(schemaMap)
+	requiredSet := make(map[string]bool, len(required))
+	for _, key := range required {
+		requiredSet[key] = true
 		if _, present := obj[key]; !present {
 			return fmt.Errorf("%s: missing required property %q", path, key)
 		}
@@ -143,6 +146,15 @@ func validateObject(value interface{}, schemaMap map[string]interface{}, path st
 	for name, sub := range props {
 		field, present := obj[name]
 		if !present {
+			continue
+		}
+		// A JSON null for an OPTIONAL property is treated as "no value". Strict
+		// tool-use advertises optional fields as nullable on the OpenAI wire
+		// (issue #359), so a strict model passes null when it has nothing to
+		// supply; the tools' arg helpers already coerce that to the field default.
+		// A null for a REQUIRED property is still type-checked (and rejected), so
+		// genuinely missing input is never silently accepted.
+		if field == nil && !requiredSet[name] {
 			continue
 		}
 		if err := validateValue(field, sub, path+"."+name); err != nil {

@@ -182,11 +182,14 @@ type FunctionDef struct {
 	Parameters  interface{} `json:"parameters"`
 	// Strict marks the parameter schema as strictly enforced (OpenAI structured
 	// outputs / constrained decoding): the model's arguments are guaranteed to
-	// validate against Parameters rather than merely prompted to. It requires a
-	// closed schema (additionalProperties:false, every property listed in
-	// required) and, on OpenAI, that parallel tool calls be disabled — see
-	// buildRequest, which sets parallel_tool_calls:false whenever any advertised
-	// tool is strict. Emitted only where the provider spec supports it.
+	// validate against Parameters rather than merely prompted to. OpenAI's strict
+	// subset requires a closed schema (additionalProperties:false, every property
+	// listed in required, optionals expressed as nullable) — the openAIAdapter
+	// synthesizes that shape on the wire for strict tools (see strictifyToolParams),
+	// so a tool only needs Strict plus its ordinary lenient schema. On OpenAI a
+	// strict tool also forces parallel tool calls off — see buildRequest, which
+	// sets parallel_tool_calls:false whenever any advertised tool is strict.
+	// Emitted only where the provider spec supports it.
 	Strict bool `json:"strict,omitempty"`
 }
 

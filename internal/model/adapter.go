@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 )
 
@@ -86,7 +87,184 @@ func encodeJSON(buf *bytes.Buffer, v any) error {
 type openAIAdapter struct{}
 
 func (openAIAdapter) buildBody(req CompletionRequest, buf *bytes.Buffer) error {
+	// OpenAI's strict function calling rejects a schema unless every object sets
+	// additionalProperties:false and lists ALL of its properties in "required"
+	// (issue #359). gogent keeps a lenient, single-required schema for validation,
+	// display, and the other providers, so the strict subset is synthesized here —
+	// only on the OpenAI wire, only for tools marked strict — instead of being
+	// hand-authored into each tool. See strictifyToolParams.
+	if hasStrictTool(req.Tools) {
+		req.Tools = strictifyToolParams(req.Tools)
+	}
 	return encodeJSON(buf, req)
+}
+
+// strictifyToolParams returns a copy of tools in which every strict function's
+// parameter schema is rewritten to OpenAI's strict subset (see strictSchema).
+// Non-strict tools pass through unchanged, and the original (registry-shared)
+// schema maps are never mutated — strictSchema deep-copies.
+func strictifyToolParams(tools []ToolDef) []ToolDef {
+	out := make([]ToolDef, len(tools))
+	copy(out, tools)
+	for i := range out {
+		if out[i].Function.Strict && out[i].Function.Parameters != nil {
+			out[i].Function.Parameters = strictSchema(out[i].Function.Parameters)
+		}
+	}
+	return out
+}
+
+// strictSchema returns an OpenAI-strict-compliant deep copy of a parameter
+// schema. For every object node it forces additionalProperties:false and rebuilds
+// "required" to list every property; a property that was NOT originally required
+// is made optional the way strict mode requires — by widening its "type" to
+// include "null" — so a strict model passes null when it has no value (gogent's
+// arg helpers and validateArgs already treat such a null as the field default).
+// The input is not mutated.
+func strictSchema(schema interface{}) interface{} {
+	m, ok := schema.(map[string]interface{})
+	if !ok {
+		return schema
+	}
+	return strictNode(m)
+}
+
+func strictNode(m map[string]interface{}) map[string]interface{} {
+	declaredRequired := map[string]bool{}
+	for _, k := range schemaStringSlice(m["required"]) {
+		declaredRequired[k] = true
+	}
+	props, hasProps := m["properties"].(map[string]interface{})
+
+	out := make(map[string]interface{}, len(m)+2)
+	for k, v := range m {
+		switch k {
+		case "required":
+			// Rebuilt below to list every property (the strict requirement).
+		case "properties":
+			np := make(map[string]interface{}, len(props))
+			for name, sub := range props {
+				subM, ok := sub.(map[string]interface{})
+				if !ok {
+					np[name] = sub
+					continue
+				}
+				ns := strictNode(subM)
+				if !declaredRequired[name] {
+					ns = withNullableType(ns)
+				}
+				np[name] = ns
+			}
+			out[k] = np
+		default:
+			out[k] = strictValue(v)
+		}
+	}
+
+	// Only object nodes carry additionalProperties/required in strict mode.
+	if hasProps || isObjectType(m["type"]) {
+		if _, ok := out["properties"]; !ok {
+			out["properties"] = map[string]interface{}{}
+		}
+		out["additionalProperties"] = false
+		names := make([]string, 0, len(props))
+		for name := range props {
+			names = append(names, name)
+		}
+		sort.Strings(names) // deterministic wire output (props is a Go map)
+		out["required"] = names
+	}
+	return out
+}
+
+// strictValue deep-copies a schema-bearing value, recursing through nested
+// schema objects (e.g. an "items" subschema) and arrays while leaving scalars
+// and non-schema slices (such as an "enum") untouched.
+func strictValue(v interface{}) interface{} {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		return strictNode(t)
+	case []interface{}:
+		arr := make([]interface{}, len(t))
+		for i, e := range t {
+			arr[i] = strictValue(e)
+		}
+		return arr
+	default:
+		return v
+	}
+}
+
+// withNullableType widens a (freshly copied) property schema's "type" to include
+// "null", the strict-mode way to express an optional field. It is a no-op when
+// the type already permits null or no "type" is declared.
+func withNullableType(schema map[string]interface{}) map[string]interface{} {
+	switch t := schema["type"].(type) {
+	case string:
+		if t != "null" {
+			schema["type"] = []interface{}{t, "null"}
+		}
+	case []interface{}:
+		for _, e := range t {
+			if s, ok := e.(string); ok && s == "null" {
+				return schema
+			}
+		}
+		schema["type"] = append(append([]interface{}{}, t...), "null")
+	case []string:
+		for _, s := range t {
+			if s == "null" {
+				return schema
+			}
+		}
+		widened := make([]interface{}, 0, len(t)+1)
+		for _, s := range t {
+			widened = append(widened, s)
+		}
+		schema["type"] = append(widened, "null")
+	}
+	return schema
+}
+
+// isObjectType reports whether a JSON-Schema "type" value denotes an object
+// (either the scalar "object" or a union containing it).
+func isObjectType(t interface{}) bool {
+	switch tt := t.(type) {
+	case string:
+		return tt == "object"
+	case []interface{}:
+		for _, e := range tt {
+			if s, ok := e.(string); ok && s == "object" {
+				return true
+			}
+		}
+	case []string:
+		for _, s := range tt {
+			if s == "object" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// schemaStringSlice coerces a schema's "required" (or similar) value to a
+// []string, accepting either the []string written in the Go schema literals or
+// the []interface{} produced by JSON decoding.
+func schemaStringSlice(v interface{}) []string {
+	switch t := v.(type) {
+	case []string:
+		return t
+	case []interface{}:
+		out := make([]string, 0, len(t))
+		for _, e := range t {
+			if s, ok := e.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 func (openAIAdapter) parseResponse(body []byte) (*CompletionResponse, error) {
