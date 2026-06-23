@@ -2236,7 +2236,14 @@ func (sw *SessionWindow) addError(text string) {
 // while that transcript holds focus and only after the view itself declined the key
 // (its scroll keys keep priority) — exactly the old handleTranscriptKey scope, now
 // routed through the registry rather than an OnTypeFn switch. The handlers invoke the
-// same actions as before; Chord matching is the registry's case-insensitive rule.
+// same actions as before.
+//
+// One accepted behaviour change: the old switch matched the rune case-exactly
+// ('a' only), whereas the registry's Chord.Matches is case-insensitive, so a capital
+// (e.g. Shift+a, which most terminals deliver as rune 'A' with no Shift bit) now fires
+// the same action where it used to be inert. Case sensitivity is a property of the
+// toolkit's matcher, not something gogent can override while dispatching through the
+// registry; restoring case-exact matching is a turbotui concern (out of phase-4a scope).
 //
 // Note: the registry has no Unregister, so a closed window leaves its bindings
 // behind. They are inert — their Target is no longer in any focus chain, so they

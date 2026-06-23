@@ -191,9 +191,29 @@ func (w *Workbench) chordDisplay(id tv.ActionID) (string, bool) {
 		return "", false
 	}
 	if b, ok := reg.BindingFor(id); ok {
-		return b.Chord.String(), true
+		return displayChord(b.Chord), true
 	}
 	return "", false
+}
+
+// displayChord renders a chord as the keys the user actually presses, for the
+// palette/cheatsheet hint. It is tv.Chord.String() except for a bare letter chord
+// (a single ASCII letter with no modifier and no named key), which is shown
+// lowercase: Chord.String() upper-cases letters so "Ctrl+R" reads naturally, but an
+// unmodified transcript key like 'a' must display as the unshifted "a" the user
+// presses, not a Shift-looking "A". This keeps the derived hint equivalent to the
+// pre-4a hardcoded string (issue #269) while still tracking the real binding — a
+// rebind to another letter, or to a modified chord, flows straight through.
+func displayChord(c tv.Chord) string {
+	if c.Key == tui.KeyUnknown && !c.Ctrl && !c.Shift && !c.Alt {
+		if c.Rune >= 'a' && c.Rune <= 'z' {
+			return string(c.Rune)
+		}
+		if c.Rune >= 'A' && c.Rune <= 'Z' {
+			return string(c.Rune - 'A' + 'a')
+		}
+	}
+	return c.String()
 }
 
 // editActiveGoal is the palette's "Set / show goal" action (issue #201): it opens
