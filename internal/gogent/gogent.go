@@ -314,13 +314,20 @@ func (g *Gogent) initializeToolRegistry() {
 
 	// Register file operation tools
 	g.toolRegistry.Register(&tool.Tool{
-		Name:        "read",
-		ReadOnly:    true,
-		Description: "Read a file from the workspace. Use this when the user asks you to read, view, or display a file.",
+		Name:     "read",
+		ReadOnly: true,
+		Description: "Read a file from the workspace and return its complete contents. Use it before reasoning " +
+			"about, quoting, or editing a file — never assume a file's contents without reading it first, and always " +
+			"read a file before editing so your find text matches what is actually there. The path may be relative " +
+			"to the workspace root or absolute; reads are read-only and run without a permission prompt for " +
+			"in-workspace paths. It returns the whole file untruncated, so for a very large file use grep first to " +
+			"locate the relevant lines.",
 		InputSchema: map[string]interface{}{
-			"type":       "object",
-			"properties": map[string]interface{}{"path": map[string]interface{}{"type": "string"}},
-			"required":   []string{"path"},
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{"type": "string", "description": "File path to read, relative to the workspace root or absolute."},
+			},
+			"required": []string{"path"},
 		},
 		Execute: func(args map[string]interface{}, ctx tool.ToolContext) (interface{}, error) {
 			path, ok := args["path"].(string)
@@ -348,12 +355,21 @@ func (g *Gogent) initializeToolRegistry() {
 	})
 
 	g.toolRegistry.Register(&tool.Tool{
-		Name:        "write",
-		Description: "Write content to a file. Use this when the user asks you to create or overwrite a file.",
+		Name: "write",
+		Description: "Create a new file or completely overwrite an existing one with the given content. Use it to " +
+			"author a brand-new file or to replace a file wholesale; do NOT use it to change part of an existing " +
+			"file — prefer edit (one exact replacement), multi_edit (several replacements in one file), or " +
+			"apply_patch (changes spanning multiple files), which preserve the rest of the file instead of " +
+			"clobbering unrelated content. The path may be relative to the workspace root or absolute; writing is " +
+			"permission-gated and passes through the diff-review gate when it is active. Writing an existing path " +
+			"discards its previous contents entirely, so read it first if you mean to keep any of it.",
 		InputSchema: map[string]interface{}{
-			"type":       "object",
-			"properties": map[string]interface{}{"path": map[string]interface{}{"type": "string"}, "content": map[string]interface{}{"type": "string"}},
-			"required":   []string{"path", "content"},
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path":    map[string]interface{}{"type": "string", "description": "File path to write, relative to the workspace root or absolute."},
+				"content": map[string]interface{}{"type": "string", "description": "The full content to write; it replaces the file's previous contents entirely."},
+			},
+			"required": []string{"path", "content"},
 		},
 		Execute: func(args map[string]interface{}, ctx tool.ToolContext) (interface{}, error) {
 			path, ok := args["path"].(string)
@@ -400,14 +416,20 @@ func (g *Gogent) initializeToolRegistry() {
 	})
 
 	g.toolRegistry.Register(&tool.Tool{
-		Name:        "edit",
-		Description: "Edit a file by replacing exact text. Use this for precise edits. The find text must match exactly once; include surrounding context to make it unique, or set replace_all to true to replace every occurrence.",
+		Name: "edit",
+		Description: "Edit a file by replacing one exact run of text with another. Use it for a single precise " +
+			"change where you can quote the existing text verbatim; the find text must match exactly once, so " +
+			"include enough surrounding context to make it unique, or set replace_all to replace every occurrence. " +
+			"Prefer multi_edit when you need several separate replacements in the same file in one call, and " +
+			"apply_patch when a change spans multiple files; use write only to create or fully overwrite a file. " +
+			"Read the file first so your find text matches exactly — the edit fails if it matches zero times or " +
+			"(without replace_all) more than once.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"path":        map[string]interface{}{"type": "string"},
-				"find":        map[string]interface{}{"type": "string"},
-				"replace":     map[string]interface{}{"type": "string"},
+				"path":        map[string]interface{}{"type": "string", "description": "File path to edit, relative to the workspace root or absolute."},
+				"find":        map[string]interface{}{"type": "string", "description": "The exact text to search for; it must occur exactly once unless replace_all is true. Include surrounding context to make it unique."},
+				"replace":     map[string]interface{}{"type": "string", "description": "The text to substitute in place of the find text."},
 				"replace_all": map[string]interface{}{"type": "boolean", "description": "Replace every occurrence of find instead of requiring a single unique match. Defaults to false."},
 			},
 			"required": []string{"path", "find", "replace"},
@@ -478,8 +500,8 @@ func (g *Gogent) initializeToolRegistry() {
 					"items": map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
-							"find":        map[string]interface{}{"type": "string"},
-							"replace":     map[string]interface{}{"type": "string"},
+							"find":        map[string]interface{}{"type": "string", "description": "The exact text this edit searches for; it must occur exactly once unless this edit's replace_all is true."},
+							"replace":     map[string]interface{}{"type": "string", "description": "The text to substitute in place of this edit's find text."},
 							"replace_all": map[string]interface{}{"type": "boolean", "description": "Replace every occurrence of this edit's find instead of requiring a single unique match. Defaults to false."},
 						},
 						"required": []string{"find", "replace"},
@@ -836,13 +858,19 @@ func (g *Gogent) initializeToolRegistry() {
 	// CreateUserSession by toolRegistryForMode) — but are registered globally here
 	// so that filtering can include/exclude them by name.
 	g.toolRegistry.Register(&tool.Tool{
-		Name:        "launch_agent",
-		Description: "Launch an asynchronous interactive sub-agent. Returns an agent_id immediately; the agent keeps running concurrently.",
+		Name: "launch_agent",
+		Description: "Launch an asynchronous, interactive sub-agent that runs concurrently and return its agent_id " +
+			"immediately without blocking. Use it for long-running or conversational delegation where you want to " +
+			"keep working and later poll the agent (agent_status), block for its next event (wait_agent_event), " +
+			"answer its CLARIFY question (agent_send), or stop it (agent_terminate). Prefer spawn_subagent instead " +
+			"when you just need one or more one-shot results and are willing to block until they finish — it fans a " +
+			"whole batch out concurrently in a single call. Provide the task to perform and an optional short name " +
+			"for the agent.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"name": map[string]interface{}{"type": "string"},
-				"task": map[string]interface{}{"type": "string"},
+				"name": map[string]interface{}{"type": "string", "description": "Optional short label identifying the sub-agent."},
+				"task": map[string]interface{}{"type": "string", "description": "The task the sub-agent should carry out."},
 			},
 			"required": []string{"task"},
 		},
@@ -865,12 +893,18 @@ func (g *Gogent) initializeToolRegistry() {
 	})
 
 	g.toolRegistry.Register(&tool.Tool{
-		Name:        "agent_status",
-		Description: "Query the status (running/waiting/completed/failed) and last result of an interactive sub-agent.",
+		Name: "agent_status",
+		Description: "Query the current status of an interactive sub-agent (running, waiting, completed or failed) " +
+			"and its last result, by the agent_id that launch_agent returned. Use it to poll an agent you launched " +
+			"asynchronously without blocking — for example to check whether it has finished or is awaiting a " +
+			"clarification. To block until the next event instead of polling, use wait_agent_event. Returns the " +
+			"status plus the most recent result text.",
 		InputSchema: map[string]interface{}{
-			"type":       "object",
-			"properties": map[string]interface{}{"agent_id": map[string]interface{}{"type": "string"}},
-			"required":   []string{"agent_id"},
+			"type": "object",
+			"properties": map[string]interface{}{
+				"agent_id": map[string]interface{}{"type": "string", "description": "The id of the interactive sub-agent to query (returned by launch_agent)."},
+			},
+			"required": []string{"agent_id"},
 		},
 		Execute: func(args map[string]interface{}, ctx tool.ToolContext) (interface{}, error) {
 			session := g.GetUserSession(ctx.SessionID)
@@ -887,13 +921,17 @@ func (g *Gogent) initializeToolRegistry() {
 	})
 
 	g.toolRegistry.Register(&tool.Tool{
-		Name:        "agent_send",
-		Description: "Answer an interactive sub-agent's CLARIFY question. The agent must be awaiting input (status 'waiting'); drive this off a clarify event from wait_agent_event.",
+		Name: "agent_send",
+		Description: "Answer an interactive sub-agent's CLARIFY question so it can resume. The target agent must be " +
+			"awaiting input (status 'waiting'); drive this off a clarify event delivered by wait_agent_event rather " +
+			"than guessing. Pass the agent_id and the message that answers the question. Use it only to reply to a " +
+			"pending clarification — it is not a general channel for assigning new work (launch a new agent for " +
+			"that).",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"agent_id": map[string]interface{}{"type": "string"},
-				"message":  map[string]interface{}{"type": "string"},
+				"agent_id": map[string]interface{}{"type": "string", "description": "The id of the interactive sub-agent to answer (returned by launch_agent)."},
+				"message":  map[string]interface{}{"type": "string", "description": "The message answering the sub-agent's CLARIFY question."},
 			},
 			"required": []string{"agent_id", "message"},
 		},
@@ -912,12 +950,17 @@ func (g *Gogent) initializeToolRegistry() {
 	})
 
 	g.toolRegistry.Register(&tool.Tool{
-		Name:        "agent_terminate",
-		Description: "Terminate a running interactive sub-agent by id.",
+		Name: "agent_terminate",
+		Description: "Terminate a running interactive sub-agent by its agent_id, stopping its work and freeing its " +
+			"slot. Use it to cancel an agent you no longer need, or one that is stuck or no longer relevant. This is " +
+			"irreversible — the agent's in-progress work is discarded and cannot be resumed, so launch a new agent " +
+			"if you need the task done again. Takes the agent_id returned by launch_agent.",
 		InputSchema: map[string]interface{}{
-			"type":       "object",
-			"properties": map[string]interface{}{"agent_id": map[string]interface{}{"type": "string"}},
-			"required":   []string{"agent_id"},
+			"type": "object",
+			"properties": map[string]interface{}{
+				"agent_id": map[string]interface{}{"type": "string", "description": "The id of the interactive sub-agent to terminate (returned by launch_agent)."},
+			},
+			"required": []string{"agent_id"},
 		},
 		Execute: func(args map[string]interface{}, ctx tool.ToolContext) (interface{}, error) {
 			session := g.GetUserSession(ctx.SessionID)
@@ -936,8 +979,10 @@ func (g *Gogent) initializeToolRegistry() {
 		Name:        "wait_agent_event",
 		Description: "Block until an interactive sub-agent finishes or asks for clarification, then return that event; returns {timed_out:true} if none arrives in time. timeout_ms bounds the wait (defaults to 30000ms when omitted). Call this only while agents are still running — waiting with nothing outstanding just times out.",
 		InputSchema: map[string]interface{}{
-			"type":       "object",
-			"properties": map[string]interface{}{"timeout_ms": map[string]interface{}{"type": "number"}},
+			"type": "object",
+			"properties": map[string]interface{}{
+				"timeout_ms": map[string]interface{}{"type": "number", "description": "How long to wait for an event, in milliseconds (defaults to 30000 when omitted or non-positive)."},
+			},
 		},
 		Execute: func(args map[string]interface{}, ctx tool.ToolContext) (interface{}, error) {
 			session := g.GetUserSession(ctx.SessionID)
@@ -966,12 +1011,19 @@ func (g *Gogent) initializeToolRegistry() {
 	})
 
 	g.toolRegistry.Register(&tool.Tool{
-		Name:        "structured_output",
-		Description: "Use this tool to return your final response. Include your response text and any tool calls.",
+		Name: "structured_output",
+		Description: "Return your final response for the turn. This is the terminal tool: call it when the task is " +
+			"done (or you need to hand a final answer back to the user) with your complete response text in " +
+			"`response`. Set `final` to true to mark this as the last turn and end the task loop; leave it false or " +
+			"omit it when more turns are expected. Use ordinary tool calls — not this — while you are still working; " +
+			"this tool delivers the answer rather than performing more work.",
 		InputSchema: map[string]interface{}{
-			"type":       "object",
-			"properties": map[string]interface{}{"response": map[string]interface{}{"type": "string"}, "final": map[string]interface{}{"type": "boolean"}},
-			"required":   []string{"response"},
+			"type": "object",
+			"properties": map[string]interface{}{
+				"response": map[string]interface{}{"type": "string", "description": "The final response text to deliver to the user."},
+				"final":    map[string]interface{}{"type": "boolean", "description": "If true, marks this as the terminal response and ends the task loop; omit or set false when more turns are expected."},
+			},
+			"required": []string{"response"},
 		},
 		Execute: func(args map[string]interface{}, ctx tool.ToolContext) (interface{}, error) {
 			response, _ := args["response"].(string)
@@ -1012,8 +1064,8 @@ func (g *Gogent) initializeToolRegistry() {
 					"items": map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
-							"content": map[string]interface{}{"type": "string"},
-							"status":  map[string]interface{}{"type": "string", "enum": []string{"pending", "in_progress", "completed"}},
+							"content": map[string]interface{}{"type": "string", "description": "What this checklist item is — a short description of the step."},
+							"status":  map[string]interface{}{"type": "string", "enum": []string{"pending", "in_progress", "completed"}, "description": "This item's state: pending, in_progress or completed (defaults to pending)."},
 							"note":    map[string]interface{}{"type": "string", "description": "Optional finding, rationale or detail attached to this item."},
 						},
 						"required": []string{"content"},
@@ -1064,9 +1116,11 @@ func (g *Gogent) initializeToolRegistry() {
 			Name:        "skill",
 			Description: "Load the full instructions for a named skill before performing a task it covers. Returns the skill's markdown content. Use the skill names listed under 'Available skills'.",
 			InputSchema: map[string]interface{}{
-				"type":       "object",
-				"properties": map[string]interface{}{"name": map[string]interface{}{"type": "string"}},
-				"required":   []string{"name"},
+				"type": "object",
+				"properties": map[string]interface{}{
+					"name": map[string]interface{}{"type": "string", "description": "Name of the skill to load (one of the names listed under 'Available skills')."},
+				},
+				"required": []string{"name"},
 			},
 			Execute: func(args map[string]interface{}, ctx tool.ToolContext) (interface{}, error) {
 				name, ok := args["name"].(string)
@@ -1784,7 +1838,12 @@ func (g *Gogent) GetUserSession(id string) *agent.UserSession {
 	return g.userSessions[id]
 }
 
-// GetSystemPrompt gets the system prompt for the agent
+// GetSystemPrompt gets the system prompt for the agent.
+//
+// The "Available Tools" section is generated from the live tool registry
+// (toolRegistry.RenderToolDocs), not hand-maintained, so it can never drift from
+// the authoritative Tool.Description/InputSchema the live loop sends as native
+// function definitions (issue #357).
 func (g *Gogent) GetSystemPrompt(sessionID, agentID string) string {
 	return `You are Gogent, a helpful AI assistant with access to powerful tools.
 
@@ -1797,67 +1856,7 @@ tool also runs here, so its output stays in sync with read/write/edit.
 
 ## Available Tools
 
-### read
-Read a file from the workspace. Use this when the user asks you to read, view, or display a file's contents.
-- Input: {"path": "string"} - Path to the file
-- Example: {"tool": "read", "args": {"path": "hello.txt"}}
-
-### write
-Write content to a file. Use this when the user asks you to create or overwrite a file.
-- Input: {"path": "string", "content": "string"}
-- Example: {"tool": "write", "args": {"path": "hello.txt", "content": "Hello World!"}}
-
-### edit
-Edit a file by replacing exact text. Use this for precise edits. The find string must match exactly once — include surrounding context to make it unique, or pass "replace_all": true to replace every occurrence.
-- Input: {"path": "string", "find": "string", "replace": "string", "replace_all": "boolean (optional, default false)"}
-- Example: {"tool": "edit", "args": {"path": "hello.txt", "find": "World", "replace": "Universe"}}
-
-### multi_edit
-Apply several exact text replacements to one file in a single call. Edits run in order (each against the result of the previous one) and each find must match exactly once unless that edit sets replace_all. The batch is all-or-nothing: if any edit fails, the file is left untouched. Prefer this over many edit calls when changing several spots in one file.
-- Input: {"path": "string", "edits": [{"find": "string", "replace": "string", "replace_all": "boolean (optional)"}]}
-- Example: {"tool": "multi_edit", "args": {"path": "main.go", "edits": [{"find": "foo", "replace": "bar"}, {"find": "old", "replace": "new"}]}}
-
-### apply_patch
-Apply a unified-diff patch in the "*** Begin Patch" / "*** End Patch" envelope to add, update and delete files in one call. Sections are "*** Add File: <path>" (followed by '+' content lines), "*** Delete File: <path>", and "*** Update File: <path>" (followed by '@@' hunks whose lines are prefixed ' ' for context, '-' to remove, '+' to add). Update hunks are located by their context, so include a few surrounding lines. The patch leaves the workspace untouched if it does not apply cleanly.
-- Input: {"patch": "string"}
-- Example: {"tool": "apply_patch", "args": {"patch": "*** Begin Patch\n*** Update File: main.go\n@@\n-old line\n+new line\n*** End Patch"}}
-
-### grep
-Search file contents across the workspace for a regular expression (Go regex syntax). Read-only and workspace-confined, so it runs without a permission prompt — prefer it over shelling out to grep/rg. It returns file:line references you can pass straight to read.
-- Input: {"pattern": "string", "path": "string (optional)", "output_mode": "content|files_with_matches|count (optional)", "include": "string (optional glob)", "case_insensitive": "boolean (optional)", "max_results": "integer (optional)"}
-- Example: {"tool": "grep", "args": {"pattern": "func.*List", "include": "*.go"}}
-
-### glob
-List workspace files whose path matches a shell-style glob (*, ?, [abc]; does not cross directory boundaries). Read-only and runs without a prompt. Use it to discover files by name.
-- Input: {"pattern": "string"}
-- Example: {"tool": "glob", "args": {"pattern": "*.go"}}
-
-### list
-List the files and subdirectories immediately inside a workspace directory. Read-only and runs without a prompt. Use it to explore layout before reading files.
-- Input: {"path": "string (optional, default workspace root)"}
-- Example: {"tool": "list", "args": {"path": "internal"}}
-
-### calc
- 	Evaluate a math expression and get the exact result. Use this whenever you need a number — arithmetic, geometry, trig, logs, combinatorics, physics — instead of doing the arithmetic yourself or shelling out to python/bc.
- 	- Input: {"expression": "string"} - A math expression like "sqrt(2)", "sin(pi/2)", "2**10", "G*5.97e24/(6.371e6)^2"
- 	- Example: {"tool": "calc", "args": {"expression": "sqrt(2)"}}
- 	- Returns: {"success": true, "result": {"expression": "...", "result": "..."}} — the result is a string; integers print cleanly (2+2 -> "4"), fractionals keep full precision (1/3 -> "0.3333333333333333"), non-finite as "+Inf"/"-Inf"/"NaN"
- 	- Operators: + - * /, power (** or ^), unary minus, parentheses. % is integer modulo only — for non-integers use mod(x,y). A comparison (>, <, ==, !=) is only valid as a ternary condition: (a>b ? a : b)
- 	- Functions: sqrt cbrt pow hypot exp log log2 log10; sin cos tan asin acos atan atan2 (radians) with deg()/rad() converters; sinh cosh tanh; abs floor ceil round trunc sign mod min max; factorial (alias fact, also postfix n!) gcd lcm; sum mean median
- 	- Constants: pi e tau phi sqrt2; physics c G g h hbar k Na R sigma epsilon0 mu0 echarge me mp (case-sensitive, flat names)
-
-### shell
- 	Execute shell commands. Use this when you need to run shell commands like curl, wget, ls, grep, etc.
- 	- Input: {"command": "string"} - A shell command string
- 	- Example: {"tool": "shell", "args": {"command": "curl -s https://unsorted.ch/account/api/info"}}
- 	- Returns: {"command": "...", "stdout": "...", "stderr": "...", "exit_code": 0, "timeout": false, "error": null}
- 	- Timeout: 5 minutes, max output: 1MB
-
-### diagnostics
-Run the project's compiler/linter and return structured errors (file:line:column, severity, message). The default is "go vet ./..."; the command is fixed (configurable, not model-controlled). Prefer it over running the compiler through the shell: no shell quoting, output parsed into actionable diagnostics, and ok=true means the project builds. Call it after edits to catch compile/typecheck/lint breakage early.
-- Input: {} (no arguments)
-- Example: {"tool": "diagnostics", "args": {}}
-- Returns: {"command": ["go","vet","./..."], "ok": false, "exit_code": 1, "count": 1, "diagnostics": [{"path": "foo.go", "line": 6, "column": 14, "severity": "error", "message": "undefined: undef"}]}
+` + g.toolRegistry.RenderToolDocs() + `
 
 ## How to Use Tools
 
@@ -1867,13 +1866,13 @@ When the user asks you to do something, determine which tool(s) to use and outpu
 
 ## Tool Results
 
-	After you call a tool, include the tool result in your next response so the user can see it.
+After you call a tool, include the tool result in your next response so the user can see it.
 
 ## Final Responses
 
-	When you have completed the task or need to provide a final answer, use:
+When you have completed the task or need to provide a final answer, use:
 
-	{"response": "Your final response here", "final": true}
+{"response": "Your final response here", "final": true}
 `
 }
 

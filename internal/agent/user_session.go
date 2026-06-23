@@ -602,7 +602,7 @@ func (s *UserSession) SendMessage(agentID, message string) (*model.CompletionRes
 	// Create message with tool definitions in system prompt
 	msg := model.Message{
 		Role:    model.RoleUser,
-		Content: s.buildMessageWithTools(message),
+		Content: s.buildMessageWithTools(agent.ToolRegistry, message),
 	}
 
 	// Send message to the agent's model session
@@ -645,44 +645,25 @@ func (s *UserSession) SendMessageNoTools(agentID, message string) (*model.Comple
 	return nil, nil
 }
 
-// buildMessageWithTools adds tool definitions to the message
-func (s *UserSession) buildMessageWithTools(message string) string {
-	toolDefs := `You have access to the following tools:
+// buildMessageWithTools prepends a tool catalog to the message for the legacy
+// single-shot SendMessage path. The catalog is generated from the live registry
+// (reg.RenderToolDocs), not hand-maintained, so it cannot drift from the
+// authoritative Tool.Description/InputSchema the live task loop sends as native
+// function definitions (issue #357). reg may be nil or empty, in which case the
+// catalog section is omitted.
+func (s *UserSession) buildMessageWithTools(reg *tool.ToolRegistry, message string) string {
+	var toolDocs string
+	if reg != nil {
+		toolDocs = reg.RenderToolDocs()
+	}
 
-read:
-  description: Read a file from the workspace. ALWAYS use this tool to verify file existence and content before making assumptions about files. This tool returns the actual file content.
-
-write:
-  description: Write content to a file. Use this to create or overwrite files.
-  input: {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}}
-
-edit:
-  description: Edit a file by replacing exact text. Use this for precise edits. The find text must match exactly once; set replace_all to true to replace every occurrence.
-  input: {"type": "object", "properties": {"path": {"type": "string"}, "find": {"type": "string"}, "replace": {"type": "string"}, "replace_all": {"type": "boolean"}}}
-
-multi_edit:
-  description: Apply several exact text replacements to one file in one call. Edits run in order; each find must match exactly once unless its replace_all is set. All-or-nothing: if any edit fails, the file is left untouched.
-  input: {"type": "object", "properties": {"path": {"type": "string"}, "edits": {"type": "array", "items": {"type": "object", "properties": {"find": {"type": "string"}, "replace": {"type": "string"}, "replace_all": {"type": "boolean"}}}}}}
-
-apply_patch:
-  description: Apply a unified-diff patch in the "*** Begin Patch" / "*** End Patch" envelope to add, update and delete files in one call. Update hunks are located by their context lines.
-  input: {"type": "object", "properties": {"patch": {"type": "string"}}}
-
-calc:
-  	description: Evaluate a math expression and get the exact result. Operators + - * /, power (** or ^), unary minus, parentheses; % is integer modulo only (use mod(x,y) for non-integers); a comparison is only valid inside a ternary (a>b ? a : b). Functions sqrt cbrt pow exp log log2 log10 sin cos tan asin acos atan atan2 (radians) deg rad sinh cosh tanh abs floor ceil round trunc sign mod min max factorial (also postfix n!) gcd lcm sum mean median. Constants pi e tau phi sqrt2 c G g h hbar k Na R sigma epsilon0 mu0 echarge me mp. Integers print cleanly (2+2 -> 4); fractionals keep full precision.
-  	input: {"type": "object", "properties": {"expression": {"type": "string"}}}
-
-  	shell:
-  	description: Execute shell commands like curl, wget, ls, grep, etc.
-  	input: {"type": "object", "properties": {"command": {"type": "string"}}}
-  	example: {"tool": "shell", "args": {"command": "curl -s https://unsorted.ch/account/api/info"}}
-  	returns: {"command": "...", "stdout": "...", "stderr": "...", "exit_code": 0, "timeout": false, "error": null}
-
-  	structured_output:
-  	description: Use this tool to return your final response
-  	input: {"type": "object", "properties": {"response": {"type": "string"}, "final": {"type": "boolean"}}}
-
-  	IMPORTANT INSTRUCTIONS:
+	var b strings.Builder
+	if toolDocs != "" {
+		b.WriteString("You have access to the following tools:\n\n")
+		b.WriteString(toolDocs)
+		b.WriteString("\n\n")
+	}
+	b.WriteString(`IMPORTANT INSTRUCTIONS:
 1. ALWAYS use the read tool to verify file existence and get actual content before making assumptions
 2. Do not state that a file doesn't exist without first using the read tool
 3. Tool execution happens automatically - you just need to request it
@@ -693,9 +674,10 @@ To use a tool, output a JSON object with:
 
 For final responses, use:
 {"response": "...", "final": true}
-`
 
-	return toolDefs + "\n\n" + message
+`)
+	b.WriteString(message)
+	return b.String()
 }
 
 // ExecuteTaskLoop runs the multi-turn task loop with tool calling.
