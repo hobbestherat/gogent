@@ -791,12 +791,11 @@ type geminiToolConfig struct {
 type geminiFunctionCallingConfig struct {
 	Mode                 string   `json:"mode,omitempty"`
 	AllowedFunctionNames []string `json:"allowedFunctionNames,omitempty"`
-	// ParallelFunctionCalls advertises whether the model may emit several
-	// functionCall parts in one turn. Gemini enables this by default; it is a
-	// pointer so it is always surfaced explicitly (the native wire reference lists
-	// it) while still letting an explicit gogent override (parallel_tool_calls:false
-	// for strict tool sets) pass through. See geminiToolConfigFor.
-	ParallelFunctionCalls *bool `json:"parallelFunctionCalls,omitempty"`
+	// NOTE: no parallelFunctionCalls field. The Vertex AI native Gemini endpoint
+	// (the only backend this adapter targets) rejects an unknown
+	// "parallelFunctionCalls" in functionCallingConfig with a 400 — it is a Gemini
+	// Developer API field, not a Vertex one. Gemini allows parallel function calls
+	// by default and Vertex exposes no toggle here, so gogent simply does not emit it.
 }
 
 type geminiGenConfig struct {
@@ -862,7 +861,7 @@ func (geminiAdapter) buildBody(req CompletionRequest, buf *bytes.Buffer) error {
 		}
 		out.Tools = []geminiTool{{FunctionDeclarations: decls}}
 		if req.ToolChoice != nil {
-			out.ToolConfig = geminiToolConfigFor(*req.ToolChoice, req.ParallelToolCalls)
+			out.ToolConfig = geminiToolConfigFor(*req.ToolChoice)
 		}
 	}
 
@@ -1005,7 +1004,7 @@ func geminiImagePart(img ImageURL) (geminiPart, bool) {
 // functionCallingConfig: AUTO (model decides), ANY (must call some tool — the
 // "required" analogue), NONE (no calls), or ANY restricted to a single
 // allowedFunctionNames entry for a forced specific tool.
-func geminiToolConfigFor(tc ToolChoice, parallel *bool) *geminiToolConfig {
+func geminiToolConfigFor(tc ToolChoice) *geminiToolConfig {
 	cfg := &geminiFunctionCallingConfig{}
 	switch tc.Mode {
 	case ToolChoiceNone:
@@ -1018,13 +1017,8 @@ func geminiToolConfigFor(tc ToolChoice, parallel *bool) *geminiToolConfig {
 	default:
 		cfg.Mode = "AUTO"
 	}
-	// Default to Gemini's native behavior (parallel calls allowed), honoring an
-	// explicit gogent override when one is present.
-	par := true
-	if parallel != nil {
-		par = *parallel
-	}
-	cfg.ParallelFunctionCalls = &par
+	// No parallelFunctionCalls: Vertex rejects the field and defaults to parallel
+	// calls anyway (see geminiFunctionCallingConfig).
 	return &geminiToolConfig{FunctionCallingConfig: cfg}
 }
 

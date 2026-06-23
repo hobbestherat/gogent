@@ -140,8 +140,11 @@ func TestIssue359StrictToolWireFormatGeminiDropsUnsupportedStrictField(t *testin
 	if got := params["additionalProperties"]; got != false {
 		t.Fatalf("Gemini parameters.additionalProperties = %v, want false", got)
 	}
+	// Vertex AI's functionCallingConfig has no parallelFunctionCalls field (it 400s
+	// on it), so a strict tool set's parallel-disable override is simply not
+	// surfaced here — the field must be absent regardless.
 	cfg := got["toolConfig"].(map[string]interface{})["functionCallingConfig"].(map[string]interface{})
-	if cfg["parallelFunctionCalls"] != false {
-		t.Fatalf("Gemini parallelFunctionCalls = %v, want false for strict tool set", cfg["parallelFunctionCalls"])
+	if _, ok := cfg["parallelFunctionCalls"]; ok {
+		t.Fatalf("Gemini parallelFunctionCalls present (%v); Vertex rejects this field", cfg["parallelFunctionCalls"])
 	}
 }
