@@ -18,11 +18,12 @@ import (
 // real work — kind decision (attached vs free-running), permission gating
 // (ActionWatcher), persistence and scoping — lives in the backend.
 //
-// The HTTP surface manages free-running watchers: List/Get scope through
-// ListWatchers("") (empty session id ⇒ free-running only), since attached
-// watchers are controlled via their owning session. Create still honours
-// report_to_session, so a caller may create an attached watcher pointed at a
-// live session.
+// The HTTP surface manages both kinds. List scopes through the gogent
+// ListWatchers wrapper: GET /watchers lists free-running watchers; GET
+// /watchers?session_id=<id> additionally includes that session's attached
+// watchers. Create honours report_to_session (nil ⇒ free-running; a live
+// session id ⇒ attached). Get resolves a watcher of either kind by id or name
+// so a just-created attached watcher is immediately readable by its returned id.
 type watchersSvc struct{ s *Server }
 
 // ensureEnabled gates the watcher API behind the same Experimental.Watchers
@@ -37,15 +38,17 @@ func (svc watchersSvc) ensureEnabled() error {
 	return nil
 }
 
-// List handles GET /watchers — every free-running watcher.
-func (svc watchersSvc) List(r *http.Request) (interface{}, error) {
+// List handles GET /watchers[?session_id=<id>] — free-running watchers, plus
+// the given session's attached watchers when session_id is supplied (the
+// scoping the gogent ListWatchers wrapper enforces).
+func (svc watchersSvc) List(r *http.Request, q watcherListQuery) (interface{}, error) {
 	if err := requireHuman(r, svc.s.provider); err != nil {
 		return nil, err
 	}
 	if err := svc.ensureEnabled(); err != nil {
 		return nil, err
 	}
-	infos := svc.s.g.ListWatchers("")
+	infos := svc.s.g.ListWatchers(q.SessionID)
 	out := make([]watcherView, 0, len(infos))
 	for _, info := range infos {
 		out = append(out, watcherToView(info))
@@ -53,7 +56,8 @@ func (svc watchersSvc) List(r *http.Request) (interface{}, error) {
 	return out, nil
 }
 
-// Get handles GET /watchers/:id — one watcher by id or name, 404 if unknown.
+// Get handles GET /watchers/:id — one watcher by id or name (either kind), 404
+// if unknown.
 func (svc watchersSvc) Get(r *http.Request, id string) (interface{}, error) {
 	if err := requireHuman(r, svc.s.provider); err != nil {
 		return nil, err
@@ -61,10 +65,8 @@ func (svc watchersSvc) Get(r *http.Request, id string) (interface{}, error) {
 	if err := svc.ensureEnabled(); err != nil {
 		return nil, err
 	}
-	for _, info := range svc.s.g.ListWatchers("") {
-		if info.ID == id || info.Name == id {
-			return watcherToView(info), nil
-		}
+	if info, ok := svc.findWatcher(id); ok {
+		return watcherToView(info), nil
 	}
 	return nil, webapi.NewHTTPError(http.StatusNotFound, "watcher not found")
 }
@@ -198,6 +200,26 @@ func (svc watchersSvc) Delete(r *http.Request, id string) (interface{}, error) {
 }
 
 // --- helpers ----------------------------------------------------------------
+
+// findWatcher resolves a watcher by id or name across every visibility scope:
+// the free-running set plus the attached watchers of every live session. The
+// gogent ListWatchers wrapper has no global "all watchers" view (it is always
+// session-scoped by design), so an attached watcher can only be reached through
+// its owning session; this scans those scopes so Get works regardless of kind.
+// The free-running scope ("") is searched first, then each live session, and the
+// first match wins — a free-running watcher (present in every per-session list)
+// is therefore resolved from the "" scope, never duplicated.
+func (svc watchersSvc) findWatcher(idOrName string) (watcher.WatcherInfo, bool) {
+	scopes := append([]string{""}, svc.s.g.SessionIDs()...)
+	for _, sid := range scopes {
+		for _, info := range svc.s.g.ListWatchers(sid) {
+			if info.ID == idOrName || info.Name == idOrName {
+				return info, true
+			}
+		}
+	}
+	return watcher.WatcherInfo{}, false
+}
 
 // watcherToView maps a backend watcher snapshot to its wire view, matching the
 // agent tools' watcherInfoMap shape (target = owning session id for attached

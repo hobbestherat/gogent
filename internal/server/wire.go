@@ -129,6 +129,14 @@ type createWatcherRequest struct {
 	ReportToSession *string               `json:"report_to_session,omitempty"`
 }
 
+// watcherListQuery binds the ?session_id= query parameter of GET /watchers. An
+// empty session id lists free-running watchers only; a session id lists every
+// free-running watcher plus that session's own attached watchers (the scoping
+// the gogent ListWatchers wrapper enforces).
+type watcherListQuery struct {
+	SessionID string `json:"session_id"`
+}
+
 // updateWatcherRequest is the body of PUT/PATCH /watchers/:id — a sparse patch.
 // Only non-empty fields are applied; the watcher's kind/owning session is never
 // changed.
