@@ -73,6 +73,28 @@ func TestInlineToolSchemaPropertiesHaveDescriptions(t *testing.T) {
 	}
 }
 
+func TestEveryEnabledToolTopLevelSchemaPropertyHasDescription(t *testing.T) {
+	g := NewGogent(t.TempDir())
+
+	for _, tl := range g.GetToolRegistry().ListEnabled() {
+		t.Run(tl.Name, func(t *testing.T) {
+			if !toolNameRE.MatchString(tl.Name) {
+				t.Fatalf("tool name %q does not match provider-safe format", tl.Name)
+			}
+
+			schema, ok := tl.InputSchema.(map[string]interface{})
+			if !ok {
+				return
+			}
+			props, ok := schema["properties"].(map[string]interface{})
+			if !ok {
+				return
+			}
+			assertPropertyMapDescriptions(t, tl.Name, props)
+		})
+	}
+}
+
 func TestGetSystemPromptToolDocsComeFromRegistry(t *testing.T) {
 	g := NewGogent(t.TempDir())
 
@@ -119,6 +141,12 @@ func assertSchemaPropertyDescriptions(t *testing.T, owner string, raw interface{
 		t.Fatalf("%s schema has no properties", owner)
 	}
 
+	assertPropertyMapDescriptions(t, owner, props)
+}
+
+func assertPropertyMapDescriptions(t *testing.T, owner string, props map[string]interface{}) {
+	t.Helper()
+
 	for propName, rawProp := range props {
 		if !toolNameRE.MatchString(propName) {
 			t.Errorf("%s property name %q does not match provider-safe format", owner, propName)
@@ -132,6 +160,15 @@ func assertSchemaPropertyDescriptions(t *testing.T, owner string, raw interface{
 		desc, _ := prop["description"].(string)
 		if strings.TrimSpace(desc) == "" {
 			t.Errorf("%s.%s is missing a non-empty description", owner, propName)
+		}
+
+		if nestedProps, ok := prop["properties"].(map[string]interface{}); ok {
+			assertPropertyMapDescriptions(t, owner+"."+propName, nestedProps)
+		}
+		if items, ok := prop["items"].(map[string]interface{}); ok {
+			if nestedProps, ok := items["properties"].(map[string]interface{}); ok {
+				assertPropertyMapDescriptions(t, owner+"."+propName+"[]", nestedProps)
+			}
 		}
 	}
 }
