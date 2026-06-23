@@ -1619,6 +1619,10 @@ func (sw *SessionWindow) apply(ev agent.SessionEvent) {
 		if sw.planPending {
 			sw.addNote("Plan ready for review — approve with /act (or Session → Approve Plan) to execute it.")
 		}
+	case agent.SessionEventYolo:
+		// Backend-owned yolo indicator (issue #356): the display field is set here
+		// (never from the local toggle) so it is correct however yolo was activated.
+		sw.applyYoloMode(ev.Yolo)
 	case agent.SessionEventTodo:
 		// The checklist is rendered in the sidebar; nothing to add to the
 		// transcript (issue #43).
@@ -2102,17 +2106,30 @@ func (sw *SessionWindow) togglePlanMode() {
 	sw.refreshStatus()
 }
 
-// toggleYoloMode flips the session's yolo mode (issue #356): it mirrors the new
-// state to the backend (auto-approve permissions + remove the step cap) and the
-// status line, and explains the new state. The rules.json hard-deny guardrails
-// (issue #355) still hold under yolo, and cancellation, token budget, and the
-// audit trail remain active — the note says so to keep the mode honest.
+// toggleYoloMode requests a yolo-mode flip for the session (issue #356). It is
+// request-only: it asks the backend to toggle and does NOT flip the local display
+// field. The backend applies the change (auto-approve permissions + remove the
+// step cap) and emits a SessionEventYolo carrying the new state, which apply()
+// renders — so the indicator is backend-owned and correct regardless of how yolo
+// was activated (toggle, config, or --yolo), unlike plan mode's local mirror.
 func (sw *SessionWindow) toggleYoloMode() {
-	sw.yoloMode = !sw.yoloMode
-	if sw.wb.handlers.OnSetYoloMode != nil {
-		sw.wb.handlers.OnSetYoloMode(sw.id, sw.yoloMode)
+	if sw.wb.handlers.OnSetYoloMode == nil {
+		sw.addNote("YOLO mode unavailable")
+		return
 	}
-	if sw.yoloMode {
+	sw.wb.handlers.OnSetYoloMode(sw.id, !sw.yoloMode)
+}
+
+// applyYoloMode renders a backend-announced yolo state (issue #356). It sets the
+// display-only field, refreshes the status line, and explains the new state on a
+// real change. The change guard keeps the silent default (yolo off) quiet at
+// session creation while still announcing config/CLI-activated yolo and toggles.
+func (sw *SessionWindow) applyYoloMode(on bool) {
+	if sw.yoloMode == on {
+		return
+	}
+	sw.yoloMode = on
+	if on {
 		sw.addNote("YOLO mode on — permission prompts auto-approve (except hard-deny guardrails) " +
 			"and the step cap is removed. Cancellation, token budget, and the audit trail still apply; " +
 			"set a token budget as the brake.")

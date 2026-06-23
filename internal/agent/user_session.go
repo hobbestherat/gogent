@@ -58,6 +58,12 @@ const (
 	// SessionEventPlan carries a proposed plan produced in plan mode, awaiting the
 	// user's approval before the agent executes it (issue #43).
 	SessionEventPlan SessionEventType = "plan"
+	// SessionEventYolo announces the session's effective yolo state (issue #356):
+	// Yolo holds the current value. The backend emits it on toggle and at session
+	// creation, so the status indicator is driven by the backend (never a UI-local
+	// mirror) and config/CLI-activated yolo is announced too. A UI sets a
+	// display-only field from it and refreshes the status line.
+	SessionEventYolo SessionEventType = "yolo"
 )
 
 // SessionStats is a point-in-time, mutex-free snapshot of a session's per-session
@@ -116,6 +122,8 @@ type SessionEvent struct {
 	Todos []TodoItem
 	// Plan carries the proposed plan on SessionEventPlan (plan mode).
 	Plan string
+	// Yolo carries the effective yolo state on SessionEventYolo (issue #356).
+	Yolo bool
 }
 
 // SessionObserver receives SessionEvents as a task loop progresses. It is always
@@ -531,6 +539,13 @@ func (s *UserSession) SetObserver(observer SessionObserver) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.observer = observer
+}
+
+// EmitYolo announces the session's effective yolo state to its observer (issue
+// #356), so the UI status indicator is driven by the backend rather than a
+// UI-local mirror. It is a no-op when no observer is registered.
+func (s *UserSession) EmitYolo(on bool) {
+	s.emit(SessionEvent{Type: SessionEventYolo, Yolo: on})
 }
 
 // emit dispatches a session event to the registered observer (if any).

@@ -77,7 +77,16 @@ func (g *Gogent) SetReviewEdits(enabled bool) {
 // through the diff-review gate: review is enabled, a reviewer is installed, and
 // the session has not chosen "approve all". When false, callers skip the preview
 // read entirely and write exactly as before.
+//
+// Yolo mode (issue #356) skips the gate entirely: yolo's contract is "no human in
+// the loop," so the edit-review gate — a human-in-the-loop layer on top of
+// permissions — is bypassed alongside permission prompts. The rules.json hard-deny
+// guardrails (issue #355) still apply, since they gate at the permission layer the
+// write must clear first.
 func (g *Gogent) reviewActive(sessionID string) bool {
+	if g.permissions.EffectiveYolo(sessionID) {
+		return false
+	}
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	return g.config != nil && g.config.ReviewEdits && g.reviewer != nil && !g.reviewApprovedAll[sessionID]

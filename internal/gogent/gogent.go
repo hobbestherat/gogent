@@ -2395,6 +2395,19 @@ func (g *Gogent) SetYoloMode(sessionID string, on bool) {
 		} else {
 			us.SetMaxSteps(g.config.MaxStepsOrDefault())
 		}
+		// Announce the new state so the UI status indicator reflects the backend
+		// (issue #356) rather than mirroring it locally.
+		us.EmitYolo(g.permissions.EffectiveYolo(sessionID))
+	}
+}
+
+// EmitYoloState pushes a session's current effective yolo state to its observer
+// (issue #356). The UI wiring calls it right after installing a session's
+// observer so a freshly opened window reflects config/CLI-activated yolo without
+// a UI-local mirror. It is a no-op for an unknown session or one with no observer.
+func (g *Gogent) EmitYoloState(sessionID string) {
+	if us := g.GetUserSession(sessionID); us != nil {
+		us.EmitYolo(g.permissions.EffectiveYolo(sessionID))
 	}
 }
 

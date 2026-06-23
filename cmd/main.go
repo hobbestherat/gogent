@@ -175,6 +175,10 @@ func main() {
 				session.SetObserver(func(ev agent.SessionEvent) {
 					wb.EmitSessionEvent(sessionID, ev)
 				})
+				// Announce the session's effective yolo state now that its observer
+				// is installed, so config/CLI-activated yolo lights the status line
+				// from the backend (issue #356) rather than a UI-local mirror.
+				g.EmitYoloState(sessionID)
 			},
 			// OnSend runs the task loop in the background; progress (thoughts,
 			// tool calls, final answer) flows back through the observer above.
