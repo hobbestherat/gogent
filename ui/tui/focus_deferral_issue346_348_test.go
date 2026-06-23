@@ -228,6 +228,61 @@ func TestAskPermissionPostedPathDefersAndDrainsOnSubmit(t *testing.T) {
 	}
 }
 
+func TestAskPermissionPostedPathDrainsWhenInputCleared(t *testing.T) {
+	w := newTestWorkbench(t)
+	sw := w.openWindow("s", "Session")
+	w.desktop.SetFocus(sw.input)
+	sw.input.SetText("x")
+
+	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+	w.desktop.SetClock(func() time.Time { return now })
+	setDesktopLastInputAt(t, w.desktop, now)
+	t.Cleanup(w.stopDeferredTimer)
+
+	done := make(chan permission.Decision, 1)
+	go func() {
+		done <- w.AskPermission(issue346PermissionRequest())
+	}()
+
+	drainPostedEventually(t, w)
+	drainPosted(t, w)
+
+	if top := w.desktop.TopLayer(); top == nil || top.Name == "permission-dialog" {
+		t.Fatalf("permission dialog should not be shown while typing before clear; top=%v", top)
+	}
+	if w.deferredModal == nil {
+		t.Fatal("AskPermission did not leave a deferred modal queued")
+	}
+
+	dispatchType(t, w, tui.TypeEvent{Key: tui.KeyBackspace})
+	if got := sw.input.GetText(); got != "" {
+		w.quit()
+		t.Fatalf("setup failed: Backspace left input text %q, want empty", got)
+	}
+
+	top := w.desktop.TopLayer()
+	if top == nil || top.Name != "permission-dialog" {
+		w.quit()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+		t.Fatalf("permission dialog did not drain immediately when input was cleared; top=%v", top)
+	}
+
+	if top.Root.OnTypeFn == nil || !top.Root.OnTypeFn(top.Root, tui.TypeEvent{Key: tui.KeyEscape}) {
+		t.Fatal("permission dialog did not handle Escape dismissal")
+	}
+	select {
+	case got := <-done:
+		if got != permission.DecisionDeny {
+			t.Fatalf("AskPermission after Escape = %v, want deny", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("AskPermission did not return after the dialog resolved")
+	}
+}
+
 func TestReviewEditPostedPathDefersAndShowsAfterIdle(t *testing.T) {
 	w := newTestWorkbench(t)
 	sw := w.openWindow("s", "Session")
