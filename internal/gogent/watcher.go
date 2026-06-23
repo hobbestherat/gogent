@@ -138,6 +138,29 @@ func (g *Gogent) ListWatchers(sessionID string) []watcher.WatcherInfo {
 	return mgr.ListWatchers(sessionID)
 }
 
+// GetWatcher resolves a single watcher by id or name across every registered
+// watcher — free-running and attached, regardless of owning session — and
+// returns its current snapshot (issue #329 Phase 5). It is the read accessor the
+// HTTP GET /watchers/:id endpoint builds on, sharing the same resolver semantics
+// as the mutating wrappers (DeleteWatcher/ToggleWatcher/…): it returns
+// watcher.ErrNotFound when nothing matches and watcher.ErrAmbiguous when a name
+// matches more than one (ids are unique, so id lookups never collide). Like
+// ListWatchers it is a read and is not ActionWatcher-gated. It returns an error
+// when the engine is not running.
+func (g *Gogent) GetWatcher(idOrName string) (watcher.WatcherInfo, error) {
+	g.mu.RLock()
+	mgr := g.watchers
+	g.mu.RUnlock()
+	if mgr == nil {
+		return watcher.WatcherInfo{}, fmt.Errorf("watcher engine is not running")
+	}
+	info, err := mgr.Resolve(idOrName)
+	if err != nil {
+		return watcher.WatcherInfo{}, fmt.Errorf("resolve watcher: %w", err)
+	}
+	return info, nil
+}
+
 // attachedWatchersFor returns a copy of the attached (session-scoped) watcher
 // configs owned by sessionID, for the SessionStore to serialize into the
 // session's index (issue #329 Phase 3). It returns nil when the session has no

@@ -95,6 +95,61 @@ type planView struct {
 
 // --- Events -----------------------------------------------------------------
 
+// --- Watchers ---------------------------------------------------------------
+
+// watcherView is the wire representation of a watcher (issue #329 Phase 5). It
+// is the typed mirror of tool.watcherInfoMap: target is the owning session id
+// for attached watchers or "free" for free-running ones; zero timestamps are
+// omitted.
+type watcherView struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Kind       string `json:"kind"`   // "free" | "attached"
+	Target     string `json:"target"` // session id, or "free" for free-running
+	Task       string `json:"task,omitempty"`
+	Schedule   string `json:"schedule,omitempty"`
+	Enabled    bool   `json:"enabled"`
+	Status     string `json:"status"`
+	NextFire   string `json:"next_fire,omitempty"`
+	LastRun    string `json:"last_run,omitempty"`
+	LastResult string `json:"last_result,omitempty"`
+	LastError  string `json:"last_error,omitempty"`
+}
+
+// createWatcherRequest is the body of POST /watchers. Schedule reuses the config
+// type (exactly one of every / daily_at). Enabled defaults to true when omitted.
+// ReportToSession decides the watcher's kind: nil/omitted = free-running
+// (global); a non-nil session id = attached to that (live) session.
+type createWatcherRequest struct {
+	Name            string                `json:"name"`
+	Task            string                `json:"task"`
+	Schedule        config.ScheduleConfig `json:"schedule"`
+	Model           string                `json:"model,omitempty"`
+	Enabled         *bool                 `json:"enabled,omitempty"`
+	ReportToSession *string               `json:"report_to_session,omitempty"`
+	Output          *config.WatcherOutput `json:"on_complete,omitempty"`
+}
+
+// watcherListQuery binds the ?session_id= query parameter of GET /watchers. An
+// empty session id lists free-running watchers only; a session id lists every
+// free-running watcher plus that session's own attached watchers (the scoping
+// the gogent ListWatchers wrapper enforces).
+type watcherListQuery struct {
+	SessionID string `json:"session_id"`
+}
+
+// updateWatcherRequest is the body of PUT/PATCH /watchers/:id — a sparse patch.
+// Only non-empty fields are applied; the watcher's kind/owning session is never
+// changed.
+type updateWatcherRequest struct {
+	Name     string                `json:"name,omitempty"`
+	Task     string                `json:"task,omitempty"`
+	Schedule config.ScheduleConfig `json:"schedule,omitempty"`
+	Model    string                `json:"model,omitempty"`
+}
+
+// --- Events -----------------------------------------------------------------
+
 // eventView is the SSE wire representation of an agent.SessionEvent. The event
 // type is carried as the SSE event: field; the data: is this struct as JSON.
 type eventView struct {

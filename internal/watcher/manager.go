@@ -390,16 +390,32 @@ func (m *Manager) launchLoopLocked(r *Runner) {
 	r.done = done
 	r.enabled = true
 	r.mu.Unlock()
+	// armed is closed by scheduleLoop once it has computed the first nextFire (or
+	// failed/panicked). Waiting on it makes a snapshot taken right after Add — e.g.
+	// the HTTP create response, which returns Get(id) immediately — deterministically
+	// reflect the upcoming fire instead of racing the goroutine. The first
+	// Schedule.Next call stays inside the goroutine, so panic recovery and the
+	// once-per-fire call cadence are unchanged; the wait is just the cost of that
+	// one computation.
+	armed := make(chan struct{})
 	m.wg.Add(1)
-	go m.scheduleLoop(r, done)
+	go m.scheduleLoop(r, done, armed)
+	<-armed
 }
 
 // scheduleLoop arms a timer for r's next fire, waits, fires, and re-arms. It
 // exits when its done channel is closed (per-watcher disable/remove) or the
 // manager context is cancelled (Stop). A panic in the schedule (e.g. a custom
 // Schedule.Next) is recovered so it cannot crash the process.
-func (m *Manager) scheduleLoop(r *Runner, done chan struct{}) {
+func (m *Manager) scheduleLoop(r *Runner, done chan struct{}, armed chan struct{}) {
 	defer m.wg.Done()
+	// signal unblocks launchLoopLocked once the first nextFire is known (or the
+	// schedule failed/panicked). It is idempotent and the deferred call is the
+	// safety net for the nil-schedule and panic paths, so launchLoopLocked never
+	// blocks forever.
+	var armOnce sync.Once
+	signal := func() { armOnce.Do(func() { close(armed) }) }
+	defer signal()
 	defer func() {
 		if rec := recover(); rec != nil {
 			r.mu.Lock()
@@ -422,6 +438,7 @@ func (m *Manager) scheduleLoop(r *Runner, done chan struct{}) {
 		r.mu.Lock()
 		r.nextFire = next
 		r.mu.Unlock()
+		signal()
 
 		// Delay relative to the now we handed Next, floored to avoid spinning
 		// on a non-advancing schedule.
