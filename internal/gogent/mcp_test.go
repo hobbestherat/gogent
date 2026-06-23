@@ -96,6 +96,122 @@ func TestStartMCPServersRegistersAndDispatches(t *testing.T) {
 	}
 }
 
+func TestStartMCPServersBareNameFallbackDispatchesJSONTextCall(t *testing.T) {
+	ts := mcpTestServer(t)
+	defer ts.Close()
+
+	g := NewGogent(t.TempDir())
+	g.GetPermissionService().AddRule(permission.Rule{
+		Action: string(permission.ActionMCP), Resource: "*", Effect: string(permission.EffectAllow),
+	})
+	g.config.MCPServers = []config.MCPServerConfig{
+		{Name: "demo", Transport: "http", URL: ts.URL},
+	}
+
+	g.StartMCPServers()
+	defer g.CloseMCPServers()
+
+	resp, err := g.GetToolRegistry().ExecuteToolCall(&tool.ToolCall{
+		Tool: "greet",
+		Args: map[string]interface{}{"who": "fallback"},
+	}, tool.ToolContext{})
+	if err != nil {
+		t.Fatalf("ExecuteToolCall: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("bare fallback call failed: %s", resp.Error)
+	}
+	out, _ := resp.Result.(map[string]interface{})
+	if got := out["server"]; got != "demo" {
+		t.Fatalf("fallback should dispatch to demo MCP server, got result %v", out)
+	}
+	if got := out["tool"]; got != "greet" {
+		t.Fatalf("fallback should call bare MCP tool greet, got result %v", out)
+	}
+	if got := out["content"]; got != "hello fallback" {
+		t.Fatalf("unexpected content: %v", out)
+	}
+	if got := g.GetToolRegistry().Invocations("mcp__demo__greet"); got != 1 {
+		t.Fatalf("resolved MCP tool should receive invocation count, got %d", got)
+	}
+	if got := g.GetToolRegistry().Invocations("greet"); got != 0 {
+		t.Fatalf("bare fallback name must not receive invocation count, got %d", got)
+	}
+}
+
+func TestStartMCPServersBareNameFallbackAmbiguousAcrossServers(t *testing.T) {
+	ts1 := mcpTestServer(t)
+	defer ts1.Close()
+	ts2 := mcpTestServer(t)
+	defer ts2.Close()
+
+	g := NewGogent(t.TempDir())
+	g.GetPermissionService().AddRule(permission.Rule{
+		Action: string(permission.ActionMCP), Resource: "*", Effect: string(permission.EffectAllow),
+	})
+	g.config.MCPServers = []config.MCPServerConfig{
+		{Name: "alpha", Transport: "http", URL: ts1.URL},
+		{Name: "beta", Transport: "http", URL: ts2.URL},
+	}
+
+	g.StartMCPServers()
+	defer g.CloseMCPServers()
+
+	resp, err := g.GetToolRegistry().ExecuteToolCall(&tool.ToolCall{
+		Tool: "greet",
+		Args: map[string]interface{}{"who": "fallback"},
+	}, tool.ToolContext{})
+	if err != nil {
+		t.Fatalf("ExecuteToolCall: %v", err)
+	}
+	if resp.Success {
+		t.Fatalf("ambiguous bare MCP fallback must not dispatch silently, got result %v", resp.Result)
+	}
+	for _, want := range []string{
+		"unknown tool: greet",
+		"ambiguous MCP bare name",
+		"mcp__alpha__greet",
+		"mcp__beta__greet",
+	} {
+		if !strings.Contains(resp.Error, want) {
+			t.Fatalf("ambiguous error %q does not contain %q", resp.Error, want)
+		}
+	}
+	if got := g.GetToolRegistry().Invocations("mcp__alpha__greet"); got != 0 {
+		t.Fatalf("ambiguous fallback must not execute alpha, got %d invocations", got)
+	}
+	if got := g.GetToolRegistry().Invocations("mcp__beta__greet"); got != 0 {
+		t.Fatalf("ambiguous fallback must not execute beta, got %d invocations", got)
+	}
+}
+
+func TestStartMCPServersDescriptionsAdvertiseNamespacedToolName(t *testing.T) {
+	ts := mcpTestServer(t)
+	defer ts.Close()
+
+	g := NewGogent(t.TempDir())
+	g.GetPermissionService().AddRule(permission.Rule{
+		Action: string(permission.ActionMCP), Resource: "*", Effect: string(permission.EffectAllow),
+	})
+	g.config.MCPServers = []config.MCPServerConfig{
+		{Name: "demo", Transport: "http", URL: ts.URL},
+	}
+
+	g.StartMCPServers()
+	defer g.CloseMCPServers()
+
+	tl := g.GetToolRegistry().Get("mcp__demo__greet")
+	if tl == nil {
+		t.Fatalf("MCP tool was not registered; tools=%v", toolNames(g.GetToolRegistry()))
+	}
+	if !strings.Contains(tl.Description, "Greet someone") {
+		t.Fatalf("description should preserve MCP server description, got %q", tl.Description)
+	}
+	if !strings.Contains(tl.Description, `use its full name "mcp__demo__greet"`) {
+		t.Fatalf("description should instruct JSON fallback models to use namespaced name, got %q", tl.Description)
+	}
+}
+
 // TestStartMCPServersGatedByPermission confirms a server whose launch is denied
 // registers no tools and does not abort startup.
 func TestStartMCPServersGatedByPermission(t *testing.T) {
