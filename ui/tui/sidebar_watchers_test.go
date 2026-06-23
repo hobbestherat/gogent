@@ -296,6 +296,70 @@ func TestReorderPreservesWatcherRoots(t *testing.T) {
 	}
 }
 
+// --- free-running watcher / open-window dedup (fixes round 1) --------------
+
+// TestSetWatchersSuppressesRootWhenSessionOpen verifies the dedup guard: when a
+// free-running watcher's dedicated watcher:<name> session has an open window, the
+// separate ◷ root is suppressed (the session row represents it) — no double entry.
+func TestSetWatchersSuppressesRootWhenSessionOpen(t *testing.T) {
+	s := newTestSidebar()
+	s.setWatchers([]WatcherInfo{freeInfo("w1", "emailer", false)}, nil)
+	if _, ok := s.watchers["w1"]; !ok {
+		t.Fatal("precondition: ◷ root should exist while the window is closed")
+	}
+	// The watcher's session window opens (its id is "watcher:emailer").
+	s.addSession("watcher:emailer", "watcher:emailer", false)
+
+	s.setWatchers([]WatcherInfo{freeInfo("w1", "emailer", false)}, nil)
+	if _, ok := s.watchers["w1"]; ok {
+		t.Error("◷ root should be suppressed once the watcher's session window is open")
+	}
+	// Exactly one top-level row mentions the watcher (the session row).
+	rows := 0
+	for _, n := range s.tree.Roots {
+		if strings.Contains(n.Label, "watcher:emailer") {
+			rows++
+		}
+	}
+	if rows != 1 {
+		t.Errorf("want exactly 1 top-level row for the open watcher, got %d", rows)
+	}
+}
+
+// TestSetWatchersRootReappearsAfterSessionClose verifies the other half of the
+// dedup contract the comment promises: closing the watcher's session window brings
+// the ◷ root back.
+func TestSetWatchersRootReappearsAfterSessionClose(t *testing.T) {
+	s := newTestSidebar()
+	s.addSession("watcher:emailer", "watcher:emailer", false)
+	s.setWatchers([]WatcherInfo{freeInfo("w1", "emailer", false)}, nil)
+	if _, ok := s.watchers["w1"]; ok {
+		t.Fatal("precondition: ◷ root suppressed while the window is open")
+	}
+
+	s.removeSession("watcher:emailer")
+	s.setWatchers([]WatcherInfo{freeInfo("w1", "emailer", false)}, nil)
+	if _, ok := s.watchers["w1"]; !ok {
+		t.Error("◷ root should reappear after the watcher's session window closes")
+	}
+}
+
+// TestSetWatchersAttachedNotSuppressedByOpenSession is the negative guard: the
+// dedup is for FREE-running watchers only. An attached watcher's SessionID is its
+// (open) target session, but it must still render as a ◷ CHILD — the open target
+// must not suppress it.
+func TestSetWatchersAttachedNotSuppressedByOpenSession(t *testing.T) {
+	s := newTestSidebar()
+	s.addSession("s1", "Session 1", false)
+	s.setWatchers(nil, map[string][]WatcherInfo{"s1": {attInfo("a1", "gh", "s1", false)}})
+	if _, ok := s.watchers["a1"]; !ok {
+		t.Error("an attached watcher must render even though its target session is open")
+	}
+	if !isChildOf(s.sessions["s1"], s.watchers["a1"]) {
+		t.Error("attached watcher should be a child of its open target session")
+	}
+}
+
 // --- refreshWatcherNodes (tui.go integration) ------------------------------
 
 // TestRefreshWatcherNodesNilHandler verifies the no-op guard: with no
