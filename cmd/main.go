@@ -47,6 +47,15 @@ var (
 )
 
 func main() {
+	// Subcommand dispatch: `gogent daemon <start|stop|status|restart>` runs the
+	// userspace daemon lifecycle (issue #358). It is intercepted before
+	// flag.Parse so the global flags (which describe the embedded/foreground
+	// invocation) do not consume the subcommand's own arguments. Any other
+	// invocation falls through to the unchanged default behaviour below.
+	if len(os.Args) > 1 && os.Args[1] == "daemon" {
+		os.Exit(runDaemon(os.Args[2:]))
+	}
+
 	flag.Parse()
 
 	// Get home directory
@@ -1013,18 +1022,13 @@ func resolveHTTPPassword(flagValue string) string {
 	return ""
 }
 
-func startHTTPServer(host string, port int, g *gogent.Gogent, apiServer *server.Server, password string) {
-	// A non-loopback host requires a password or token so the instance is not
-	// exposed on the network without an identity gate. Loopback binds need none.
-	if !isLoopbackHost(host) && password == "" && os.Getenv("GOGENT_HTTP_TOKEN") == "" {
-		fmt.Printf("Refusing to bind HTTP server to non-loopback host %q without a password or token.\n", host)
-		fmt.Println("Set --http-password (or GOGENT_HTTP_PASSWORD / GOGENT_HTTP_TOKEN) to authorize it.")
-		return
-	}
-
-	// Build the root mux: the new /api surface (webapi, reflection-bound + SSE)
-	// alongside the legacy form-encoded handlers (/message, /status, /exit) for
-	// backward compatibility.
+// buildRootHandler assembles the daemon/server's full HTTP surface: the new
+// /api surface (webapi, reflection-bound + SSE) alongside the legacy form-encoded
+// handlers (/message, /status, /exit, /health) kept for backward compatibility.
+// It is shared by the TCP server (startHTTPServer) and the daemon's Unix-socket
+// listener so both expose an identical surface. /exit triggers the same graceful
+// shutdown path as an OS interrupt via httpShutdownCh.
+func buildRootHandler(g *gogent.Gogent, apiServer *server.Server) http.Handler {
 	root := http.NewServeMux()
 	root.Handle("/api/", apiServer.Handler())
 
@@ -1047,6 +1051,19 @@ func startHTTPServer(host string, port int, g *gogent.Gogent, apiServer *server.
 	root.Handle("/status", authed)
 	root.Handle("/exit", legacy)
 	root.Handle("/health", legacy)
+	return root
+}
+
+func startHTTPServer(host string, port int, g *gogent.Gogent, apiServer *server.Server, password string) {
+	// A non-loopback host requires a password or token so the instance is not
+	// exposed on the network without an identity gate. Loopback binds need none.
+	if !isLoopbackHost(host) && password == "" && os.Getenv("GOGENT_HTTP_TOKEN") == "" {
+		fmt.Printf("Refusing to bind HTTP server to non-loopback host %q without a password or token.\n", host)
+		fmt.Println("Set --http-password (or GOGENT_HTTP_PASSWORD / GOGENT_HTTP_TOKEN) to authorize it.")
+		return
+	}
+
+	root := buildRootHandler(g, apiServer)
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", host, port),
