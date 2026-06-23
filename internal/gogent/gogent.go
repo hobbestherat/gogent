@@ -814,6 +814,14 @@ func (g *Gogent) initializeToolRegistry() {
 				},
 			},
 		},
+		InputExamples: []map[string]interface{}{
+			{
+				"subtasks": []map[string]interface{}{
+					{"name": "diagnostics", "task": "Run diagnostics on the package and report any errors."},
+					{"name": "tests", "task": "Run the test suite and summarize failures."},
+				},
+			},
+		},
 		Execute: func(args map[string]interface{}, ctx tool.ToolContext) (interface{}, error) {
 			session := g.GetUserSession(ctx.SessionID)
 			if session == nil {
