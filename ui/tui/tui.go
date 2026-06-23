@@ -839,11 +839,13 @@ func (w *Workbench) settingsItems() []*tv.MenuItem {
 
 // RefreshTheme re-applies the active palette to the whole live UI after a theme
 // change, so the change takes effect without a restart (issues #103, #204). The
-// desktop background, sidebar and (rebuilt) menu bar read the active palette at
-// draw time, so rebuilding the menu recolours the chrome; but the open session
-// windows froze their colours at construction, so each is re-skinned in turn —
-// its transcript re-rendered in the new palette and its window/widget chrome
-// re-seeded (see SessionWindow.refreshTheme) — before a full desktop redraw. This
+// desktop background, sidebar panel chrome and (rebuilt) menu bar read the active
+// palette at draw time, so rebuilding the menu recolours the chrome; but the open
+// session windows and the sidebar's tree / dropdown froze their colours at
+// construction, so each is re-skinned in turn — every window's transcript
+// re-rendered in the new palette and its window/widget chrome re-seeded (see
+// SessionWindow.refreshTheme), and the sidebar's tree/dropdown reseeded (see
+// sidebar.refreshTheme) — before a full desktop redraw. This
 // covers the same regions a restart fixes, where ApplyTheme runs before the
 // windows are built.
 func (w *Workbench) RefreshTheme() {
@@ -856,6 +858,13 @@ func (w *Workbench) RefreshTheme() {
 	w.mu.Unlock()
 	for _, sw := range windows {
 		sw.refreshTheme()
+	}
+	// The sidebar's panel chrome reads the package chrome vars at draw time, but its
+	// session/agent/watcher tree and Overall-band dropdown froze their colours at
+	// construction; reseed them so the whole sidebar follows the live switch too,
+	// not just the surrounding panel fill (issue #379).
+	if w.sidebar != nil {
+		w.sidebar.refreshTheme()
 	}
 	w.desktop.Redraw()
 }

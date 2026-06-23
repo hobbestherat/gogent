@@ -416,7 +416,67 @@ func newSidebar(wb *Workbench) *sidebar {
 	s.overallModelKeys = []string{""}
 	s.layer = tv.NewWindowLayer("sidebar", panel)
 	s.rebuildModelOptions()
+	// Seed the tree / dropdown colours from the active palette explicitly, so the
+	// sidebar is correct on a fresh start regardless of whether ApplyTheme ran
+	// before construction, and so the live-switch reseed has a single funnel
+	// (issue #379).
+	s.refreshTheme()
 	return s
+}
+
+// refreshTheme re-seeds the sidebar's already-built turbotui widgets from the
+// active palette so a live theme switch recolours them without a restart (issue
+// #379). The panel fill, the "Sessions & Agents"/"TODOs"/"Overall" titles, the
+// dividers, the TODO/Overall bands and the resize handle all read the package
+// chrome vars (chromePanelBG/FG, chromeTitle, chromeDivider, chromeAccent) at
+// draw time, so they already follow the theme on a redraw. But the session /
+// sub-agent / watcher tree and the Overall band's model dropdown froze their
+// colours at construction — tv.NewTree seeds its row FG/BG/selection from the
+// active theme once, and newSelect seeds the closed control once — so after a
+// default→dark switch the tree's row region kept its stale fill while the rest of
+// the panel recoloured (the reported "stays blue"). Reseeding them here keeps the
+// whole sidebar in lockstep, mirroring SessionWindow.refreshTheme's reseed of the
+// frozen transcript view (issue #204). Runs on the UI thread, from
+// Workbench.RefreshTheme and once at construction.
+func (s *sidebar) refreshTheme() {
+	th := tv.ActiveTheme()
+	if s.tree != nil {
+		// The tree's plain row fill IS sidebar body text on the sidebar background, so
+		// it follows the gogent PANEL roles — the exact package vars panel.DrawFn fills
+		// the surrounding panel and drawTodos/drawOverall paint their body rows with —
+		// NOT turbotui's WindowFG/WindowBG that tv.NewTree happens to seed (issue #379).
+		// Those coincide with Panel* only because the built-in presets keep
+		// WindowBG == PanelBG and (for dark/high-contrast) WindowFG == PanelFG; that
+		// coincidence is exactly what masked the bug, and it breaks when a custom theme
+		// repoints panel_fg/panel_bg independently of window_fg/window_bg (the theme
+		// editor exposes both). Sourcing the fill from the panel chrome makes the tree
+		// blend with the panel under every preset and every override, unifies the row
+		// text with the TODO/Overall body (which already use chromePanelFG — the tree
+		// was the lone hold-out on the brighter WindowFG), and is the pair the
+		// paletteContrast "panel-body" audit (PanelFG/PanelBG) actually certifies.
+		s.tree.FG, s.tree.BG = chromePanelFG, chromePanelBG
+		// Selection bars. The sidebar tree never takes keyboard focus — every
+		// SetFocus target is a session window's input, never the tree — so the
+		// FOCUSED bar (SelFG/SelBG) is never actually painted here; it is still
+		// seeded from the theme's Selection* roles for correctness should that ever
+		// change. What the user always sees on the active session's row is the
+		// UNFOCUSED bar, which tv.NewTree hard-codes as WindowFG over ANSI 8 — a fixed
+		// grey that ignores the sidebar palette, follows window chrome rather than
+		// panel chrome when a custom theme repoints them independently, and emits a
+		// stray ANSI 8 under NO_COLOR (issue #379). Reseed it instead as a reverse-
+		// video of the panel chrome: panel-background text on a panel-foreground bar.
+		// That keeps the highlight on the sidebar's own palette (so it tracks panel_fg/
+		// panel_bg and every preset), stays distinct from the plain PanelBG fill so the
+		// active row still reads as selected, is legible by the same symmetry the
+		// paletteContrast "panel-body" audit already certifies for PanelFG/PanelBG, and
+		// flattens to the terminal default under NO_COLOR (no stray ANSI 8) — the bar
+		// simply disappears there, as a colour-based highlight must.
+		s.tree.SelFG, s.tree.SelBG = th.SelectionFG, th.SelectionBG
+		s.tree.SelFGUnfocused, s.tree.SelBGUnfocused = chromePanelBG, chromePanelFG
+	}
+	// The Overall band's model selector is a closed control seeded once from the
+	// dropdown palette (issue #260); reseed it like every other live Select.
+	reseedSelect(s.overallSelect, th)
 }
 
 // reposition pins the sidebar to the right edge of the desktop, using the
