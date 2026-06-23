@@ -1,10 +1,17 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"gogent/internal/watcher"
 )
 
 // ModelConfig represents a single model configuration
@@ -288,6 +295,7 @@ type NotifyConfig struct {
 	OnError    bool `json:"on_error"`    // a task errored
 	OnApproval bool `json:"on_approval"` // a permission prompt needs an answer
 	OnClarify  bool `json:"on_clarify"`  // a sub-agent asked a question (CLARIFY)
+	OnWatcher  bool `json:"on_watcher"`  // a free-running watcher fire completed (issue #329)
 	// SuppressWhenFocused skips notifications whose originating session is the
 	// currently focused window, so a session you are already watching does not
 	// also ding. Approval prompts are never suppressed this way (they block the
@@ -308,6 +316,7 @@ func DefaultNotifyConfig() NotifyConfig {
 		OnError:             true,
 		OnApproval:          true,
 		OnClarify:           true,
+		OnWatcher:           true,
 		SuppressWhenFocused: false,
 	}
 }
@@ -506,6 +515,12 @@ type Config struct {
 	// takes effect when Experimental.Supervisor is enabled; the zero value resolves
 	// to the built-in defaults via the *OrDefault accessors.
 	Supervisor SupervisorConfig `json:"supervisor,omitempty"`
+	// Watchers tunes the scheduled-watcher engine (issue #329): the global
+	// concurrency cap and the default overlap policy. It only takes effect when
+	// Experimental.Watchers is enabled; the zero value resolves to the built-in
+	// defaults via the *OrDefault accessors. Watcher definitions themselves are
+	// NOT here — they live in ~/.gogent/watchers.json (see WatcherStore).
+	Watchers WatchersConfig `json:"watchers,omitempty"`
 	// MaxSteps caps how many model round-trips (steps/turns) an agent loop may take
 	// before it stops, preventing runaway loops while still letting a session run
 	// longer than the historical fixed bound (issue #249). The single value governs
@@ -563,6 +578,13 @@ type ExperimentalConfig struct {
 	// keeps the previous behaviour (reasoning shown only as a post-turn foldable
 	// thought, if at all). It can also be toggled live with the /thinking command.
 	StreamThinking bool `json:"stream_thinking,omitempty"`
+	// Watchers, when true, enables scheduled "Watcher" agent actions (issue #329):
+	// recurring tasks that fire on their own cadence and run a full agent loop.
+	// Off by default, so a config without the key never starts watcher goroutines
+	// and existing users see no behaviour change. Free-running watcher definitions
+	// live in ~/.gogent/watchers.json; only the tuning block lives in config.json
+	// (see WatchersConfig). The startup gate is also subject to ActionWatcher.
+	Watchers bool `json:"watchers,omitempty"`
 }
 
 // SupervisorConfig tunes the harness-level supervisor (issue #172). It is only
@@ -587,6 +609,169 @@ func (c SupervisorConfig) MaxNudgesOrDefault() int {
 		return defaultSupervisorMaxNudges
 	}
 	return c.MaxNudges
+}
+
+// WatchersConfig is the tuning block for the scheduled-watcher engine (issue
+// #329). It lives under the "watchers" key in config.json and holds ONLY global
+// tuning — never watcher definitions, which live in ~/.gogent/watchers.json (see
+// WatcherStore). It is consulted only when Experimental.Watchers is enabled; a
+// zero value resolves to the built-in defaults via the *OrDefault accessors.
+type WatchersConfig struct {
+	// MaxConcurrent bounds how many watcher fires may run concurrently across all
+	// watchers. <=0 (the default) resolves to defaultWatcherMaxConcurrent.
+	MaxConcurrent int `json:"max_concurrent,omitempty"`
+	// DefaultSkipIfRunning is the default overlap policy: when a watcher's
+	// previous fire is still running at its next due time, surface the dropped
+	// fire as "skipped". It is a pointer so an absent key defaults to true
+	// (a plain bool could not express a default of true): nil → true.
+	DefaultSkipIfRunning *bool `json:"default_skip_if_running,omitempty"`
+}
+
+// defaultWatcherMaxConcurrent is the built-in global concurrency cap applied when
+// WatchersConfig.MaxConcurrent is left unset (<=0).
+const defaultWatcherMaxConcurrent = 4
+
+// MaxConcurrentOrDefault returns the configured global watcher-fire concurrency
+// cap, or the built-in default (4) when unset (<=0).
+func (c WatchersConfig) MaxConcurrentOrDefault() int {
+	if c.MaxConcurrent <= 0 {
+		return defaultWatcherMaxConcurrent
+	}
+	return c.MaxConcurrent
+}
+
+// SkipIfRunningOrDefault returns the configured default overlap policy, or the
+// built-in default (true) when unset (nil pointer).
+func (c WatchersConfig) SkipIfRunningOrDefault() bool {
+	if c.DefaultSkipIfRunning == nil {
+		return true
+	}
+	return *c.DefaultSkipIfRunning
+}
+
+// WatcherStore is the on-disk shape of ~/.gogent/watchers.json: the free-running
+// watcher definitions. It mirrors the per-feature-file precedent
+// (workbench_layout.json) — loaded/saved atomically and leniently by
+// internal/gogent. Attached (session-scoped) watchers are NOT stored here.
+type WatcherStore struct {
+	Items []WatcherConfig `json:"items,omitempty"`
+}
+
+// WatcherConfig defines a single free-running watcher (issue #329). The ID is a
+// stable unique identifier generated on load when empty (hand-written configs may
+// omit it); the Name is the editable display label. Schedule/Task/Model drive the
+// recurring agent invocation; Output configures completion delivery.
+type WatcherConfig struct {
+	// ID is the stable unique identifier the manager keys by. Empty in a
+	// hand-written file → generated on load (GenerateWatcherID) and persisted back.
+	ID string `json:"id,omitempty"`
+	// Name is the human-friendly display label (e.g. "daily-meeting-overview").
+	// It is also the dedicated session name (watcher:<name>) for free-running
+	// watchers.
+	Name string `json:"name"`
+	// Enabled gates whether the watcher's schedule is armed at startup. A disabled
+	// watcher is registered but never fires until enabled.
+	Enabled bool `json:"enabled,omitempty"`
+	// Schedule is the recurring cadence (exactly one of every / daily_at).
+	Schedule ScheduleConfig `json:"schedule"`
+	// Task is the prompt the watcher runs through the agent loop on each fire.
+	Task string `json:"task"`
+	// Model is the model config name used for the fire; empty = the default model.
+	Model string `json:"model,omitempty"`
+	// Output configures completion delivery (notification). nil = notify on.
+	Output *WatcherOutput `json:"on_complete,omitempty"`
+}
+
+// WatcherOutput configures how a free-running watcher's completion is delivered.
+// v1 only adds a notification; side-effecting delivery (email/webhook) is the
+// agent's job via tools during the run.
+type WatcherOutput struct {
+	// Notify, when true, emits a completion notification (ReasonWatcher). The
+	// Phase-1 manager calls the host notifier on a successful free-running fire.
+	Notify bool `json:"notify,omitempty"`
+}
+
+// ScheduleConfig is the JSON shape of a watcher schedule. Exactly one of Every
+// (a duration like "5m") or DailyAt (an "HH:MM" wall-clock time, interpreted in
+// Timezone) must be set; see Schedule for the validation rules.
+type ScheduleConfig struct {
+	// Every is an interval duration string ("5m", "1h", "30s"). Mutually
+	// exclusive with DailyAt.
+	Every string `json:"every,omitempty"`
+	// DailyAt is a 24h "HH:MM" wall-clock time. Mutually exclusive with Every.
+	DailyAt string `json:"daily_at,omitempty"`
+	// Timezone is an IANA location name ("Europe/Zurich") used to resolve DailyAt;
+	// empty = UTC. Ignored for Every.
+	Timezone string `json:"timezone,omitempty"`
+}
+
+// Schedule parses the config into a watcher.Schedule or returns a validation
+// error. Rules: exactly one of Every / DailyAt is set; Every parses via
+// time.ParseDuration and must be strictly positive; DailyAt is "HH:MM" with
+// Hour 0-23 and Min 0-59; Timezone (when non-empty) must resolve via
+// time.LoadLocation (empty = UTC, DST handled by the Schedule itself).
+func (s ScheduleConfig) Schedule() (watcher.Schedule, error) {
+	every := strings.TrimSpace(s.Every)
+	dailyAt := strings.TrimSpace(s.DailyAt)
+	switch {
+	case every != "" && dailyAt != "":
+		return nil, fmt.Errorf("watcher schedule: set exactly one of every/daily_at, not both")
+	case every == "" && dailyAt == "":
+		return nil, fmt.Errorf("watcher schedule: set exactly one of every/daily_at")
+	case every != "":
+		d, err := time.ParseDuration(every)
+		if err != nil {
+			return nil, fmt.Errorf("watcher schedule: invalid every %q: %w", every, err)
+		}
+		if d <= 0 {
+			return nil, fmt.Errorf("watcher schedule: every must be positive, got %q", every)
+		}
+		return watcher.IntervalSchedule{D: d}, nil
+	default:
+		hour, min, err := parseHHMM(dailyAt)
+		if err != nil {
+			return nil, err
+		}
+		loc := time.UTC
+		if tz := strings.TrimSpace(s.Timezone); tz != "" {
+			l, err := time.LoadLocation(tz)
+			if err != nil {
+				return nil, fmt.Errorf("watcher schedule: invalid timezone %q: %w", tz, err)
+			}
+			loc = l
+		}
+		return watcher.DailySchedule{Hour: hour, Min: min, Loc: loc}, nil
+	}
+}
+
+// parseHHMM parses a 24h "HH:MM" string into hour/minute, validating the ranges.
+func parseHHMM(v string) (hour, min int, err error) {
+	parts := strings.Split(v, ":")
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("watcher schedule: invalid daily_at %q: want HH:MM", v)
+	}
+	hour, err = strconv.Atoi(parts[0])
+	if err != nil || hour < 0 || hour > 23 {
+		return 0, 0, fmt.Errorf("watcher schedule: invalid daily_at hour in %q: want 00-23", v)
+	}
+	min, err = strconv.Atoi(parts[1])
+	if err != nil || min < 0 || min > 59 {
+		return 0, 0, fmt.Errorf("watcher schedule: invalid daily_at minute in %q: want 00-59", v)
+	}
+	return hour, min, nil
+}
+
+// GenerateWatcherID returns a fresh stable watcher identifier of the form
+// "watcher-<8 hex chars>". It is generated from crypto/rand so ids never collide
+// in practice; callers persist it so the id is stable across runs.
+func GenerateWatcherID() string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand failing is effectively impossible; fall back to a fixed
+		// prefix so the caller still gets a non-empty, syntactically valid id.
+		return "watcher-00000000"
+	}
+	return "watcher-" + hex.EncodeToString(b[:])
 }
 
 // NotifyConfig returns the effective notification configuration, substituting

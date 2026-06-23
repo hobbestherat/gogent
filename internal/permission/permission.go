@@ -29,6 +29,7 @@ const (
 	ActionMCP         Action = "mcp"         // launch/connect to an MCP server
 	ActionDiagnostics Action = "diagnostics" // run the configured compiler/linter
 	ActionVerify      Action = "verify"      // run the configured test command
+	ActionWatcher     Action = "watcher"     // start/manage a scheduled watcher (issue #329)
 )
 
 // Effect is the resolved policy for a request.

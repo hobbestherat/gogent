@@ -41,6 +41,8 @@ const (
 	ReasonApproval Reason = "approval"
 	// ReasonClarify: a sub-agent asked a question (interactive CLARIFY).
 	ReasonClarify Reason = "clarify"
+	// ReasonWatcher: a free-running watcher fire completed (issue #329).
+	ReasonWatcher Reason = "watcher"
 )
 
 // bell is the ASCII BEL control character.
@@ -174,6 +176,8 @@ func reasonOn(cfg config.NotifyConfig, r Reason) bool {
 		return cfg.OnApproval
 	case ReasonClarify:
 		return cfg.OnClarify
+	case ReasonWatcher:
+		return cfg.OnWatcher
 	}
 	return false
 }

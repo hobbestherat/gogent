@@ -18,11 +18,13 @@ import (
 	"gogent/internal/fileops"
 	"gogent/internal/mcp"
 	"gogent/internal/model"
+	"gogent/internal/notify"
 	"gogent/internal/permission"
 	"gogent/internal/skill"
 	"gogent/internal/stats"
 	"gogent/internal/tool"
 	"gogent/internal/vcs"
+	"gogent/internal/watcher"
 )
 
 // Gogent is the main entry point for the agent system
@@ -92,6 +94,15 @@ type Gogent struct {
 	// created once at startup from the configured RateLimit. Nil/unbounded when
 	// throttling is disabled.
 	rateLimiter *agent.RateLimiter
+	// watchers owns the scheduled free-running watchers (issue #329). It is nil
+	// until StartWatchers builds it (only when Experimental.Watchers is on) and is
+	// torn down by StopWatchers. See watcher.go.
+	watchers *watcher.Manager
+	// notifier emits desktop/terminal notifications for backend-originated events
+	// — currently free-running watcher completions (issue #329). It is independent
+	// of the TUI's own notifier (which handles session events) and is gated by the
+	// same NotifyConfig. Built in NewGogentWithWorkspace.
+	notifier *notify.Notifier
 }
 
 // HookEvent represents an event that triggers hooks
@@ -170,6 +181,7 @@ func NewGogentWithWorkspace(homeDir, workspaceRoot string) *Gogent {
 		audit:             audit,
 		subAgentLimiter:   agent.NewSubAgentLimiter(cfg.SubAgents.MaxConcurrentOrDefault()),
 		rateLimiter:       agent.NewRateLimiter(cfg.RateLimit.RequestsPerMinute, cfg.RateLimit.Burst),
+		notifier:          notify.New(cfg.NotifyConfig(), os.Stdout),
 	}
 
 	// Session transcript persistence (best-effort; a nil store disables it).
@@ -2605,7 +2617,13 @@ func (g *Gogent) Notifications() config.NotifyConfig {
 func (g *Gogent) SetNotifications(n config.NotifyConfig) {
 	g.mu.Lock()
 	g.config.SetNotifyConfig(n)
+	notifier := g.notifier
 	g.mu.Unlock()
+	// Keep the backend notifier (watcher completions, issue #329) in sync with
+	// the live config so a toggled on_watcher / enabled takes effect immediately.
+	if notifier != nil {
+		notifier.SetConfig(n)
+	}
 	if err := g.SaveConfig(); err != nil {
 		g.warnf("Failed to persist config: %v", err)
 	}

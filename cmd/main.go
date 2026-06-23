@@ -486,6 +486,11 @@ func main() {
 	// prompt interactively rather than defaulting to deny.
 	g.StartMCPServers()
 
+	// Start the scheduled free-running watchers (issue #329). After StartMCPServers
+	// so the permission prompter is installed for the ActionWatcher gate; a no-op
+	// unless Experimental.Watchers is enabled.
+	g.StartWatchers()
+
 	// Keep running with graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -511,6 +516,10 @@ func main() {
 	case <-httpShutdownCh:
 		fmt.Printf("\nShutdown requested via /exit, shutting down...\n")
 	}
+
+	// Stop the scheduled watchers (cancel in-flight fires, stop schedule loops)
+	// before releasing MCP servers, since a watcher fire may use MCP tools.
+	g.StopWatchers()
 
 	// Release any MCP servers (terminates stdio subprocesses).
 	g.CloseMCPServers()
