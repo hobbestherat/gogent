@@ -39,6 +39,12 @@ type fakeHost struct {
 	setResult string
 	// errFor maps a watcher ID to an error the fire should return.
 	errFor map[string]error
+	// blockFor overrides block per watcher id: a fire for an id present here
+	// waits on its channel (or ctx); fires for other ids are not blocked.
+	blockFor map[string]chan struct{}
+	// panicMsg, when non-empty, makes every fire panic with it (to exercise the
+	// manager's panic recovery). Cleared under mu by tests that reuse the host.
+	panicMsg string
 }
 
 func (h *fakeHost) RunWatcherFire(ctx context.Context, r *watcher.Runner) error {
@@ -49,8 +55,14 @@ func (h *fakeHost) RunWatcherFire(ctx context.Context, r *watcher.Runner) error 
 		h.maxActive = h.active
 	}
 	block := h.block
+	if h.blockFor != nil {
+		if ch, ok := h.blockFor[r.ID()]; ok {
+			block = ch
+		}
+	}
 	dwell := h.dwell
 	setResult := h.setResult
+	panicMsg := h.panicMsg
 	var err error
 	if h.errFor != nil {
 		err = h.errFor[r.ID()]
@@ -62,6 +74,10 @@ func (h *fakeHost) RunWatcherFire(ctx context.Context, r *watcher.Runner) error 
 		h.active--
 		h.mu.Unlock()
 	}()
+
+	if panicMsg != "" {
+		panic(panicMsg)
+	}
 
 	if setResult != "" {
 		r.SetLastResult(setResult)
@@ -1313,4 +1329,398 @@ func TestConcurrentControlNoPanic(t *testing.T) {
 		}(id)
 	}
 	wg.Wait()
+}
+
+// ===========================================================================
+// Round 2: regression + adversarial tests for the revised implementation
+// (panic recovery, minFireDelay floor, cancelled!=failed, ErrAmbiguous,
+// ErrNilSchedule, removed-late-notify suppression, RunNow-before-Start).
+// ===========================================================================
+
+func (h *fakeHost) setPanic(msg string) {
+	h.mu.Lock()
+	h.panicMsg = msg
+	h.mu.Unlock()
+}
+
+// panicSchedule panics from Next, to exercise scheduleLoop's panic recovery.
+type panicSchedule struct{}
+
+func (panicSchedule) Next(now time.Time) time.Time { panic("boom in Next") }
+
+// nowSchedule always returns a time that is already in the past relative to the
+// loop's next check, exercising the minFireDelay floor (no hot-spin).
+type nowSchedule struct{}
+
+func (nowSchedule) Next(now time.Time) time.Time { return now }
+
+// ---------------------------------------------------------------------------
+// Add validation: nil schedule
+// ---------------------------------------------------------------------------
+
+func TestAddNilScheduleRejected(t *testing.T) {
+	m := watcher.NewManager(&fakeHost{})
+	r := watcher.NewRunner(watcher.Spec{ID: "w1", Name: "alpha", Kind: watcher.KindFree, Schedule: nil, Enabled: true})
+	if err := m.Add(r); !errors.Is(err, watcher.ErrNilSchedule) {
+		t.Fatalf("Add nil schedule = %v, want ErrNilSchedule", err)
+	}
+	// And it must not be registered.
+	if _, ok := m.Get("w1"); ok {
+		t.Fatalf("watcher with nil schedule was registered")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Name resolution: ambiguity and id/name precedence
+// ---------------------------------------------------------------------------
+
+func TestAmbiguousNameRejected(t *testing.T) {
+	m := watcher.NewManager(&fakeHost{})
+	if err := m.Add(newRunner("id1", "dup", watcher.KindFree, "", constSchedule{time.Hour}, false)); err != nil {
+		t.Fatalf("Add id1: %v", err)
+	}
+	if err := m.Add(newRunner("id2", "dup", watcher.KindFree, "", constSchedule{time.Hour}, false)); err != nil {
+		t.Fatalf("Add id2: %v", err)
+	}
+	// Control methods resolving by the duplicated name must error, not guess.
+	if err := m.Toggle("dup"); !errors.Is(err, watcher.ErrAmbiguous) {
+		t.Fatalf("Toggle ambiguous = %v, want ErrAmbiguous", err)
+	}
+	if err := m.RunNow("dup"); !errors.Is(err, watcher.ErrAmbiguous) {
+		t.Fatalf("RunNow ambiguous = %v, want ErrAmbiguous", err)
+	}
+	if err := m.Remove("dup"); !errors.Is(err, watcher.ErrAmbiguous) {
+		t.Fatalf("Remove ambiguous = %v, want ErrAmbiguous", err)
+	}
+	if err := m.StopWatcher("dup"); !errors.Is(err, watcher.ErrAmbiguous) {
+		t.Fatalf("StopWatcher ambiguous = %v, want ErrAmbiguous", err)
+	}
+	if _, ok := m.Get("dup"); ok {
+		t.Fatalf("Get ambiguous returned ok=true, want false")
+	}
+	// Resolving by the exact id is still unambiguous.
+	if _, ok := m.Get("id1"); !ok {
+		t.Fatalf("Get by exact id failed")
+	}
+}
+
+func TestExactIDBeatsName(t *testing.T) {
+	// A watcher whose NAME equals another watcher's ID must not shadow that
+	// other watcher when looked up by the shared string (exact id wins).
+	m := watcher.NewManager(&fakeHost{})
+	if err := m.Add(newRunner("shared", "real-name", watcher.KindFree, "", constSchedule{time.Hour}, false)); err != nil {
+		t.Fatalf("Add target: %v", err)
+	}
+	if err := m.Add(newRunner("other", "shared", watcher.KindAttached, "sX", constSchedule{time.Hour}, false)); err != nil {
+		t.Fatalf("Add decoy: %v", err)
+	}
+	info, ok := m.Get("shared")
+	if !ok {
+		t.Fatalf("Get(shared) not found")
+	}
+	if info.ID != "shared" {
+		t.Fatalf("Get(shared) resolved to id %q, want exact-id match \"shared\"", info.ID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Panic recovery (host fire + schedule)
+// ---------------------------------------------------------------------------
+
+func TestHostPanicRecoveredAsFailed(t *testing.T) {
+	host := &fakeHost{panicMsg: "kaboom"}
+	m := watcher.NewManager(host)
+	m.Start()
+	defer m.Stop()
+	if err := m.Add(newRunner("w1", "alpha", watcher.KindFree, "", constSchedule{time.Hour}, true)); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := m.RunNow("w1"); err != nil {
+		t.Fatalf("RunNow: %v", err)
+	}
+	if !waitFor(t, waitTimeout, func() bool { return mustGet(t, m, "w1").Status == watcher.StatusFailed }) {
+		t.Fatalf("panicking fire status = %v, want failed", mustGet(t, m, "w1").Status)
+	}
+	if le := mustGet(t, m, "w1").LastError; le == "" {
+		t.Fatalf("panicking fire recorded empty LastError")
+	}
+}
+
+func TestManagerUsableAfterHostPanic(t *testing.T) {
+	// A panic must not leak the concurrency slot or the WaitGroup: a later fire
+	// must still run, and Stop must still return.
+	host := &fakeHost{panicMsg: "kaboom", setResult: "ok"}
+	m := watcher.NewManager(host, watcher.WithMaxConcurrent(1))
+	m.Start()
+	if err := m.Add(newRunner("w1", "alpha", watcher.KindFree, "", constSchedule{time.Hour}, true)); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := m.RunNow("w1"); err != nil {
+		t.Fatalf("RunNow panic: %v", err)
+	}
+	if !waitFor(t, waitTimeout, func() bool { return mustGet(t, m, "w1").Status == watcher.StatusFailed }) {
+		t.Fatalf("expected failed after panic")
+	}
+	// Clear the panic and fire again: the slot must be free and the fire must
+	// complete successfully.
+	host.setPanic("")
+	before := host.fireCount()
+	if err := m.RunNow("w1"); err != nil {
+		t.Fatalf("RunNow after panic: %v", err)
+	}
+	if !waitFor(t, waitTimeout, func() bool { return mustGet(t, m, "w1").Status == watcher.StatusIdle }) {
+		t.Fatalf("slot/WaitGroup leaked after panic: status=%v fires=%d->%d",
+			mustGet(t, m, "w1").Status, before, host.fireCount())
+	}
+	// Stop must return (WaitGroup balanced).
+	done := make(chan struct{})
+	go func() { m.Stop(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(waitTimeout):
+		t.Fatalf("Stop hung after host panic (WaitGroup leak)")
+	}
+}
+
+func TestSchedulePanicRecoveredOthersUnaffected(t *testing.T) {
+	host := &fakeHost{}
+	m := watcher.NewManager(host)
+	// One watcher whose schedule panics, one healthy watcher.
+	if err := m.Add(watcher.NewRunner(watcher.Spec{ID: "bad", Name: "bad", Kind: watcher.KindFree, Schedule: panicSchedule{}, Enabled: true})); err != nil {
+		t.Fatalf("Add bad: %v", err)
+	}
+	if err := m.Add(newRunner("good", "good", watcher.KindFree, "", constSchedule{30 * time.Millisecond}, true)); err != nil {
+		t.Fatalf("Add good: %v", err)
+	}
+	m.Start()
+	defer m.Stop()
+
+	// The panicking schedule is recorded as failed, not a crash.
+	if !waitFor(t, waitTimeout, func() bool { return mustGet(t, m, "bad").Status == watcher.StatusFailed }) {
+		t.Fatalf("panicking schedule status = %v, want failed", mustGet(t, m, "bad").Status)
+	}
+	// The healthy watcher keeps firing. Only "good" can produce fires here:
+	// "bad" died on its first schedule call before ever firing.
+	if !waitFor(t, waitTimeout, func() bool { return host.fireCount() >= 1 }) {
+		t.Fatalf("healthy watcher did not fire after sibling schedule panic")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// minFireDelay floor: a non-advancing schedule must not hot-spin
+// ---------------------------------------------------------------------------
+
+func TestDegenerateScheduleDoesNotHotSpin(t *testing.T) {
+	host := &fakeHost{}
+	m := watcher.NewManager(host) // skipIfRunning default true
+	if err := m.Add(watcher.NewRunner(watcher.Spec{ID: "w1", Name: "spin", Kind: watcher.KindFree, Schedule: nowSchedule{}, Enabled: true})); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	m.Start()
+	defer m.Stop()
+
+	// The schedule always returns "now" (in the past by the time the timer is
+	// armed). With the floor it fires at roughly 1ms cadence; without it the
+	// loop would spin and rack up tens of thousands of fires in this window.
+	time.Sleep(80 * time.Millisecond)
+	n := host.fireCount()
+	if n == 0 {
+		t.Fatalf("degenerate schedule never advanced (floor too high or loop stuck)")
+	}
+	if n > 2000 {
+		t.Fatalf("degenerate schedule hot-spun: %d fires in 80ms (missing minFireDelay floor)", n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Cancelled fire is recorded as idle, not failed
+// ---------------------------------------------------------------------------
+
+func TestStopWatcherRecordsIdleNotFailed(t *testing.T) {
+	host := &fakeHost{block: make(chan struct{})}
+	m := watcher.NewManager(host)
+	m.Start()
+	if err := m.Add(newRunner("w1", "alpha", watcher.KindFree, "", constSchedule{time.Hour}, true)); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	defer func() {
+		close(host.block)
+		m.Stop()
+	}()
+	if err := m.RunNow("w1"); err != nil {
+		t.Fatalf("RunNow: %v", err)
+	}
+	if !waitFor(t, waitTimeout, func() bool { return host.activeCount() == 1 }) {
+		t.Fatalf("fire never started")
+	}
+	if err := m.StopWatcher("w1"); err != nil {
+		t.Fatalf("StopWatcher: %v", err)
+	}
+	// Cancellation is an intentional stop, not a failure.
+	if !waitFor(t, waitTimeout, func() bool {
+		info := mustGet(t, m, "w1")
+		return info.Status == watcher.StatusIdle
+	}) {
+		t.Fatalf("cancelled fire status = %v, want idle", mustGet(t, m, "w1").Status)
+	}
+	if le := mustGet(t, m, "w1").LastError; le != "" {
+		t.Fatalf("cancelled fire LastError = %q, want empty", le)
+	}
+}
+
+func TestStopRecordsInFlightAsIdle(t *testing.T) {
+	host := &fakeHost{block: make(chan struct{})} // never released
+	m := watcher.NewManager(host)
+	m.Start()
+	if err := m.Add(newRunner("w1", "alpha", watcher.KindFree, "", constSchedule{time.Hour}, true)); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := m.RunNow("w1"); err != nil {
+		t.Fatalf("RunNow: %v", err)
+	}
+	if !waitFor(t, waitTimeout, func() bool { return host.activeCount() == 1 }) {
+		t.Fatalf("fire never started")
+	}
+	m.Stop() // cancels the in-flight fire and waits for it
+	info, ok := m.Get("w1")
+	if !ok {
+		t.Fatalf("Get after Stop failed")
+	}
+	if info.Status == watcher.StatusFailed {
+		t.Fatalf("shutdown-cancelled fire recorded as failed; want idle")
+	}
+	if info.LastError != "" {
+		t.Fatalf("shutdown-cancelled fire LastError = %q, want empty", info.LastError)
+	}
+}
+
+// A cancelled fire must NOT emit a completion notification.
+func TestCancelledFireDoesNotNotify(t *testing.T) {
+	host := &fakeHost{block: make(chan struct{})}
+	m := watcher.NewManager(host)
+	m.Start()
+	if err := m.Add(newRunner("w1", "alpha", watcher.KindFree, "", constSchedule{time.Hour}, true)); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := m.RunNow("w1"); err != nil {
+		t.Fatalf("RunNow: %v", err)
+	}
+	if !waitFor(t, waitTimeout, func() bool { return host.activeCount() == 1 }) {
+		t.Fatalf("fire never started")
+	}
+	if err := m.StopWatcher("w1"); err != nil {
+		t.Fatalf("StopWatcher: %v", err)
+	}
+	if !waitFor(t, waitTimeout, func() bool { return host.ctxCancelled() >= 1 }) {
+		t.Fatalf("fire was not cancelled")
+	}
+	time.Sleep(40 * time.Millisecond)
+	if n := len(host.notifyList()); n != 0 {
+		t.Fatalf("cancelled free-running fire notified %d times, want 0", n)
+	}
+	close(host.block)
+	m.Stop()
+}
+
+// ---------------------------------------------------------------------------
+// RunNow on a disabled watcher still fires (documented behavior)
+// ---------------------------------------------------------------------------
+
+func TestRunNowFiresDisabledWatcher(t *testing.T) {
+	host := &fakeHost{}
+	m := watcher.NewManager(host)
+	m.Start()
+	defer m.Stop()
+	if err := m.Add(newRunner("w1", "alpha", watcher.KindFree, "", constSchedule{time.Hour}, false)); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if mustGet(t, m, "w1").Enabled {
+		t.Fatalf("watcher should be disabled")
+	}
+	if err := m.RunNow("w1"); err != nil {
+		t.Fatalf("RunNow: %v", err)
+	}
+	if !waitFor(t, waitTimeout, func() bool { return host.fireCount() == 1 }) {
+		t.Fatalf("RunNow did not fire a disabled watcher (count=%d)", host.fireCount())
+	}
+	// It must remain disabled (manual fire does not enable the schedule).
+	if mustGet(t, m, "w1").Enabled {
+		t.Fatalf("RunNow wrongly enabled the watcher")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RunNow before Start must not poison Start (regression for the round-1 bug)
+// ---------------------------------------------------------------------------
+
+func TestRunNowBeforeStartThenStartArms(t *testing.T) {
+	host := &fakeHost{}
+	m := watcher.NewManager(host)
+	if err := m.Add(newRunner("w1", "alpha", watcher.KindFree, "", constSchedule{30 * time.Millisecond}, true)); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := m.RunNow("w1"); err != nil {
+		t.Fatalf("RunNow before Start: %v", err)
+	}
+	if !waitFor(t, waitTimeout, func() bool { return host.fireCount() >= 1 }) {
+		t.Fatalf("RunNow before Start did not fire")
+	}
+	m.Start()
+	defer m.Stop()
+	if !waitFor(t, waitTimeout, func() bool { return host.fireCount() >= 4 }) {
+		t.Fatalf("Start failed to arm the schedule after a pre-Start RunNow: %d fires", host.fireCount())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// removed flag suppresses a late completion notify for a fire that was queued
+// on the concurrency semaphore when Remove ran (cancelFire still nil, so the
+// fire completes successfully rather than being cancelled).
+// ---------------------------------------------------------------------------
+
+func TestRemoveSuppressesLateNotifyOnQueuedFire(t *testing.T) {
+	holdA := make(chan struct{})
+	host := &fakeHost{blockFor: map[string]chan struct{}{"A": holdA}}
+	m := watcher.NewManager(host, watcher.WithMaxConcurrent(1))
+	m.Start()
+	if err := m.Add(newRunner("A", "A", watcher.KindFree, "", constSchedule{time.Hour}, true)); err != nil {
+		t.Fatalf("Add A: %v", err)
+	}
+	if err := m.Add(newRunner("B", "B", watcher.KindFree, "", constSchedule{time.Hour}, true)); err != nil {
+		t.Fatalf("Add B: %v", err)
+	}
+	defer m.Stop()
+
+	// A occupies the single concurrency slot and blocks.
+	if err := m.RunNow("A"); err != nil {
+		t.Fatalf("RunNow A: %v", err)
+	}
+	if !waitFor(t, waitTimeout, func() bool { return host.activeCount() == 1 }) {
+		t.Fatalf("A never acquired the slot")
+	}
+	// B is dispatched but blocks acquiring the (full) semaphore: its cancelFire
+	// is still nil, so Remove cannot cancel it — only the removed flag will stop
+	// its late notify.
+	if err := m.RunNow("B"); err != nil {
+		t.Fatalf("RunNow B: %v", err)
+	}
+	time.Sleep(30 * time.Millisecond) // let B reach the sem wait
+	if err := m.Remove("B"); err != nil {
+		t.Fatalf("Remove B: %v", err)
+	}
+	// Release A; it completes (and notifies). B then acquires the slot and runs
+	// to a successful completion, but must NOT notify because it was removed.
+	close(holdA)
+
+	if !waitFor(t, waitTimeout, func() bool { return host.fireCount() >= 2 }) {
+		t.Fatalf("B's queued fire did not run after the slot freed (count=%d)", host.fireCount())
+	}
+	time.Sleep(40 * time.Millisecond) // allow any erroneous notify to land
+	notes := host.notifyList()
+	if len(notes) != 1 {
+		t.Fatalf("got %d notifies %v, want exactly 1 (A only; B was removed)", len(notes), notes)
+	}
+	if notes[0].title != "A" {
+		t.Fatalf("notify was for %q, want A; B's late notify was not suppressed", notes[0].title)
+	}
 }
