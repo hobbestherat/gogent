@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 	"unsafe"
 
 	tui "github.com/hobbestherat/turbotui"
@@ -176,6 +177,118 @@ func TestHelpMenuWelcomeItemOpensDialog(t *testing.T) {
 	if top := w.desktop.TopLayer(); top == nil || top.Name != "welcome-dialog" {
 		t.Fatalf("top layer after Help Welcome = %v, want welcome-dialog", top)
 	}
+}
+
+func TestWelcomeBodyListsExpectedOrientationItems(t *testing.T) {
+	for _, want := range []string{
+		"Ctrl+K",
+		"Ctrl+N",
+		"Ctrl+F",
+		"?",
+		"Ctrl+Q",
+		"/plan",
+		"/act",
+		"/undo",
+		"/rewind",
+		"/stop",
+		"/goal",
+		"/thinking",
+	} {
+		if !strings.Contains(welcomeBody, want) {
+			t.Errorf("welcomeBody missing %q\n%s", want, welcomeBody)
+		}
+	}
+}
+
+func TestWelcomeStartupGate(t *testing.T) {
+	t.Run("shows after initial session when preference true", func(t *testing.T) {
+		w := newTestWorkbench(t)
+		w.SetHandlers(Handlers{GetShowWelcome: func() bool { return true }})
+		done := runWorkbenchForTest(t, w)
+		defer stopWorkbenchForTest(t, w, done)
+
+		eventually(t, func() bool {
+			return len(w.orderIDs()) == 1 && topLayerName(w) == "welcome-dialog"
+		}, "initial session plus welcome dialog")
+	})
+
+	t.Run("skips when preference false", func(t *testing.T) {
+		w := newTestWorkbench(t)
+		checked := make(chan struct{}, 1)
+		w.SetHandlers(Handlers{GetShowWelcome: func() bool {
+			select {
+			case checked <- struct{}{}:
+			default:
+			}
+			return false
+		}})
+		done := runWorkbenchForTest(t, w)
+		defer stopWorkbenchForTest(t, w, done)
+
+		select {
+		case <-checked:
+		case <-time.After(time.Second):
+			t.Fatal("startup did not query GetShowWelcome")
+		}
+		if got := len(w.orderIDs()); got != 1 {
+			t.Fatalf("session count after startup preference check = %d, want 1", got)
+		}
+		if got := topLayerName(w); got == "welcome-dialog" {
+			t.Fatal("welcome dialog opened despite false startup preference")
+		}
+	})
+
+	t.Run("missing handler starts without panic and skips", func(t *testing.T) {
+		w := newTestWorkbench(t)
+		done := runWorkbenchForTest(t, w)
+		defer stopWorkbenchForTest(t, w, done)
+
+		eventually(t, func() bool { return len(w.orderIDs()) == 1 }, "initial session without welcome handler")
+		if got := topLayerName(w); got == "welcome-dialog" {
+			t.Fatal("welcome dialog opened with no GetShowWelcome handler")
+		}
+	})
+}
+
+func runWorkbenchForTest(t *testing.T, w *Workbench) chan error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		done <- w.Run()
+	}()
+	return done
+}
+
+func stopWorkbenchForTest(t *testing.T, w *Workbench, done chan error) {
+	t.Helper()
+	w.quit()
+	select {
+	case err := <-done:
+		if err != nil && !strings.Contains(err.Error(), "inappropriate ioctl for device") {
+			t.Fatalf("Workbench.Run returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Workbench.Run did not stop after quit")
+	}
+}
+
+func eventually(t *testing.T, ok func() bool, desc string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if ok() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", desc)
+}
+
+func topLayerName(w *Workbench) string {
+	if top := w.desktop.TopLayer(); top != nil {
+		return top.Name
+	}
+	return ""
 }
 
 func desktopMenuBar(t *testing.T, w *Workbench) *tv.MenuBar {
