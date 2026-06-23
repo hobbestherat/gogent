@@ -2,6 +2,7 @@ package ui
 
 import (
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 	"unsafe"
@@ -13,13 +14,64 @@ import (
 	tv "github.com/hobbestherat/turbotui/turbotv"
 )
 
+func exportedField[T any](t *testing.T, owner any, name string) *T {
+	t.Helper()
+	field := reflect.ValueOf(owner).Elem().FieldByName(name)
+	if !field.IsValid() {
+		t.Fatalf("%T no longer has field %q; update the test harness", owner, name)
+	}
+	return reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Interface().(*T)
+}
+
+func drainPosted(t *testing.T, w *Workbench) int {
+	t.Helper()
+	total := 0
+	for {
+		mu := exportedField[sync.Mutex](t, w.app, "postMu")
+		mu.Lock()
+		queue := exportedField[[]func()](t, w.app, "postQueue")
+		batch := append([]func(){}, (*queue)...)
+		*queue = (*queue)[:0]
+		mu.Unlock()
+
+		if len(batch) == 0 {
+			return total
+		}
+		total += len(batch)
+		for _, fn := range batch {
+			fn()
+		}
+	}
+}
+
+func drainPostedEventually(t *testing.T, w *Workbench) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if drainPosted(t, w) > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for a desktop.Post callback")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func dispatchType(t *testing.T, w *Workbench, ev tui.TypeEvent) {
+	t.Helper()
+	handlers := append([]func(tui.TypeEvent){}, *exportedField[[]func(tui.TypeEvent)](t, w.app, "typeHandlers")...)
+	if len(handlers) == 0 {
+		t.Fatal("app has no type handlers; desktop input dispatch is not wired")
+	}
+	for _, handler := range handlers {
+		handler(ev)
+	}
+}
+
 func setDesktopLastInputAt(t *testing.T, d *tv.Desktop, at time.Time) {
 	t.Helper()
-	field := reflect.ValueOf(d).Elem().FieldByName("lastInputAt")
-	if !field.IsValid() {
-		t.Fatal("turbotui Desktop no longer has lastInputAt; update the typing-awareness test harness")
-	}
-	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(at))
+	*exportedField[time.Time](t, d, "lastInputAt") = at
 }
 
 func issue346PermissionRequest() permission.Request {
@@ -119,24 +171,133 @@ func TestBackgroundReviewModalDefersUntilTypingIdle(t *testing.T) {
 	}
 }
 
-func TestBackgroundDialogsAreArmedForEnterGrace(t *testing.T) {
+func TestAskPermissionPostedPathDefersAndDrainsOnSubmit(t *testing.T) {
+	w := newTestWorkbench(t)
+	sw := w.openWindow("s", "Session")
+	w.desktop.SetFocus(sw.input)
+
+	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+	w.desktop.SetClock(func() time.Time { return now })
+	setDesktopLastInputAt(t, w.desktop, now)
+	t.Cleanup(w.stopDeferredTimer)
+
+	done := make(chan permission.Decision, 1)
+	go func() {
+		done <- w.AskPermission(issue346PermissionRequest())
+	}()
+
+	drainPostedEventually(t, w) // badge update + prompt presentation post
+	drainPosted(t, w)
+
+	if top := w.desktop.TopLayer(); top == nil || top.Name == "permission-dialog" {
+		t.Fatalf("permission dialog should not be shown while typing through AskPermission; top=%v", top)
+	}
+	if !sw.input.Component.Focused() {
+		t.Fatal("AskPermission stole focus from the session input while deferred")
+	}
+	if w.deferredModal == nil {
+		t.Fatal("AskPermission did not leave a deferred modal queued")
+	}
+	select {
+	case got := <-done:
+		t.Fatalf("AskPermission returned before the deferred dialog resolved: %v", got)
+	default:
+	}
+
+	sw.input.SetText("send this first")
+	sw.submitFn()
+
+	top := w.desktop.TopLayer()
+	if top == nil || top.Name != "permission-dialog" {
+		t.Fatalf("permission dialog did not drain immediately on submit; top=%v", top)
+	}
+	if w.deferredModal != nil {
+		t.Fatal("deferred modal was not cleared after submit-drain")
+	}
+
+	if top.Root.OnTypeFn == nil || !top.Root.OnTypeFn(top.Root, tui.TypeEvent{Key: tui.KeyEscape}) {
+		t.Fatal("permission dialog did not handle Escape dismissal")
+	}
+	select {
+	case got := <-done:
+		if got != permission.DecisionDeny {
+			t.Fatalf("AskPermission after Escape = %v, want deny", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("AskPermission did not return after the dialog resolved")
+	}
+}
+
+func TestReviewEditPostedPathDefersAndShowsAfterIdle(t *testing.T) {
+	w := newTestWorkbench(t)
+	sw := w.openWindow("s", "Session")
+	w.desktop.SetFocus(sw.input)
+
+	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+	w.desktop.SetClock(func() time.Time { return now })
+	setDesktopLastInputAt(t, w.desktop, now)
+	t.Cleanup(w.stopDeferredTimer)
+
+	done := make(chan gogent.EditReviewDecision, 1)
+	go func() {
+		done <- w.ReviewEdit(issue346ReviewRequest())
+	}()
+
+	drainPostedEventually(t, w)
+	drainPosted(t, w)
+
+	if top := w.desktop.TopLayer(); top == nil || top.Name == "review-dialog" {
+		t.Fatalf("review dialog should not be shown while typing through ReviewEdit; top=%v", top)
+	}
+	if !sw.input.Component.Focused() {
+		t.Fatal("ReviewEdit stole focus from the session input while deferred")
+	}
+	if w.deferredModal == nil {
+		t.Fatal("ReviewEdit did not leave a deferred modal queued")
+	}
+
+	now = now.Add(typingIdleThreshold + time.Nanosecond)
+	w.maybeShowDeferredModal()
+
+	top := w.desktop.TopLayer()
+	if top == nil || top.Name != "review-dialog" {
+		t.Fatalf("review dialog did not show after typing went idle; top=%v", top)
+	}
+	if top.Root.OnTypeFn == nil || !top.Root.OnTypeFn(top.Root, tui.TypeEvent{Key: tui.KeyEscape}) {
+		t.Fatal("review dialog did not handle Escape dismissal")
+	}
+	select {
+	case got := <-done:
+		if got != gogent.EditReject {
+			t.Fatalf("ReviewEdit after Escape = %v, want reject", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReviewEdit did not return after the dialog resolved")
+	}
+}
+
+func TestBackgroundDialogsHonorEnterGrace(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		open func(*Workbench)
-		want string
+		name      string
+		open      func(*Workbench, func())
+		wantLayer string
 	}{
 		{
-			name: "permission",
-			want: "permission-dialog",
-			open: func(w *Workbench) {
-				showPermissionDialog(w.desktop, issue346PermissionRequest(), "Session", func(permission.Decision) {})
+			name:      "permission",
+			wantLayer: "permission-dialog",
+			open: func(w *Workbench, resolved func()) {
+				showPermissionDialog(w.desktop, issue346PermissionRequest(), "Session", func(permission.Decision) {
+					resolved()
+				})
 			},
 		},
 		{
-			name: "review",
-			want: "review-dialog",
-			open: func(w *Workbench) {
-				showReviewDialog(w.desktop, issue346ReviewRequest(), "Session", func(gogent.EditReviewDecision) {})
+			name:      "review",
+			wantLayer: "review-dialog",
+			open: func(w *Workbench, resolved func()) {
+				showReviewDialog(w.desktop, issue346ReviewRequest(), "Session", func(gogent.EditReviewDecision) {
+					resolved()
+				})
 			},
 		},
 	} {
@@ -144,24 +305,96 @@ func TestBackgroundDialogsAreArmedForEnterGrace(t *testing.T) {
 			w := newTestWorkbench(t)
 			sw := w.openWindow("s", "Session")
 			w.desktop.SetFocus(sw.input)
+			now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+			w.desktop.SetClock(func() time.Time { return now })
 
-			tc.open(w)
+			resolved := 0
+			tc.open(w, func() { resolved++ })
 
 			top := w.desktop.TopLayer()
-			if top == nil || top.Name != tc.want {
-				t.Fatalf("top layer = %v, want %s", top, tc.want)
+			if top == nil || top.Name != tc.wantLayer {
+				t.Fatalf("top layer = %v, want %s", top, tc.wantLayer)
 			}
 			if !top.Modal {
-				t.Fatalf("%s layer is not modal", tc.want)
+				t.Fatalf("%s layer is not modal", tc.wantLayer)
 			}
 			if top.NoEnterGrace {
-				t.Fatalf("%s opted out of modal Enter grace", tc.want)
+				t.Fatalf("%s opted out of modal Enter grace", tc.wantLayer)
 			}
 			if top.ArmedAt().IsZero() {
-				t.Fatalf("%s was not armed when added to the desktop", tc.want)
+				t.Fatalf("%s was not armed when added to the desktop", tc.wantLayer)
 			}
 			if w.desktop.EnterGrace() <= 0 {
 				t.Fatal("desktop Enter grace is disabled; background dialogs cannot benefit from turbotui #347")
+			}
+
+			now = top.ArmedAt().Add(w.desktop.EnterGrace() - time.Nanosecond)
+			dispatchType(t, w, tui.TypeEvent{Key: tui.KeyEnter})
+			if resolved != 0 {
+				t.Fatalf("Enter inside grace resolved %s", tc.wantLayer)
+			}
+			if stillTop := w.desktop.TopLayer(); stillTop == nil || stillTop.Name != tc.wantLayer {
+				t.Fatalf("%s closed during Enter grace; top=%v", tc.wantLayer, stillTop)
+			}
+
+			now = top.ArmedAt().Add(w.desktop.EnterGrace())
+			dispatchType(t, w, tui.TypeEvent{Key: tui.KeyEnter})
+			if resolved != 1 {
+				t.Fatalf("Enter after grace resolved %s %d times, want 1", tc.wantLayer, resolved)
+			}
+			if stillTop := w.desktop.TopLayer(); stillTop != nil && stillTop.Name == tc.wantLayer {
+				t.Fatalf("%s stayed open after Enter outside grace", tc.wantLayer)
+			}
+		})
+	}
+}
+
+func TestBackgroundDialogsEscapeDuringEnterGrace(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		open      func(*Workbench, func())
+		wantLayer string
+	}{
+		{
+			name:      "permission",
+			wantLayer: "permission-dialog",
+			open: func(w *Workbench, resolved func()) {
+				showPermissionDialog(w.desktop, issue346PermissionRequest(), "Session", func(permission.Decision) {
+					resolved()
+				})
+			},
+		},
+		{
+			name:      "review",
+			wantLayer: "review-dialog",
+			open: func(w *Workbench, resolved func()) {
+				showReviewDialog(w.desktop, issue346ReviewRequest(), "Session", func(gogent.EditReviewDecision) {
+					resolved()
+				})
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newTestWorkbench(t)
+			sw := w.openWindow("s", "Session")
+			w.desktop.SetFocus(sw.input)
+			now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+			w.desktop.SetClock(func() time.Time { return now })
+
+			resolved := 0
+			tc.open(w, func() { resolved++ })
+			top := w.desktop.TopLayer()
+			if top == nil || top.Name != tc.wantLayer {
+				t.Fatalf("top layer = %v, want %s", top, tc.wantLayer)
+			}
+
+			now = top.ArmedAt().Add(w.desktop.EnterGrace() - time.Nanosecond)
+			dispatchType(t, w, tui.TypeEvent{Key: tui.KeyEscape})
+			if resolved != 1 {
+				t.Fatalf("Escape during grace resolved %s %d times, want 1", tc.wantLayer, resolved)
+			}
+			if stillTop := w.desktop.TopLayer(); stillTop != nil && stillTop.Name == tc.wantLayer {
+				t.Fatalf("%s stayed open after Escape during grace", tc.wantLayer)
 			}
 		})
 	}
