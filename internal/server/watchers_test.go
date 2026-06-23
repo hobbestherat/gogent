@@ -148,6 +148,43 @@ func TestWatchersAPICreateListGetUpdateAndDeleteFreeRunning(t *testing.T) {
 	}
 }
 
+func TestWatchersAPICreatePersistsFullWatcherConfig(t *testing.T) {
+	srv := newWatcherTestServer(t)
+
+	created := postWatcher(t, srv, `{
+		"name": "quiet-brief",
+		"task": "Summarize quietly.",
+		"schedule": {"daily_at": "07:30", "timezone": "Europe/Zurich"},
+		"model": "test-model",
+		"enabled": false,
+		"on_complete": {"notify": false}
+	}`)
+	if created.Enabled {
+		t.Fatalf("created watcher enabled = true, want false: %+v", created)
+	}
+	if created.NextFire != "" {
+		t.Fatalf("disabled watcher next_fire = %q, want empty", created.NextFire)
+	}
+
+	store := srv.g.LoadWatchers()
+	var persisted *bool
+	for _, item := range store.Items {
+		if item.ID == created.ID {
+			if item.Output != nil {
+				v := item.Output.Notify
+				persisted = &v
+			}
+			break
+		}
+	}
+	if persisted == nil {
+		t.Fatalf("created watcher %q did not persist on_complete.notify", created.ID)
+	}
+	if *persisted {
+		t.Fatalf("on_complete.notify persisted as true, want false")
+	}
+}
+
 func TestWatchersAPICreateAttachedGetAndScopedList(t *testing.T) {
 	srv := newWatcherTestServer(t)
 
@@ -169,6 +206,11 @@ func TestWatchersAPICreateAttachedGetAndScopedList(t *testing.T) {
 	if created.Kind != "attached" || created.Target != sess.ID {
 		t.Fatalf("created watcher = %+v, want attached target %q", created, sess.ID)
 	}
+	free := postWatcher(t, srv, `{
+		"name": "free-visible",
+		"task": "Visible everywhere.",
+		"schedule": {"every": "1h"}
+	}`)
 
 	got, code, body := getWatcher(t, srv, created.ID)
 	if code != http.StatusOK {
@@ -185,8 +227,89 @@ func TestWatchersAPICreateAttachedGetAndScopedList(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &scoped); err != nil {
 		t.Fatalf("invalid scoped watcher list JSON: %v", err)
 	}
-	if len(scoped) != 1 || scoped[0].ID != created.ID || scoped[0].Target != sess.ID {
+	if len(scoped) != 2 {
+		t.Fatalf("scoped watchers = %+v, want free watcher plus attached watcher", scoped)
+	}
+	seen := map[string]watcherView{}
+	for _, item := range scoped {
+		seen[item.ID] = item
+	}
+	if seen[created.ID].Target != sess.ID {
 		t.Errorf("scoped watchers = %+v, want attached watcher %q for %q", scoped, created.ID, sess.ID)
+	}
+	if seen[free.ID].Target != "free" {
+		t.Errorf("scoped watchers = %+v, want free watcher %q also visible", scoped, free.ID)
+	}
+
+	rec = serveOne(t, srv, loopbackReq(http.MethodPost, "/api/sessions", strings.NewReader(`{"title":"other","persisted":false}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create other session status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var other sessionView
+	if err := json.Unmarshal(rec.Body.Bytes(), &other); err != nil {
+		t.Fatalf("invalid other session JSON: %v", err)
+	}
+	otherAttached := postWatcher(t, srv, `{
+		"name": "other-attached",
+		"task": "Check another session.",
+		"schedule": {"every": "30m"},
+		"report_to_session": "`+other.ID+`"
+	}`)
+
+	rec = serveOne(t, srv, loopbackReq(http.MethodGet, "/api/watchers?session_id="+sess.ID, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("scoped list after other watcher status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	scoped = nil
+	if err := json.Unmarshal(rec.Body.Bytes(), &scoped); err != nil {
+		t.Fatalf("invalid scoped watcher list JSON after other watcher: %v", err)
+	}
+	for _, item := range scoped {
+		if item.ID == otherAttached.ID {
+			t.Fatalf("session %q scoped list leaked other session attached watcher: %+v", sess.ID, scoped)
+		}
+	}
+
+	rec = serveOne(t, srv, loopbackReq(http.MethodGet, "/api/watchers", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unscoped list status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var unscoped []watcherView
+	if err := json.Unmarshal(rec.Body.Bytes(), &unscoped); err != nil {
+		t.Fatalf("invalid unscoped watcher list JSON: %v", err)
+	}
+	if len(unscoped) != 1 || unscoped[0].ID != free.ID {
+		t.Fatalf("unscoped watchers = %+v, want only free watcher %q", unscoped, free.ID)
+	}
+}
+
+func TestWatchersAPIGetByAmbiguousNameReturnsConflict(t *testing.T) {
+	srv := newWatcherTestServer(t)
+	first := postWatcher(t, srv, `{
+		"name": "duplicate-name",
+		"task": "First.",
+		"schedule": {"every": "1h"}
+	}`)
+	second := postWatcher(t, srv, `{
+		"name": "duplicate-name",
+		"task": "Second.",
+		"schedule": {"every": "2h"}
+	}`)
+	if first.ID == second.ID {
+		t.Fatalf("duplicate-name watchers unexpectedly share id %q", first.ID)
+	}
+
+	rec := serveOne(t, srv, loopbackReq(http.MethodGet, "/api/watchers/duplicate-name", nil))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("get ambiguous name status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+
+	got, code, body := getWatcher(t, srv, second.ID)
+	if code != http.StatusOK {
+		t.Fatalf("get by unambiguous id status = %d, want 200; body=%s", code, body)
+	}
+	if got.ID != second.ID {
+		t.Fatalf("get by id returned %+v, want id %q", got, second.ID)
 	}
 }
 
