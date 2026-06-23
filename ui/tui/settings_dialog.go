@@ -69,9 +69,10 @@ func (w *Workbench) showSettingsDialog() {
 	// wide enough to honour it (≥90 cols); MaxW caps it so it never balloons to 160. On a
 	// narrow 80-col terminal the 80% cap still forces width down to 64 and the longest
 	// label clips — inherent to the cap policy, as before — so MinW=64 is the floor. The
-	// height is pinned at 20: the last field is at Y=15 and the button row at height-3, so
-	// 20 leaves one blank gap. The spec is static (no terminal-dependent fields), so the
-	// dialog.Fit re-resolve of the frame on resize stays correct.
+	// height is pinned at 20: the last toggles are the review-edits gate at Y=15 and the
+	// startup-welcome toggle at Y=16, with the button row at height-3 (Y=17). The spec is
+	// static (no terminal-dependent fields), so the dialog.Fit re-resolve of the frame on
+	// resize stays correct.
 	spec := tv.DialogSpec{MinW: 64, MaxW: 76, PreferredW: 72, MinH: 20, MaxH: 20}
 	x, y, width, height := w.dialogRect(spec)
 
@@ -100,6 +101,17 @@ func (w *Workbench) showSettingsDialog() {
 	reviewEdits := styleCheck(tv.NewCheckbox("Re&view edits before applying (show diff)", tv.Rect{X: 2, Y: 15, W: width - 4, H: 1}, nil))
 	if w.handlers.GetReviewEdits != nil {
 		reviewEdits.SetChecked(w.handlers.GetReviewEdits())
+	}
+
+	// Startup welcome dialog preference (issues #339/#341/#342), an independent
+	// toggle alongside the review-edits gate. It is wired to the same
+	// GetShowWelcome / SetShowWelcome handlers the welcome dialog itself uses, so
+	// the startup preference can be toggled from settings too — not only from the
+	// welcome dialog's own "Don't show this on startup again" checkbox (issue #339
+	// acceptance). Checked means the dialog is shown on startup.
+	showWelcome := styleCheck(tv.NewCheckbox("Show &welcome dialog on startup", tv.Rect{X: 2, Y: 16, W: width - 4, H: 1}, nil))
+	if w.handlers.GetShowWelcome != nil {
+		showWelcome.SetChecked(w.handlers.GetShowWelcome())
 	}
 
 	// Reflect the persisted style: exactly one of the three is checked.
@@ -141,6 +153,7 @@ func (w *Workbench) showSettingsDialog() {
 	dialog.Window.AddContent(interactive)
 	dialog.Window.AddContent(recursive)
 	dialog.Window.AddContent(reviewEdits)
+	dialog.Window.AddContent(showWelcome)
 	dialog.Window.AddContent(timeoutsLabel)
 	for _, f := range []*numField{maxAgents, maxDepth, modelTO, toolTO, subTO} {
 		dialog.Window.AddContent(f.label)
@@ -165,6 +178,10 @@ func (w *Workbench) showSettingsDialog() {
 
 		if w.handlers.SetReviewEdits != nil {
 			w.handlers.SetReviewEdits(reviewEdits.IsChecked())
+		}
+
+		if w.handlers.SetShowWelcome != nil {
+			w.handlers.SetShowWelcome(showWelcome.IsChecked())
 		}
 
 		if w.handlers.SetTimeouts != nil {

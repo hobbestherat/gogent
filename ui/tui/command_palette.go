@@ -176,6 +176,11 @@ func (w *Workbench) commands() []command {
 		{category: "App", name: "Pin / unpin sidebar", run: w.ToggleSidebarPin},
 		{category: "App", name: "Command palette", keys: "Ctrl+K, " + chordLabel(w.chordFor(actionCommandPalette))},
 		{category: "App", name: "Keybinding help", keys: "?", actionID: actionHelpOverlay, run: w.showHelpOverlay},
+		// Re-open the welcome/onboarding dialog on demand (issue #342): always
+		// available, and because the ? cheatsheet renders from this same table it
+		// appears there too. The dialog's checkbox doubles as the startup-preference
+		// toggle, so this is also how a user re-enables the startup dialog.
+		{category: "App", name: "Show welcome", run: w.showWelcomeDialog},
 		{category: "App", name: "Customize keybindings", run: w.showKeybindingCustomizer},
 		{category: "App", name: "Quit", keys: "Ctrl+Q", run: w.confirmQuit},
 	}
