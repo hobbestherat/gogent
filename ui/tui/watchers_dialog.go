@@ -135,12 +135,13 @@ func (w *Workbench) showWatchersDialog() {
 		}
 	}
 
-	// openSession raises the selected watcher's session window (the target session
-	// for an attached watcher, the watcher:<name> session for a free-running one).
-	// Focus is a no-op when that session has no open window.
+	// openSession opens (or raises) the selected watcher's session window — the
+	// target session for an attached watcher, the watcher:<name> session for a
+	// free-running one. openWatcherSession adopts a not-yet-open watcher session
+	// from disk rather than no-opping, and treats an empty id as a no-op.
 	openSession := func() {
-		if info, ok := selectedWatcher(); ok && info.SessionID != "" {
-			w.Focus(info.SessionID)
+		if info, ok := selectedWatcher(); ok {
+			w.openWatcherSession(info.SessionID)
 		}
 	}
 	// act runs a watcher control (by id) over the current selection, reporting the
@@ -197,7 +198,10 @@ func loadWatcherItems(get func(string) []WatcherInfo, sessionID string) []Watche
 	if get == nil {
 		return nil
 	}
-	items := get(sessionID)
+	// Copy before sorting: the UI must not mutate the slice the handler returned
+	// (it is sorted in place otherwise), even though the backend currently hands
+	// back a fresh snapshot — the contract shouldn't depend on that.
+	items := append([]WatcherInfo(nil), get(sessionID)...)
 	sort.SliceStable(items, func(i, j int) bool {
 		if items[i].Free != items[j].Free {
 			return items[i].Free // free-running first

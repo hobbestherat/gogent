@@ -2276,6 +2276,48 @@ func (w *Workbench) refreshWatcherNodes() bool {
 	return w.sidebar.setWatchers(free, attached)
 }
 
+// openWatcherSession raises — or, when necessary, opens — the session a watcher
+// reports into (issue #329 Phase 4): the target session for an attached watcher,
+// or the dedicated watcher:<name> session for a free-running one. It backs the
+// Watchers dialog's Open Session button and the ◷ sidebar node's click/Enter.
+//
+// When the session already has an open window it is raised. A free-running
+// watcher's window is usually NOT open (it renders as a ◷ node, not a session
+// window), so when the session is not open it is adopted from its persisted
+// transcript via the Saved Sessions load path — actually opening the watcher's
+// session window rather than doing nothing. An empty id is a no-op; a session with
+// neither an open window nor a saved transcript (e.g. a free-running watcher that
+// has never fired) reports where it will appear instead of failing silently. Runs
+// on the UI thread.
+func (w *Workbench) openWatcherSession(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	w.mu.Lock()
+	open := w.sessions[sessionID] != nil
+	w.mu.Unlock()
+	if open {
+		w.Focus(sessionID)
+		return
+	}
+	// Not open: adopt the watcher's persisted session so its live/past transcript is
+	// inspectable, reusing the same continue-load path as the Saved Sessions browser.
+	if w.handlers.ListSavedSessions != nil && w.handlers.OpenSavedSession != nil {
+		for _, m := range w.handlers.ListSavedSessions() {
+			if m.ID != sessionID {
+				continue
+			}
+			if rs, ok := w.handlers.OpenSavedSession(m.File, true); ok {
+				w.AdoptSession(rs)
+				return
+			}
+			break
+		}
+	}
+	w.showConfirm("Watchers",
+		fmt.Sprintf("Session %q is not open yet — it appears once the watcher has fired.", sessionID), nil)
+}
+
 // childLines splits text into lines for foldable children, preserving structure.
 func childLines(text string) []string {
 	raw := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")

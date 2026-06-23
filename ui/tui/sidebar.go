@@ -284,23 +284,41 @@ func newSidebar(wb *Workbench) *sidebar {
 		// Only raise the window for a SESSION node. For a sub-agent node, Focus would
 		// snap the tree selection back to the parent session row (issue #302),
 		// blocking keyboard navigation onto the sub-agent and the Enter/OnActivate
-		// path — so leave the selection where the user put it instead.
-		if ref.agentID == "" && ref.sessionID != "" {
+		// path — so leave the selection where the user put it instead. A watcher node
+		// is excluded for the same reason (an attached watcher child would snap to its
+		// parent session): its window is opened on click/Enter below, not on traversal.
+		if ref.agentID == "" && !ref.watcher && ref.sessionID != "" {
 			s.wb.Focus(ref.sessionID)
 		}
 	}
-	// A single MOUSE click on a sub-agent row opens its monologue (issue #302).
+	// A single MOUSE click on a sub-agent row opens its monologue, and on a watcher
+	// row opens (or raises) the watcher's session window (issue #302, #329 Phase 4).
 	// OnSelectMouse fires only on a pointer click, not on keyboard traversal, so
-	// arrowing through the tree never pops a window; showAgentMonolog replaces any
-	// open popup. Keyboard users reach it via Enter (OnActivate) below.
+	// arrowing through the tree never pops a window; keyboard users use Enter
+	// (OnActivate) below.
 	tree.OnSelectMouse = func(n *tv.TreeNode) {
-		if ref, ok := n.Data.(nodeRef); ok && ref.agentID != "" && ref.sessionID != "" {
+		ref, ok := n.Data.(nodeRef)
+		if !ok {
+			return
+		}
+		if ref.watcher {
+			s.wb.openWatcherSession(ref.sessionID)
+			return
+		}
+		if ref.agentID != "" && ref.sessionID != "" {
 			s.wb.showAgentMonolog(ref.sessionID, ref.agentID, ref.name)
 		}
 	}
 	tree.OnActivate = func(n *tv.TreeNode) {
 		ref, ok := n.Data.(nodeRef)
-		if !ok || ref.sessionID == "" {
+		if !ok {
+			return
+		}
+		if ref.watcher {
+			s.wb.openWatcherSession(ref.sessionID)
+			return
+		}
+		if ref.sessionID == "" {
 			return
 		}
 		if ref.agentID != "" {
@@ -777,6 +795,15 @@ func (s *sidebar) setWatchers(free []WatcherInfo, attached map[string][]WatcherI
 	}
 	desired := make(map[string]placement, len(free))
 	for _, info := range free {
+		// Avoid a double entry: a free-running watcher's dedicated watcher:<name>
+		// session is normally not open as a window (the watcher shows as a ◷ root),
+		// but it CAN be opened (the dialog/sidebar Open-session path adopts it from
+		// disk). When that window is open its own session row already represents the
+		// watcher, so suppress the separate ◷ root; it reappears when the window is
+		// closed (issue #329 Phase 4).
+		if info.SessionID != "" && s.sessions[info.SessionID] != nil {
+			continue
+		}
 		desired[info.ID] = placement{info, ""}
 	}
 	for sid, list := range attached {
