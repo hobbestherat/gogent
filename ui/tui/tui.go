@@ -549,11 +549,17 @@ func (w *Workbench) registerFallthroughBindings() {
 	reg := w.desktop.ScopedBindings()
 	// Chords come from chordFor (override-or-catalog-default, issue #269) so a
 	// persisted rebind of '?'/':' takes effect; with no override these are the
-	// catalog defaults '?' and ':'.
-	reg.Register(tv.KeyBinding{Chord: w.chordFor(actionHelpOverlay), ActionID: actionHelpOverlay, Scope: tv.ScopeFallthrough},
-		func() bool { w.showHelpOverlay(); return true })
-	reg.Register(tv.KeyBinding{Chord: w.chordFor(actionCommandPalette), ActionID: actionCommandPalette, Scope: tv.ScopeFallthrough},
-		func() bool { w.showCommandPalette(); return true })
+	// catalog defaults '?' and ':'. A cleared (unbound) action registers nothing, so
+	// its key fires nothing.
+	register := func(id tv.ActionID, handler func() bool) {
+		chord := w.chordFor(id)
+		if chord == unboundChord {
+			return
+		}
+		reg.Register(tv.KeyBinding{Chord: chord, ActionID: id, Scope: tv.ScopeFallthrough}, handler)
+	}
+	register(actionHelpOverlay, func() bool { w.showHelpOverlay(); return true })
+	register(actionCommandPalette, func() bool { w.showCommandPalette(); return true })
 }
 
 // SetModels updates the list of available models offered in each session window.

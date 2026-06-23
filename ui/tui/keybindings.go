@@ -84,6 +84,25 @@ func keybindActionName(id tv.ActionID) string {
 	return string(id)
 }
 
+// unboundChord is the sentinel an override map entry carries to mean "this action is
+// deliberately unbound" (issue #269 capture-mode Backspace/clear). rebuildScopedBindings
+// skips registering an unbound action, so it simply has no live binding and fires on
+// nothing — not even its old default key. The value is also chosen to never match a real
+// key event (it constrains a named key AND a rune at once, which no single TypeEvent
+// carries) as defence in depth, and its private-use rune can never collide with a real
+// binding under sameChord. It is compared with ==, so it must stay a fixed literal.
+var unboundChord = tv.Chord{Key: tui.KeyF12, Rune: '\uE000'}
+
+// chordLabel renders a chord for display, showing the unbound sentinel as an em dash
+// rather than leaking its sentinel spelling. Every customizer/cheatsheet hint that may
+// reference a clearable action routes through it.
+func chordLabel(c tv.Chord) string {
+	if c == unboundChord {
+		return "—"
+	}
+	return displayChord(c)
+}
+
 // isEscapeHatch reports whether id is one of the keyboard paths to the customizer —
 // the command palette (':'/Ctrl+K) or the help overlay ('?'). Rebinding one of these
 // risks the classic self-lockout (issue #269), so the customizer confirms before
@@ -231,6 +250,22 @@ func (w *Workbench) applyBinding(id tv.ActionID, chord tv.Chord) {
 	w.rebuildScopedBindings()
 }
 
+// isUnbound reports whether id has been deliberately cleared (issue #269): its override
+// is the unbound sentinel, so the rebuilt registry holds no binding for it and no key
+// fires it — not even its old default.
+func (w *Workbench) isUnbound(id tv.ActionID) bool {
+	return w.chordFor(id) == unboundChord
+}
+
+// clearBinding unbinds id (issue #269's capture-mode Backspace/clear): it records the
+// unbound sentinel as the override and rebuilds, so the action drops out of the registry
+// entirely and its previous key no longer fires. Reset (per-row or all) restores the
+// default; persistence stores the cleared state as "none". Callers persist afterwards.
+func (w *Workbench) clearBinding(id tv.ActionID) {
+	w.recordOverride(id, unboundChord)
+	w.rebuildScopedBindings()
+}
+
 // swapBindings reassigns chord (currently held by holder) to target, giving holder
 // target's previous chord in return (issue #269's "Reassign?" path). The swap is
 // lossless — both actions stay bound — and conflict-free by construction: target takes
@@ -327,6 +362,12 @@ func (w *Workbench) LoadKeybindings(cfg config.KeybindingsConfig) {
 		chord, ok := parseChordSpec(cfg.Overrides[idStr])
 		if !ok {
 			continue // unparseable spec
+		}
+		// A deliberately cleared action ("none") is always accepted: it registers
+		// nothing, so it can neither be undeliverable nor collide with anything.
+		if chord == unboundChord {
+			current[id] = unboundChord
+			continue
 		}
 		scope := keybindScope(id)
 		if deliverable, _ := chord.Deliverable(); !deliverable {
@@ -448,6 +489,9 @@ var nameToKeyCode = func() map[string]tui.KeyCode {
 // match is case-insensitive, so the case is cosmetic); a named key uses its
 // keyCodeNames token. parseChordSpec inverts it.
 func formatChordSpec(c tv.Chord) string {
+	if c == unboundChord {
+		return "none" // a deliberately cleared/unbound action (issue #269)
+	}
 	var parts []string
 	if c.Ctrl {
 		parts = append(parts, "Ctrl")
@@ -491,6 +535,9 @@ func parseChordSpec(s string) (tv.Chord, bool) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return tv.Chord{}, false
+	}
+	if strings.EqualFold(s, "none") {
+		return unboundChord, true // a deliberately cleared/unbound action (issue #269)
 	}
 	// A lone character is a literal rune, including '+' which would otherwise split.
 	if utf8.RuneCountInString(s) == 1 {

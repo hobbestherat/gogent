@@ -2341,7 +2341,11 @@ func (sw *SessionWindow) registerTranscriptBindings() {
 	// scope must match the keybindActions() catalog so the customizer can find, rebind
 	// and reset each one.
 	focus := func(id tv.ActionID, handler func() bool) {
-		reg.Register(tv.KeyBinding{Chord: sw.wb.chordFor(id), ActionID: id, Scope: tv.ScopeFocus, Target: target}, handler)
+		chord := sw.wb.chordFor(id)
+		if chord == unboundChord {
+			return // the user cleared this binding (issue #269)
+		}
+		reg.Register(tv.KeyBinding{Chord: chord, ActionID: id, Scope: tv.ScopeFocus, Target: target}, handler)
 	}
 	// Esc clears an active filter/search; when nothing is filtered it declines (returns
 	// false) so the key keeps falling through the dispatch chain exactly as before.

@@ -127,7 +127,7 @@ func (w *Workbench) commands() []command {
 		// Transcript view controls. The single-letter keys only fire while a
 		// transcript is focused; listing them here is exactly the cheatsheet the
 		// help overlay exists to provide.
-		{category: "Transcript", name: "Find in transcript", keys: "Ctrl+F, " + displayChord(w.chordFor(actionTranscriptFind)),
+		{category: "Transcript", name: "Find in transcript", keys: "Ctrl+F, " + chordLabel(w.chordFor(actionTranscriptFind)),
 			run: func() { w.withActiveTranscript((*SessionWindow).promptFind) }},
 		{category: "Transcript", name: "Show all (clear filter)", keys: "Esc", actionID: actionTranscriptShowAll,
 			run: func() { w.transcriptDo((*transcriptModel).showAll) }},
@@ -159,7 +159,7 @@ func (w *Workbench) commands() []command {
 		// Application-wide actions. The palette itself is reference-only (you are
 		// already in it); the sidebar pin and help/quit are runnable.
 		{category: "App", name: "Pin / unpin sidebar", run: w.ToggleSidebarPin},
-		{category: "App", name: "Command palette", keys: "Ctrl+K, " + displayChord(w.chordFor(actionCommandPalette))},
+		{category: "App", name: "Command palette", keys: "Ctrl+K, " + chordLabel(w.chordFor(actionCommandPalette))},
 		{category: "App", name: "Keybinding help", keys: "?", actionID: actionHelpOverlay, run: w.showHelpOverlay},
 		{category: "App", name: "Customize keybindings", run: w.showKeybindingCustomizer},
 		{category: "App", name: "Quit", keys: "Ctrl+Q", run: w.confirmQuit},
@@ -171,6 +171,12 @@ func (w *Workbench) commands() []command {
 	// the two composite hints already folded their live chord in above via chordFor.
 	for i := range cmds {
 		if cmds[i].actionID == "" {
+			continue
+		}
+		// A cleared action shows the unbound marker rather than its stale default: it has
+		// no registry binding, so chordDisplay would fall back to the hardcoded hint.
+		if w.isUnbound(cmds[i].actionID) {
+			cmds[i].keys = chordLabel(unboundChord)
 			continue
 		}
 		if disp, ok := w.chordDisplay(cmds[i].actionID); ok {

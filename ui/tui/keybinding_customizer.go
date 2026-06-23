@@ -12,15 +12,19 @@ import (
 const keybindCustomizerIdleHint = "Enter: rebind · Reset / Reset All · ↑↓ move · Esc close"
 
 // keybindRowText renders one action row for the customizer list: the action name, its
-// current binding, and a (default)/(custom) tag distinguishing a binding left at its
-// catalog default from one the user has overridden (issue #269). The columns line up so
-// the bindings and tags read as tidy columns, mirroring the command palette's rows.
+// current binding, and a (default)/(custom)/(unbound) tag distinguishing a binding left
+// at its catalog default, one the user has overridden, and one the user has cleared
+// (issue #269). The columns line up so the bindings and tags read as tidy columns,
+// mirroring the command palette's rows.
 func (w *Workbench) keybindRowText(a keybindAction) string {
 	tag := "default"
-	if w.isOverridden(a.id) {
+	switch {
+	case w.isUnbound(a.id):
+		tag = "unbound"
+	case w.isOverridden(a.id):
 		tag = "custom"
 	}
-	return "  " + padName(a.name, 26) + "  " + padName(displayChord(w.chordFor(a.id)), 10) + " (" + tag + ")"
+	return "  " + padName(a.name, 26) + "  " + padName(chordLabel(w.chordFor(a.id)), 10) + " (" + tag + ")"
 }
 
 // capturePrompt is the status line shown while waiting for the user to press the new
@@ -168,6 +172,35 @@ func (w *Workbench) showKeybindingCustomizer() {
 		apply()
 	}
 
+	// clearBinding unbinds an action from capture mode (Backspace). Clearing an
+	// escape-hatch action (the '?'/':' paths to this customizer) is confirmed first, so
+	// the user can't silently remove their only keyboard route back here (self-lockout).
+	clearBinding := func(a keybindAction) {
+		do := func() {
+			if w.isUnbound(a.id) {
+				setStatus(fmt.Sprintf("%q is already unbound.", a.name))
+				return
+			}
+			w.clearBinding(a.id)
+			w.persistKeybindings()
+			render()
+			setStatus(fmt.Sprintf("%q cleared (unbound).", a.name))
+		}
+		if isEscapeHatch(a.id) {
+			w.showConfirm("Self-lockout warning",
+				fmt.Sprintf("%q is a keyboard path to this customizer.\n\nClearing it removes that path. Continue?", a.name),
+				func(yes bool) {
+					if !yes {
+						setStatus("Clear cancelled.")
+						return
+					}
+					do()
+				})
+			return
+		}
+		do()
+	}
+
 	startCapture := func() {
 		if capturing != nil {
 			return
@@ -194,24 +227,13 @@ func (w *Workbench) showKeybindingCustomizer() {
 				setStatus(fmt.Sprintf("Rebind of %q cancelled.", a.name))
 				return true
 			case tui.KeyBackspace:
-				// "Clear" the action: drop its override and restore its catalog default,
-				// then leave capture. (Capture commits on the first chord, so there is no
-				// pending buffer to erase — clearing the customization is the useful and
-				// honest meaning of Backspace here.)
+				// "Clear" the action: unbind it entirely (no key fires it, not even its
+				// old default), then leave capture. Capture commits on the first chord, so
+				// there is no pending buffer to erase — a true unbind is the meaning of
+				// "Backspace clear" the prompt promises (issue #269).
 				a := *capturing
 				capturing = nil
-				if !w.isOverridden(a.id) {
-					setStatus(fmt.Sprintf("%q is already at its default (%s).", a.name, displayChord(a.deflt)))
-					return true
-				}
-				if !w.resetBinding(a.id) {
-					holder, _ := w.conflictHolder(a, a.deflt)
-					setStatus(fmt.Sprintf("Can't clear %q: default %s is in use by %q.", a.name, displayChord(a.deflt), keybindActionName(holder)))
-					return true
-				}
-				w.persistKeybindings()
-				render()
-				setStatus(fmt.Sprintf("%q cleared to its default %s.", a.name, displayChord(a.deflt)))
+				clearBinding(a)
 				return true
 			}
 			a := *capturing
