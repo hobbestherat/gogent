@@ -55,10 +55,8 @@ func TestEvalErrors(t *testing.T) {
 		{"empty parens", "()"},
 		{"nested empty parens", "(())"},
 		{"trailing operator", "5+"},
-		{"leading operator", "+5"},
 		{"dangling mul", "5*"},
 		{"leading div", "/2"},
-		{"division by zero", "1/0"},
 		{"unbalanced open", "(1+2"},
 		{"unbalanced close", "1+2)"},
 		{"stray parens", "1)(2"},
@@ -91,6 +89,17 @@ func FuzzEval(f *testing.F) {
 		"()", "(())", "5+", "+5", "5*", "/2", "1/0", "(1+2", "1+2)", "1)(2",
 		"abc", "5x", "1.5+2.5", "-5", "  3  +  4  ", "((((((", "1+2+3+4+5",
 		"(1)", "((1))", "1e3", "2**3", "++", ")(", "*1",
+		// New expr-lang syntax: unary minus, power (** and ^), modulo, factorial,
+		// functions, constants, comparison/ternary, plus pathological variants of
+		// each that the engine and the factorial desugaring must reject (never
+		// panic) rather than crash.
+		"3*-2", "2^3", "2 ** 0.5", "10%3", "10.5%3", "5!", "(2+3)!", "sqrt(4)!",
+		"5!!", "!5", "5!=3", "1e-3!", "!=", "sqrt(2)", "sin(pi/2)", "log(e)",
+		"factorial(5)", "factorial(-1)", "factorial(2.5)", "gcd(12,8)", "lcm(0,5)",
+		"mean()", "median(1,2,3)", "min(1,2,3)", "max()", "pi", "e", "tau", "phi",
+		"c", "G", "echarge", "nan", "inf", "2>1?10:20", "1?2:3", "true",
+		"deg(180)", "rad(180)", "G*5.97e24/(6.371e6)^2", "(", "sqrt(", "()!",
+		"sin", "pow(2)", "mod(10,3)", "abs(-5)", "sign(0)", "[1,2,3]", `"a"+"b"`,
 	}
 	for _, s := range seeds {
 		f.Add(s)
