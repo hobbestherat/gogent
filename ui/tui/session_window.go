@@ -221,18 +221,13 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 		color:  colorInfo,
 		role:   roleInfo,
 	})
-	// Intercept transcript keys (search/filter/fold) before the TextView's own
-	// scroll handling, falling through to it for everything else.
-	scroll := history.Component.OnTypeFn
-	history.Component.OnTypeFn = func(c *tv.VisualComponent, event tui.TypeEvent) bool {
-		if sw.handleTranscriptKey(event) {
-			return true
-		}
-		if scroll != nil {
-			return scroll(c, event)
-		}
-		return false
-	}
+	// Register the transcript-context keys (search/filter/fold/yank) as Focus-scope
+	// bindings on the desktop's BindingRegistry, scoped to this window's transcript
+	// (issue #269, phase 4a). The toolkit consults them at the focused-widget stage —
+	// AFTER the TextView's own scroll handler declines the key — so the TextView keeps
+	// its scroll keys and these only fire while this transcript holds focus. Registered
+	// before the readOnly return so analysis windows (full transcripts) get them too.
+	sw.registerTranscriptBindings()
 
 	if readOnly {
 		// Analysis window: transcript only, no input/model/status chrome.
@@ -2233,46 +2228,42 @@ func (sw *SessionWindow) addError(text string) {
 	})
 }
 
-// handleTranscriptKey implements the less/vim-style transcript controls while the
-// history view is focused: '/' to search, single letters to toggle event-type
-// filters, 'f'/'u' to fold/unfold all, 'y' to yank the last answer, and Esc to
-// clear an active filter/search. It returns false (letting the TextView scroll)
-// when nothing applies.
-func (sw *SessionWindow) handleTranscriptKey(event tui.TypeEvent) bool {
-	if event.Ctrl || event.Alt {
-		return false
+// registerTranscriptBindings registers the less/vim-style transcript controls as
+// Focus-scope bindings on the desktop's BindingRegistry (issue #269, phase 4a): '/'
+// to search, single letters to toggle event-type filters, 'f'/'u' to fold/unfold
+// all, 'y' to yank the last answer, and Esc to clear an active filter/search. Each
+// binding's Target is this window's transcript view, so the toolkit fires it only
+// while that transcript holds focus and only after the view itself declined the key
+// (its scroll keys keep priority) — exactly the old handleTranscriptKey scope, now
+// routed through the registry rather than an OnTypeFn switch. The handlers invoke the
+// same actions as before; Chord matching is the registry's case-insensitive rule.
+//
+// Note: the registry has no Unregister, so a closed window leaves its bindings
+// behind. They are inert — their Target is no longer in any focus chain, so they
+// never match — and cleanup is deferred to a later phase.
+func (sw *SessionWindow) registerTranscriptBindings() {
+	reg := sw.wb.desktop.ScopedBindings()
+	target := sw.history.Component
+	focus := func(id tv.ActionID, chord tv.Chord, handler func() bool) {
+		reg.Register(tv.KeyBinding{Chord: chord, ActionID: id, Scope: tv.ScopeFocus, Target: target}, handler)
 	}
-	switch event.Key {
-	case tui.KeyEscape:
+	// Esc clears an active filter/search; when nothing is filtered it declines (returns
+	// false) so the key keeps falling through the dispatch chain exactly as before.
+	focus(actionTranscriptShowAll, tv.Chord{Key: tui.KeyEscape}, func() bool {
 		if sw.transcript.filtering() {
 			sw.transcript.showAll()
 			return true
 		}
 		return false
-	case tui.KeyRune:
-		switch event.Rune {
-		case '/':
-			sw.promptFind()
-		case 'a':
-			sw.transcript.toggleKind(kindAssistant)
-		case 't':
-			sw.transcript.toggleKind(kindTool)
-		case 'r':
-			sw.transcript.toggleKind(kindThinking)
-		case 'e':
-			sw.transcript.toggleKind(kindError)
-		case 'f':
-			sw.transcript.setFold(true)
-		case 'u':
-			sw.transcript.setFold(false)
-		case 'y':
-			sw.copyLastAnswer()
-		default:
-			return false
-		}
-		return true
-	}
-	return false
+	})
+	focus(actionTranscriptFind, tv.Chord{Rune: '/'}, func() bool { sw.promptFind(); return true })
+	focus(actionTranscriptToggleMsg, tv.Chord{Rune: 'a'}, func() bool { sw.transcript.toggleKind(kindAssistant); return true })
+	focus(actionTranscriptToggleTool, tv.Chord{Rune: 't'}, func() bool { sw.transcript.toggleKind(kindTool); return true })
+	focus(actionTranscriptToggleThink, tv.Chord{Rune: 'r'}, func() bool { sw.transcript.toggleKind(kindThinking); return true })
+	focus(actionTranscriptToggleErr, tv.Chord{Rune: 'e'}, func() bool { sw.transcript.toggleKind(kindError); return true })
+	focus(actionTranscriptFoldAll, tv.Chord{Rune: 'f'}, func() bool { sw.transcript.setFold(true); return true })
+	focus(actionTranscriptUnfoldAll, tv.Chord{Rune: 'u'}, func() bool { sw.transcript.setFold(false); return true })
+	focus(actionTranscriptCopyAnswer, tv.Chord{Rune: 'y'}, func() bool { sw.copyLastAnswer(); return true })
 }
 
 // promptFind opens the search prompt and applies the entered query as a
