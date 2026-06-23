@@ -395,7 +395,12 @@ func TestStopGracefulAndForced(t *testing.T) {
 		}
 		assertMissing(t, p.Pid)
 		assertMissing(t, p.Sock)
-		if err := <-reap; err != nil {
+		// A graceful Stop sends SIGTERM (never SIGKILL). The shell stand-in may
+		// either run its `trap "exit 0" TERM` handler (Wait returns nil) or, if the
+		// signal races the trap, exit from SIGTERM's default disposition (Wait
+		// returns "signal: terminated"). Both prove a graceful, non-forced shutdown;
+		// only a SIGKILL ("signal: killed") would indicate force was used.
+		if err := <-reap; err != nil && !strings.Contains(err.Error(), "terminated") {
 			t.Fatalf("process wait after graceful stop: %v", err)
 		}
 		needsCleanup = false
