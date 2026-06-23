@@ -260,7 +260,7 @@ type CompletionRequest struct {
 	// MaxTokens / MaxCompletionTokens is set per request (see buildRequest).
 	MaxCompletionTokens *int `json:"max_completion_tokens,omitempty"`
 	// ReasoningEffort and Thinking are reasoning-model controls, emitted only
-	// for providers that understand them (see providerSpec capabilities).
+	// for providers that understand them (see provider Capabilities).
 	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
 	Thinking        *ThinkingParam `json:"thinking,omitempty"`
 	Model           string         `json:"model,omitempty"`
@@ -537,16 +537,18 @@ type ModelConnection struct {
 	// route is a distinct path — Vertex AI's native Gemini API streams from
 	// :streamGenerateContent?alt=sse rather than :generateContent. completeStream
 	// POSTs here when non-empty, falling back to URL otherwise. See
-	// NewModelConnectionFromConfig and providerSpec.streamURLFunc.
+	// NewModelConnectionFromConfig and modelURLEndpoints (provider_vertex.go).
 	StreamURL string
 	ModelName string
 	APIType   APIType
 	Config    *config.ModelConfig
 	Stats     *ModelStats
 	Timeout   time.Duration
-	spec      providerSpec
-	adapter   adapter
-	client    *http.Client
+	// provider carries all backend-specific behaviour (endpoints, auth, wire
+	// adapter, capabilities, optional operations like model listing). It is set by
+	// the constructors from the provider registry; methods delegate to it.
+	provider *provider
+	client   *http.Client
 
 	// configErr, when non-nil, is a construction-time configuration error that
 	// could not be returned (NewModelConnectionFromConfig has no error result).
@@ -638,8 +640,7 @@ func NewModelConnection() *ModelConnection {
 	return &ModelConnection{
 		URL:            DefaultModelURL,
 		APIType:        APITypeOpenAI,
-		spec:           specFor(APITypeOpenAI),
-		adapter:        adapterFor(APITypeOpenAI),
+		provider:       providerFor(APITypeOpenAI),
 		Stats:          &ModelStats{},
 		Timeout:        5 * time.Minute,
 		client:         newClient(5*time.Minute, nil),
@@ -654,89 +655,36 @@ func NewModelConnection() *ModelConnection {
 // full chat-completions URL or just a base URL (or empty, to use the provider
 // default), which is normalized into the concrete endpoints automatically.
 func NewModelConnectionFromConfig(modelConfig *config.ModelConfig) *ModelConnection {
-	apiType := StringToAPIType(modelConfig.APIType)
-	spec := specFor(apiType)
-	base := normalizeBaseURL(modelConfig.Endpoint, spec)
-	// Providers whose endpoint is not a single static default (Vertex AI derives
-	// its host and path from Project/Location) supply a baseURLFunc. Use it only
-	// when the user left Endpoint empty, so an explicit endpoint still overrides
-	// (and normalizeBaseURL above already trimmed any chat path off it).
-	usingDerivedBase := spec.baseURLFunc != nil && strings.TrimSpace(modelConfig.Endpoint) == ""
-	if usingDerivedBase {
-		base = spec.baseURLFunc(modelConfig)
-	}
-
-	// Most providers append a static chat path and stream from the same URL.
-	// Providers that embed the model name in the URL path (Vertex AI's native
-	// Gemini API) supply chatURLFunc/streamURLFunc instead, which also yield a
-	// distinct streaming endpoint (:streamGenerateContent?alt=sse).
-	chatURL := spec.chatURL(base)
-	streamURL := ""
-	if spec.chatURLFunc != nil {
-		chatURL = spec.chatURLFunc(base, modelConfig.Model)
-	}
-	if spec.streamURLFunc != nil {
-		streamURL = spec.streamURLFunc(base, modelConfig.Model)
-	}
+	p := providerFor(StringToAPIType(modelConfig.APIType))
+	eps := p.endpoints.endpoints(modelConfig)
 
 	conn := &ModelConnection{
-		URL:            chatURL,
-		StreamURL:      streamURL,
+		URL:            eps.ChatURL,
+		StreamURL:      eps.StreamURL,
 		ModelName:      modelConfig.Model,
-		APIType:        apiType,
+		APIType:        p.apiType,
 		Config:         modelConfig,
 		Stats:          &ModelStats{},
 		Timeout:        5 * time.Minute,
-		spec:           spec,
-		adapter:        adapterFor(apiType),
+		provider:       p,
 		maxAttempts:    defaultMaxAttempts,
 		retryBaseDelay: defaultRetryBaseDelay,
 		retryMaxDelay:  defaultRetryMaxDelay,
 	}
 
-	// A Vertex base URL is derived from Project + Location; without both, the URL
-	// is malformed (empty host segment / empty path segments) and a request would
-	// fail as an opaque DNS/HTTP error. Catch it here as a clear, deferred config
-	// error instead. Skipped when the user supplied an explicit Endpoint, which
-	// overrides the derived base and needs neither field.
-	if usingDerivedBase {
-		if strings.TrimSpace(modelConfig.Project) == "" || strings.TrimSpace(modelConfig.Location) == "" {
-			conn.configErr = &ModelError{
-				Type:    ErrorGeneric,
-				Message: "vertex: project and location are required (set them on the model, or supply an explicit endpoint)",
-			}
-		}
+	// Deferred config validation (e.g. a Vertex model missing project/location,
+	// which would otherwise fail as an opaque DNS/HTTP error). Surfaced clearly on
+	// the first completion call instead of here, since the constructor has no error
+	// result.
+	if err := p.validateConfig(modelConfig); err != nil {
+		conn.configErr = err
 	}
 
-	// Attach the provider's auth when a key is present. The exact scheme is
-	// spec-driven (OpenAI/OpenRouter bearer, Anthropic x-api-key + version, Azure
-	// api-key, or a Gemini-style query parameter); see providerSpec.authHeaders.
-	// The round-tripper wraps the shared pooled transport so keep-alive conns
-	// persist regardless of auth; without a key the client uses that shared
-	// transport directly (issue #19).
-	var rt http.RoundTripper
-	switch {
-	case spec.authMode == authADC:
-		// Vertex AI: no API key. Authenticate with a Google Application Default
-		// Credentials bearer token injected (and auto-refreshed) per request. The
-		// token source is resolved lazily on first use so this constructor — which
-		// returns no error — need not fail eagerly when ADC is unconfigured; the
-		// guiding error then surfaces on the first request instead.
-		rt = &ADCRoundTripper{
-			tokenSource: &lazyTokenSource{newTS: func() (oauth2.TokenSource, error) {
-				return adcTokenSourceFunc(context.Background(), adcScope)
-			}},
-			transport: sharedHTTPTransport,
-		}
-	case modelConfig.APIKey != "":
-		rt = &APIKeyRoundTripper{
-			apiKey:     modelConfig.APIKey,
-			headers:    spec.authHeaders(modelConfig.APIKey),
-			queryParam: spec.authQuery(),
-			transport:  sharedHTTPTransport,
-		}
-	}
-	conn.client = newClient(30*time.Second, rt)
+	// The provider's auth scheme builds the round-tripper (bearer / x-api-key /
+	// Azure api-key / Gemini query param / Google ADC), wrapping the shared pooled
+	// transport so keep-alive conns persist; a nil round-tripper means no auth is
+	// injected and the shared transport is used directly (issue #19).
+	conn.client = newClient(30*time.Second, p.auth.roundTripper(modelConfig))
 
 	return conn
 }
@@ -855,10 +803,19 @@ func (rt *ADCRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 // wireAdapter returns the connection's wire-format adapter, defaulting to the
 // OpenAI-compatible adapter so a zero-value or hand-built connection still works.
 func (c *ModelConnection) wireAdapter() adapter {
-	if c.adapter != nil {
-		return c.adapter
+	if c.provider != nil && c.provider.adapter != nil {
+		return c.provider.adapter
 	}
 	return openAIAdapter{}
+}
+
+// caps returns the connection's provider capabilities, defaulting to the empty
+// set for a zero-value/hand-built connection without a provider.
+func (c *ModelConnection) caps() Capabilities {
+	if c.provider != nil {
+		return c.provider.caps
+	}
+	return Capabilities{}
 }
 
 func (c *ModelConnection) SetURL(url string) *ModelConnection {
@@ -1008,6 +965,7 @@ func (c *ModelConnection) CompleteWithStats(messages []Message) (*CompletionResp
 // streaming paths so both send identical parameters; the only difference is that
 // streaming additionally requests a final usage chunk via stream_options.
 func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []ToolDef, format *ResponseFormat) CompletionRequest {
+	caps := c.caps()
 	maxTokens := 4096
 	var temperature, topP float32
 	var reasoningEffort string
@@ -1023,8 +981,8 @@ func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []
 	}
 	// Clamp to the provider's max_tokens ceiling; some backends (e.g. Z.AI) 400
 	// on out-of-range values instead of capping them.
-	if c.spec.maxTokensLimit > 0 && maxTokens > c.spec.maxTokensLimit {
-		maxTokens = c.spec.maxTokensLimit
+	if caps.MaxTokensLimit > 0 && maxTokens > caps.MaxTokensLimit {
+		maxTokens = caps.MaxTokensLimit
 	}
 
 	reqBody := CompletionRequest{
@@ -1038,7 +996,7 @@ func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []
 	// Output-token cap: reasoning models on some providers (OpenAI o-series /
 	// GPT-5) reject max_tokens and require max_completion_tokens.
 	mt := maxTokens
-	if reasoning && c.spec.reasoningTokenParam == "max_completion_tokens" {
+	if reasoning && caps.ReasoningTokenParam == "max_completion_tokens" {
 		reqBody.MaxCompletionTokens = &mt
 	} else {
 		reqBody.MaxTokens = &mt
@@ -1047,7 +1005,7 @@ func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []
 	// Sampling params. Omit them for reasoning models on providers that reject a
 	// custom temperature (OpenAI reasoning tiers); otherwise send temperature
 	// (pointer, so a deliberate 0 survives) and top_p when configured.
-	if !reasoning || !c.spec.reasoningRejectsTemperature {
+	if !reasoning || !caps.ReasoningRejectsTemperature {
 		t := temperature
 		reqBody.Temperature = &t
 		if topP > 0 {
@@ -1057,10 +1015,10 @@ func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []
 	}
 
 	// Reasoning controls, emitted only where the provider understands them.
-	if reasoningEffort != "" && c.spec.supportsReasoningEffort {
+	if reasoningEffort != "" && caps.SupportsReasoningEffort {
 		reqBody.ReasoningEffort = reasoningEffort
 	}
-	if thinking != nil && c.spec.supportsThinking {
+	if thinking != nil && caps.SupportsThinking {
 		state := "disabled"
 		if *thinking {
 			state = "enabled"
@@ -1076,7 +1034,7 @@ func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []
 	// understands it (OpenAI-compatible backends). Providers without the field
 	// (Anthropic) get schema-valid output through strict tools + tool_choice
 	// forcing, so the format is dropped here rather than sent and rejected.
-	if format != nil && c.spec.supportsResponseFormat {
+	if format != nil && caps.SupportsResponseFormat {
 		reqBody.ResponseFormat = format
 	}
 	// OpenAI structured outputs require parallel tool calls to be disabled
@@ -1086,7 +1044,7 @@ func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []
 	// (e.g. several spawn_subagent calls, or read-only calls) is left at the
 	// provider default and stays eligible for parallel emission. See
 	// parallelToolCallsMustBeDisabled for the scoping and the issue #282 audit.
-	if parallelToolCallsMustBeDisabled(c.spec, tools) {
+	if parallelToolCallsMustBeDisabled(caps, tools) {
 		off := false
 		reqBody.ParallelToolCalls = &off
 	}
@@ -1126,8 +1084,8 @@ func hasStrictTool(tools []ToolDef) bool {
 // can never silently disable parallel spawns. Providers without the invariant
 // (e.g. Anthropic, no response_format field) leave supportsResponseFormat unset
 // and are never affected.
-func parallelToolCallsMustBeDisabled(spec providerSpec, tools []ToolDef) bool {
-	return spec.supportsResponseFormat && hasStrictTool(tools)
+func parallelToolCallsMustBeDisabled(caps Capabilities, tools []ToolDef) bool {
+	return caps.SupportsResponseFormat && hasStrictTool(tools)
 }
 
 func (c *ModelConnection) complete(ctx context.Context, messages []Message, stream bool, tools []ToolDef, format *ResponseFormat) (*CompletionResponse, error) {
@@ -1597,73 +1555,16 @@ func (c *ModelConnection) GetStats() *ModelStats {
 	return c.Stats
 }
 
-// modelsURL derives the provider's model-listing endpoint from the configured
-// chat-completions URL (e.g. ".../chat/completions" -> ".../models"), honoring
-// the provider-specific path layout. It strips the chat path from the URL's
-// path component and re-derives via the spec, so a carried query string (Azure's
-// ?api-version=) and non-/v1 layouts are handled the same way as construction.
-func (c *ModelConnection) modelsURL() string {
-	spec := c.spec
-	if spec.chatPath == "" {
-		spec = specFor(APITypeOpenAI)
-	}
-	return spec.modelsURL(stripChatPath(c.URL, spec.chatPath))
-}
-
-// ListModels asks the backend which models it serves, using the OpenAI/OpenRouter
-// "GET /v1/models" convention. It is an optional capability: local servers that
-// do not implement the endpoint simply return an error, which callers can treat
-// as "unknown / use configured model".
+// ListModels asks the backend which models it serves (the Scan button). It is an
+// optional capability: the provider supplies a modelLister strategy (the OpenAI
+// "GET <base>/models" convention for OpenAI-compatible backends and Anthropic, the
+// Vertex Model Garden catalog for Vertex). A provider with no lister reports "not
+// supported"; callers treat that as "unknown / set the model id manually".
 func (c *ModelConnection) ListModels() ([]ModelInfo, error) {
-	// A configured provider that deliberately exposes no model-listing endpoint
-	// (empty modelsPath alongside a real chatPath, e.g. Vertex AI's OpenAI-compat
-	// layer) cannot be scanned: fail fast with a clear message instead of sending
-	// a known-bad GET to the chat base resource. The empty/zero spec (chatPath
-	// also empty) still falls back to the OpenAI convention via modelsURL().
-	if c.spec.chatPath != "" && c.spec.modelsPath == "" {
+	if c.provider == nil || c.provider.lister == nil {
 		return nil, &ModelError{Type: ErrorGeneric, Message: "model listing is not supported for this provider; set the model id manually"}
 	}
-	req, err := http.NewRequest("GET", c.modelsURL(), nil)
-	if err != nil {
-		return nil, &ModelError{Type: ErrorConnection, Message: fmt.Sprintf("failed to create models request: %v", err)}
-	}
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, &ModelError{Type: ErrorConnection, Message: fmt.Sprintf("failed to list models: %v", err)}
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, &ModelError{Type: ErrorGeneric, Message: fmt.Sprintf("failed to read models response: %v", err)}
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, c.analyzeError(resp.StatusCode, string(body))
-	}
-
-	// Most providers (OpenAI, OpenRouter, llama.cpp) wrap the list in {"data":[...]}.
-	var wrapped struct {
-		Data   []ModelInfo `json:"data"`
-		Models []ModelInfo `json:"models"`
-	}
-	if err := json.Unmarshal(body, &wrapped); err == nil {
-		if len(wrapped.Data) > 0 {
-			return wrapped.Data, nil
-		}
-		if len(wrapped.Models) > 0 {
-			return wrapped.Models, nil
-		}
-	}
-
-	// Fallback: some servers return a bare JSON array.
-	var bare []ModelInfo
-	if err := json.Unmarshal(body, &bare); err == nil && len(bare) > 0 {
-		return bare, nil
-	}
-
-	return nil, &ModelError{Type: ErrorGeneric, Message: "no models found in response"}
+	return c.provider.lister.list(context.Background(), c)
 }
 
 // StatsSnapshot returns a mutex-free copy of this connection's statistics.

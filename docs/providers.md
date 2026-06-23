@@ -1,8 +1,8 @@
 # Model providers
 
-gogent talks to LLM providers through a provider abstraction (`internal/model`). Each model entry in your config has an `api_type` that selects both an endpoint layout (the `providerSpec`) and a wire-format adapter. This lets a single codebase speak to OpenAI-compatible servers, the Anthropic Messages API, and gateway products that layer extra behavior on top of the OpenAI wire format.
+gogent talks to LLM providers through a provider abstraction (`internal/model`). Each model entry in your config has an `api_type` that selects a registered **provider**. This lets a single codebase speak to OpenAI-compatible servers, the Anthropic Messages API, Google Vertex AI, and gateway products that layer extra behavior on top of the OpenAI wire format.
 
-For the full `ModelConfig` schema (every field, defaults, and validation), see [configuration.md](configuration.md). This page focuses on how each provider behaves and how to configure it.
+For the full `ModelConfig` schema (every field, defaults, and validation), see [configuration.md](configuration.md). This page focuses on how each provider behaves and how to configure it. For how the provider layer is structured (and how to add a backend or an operation), see [Architecture](#architecture-adding-a-provider-or-operation).
 
 ## api_type values
 
@@ -84,6 +84,8 @@ Three `api_type` values target Google Vertex AI. All three authenticate with **G
 | `vertex` | OpenAI-compatible | `/endpoints/openapi/chat/completions` (v1beta1) | Reuses the OpenAI adapter; name a model like `google/gemini-2.5-flash`. |
 | `vertex-native` (alias `gemini`) | Native Gemini | `:generateContent` / `:streamGenerateContent?alt=sse` (v1) | `contents`/`parts`, `systemInstruction`, `thinkingConfig`, `responseSchema`. |
 | `vertex-anthropic` (alias `claude-vertex`) | Anthropic Messages | `:rawPredict` / `:streamRawPredict` (v1) | Claude on Vertex — see below. |
+
+**Model discovery (Scan).** All three Vertex types support the model editor's **Scan** button. Listing goes through the Vertex Model Garden (`GET https://aiplatform.googleapis.com/v1beta1/publishers/{publisher}/models`), authenticated with the same ADC token plus an `X-Goog-User-Project: <project>` header (the catalog has no project in its path, so the quota project is carried in the header). `vertex` / `vertex-native` list the `google` publisher (filtered to `gemini*` / `gemma*` chat models); `vertex-anthropic` lists the `anthropic` publisher (`claude*`). Ids are formatted for the route: `google/<model>` for the OpenAI-compat shim, bare `<model>` for the native and Claude routes. A model with no `project` set cannot be scanned (the quota header can't be formed).
 
 **`vertex-anthropic`** serves Anthropic's Claude models through Vertex. It reuses the Anthropic Messages adapter but with three Vertex-specific differences from the direct `anthropic` provider:
 
@@ -208,7 +210,7 @@ The model editor (Config → Models) surfaces the following fields for each entr
 - Display name
 - API type (dropdown)
 - Endpoint
-- Model id — with a **Scan** button that probes the backend's listing endpoint and replaces the text field with a dropdown of advertised models
+- Model id — with a **Scan** button that queries the provider's listing endpoint and replaces the text field with a dropdown of advertised models. Supported by the OpenAI-compatible providers (`openai`/`zai`/`openrouter`, via `GET <base>/models`), `anthropic` (`GET /v1/models`), and all three Vertex types (via the Model Garden — see [Google Vertex AI](#google-vertex-ai-vertex-vertex-native-vertex-anthropic)). A provider that exposes no listing endpoint reports "not supported"; set the model id manually.
 - API key
 - Temperature
 - Max tokens
@@ -218,3 +220,20 @@ The model editor (Config → Models) surfaces the following fields for each entr
 Buttons: **Save**, **Cancel**, **Set Default**.
 
 Note that `effort_options`, `context_window`, `top_p`, and `free` are config-only fields — they are not exposed in the editor. Per-session effort options appear in the window header instead.
+
+## Architecture: adding a provider or operation
+
+Each `api_type` maps to a registered `*provider` (`internal/model`) that **composes small strategy objects** rather than carrying a flat config struct. `ModelConnection` is a generic executor that delegates to the provider; it contains no backend-specific logic.
+
+A provider wires together:
+
+- **`endpoints` (`endpointResolver`)** — builds the chat and stream URLs from a model config. `staticBaseEndpoints` (base URL + static chat path, model in the body) covers the OpenAI-compatible and Anthropic providers and Vertex's OpenAI-compat shim; `modelURLEndpoints` (model in the URL path) covers Vertex's native Gemini and Claude routes.
+- **`auth` (`authScheme`)** — builds the request round-tripper. `keyAuth` presents an API key (bearer / `x-api-key` / Azure `api-key` / query param) plus any static headers; `adcAuth` mints a Google ADC bearer token. Returning `nil` means no auth (a local server).
+- **`adapter`** — the wire-format translator (request/response/stream). OpenAI-compatible backends share `openAIAdapter`; Anthropic and Gemini have dedicated adapters.
+- **`caps` (`Capabilities`)** — request-shaping flags (`max_tokens` limit, reasoning/thinking/response_format support) read by `buildRequest`.
+- **`lister` (`modelLister`, optional)** — enumerates models for the Scan button. `openAILister` handles the `GET <base>/models` convention; `vertexPublisherLister` handles the Model Garden. `nil` means listing is unsupported.
+- **`validate` (optional)** — a deferred config check (e.g. Vertex requiring `project`/`location`).
+
+**To add a backend:** write a `provider_<name>.go` that composes the strategies it needs and calls `registerProvider` from `init()` (see `provider_openai.go`, `provider_anthropic.go`, `provider_vertex.go`). Add its `api_type` to `stringToAPITypeMap` and `apiTypeDisplayOrder` in `provider.go`. Reuse an existing strategy where the behavior matches; write a new strategy value only for a genuinely new axis.
+
+**To add an operation** (token counting, embeddings, …): define a strategy interface and a nil-able field on `provider` (mirroring `lister`), implement it per provider, and run the HTTP call through the shared `ModelConnection.doJSON` runner — it applies the provider's auth and uniform error classification, so the operation only specifies the URL, any extra headers, and the response parse.

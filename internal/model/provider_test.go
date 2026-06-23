@@ -27,47 +27,48 @@ func TestStringToAPIType(t *testing.T) {
 }
 
 func TestNormalizeBaseURL(t *testing.T) {
-	openai := specFor(APITypeOpenAI)
-	zai := specFor(APITypeZAI)
+	// OpenAI-compatible providers share the "/chat/completions" chat path and
+	// differ only in their default base URL.
+	const chatPath = "/chat/completions"
+	const openaiDefault = "http://localhost:8080/v1"
+	const zaiDefault = "https://api.z.ai/api/paas/v4"
 
 	cases := []struct {
-		name     string
-		endpoint string
-		spec     providerSpec
-		want     string
+		name        string
+		endpoint    string
+		defaultBase string
+		want        string
 	}{
-		{"openai base url", "https://api.example.com/v1", openai, "https://api.example.com/v1"},
-		{"openai full url", "https://api.example.com/v1/chat/completions", openai, "https://api.example.com/v1"},
-		{"openai trailing slash", "https://api.example.com/v1/", openai, "https://api.example.com/v1"},
-		{"openai empty default", "", openai, "http://localhost:8080/v1"},
-		{"zai empty default", "", zai, "https://api.z.ai/api/paas/v4"},
-		{"zai full url collapses", "https://api.z.ai/api/paas/v4/chat/completions", zai, "https://api.z.ai/api/paas/v4"},
+		{"openai base url", "https://api.example.com/v1", openaiDefault, "https://api.example.com/v1"},
+		{"openai full url", "https://api.example.com/v1/chat/completions", openaiDefault, "https://api.example.com/v1"},
+		{"openai trailing slash", "https://api.example.com/v1/", openaiDefault, "https://api.example.com/v1"},
+		{"openai empty default", "", openaiDefault, "http://localhost:8080/v1"},
+		{"zai empty default", "", zaiDefault, "https://api.z.ai/api/paas/v4"},
+		{"zai full url collapses", "https://api.z.ai/api/paas/v4/chat/completions", zaiDefault, "https://api.z.ai/api/paas/v4"},
 	}
 	for _, tc := range cases {
-		if got := normalizeBaseURL(tc.endpoint, tc.spec); got != tc.want {
+		if got := normalizeBaseURL(tc.endpoint, tc.defaultBase, chatPath); got != tc.want {
 			t.Errorf("%s: normalizeBaseURL(%q) = %q, want %q", tc.name, tc.endpoint, got, tc.want)
 		}
 	}
 }
 
 func TestNormalizeBaseURLPreservesQuery(t *testing.T) {
-	openai := specFor(APITypeOpenAI)
-
 	// A full chat-completions URL carrying a query string (Azure's
 	// ?api-version=) must have only the chat path stripped, with the query kept
 	// so it can ride onto the derived chat/models endpoints. The old LastIndex
 	// surgery left the path in place because it was not the literal tail.
 	const azure = "https://r.openai.azure.com/openai/deployments/dep/chat/completions?api-version=2024-02-01"
-	gotBase := normalizeBaseURL(azure, openai)
+	gotBase := normalizeBaseURL(azure, "http://localhost:8080/v1", "/chat/completions")
 	wantBase := "https://r.openai.azure.com/openai/deployments/dep?api-version=2024-02-01"
 	if gotBase != wantBase {
 		t.Fatalf("normalizeBaseURL(azure) = %q, want %q", gotBase, wantBase)
 	}
-	if got := openai.chatURL(gotBase); got != azure {
+	if got := appendPath(gotBase, "/chat/completions"); got != azure {
 		t.Errorf("chatURL round-trip = %q, want %q", got, azure)
 	}
 	wantModels := "https://r.openai.azure.com/openai/deployments/dep/models?api-version=2024-02-01"
-	if got := openai.modelsURL(gotBase); got != wantModels {
+	if got := appendPath(gotBase, "/models"); got != wantModels {
 		t.Errorf("modelsURL = %q, want %q", got, wantModels)
 	}
 }
@@ -93,9 +94,7 @@ func TestNewModelConnectionFromConfigBaseURL(t *testing.T) {
 	if want := "https://api.z.ai/api/paas/v4/chat/completions"; zconn.URL != want {
 		t.Errorf("zai chat URL = %q, want %q", zconn.URL, want)
 	}
-	if want := "https://api.z.ai/api/paas/v4/models"; zconn.modelsURL() != want {
-		t.Errorf("zai models URL = %q, want %q", zconn.modelsURL(), want)
-	}
+	// The derived model-listing URL is exercised end-to-end in TestZAIModelsListing.
 }
 
 func TestZAIMaxTokensClamp(t *testing.T) {

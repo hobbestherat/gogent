@@ -21,9 +21,10 @@ import (
 //   - parseStream maps a streaming (SSE) response onto the internal delta channel.
 //
 // Authentication is deliberately NOT an adapter concern: it lives on the
-// providerSpec (see providerSpec.authHeaders) because providers that share one
+// provider's auth scheme (see keyAuth / adcAuth) because providers that share one
 // wire adapter still authenticate differently (OpenAI bearer vs. Azure api-key
-// vs. Gemini query-param), and some add static headers (OpenRouter attribution).
+// vs. Gemini query-param vs. Vertex ADC), and some add static headers (OpenRouter
+// attribution).
 //
 // OpenAI-compatible providers (incl. Z.AI, OpenRouter, Gemini's OpenAI-compat
 // layer and local servers) share openAIAdapter; genuinely different protocols
@@ -42,30 +43,12 @@ type adapter interface {
 	parseStream(body io.Reader, streamCh chan<- StreamResponse) (string, *TokenUsage, error)
 }
 
-// adapterFor returns the wire-format adapter for an APIType, defaulting to the
-// OpenAI-compatible adapter for unknown/empty types.
+// adapterFor returns the wire-format adapter registered for an APIType, defaulting
+// to the OpenAI-compatible adapter for unknown/empty types. The adapter is owned
+// by the provider (see provider.adapter); this is a thin accessor over the
+// registry used by callers/tests that only need the wire format.
 func adapterFor(t APIType) adapter {
-	switch t {
-	case APITypeAnthropic:
-		return anthropicAdapter{}
-	case APITypeVertexAnthropic:
-		// Claude on Vertex AI speaks the Anthropic Messages wire format, so it
-		// reuses anthropicAdapter; the vertex flag switches on the Vertex-specific
-		// body shape (model in URL not body, anthropic_version in body, ADC auth, no
-		// sampling params, prompt caching). See anthropicAdapter.buildBody.
-		return anthropicAdapter{vertex: true}
-	case APITypeVertex:
-		// Vertex AI's OpenAI-compatible endpoint speaks the standard OpenAI wire
-		// format, so it reuses the shared adapter; only its providerSpec (ADC auth
-		// and a dynamic, project/location-derived base URL) differs.
-		return openAIAdapter{}
-	case APITypeVertexNative:
-		// Vertex AI's native Gemini API speaks its own contents/parts wire format,
-		// so it gets a dedicated adapter (see geminiAdapter).
-		return geminiAdapter{}
-	default:
-		return openAIAdapter{}
-	}
+	return providerFor(t).adapter
 }
 
 // encodeJSON serializes v into buf as compact JSON, reusing buf's existing
@@ -120,8 +103,8 @@ func (openAIAdapter) parseStream(body io.Reader, streamCh chan<- StreamResponse)
 // ---------------------------------------------------------------------------
 
 // anthropicVersion is the Messages API version pinned via the anthropic-version
-// header (required on every request); the Anthropic providerSpec attaches it as
-// an extra header (see providerSpecs).
+// header (required on every request); the Anthropic provider attaches it as a
+// static auth header (see provider_anthropic.go, keyAuth.extraHeaders).
 const anthropicVersion = "2023-06-01"
 
 // anthropicAdapter speaks the Anthropic Messages wire format. The same adapter
@@ -731,7 +714,8 @@ func (anthropicAdapter) parseStream(body io.Reader, streamCh chan<- StreamRespon
 //     finishReason and usageMetadata carried only in the final chunk.
 //
 // The model name is NOT in the request body for native Gemini — it lives in the
-// URL path (see providerSpec.chatURLFunc) — so buildBody ignores req.Model.
+// URL path (see modelURLEndpoints in provider_vertex.go) — so buildBody ignores
+// req.Model.
 type geminiAdapter struct{}
 
 // geminiRequest is the native :generateContent / :streamGenerateContent body.

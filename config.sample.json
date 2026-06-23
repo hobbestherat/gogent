@@ -74,6 +74,18 @@
       "free": false
     },
     {
+      "name": "gemini-vertex",
+      "display_name": "Gemini on Vertex AI (GCP ADC; Scan to discover models)",
+      "api_type": "vertex",
+      "endpoint": "",
+      "project": "your-gcp-project",
+      "location": "us-central1",
+      "model": "google/gemini-2.5-flash",
+      "max_tokens": 8192,
+      "context_window": 1000000,
+      "free": false
+    },
+    {
       "name": "claude-vertex",
       "display_name": "Claude on Vertex AI (GCP ADC; no API key)",
       "api_type": "vertex-anthropic",

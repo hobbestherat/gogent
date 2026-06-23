@@ -1,80 +1,64 @@
 package model
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
 
+	"golang.org/x/oauth2"
+
 	"gogent/internal/config"
 )
 
-// APIType identifies which provider/wire conventions a backend speaks. It
-// selects two things: a providerSpec (base-URL layout, default endpoint and
-// request capabilities) and a wire-format adapter (request/response/stream
-// translation; see adapterFor). OpenAI-compatible providers share one adapter
-// and differ only in their providerSpec; a genuinely different protocol
-// (Anthropic Messages) gets its own APIType, providerSpec and adapter. That is
-// the seam to extend when adding a new provider family.
+// This file defines the provider abstraction: each model backend ("openai",
+// "anthropic", "vertex", …) is a *provider value that COMPOSES small, reusable
+// strategy objects — an endpointResolver (how to build URLs), an authScheme (how
+// to authenticate), a wire adapter (request/response/stream translation), and
+// optional per-operation strategies such as a modelLister. ModelConnection is a
+// generic executor that drives a provider; it knows nothing backend-specific.
+//
+// Adding a backend is a self-contained change: write a provider_<name>.go that
+// composes the strategies it needs and registers itself (see provider_openai.go,
+// provider_anthropic.go, provider_vertex.go). Adding a new *operation* (token
+// counting, embeddings, …) is likewise additive: define a strategy interface and
+// a nil-able field on provider, then run it through the shared doJSON runner.
+
+// ---------------------------------------------------------------------------
+// api_type identity
+// ---------------------------------------------------------------------------
+
+// APIType is the config token (`api_type`) that names a provider. It is the
+// stable public identifier used in configs, the model editor, and stats; the
+// behaviour behind it lives in the registered *provider.
 type APIType string
 
 const (
-	// APITypeOpenAI is the generic OpenAI-compatible API: the caller supplies a
-	// base URL (or a full chat-completions URL) and we talk plain OpenAI.
+	// APITypeOpenAI is the generic OpenAI-compatible API and the default.
 	APITypeOpenAI APIType = "openai"
-	// APITypeZAI is the Z.AI platform (https://docs.z.ai). It is OpenAI
-	// compatible; only the default base URL differs, so the user can leave the
-	// endpoint empty and just provide an API key.
+	// APITypeZAI is the Z.AI platform (OpenAI-compatible; different default base).
 	APITypeZAI APIType = "zai"
-	// APITypeAnthropic is the Anthropic Messages API (POST /v1/messages). It is
-	// not OpenAI-compatible — it uses x-api-key + anthropic-version auth, a
-	// top-level system prompt, content-block message arrays, input_schema tools
-	// and tool_use/tool_result blocks — so it is served by a dedicated adapter.
+	// APITypeAnthropic is the Anthropic Messages API (POST /v1/messages).
 	APITypeAnthropic APIType = "anthropic"
-	// APITypeOpenRouter is the OpenRouter gateway (https://openrouter.ai). It is
-	// OpenAI-compatible (bearer auth, same wire format), differing only in its
-	// default base URL and the recommended HTTP-Referer / X-Title attribution
-	// headers it sends for app ranking and free-tier prioritization.
+	// APITypeOpenRouter is the OpenRouter gateway (OpenAI-compatible + attribution
+	// headers).
 	APITypeOpenRouter APIType = "openrouter"
-	// APITypeVertex is Google Vertex AI's OpenAI-compatible endpoint
-	// (/endpoints/openapi/chat/completions). It speaks the standard OpenAI wire
-	// format — so it reuses openAIAdapter — but differs in two ways: its base URL
-	// is derived from the config's Project/Location rather than a static default
-	// (see providerSpec.baseURLFunc), and it authenticates with Google Application
-	// Default Credentials (a bearer token injected by ADCRoundTripper) instead of
-	// an API key (see authADC).
+	// APITypeVertex is Google Vertex AI's OpenAI-compatible endpoint (Gemini via
+	// the /endpoints/openapi shim; ADC auth, project/location-derived base).
 	APITypeVertex APIType = "vertex"
-	// APITypeVertexNative is Google Vertex AI's NATIVE Gemini API
-	// (:generateContent / :streamGenerateContent), as opposed to the
-	// OpenAI-compatible shim (APITypeVertex). It speaks Gemini's own wire format —
-	// contents/parts, systemInstruction, functionDeclarations, generationConfig —
-	// so it is served by a dedicated geminiAdapter rather than openAIAdapter, and
-	// it unlocks native-only features: thinking/reasoning (thinkingConfig,
-	// thought:true parts), structured output via responseSchema, and image parts.
-	// Like APITypeVertex it derives its base URL from Project/Location and
-	// authenticates with ADC (authADC); unlike it, the model name lives in the URL
-	// path (see chatURLFunc/streamURLFunc), not the request body. The config alias
-	// "gemini" resolves here.
+	// APITypeVertexNative is Vertex AI's native Gemini API (:generateContent /
+	// :streamGenerateContent). The config alias "gemini" resolves here.
 	APITypeVertexNative APIType = "vertex-native"
-	// APITypeVertexAnthropic is Anthropic's Claude models served through Google
-	// Vertex AI (:rawPredict / :streamRawPredict). It speaks the Anthropic Messages
-	// wire format — so it reuses anthropicAdapter — but differs from the direct
-	// Anthropic API in three Vertex-specific ways: (1) auth is Google ADC (a bearer
-	// token via authADC), not x-api-key; (2) the model name lives in the URL path
-	// (publishers/anthropic/models/{MODEL}:rawPredict), not the request body, so the
-	// body omits "model"; and (3) the API version travels in the body as
-	// "anthropic_version":"vertex-2023-10-16" rather than the anthropic-version
-	// header. Like the other Vertex types its base URL is derived from
-	// Project/Location (v1, GA). The config alias "claude-vertex" resolves here.
+	// APITypeVertexAnthropic is Anthropic's Claude models on Vertex AI
+	// (:rawPredict / :streamRawPredict). The config alias "claude-vertex" resolves
+	// here.
 	APITypeVertexAnthropic APIType = "vertex-anthropic"
 )
 
-// vertexAnthropicVersion is the value carried in the request body's
-// anthropic_version field for Claude on Vertex AI. Unlike the direct Anthropic
-// API — which pins the version via the anthropic-version HEADER (see
-// anthropicVersion) — Vertex names it in the body and uses its own dated token.
-const vertexAnthropicVersion = "vertex-2023-10-16"
-
+// stringToAPITypeMap resolves config strings (and aliases) to an APIType.
 var stringToAPITypeMap = map[string]APIType{
 	"openai":           APITypeOpenAI,
 	"zai":              APITypeZAI,
@@ -89,6 +73,19 @@ var stringToAPITypeMap = map[string]APIType{
 	"claude-vertex":    APITypeVertexAnthropic,
 }
 
+// apiTypeDisplayOrder is the selectable api_type order for config UIs (first is
+// the default). Kept explicit so it is independent of provider-registration
+// (init) order.
+var apiTypeDisplayOrder = []APIType{
+	APITypeOpenAI,
+	APITypeZAI,
+	APITypeAnthropic,
+	APITypeOpenRouter,
+	APITypeVertex,
+	APITypeVertexNative,
+	APITypeVertexAnthropic,
+}
+
 // StringToAPIType resolves a config string to an APIType, defaulting to the
 // generic OpenAI-compatible provider when empty or unknown.
 func StringToAPIType(s string) APIType {
@@ -98,360 +95,245 @@ func StringToAPIType(s string) APIType {
 	return APITypeOpenAI
 }
 
-// authMode selects how an API key is presented to a provider. OpenAI-compatible
-// backends frequently differ only here (and in extraHeaders), so the auth policy
-// lives on the providerSpec rather than the wire adapter: providers that share
-// one adapter (OpenAI, Z.AI, OpenRouter, ...) can still authenticate differently.
-type authMode string
+// APITypeIDs lists the selectable api_type values in display order (first is the
+// default). Config UIs use this to populate an API-type dropdown.
+func APITypeIDs() []string {
+	ids := make([]string, 0, len(apiTypeDisplayOrder))
+	for _, t := range apiTypeDisplayOrder {
+		ids = append(ids, string(t))
+	}
+	return ids
+}
 
-const (
-	// authBearer sends Authorization: Bearer <key> (OpenAI, Z.AI, OpenRouter and
-	// Gemini's OpenAI-compat layer). It is also the zero-value default.
-	authBearer authMode = "bearer"
-	// authXAPIKey sends x-api-key: <key> (Anthropic Messages API).
-	authXAPIKey authMode = "x-api-key"
-	// authAzureKey sends api-key: <key> (Azure OpenAI).
-	authAzureKey authMode = "azure"
-	// authQuery carries the key in a URL query parameter named authQueryParam
-	// rather than a header (Gemini's native ?key=).
-	authQuery authMode = "query"
-	// authADC authenticates with a Google Application Default Credentials bearer
-	// token, injected per request (and auto-refreshed) by an ADCRoundTripper
-	// rather than from a configured API key (Vertex AI). The constructor builds
-	// the ADC round-tripper when a spec selects this mode; see
-	// NewModelConnectionFromConfig.
-	authADC authMode = "adc"
-)
-
-// OpenRouter app-attribution headers. OpenRouter uses these (both optional) to
-// rank apps on its leaderboards and to prioritize free-tier traffic; sending
-// them is recommended for every request. See
-// https://openrouter.ai/docs/api/reference/overview.
+// OpenRouter app-attribution headers (both optional, recommended on every
+// request). See https://openrouter.ai/docs/api/reference/overview.
 const (
 	openRouterReferer = "https://github.com/hobbestherat/gogent"
 	openRouterTitle   = "gogent"
 )
 
-// providerSpec describes how to derive concrete endpoints for an APIType from a
-// (possibly empty) user-supplied base URL.
-type providerSpec struct {
-	// defaultBaseURL is used when the config endpoint is left empty, so simple
-	// providers only need an API key.
+// ---------------------------------------------------------------------------
+// Core types
+// ---------------------------------------------------------------------------
+
+// Endpoints is the resolved set of request URLs for a model config. StreamURL is
+// empty when streaming uses the same URL as blocking (the OpenAI-compatible
+// case); it is set only where the streaming route is a distinct path (Vertex's
+// :streamGenerateContent / :streamRawPredict).
+type Endpoints struct {
+	ChatURL   string
+	StreamURL string
+}
+
+// Capabilities reports how a provider wants the internal CompletionRequest shaped
+// on the wire. buildRequest reads these flags to gate reasoning/thinking/format
+// parameters and the output-token field, so a provider never emits a parameter
+// its backend would reject.
+type Capabilities struct {
+	// MaxTokensLimit clamps the output-token cap (0 = no known limit).
+	MaxTokensLimit int
+	// ReasoningTokenParam, when "max_completion_tokens", makes reasoning models
+	// send that field instead of max_tokens (OpenAI o-series / GPT-5).
+	ReasoningTokenParam string
+	// ReasoningRejectsTemperature drops temperature/top_p for reasoning models.
+	ReasoningRejectsTemperature bool
+	// SupportsReasoningEffort / SupportsThinking gate the reasoning_effort and
+	// thinking request parameters.
+	SupportsReasoningEffort bool
+	SupportsThinking        bool
+	// SupportsResponseFormat gates response_format (OpenAI structured outputs) and
+	// the strict-tool parallel_tool_calls invariant.
+	SupportsResponseFormat bool
+}
+
+// ---------------------------------------------------------------------------
+// Strategy interfaces — one axis of provider behaviour each
+// ---------------------------------------------------------------------------
+
+// endpointResolver builds the chat (blocking) and stream URLs for a model config.
+type endpointResolver interface {
+	endpoints(cfg *config.ModelConfig) Endpoints
+}
+
+// authScheme builds the auth/transport for a model config. It wraps the shared
+// pooled transport so keep-alive connections persist; returning nil means no
+// auth is injected and the shared transport is used directly.
+type authScheme interface {
+	roundTripper(cfg *config.ModelConfig) http.RoundTripper
+}
+
+// modelLister enumerates the models a provider serves (the Scan button). It is an
+// OPTIONAL operation: a provider that cannot list models leaves provider.lister
+// nil and ListModels reports "not supported". This is the template for future
+// per-operation strategies (token counting, embeddings, …): define the interface,
+// add a nil-able field on provider, and run the call through ModelConnection.doJSON.
+type modelLister interface {
+	list(ctx context.Context, c *ModelConnection) ([]ModelInfo, error)
+}
+
+// ---------------------------------------------------------------------------
+// provider — composes the strategies for one api_type
+// ---------------------------------------------------------------------------
+
+// provider is one model backend. It is a value composing the strategy objects
+// above plus the wire adapter and request capabilities. The zero-value-friendly
+// optional fields (lister, validate) keep simple providers terse.
+type provider struct {
+	apiType   APIType
+	adapter   adapter
+	caps      Capabilities
+	endpoints endpointResolver
+	auth      authScheme
+	// lister enumerates models for the Scan button; nil = listing unsupported.
+	lister modelLister
+	// validate returns a deferred config error (e.g. Vertex missing
+	// project/location); nil = always valid.
+	validate func(cfg *config.ModelConfig) error
+}
+
+func (p *provider) validateConfig(cfg *config.ModelConfig) error {
+	if p.validate == nil {
+		return nil
+	}
+	return p.validate(cfg)
+}
+
+// providerRegistry holds every registered backend keyed by api_type. Per-provider
+// files populate it from init(); ModelConnection looks providers up by APIType.
+var providerRegistry = map[APIType]*provider{}
+
+// registerProvider adds a provider to the registry. Called from each
+// provider_<name>.go init(). A duplicate api_type is a programming error.
+func registerProvider(p *provider) {
+	if _, dup := providerRegistry[p.apiType]; dup {
+		panic(fmt.Sprintf("model: duplicate provider registration for api_type %q", p.apiType))
+	}
+	providerRegistry[p.apiType] = p
+}
+
+// providerFor returns the provider for an APIType, falling back to the OpenAI
+// provider for an unknown/zero type so a hand-built connection still works.
+func providerFor(t APIType) *provider {
+	if p, ok := providerRegistry[t]; ok {
+		return p
+	}
+	return providerRegistry[APITypeOpenAI]
+}
+
+// ---------------------------------------------------------------------------
+// Shared operation runner
+// ---------------------------------------------------------------------------
+
+// doJSON performs an authenticated JSON request through the connection's client
+// and returns the response body, classifying non-200s via analyzeError. It is the
+// single seam every non-completion operation (model listing today; token
+// counting, embeddings, … later) flows through: auth (the client's round-tripper)
+// and error handling are applied uniformly, so an operation strategy only needs to
+// build the URL + extra headers and parse the body. extraHeaders are operation
+// specific (e.g. Vertex's X-Goog-User-Project); the auth header is added by the
+// round-tripper.
+func (c *ModelConnection) doJSON(ctx context.Context, method, rawURL string, extraHeaders http.Header) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, nil)
+	if err != nil {
+		return nil, &ModelError{Type: ErrorConnection, Message: fmt.Sprintf("failed to create request: %v", err)}
+	}
+	req.Header.Set("Accept", "application/json")
+	for k, vs := range extraHeaders {
+		for _, v := range vs {
+			req.Header.Set(k, v)
+		}
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, &ModelError{Type: ErrorConnection, Message: fmt.Sprintf("request failed: %v", err)}
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, &ModelError{Type: ErrorGeneric, Message: fmt.Sprintf("failed to read response: %v", err)}
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.analyzeError(resp.StatusCode, string(body))
+	}
+	return body, nil
+}
+
+// ---------------------------------------------------------------------------
+// Endpoint resolvers
+// ---------------------------------------------------------------------------
+
+// staticBaseEndpoints resolves "base URL + static chat path" endpoints, where the
+// model name rides in the request body and streaming reuses the chat URL. The
+// base is the user's endpoint (normalized) or, when empty, either a static
+// default or a derived base (baseURLFunc, used by Vertex's OpenAI-compat shim).
+type staticBaseEndpoints struct {
 	defaultBaseURL string
-	// baseURLFunc derives the base URL from the model config when the provider's
-	// endpoint is not a single static default but depends on per-model settings —
-	// Vertex AI builds its host and path from Project/Location. It is nil for
-	// every provider with a static defaultBaseURL; when set, the constructor uses
-	// it in place of defaultBaseURL but only when the user leaves Endpoint empty,
-	// so an explicit endpoint still overrides. See NewModelConnectionFromConfig.
-	baseURLFunc func(*config.ModelConfig) string
-	// chatURLFunc / streamURLFunc build the concrete (non-streaming / streaming)
-	// request URLs from the base URL and the model name, for providers whose
-	// endpoint embeds the model in the URL path rather than the request body —
-	// Vertex AI's native Gemini API uses /publishers/google/models/{MODEL}:generateContent
-	// and a distinct :streamGenerateContent?alt=sse streaming route. They are nil
-	// for every provider whose chat path is static (the model rides in the body);
-	// when set, the constructor uses them in place of spec.chatURL(base) and to
-	// populate ModelConnection.StreamURL. See NewModelConnectionFromConfig.
+	baseURLFunc    func(cfg *config.ModelConfig) string // optional; only when Endpoint is empty
+	chatPath       string
+}
+
+func (e staticBaseEndpoints) endpoints(cfg *config.ModelConfig) Endpoints {
+	base := normalizeBaseURL(cfg.Endpoint, e.defaultBaseURL, e.chatPath)
+	if e.baseURLFunc != nil && strings.TrimSpace(cfg.Endpoint) == "" {
+		base = e.baseURLFunc(cfg)
+	}
+	return Endpoints{ChatURL: appendPath(base, e.chatPath)}
+}
+
+// modelURLEndpoints resolves endpoints where the model name is embedded in the
+// URL PATH (Vertex's native Gemini and Claude routes) and the streaming action is
+// a distinct URL. The base is derived from project/location unless an explicit
+// endpoint overrides it.
+type modelURLEndpoints struct {
+	baseURLFunc   func(cfg *config.ModelConfig) string
 	chatURLFunc   func(base, model string) string
 	streamURLFunc func(base, model string) string
-	// chatPath and modelsPath are appended to the base URL to reach the
-	// chat-completions and model-listing endpoints.
-	chatPath   string
-	modelsPath string
-	// maxTokensLimit is the largest value the provider accepts for the
-	// max_tokens (output) parameter; requests above it are clamped. 0 means no
-	// known limit (don't clamp), which suits local servers.
-	maxTokensLimit int
-
-	// --- authentication policy (issue #30) ---
-
-	// authMode selects where the API key goes: an Authorization bearer token
-	// (default), an x-api-key header, an Azure api-key header, or a URL query
-	// parameter (authQueryParam).
-	authMode authMode
-	// authQueryParam is the URL query parameter that carries the key when
-	// authMode is authQuery (e.g. "key" for Gemini's native API).
-	authQueryParam string
-	// extraHeaders are static headers attached to every authenticated request,
-	// independent of the key itself: a version pin (Anthropic's
-	// anthropic-version) or attribution (OpenRouter's HTTP-Referer / X-Title).
-	extraHeaders map[string]string
-
-	// --- reasoning-model request capabilities (issue #31) ---
-
-	// reasoningTokenParam, when non-empty, is the JSON field used to cap output
-	// tokens for reasoning models instead of the default max_tokens. OpenAI's
-	// o-series and GPT-5 reject max_tokens and require max_completion_tokens;
-	// Z.AI keeps max_tokens, so it leaves this empty.
-	reasoningTokenParam string
-	// reasoningRejectsTemperature drops temperature/top_p from reasoning
-	// requests entirely. OpenAI reasoning models accept only the default
-	// temperature (o-series require exactly 1, GPT-5 rejects the field
-	// outright), so the safe encoding is to omit it.
-	reasoningRejectsTemperature bool
-	// supportsReasoningEffort / supportsThinking gate the reasoning_effort and
-	// thinking request parameters so they are emitted only where understood.
-	supportsReasoningEffort bool
-	supportsThinking        bool
-
-	// supportsResponseFormat gates the response_format request parameter (OpenAI
-	// structured outputs) and the strict-tool parallel_tool_calls invariant
-	// (issue #49). It is set for the OpenAI-compatible family; Anthropic, which
-	// has no response_format field, leaves it unset and relies on strict tools +
-	// tool_choice forcing for structured output.
-	supportsResponseFormat bool
 }
 
-var providerSpecs = map[APIType]providerSpec{
-	APITypeOpenAI: {
-		// Neutral local default; apps with their own default resolve it upstream
-		// (see config.DefaultEndpoint) and pass a full endpoint in.
-		defaultBaseURL: "http://localhost:8080/v1",
-		chatPath:       "/chat/completions",
-		modelsPath:     "/models",
-		authMode:       authBearer,
-		// OpenAI reasoning models (o-series, GPT-5) require max_completion_tokens
-		// and reject a custom temperature; they accept reasoning_effort but have
-		// no `thinking` toggle.
-		reasoningTokenParam:         "max_completion_tokens",
-		reasoningRejectsTemperature: true,
-		supportsReasoningEffort:     true,
-		supportsResponseFormat:      true,
-	},
-	APITypeZAI: {
-		defaultBaseURL: "https://api.z.ai/api/paas/v4",
-		chatPath:       "/chat/completions",
-		modelsPath:     "/models",
-		authMode:       authBearer,
-		// Z.AI rejects max_tokens outside [1, 131072] with a 400.
-		maxTokensLimit: 131072,
-		// GLM reasoning keeps max_tokens and accepts a temperature; it exposes
-		// both an explicit thinking toggle and reasoning_effort (GLM-5.2).
-		supportsReasoningEffort: true,
-		supportsThinking:        true,
-		supportsResponseFormat:  true,
-	},
-	APITypeAnthropic: {
-		defaultBaseURL: "https://api.anthropic.com",
-		chatPath:       "/v1/messages",
-		modelsPath:     "/v1/models",
-		// Anthropic authenticates with x-api-key and requires the version pin on
-		// every request.
-		authMode:     authXAPIKey,
-		extraHeaders: map[string]string{"anthropic-version": anthropicVersion},
-		// max_tokens is required by the Messages API and capped at the model's
-		// output limit; 0 here leaves the (always-set) request value untouched.
-		// Extended thinking and reasoning_effort are not wired through the
-		// Anthropic adapter yet, so leave their capability flags unset (the
-		// internal thinking/effort params would otherwise be emitted in the
-		// OpenAI shape, which Anthropic rejects). See follow-up below.
-	},
-	APITypeOpenRouter: {
-		defaultBaseURL: "https://openrouter.ai/api/v1",
-		chatPath:       "/chat/completions",
-		modelsPath:     "/models",
-		authMode:       authBearer,
-		extraHeaders: map[string]string{
-			"HTTP-Referer": openRouterReferer,
-			"X-Title":      openRouterTitle,
-		},
-		supportsResponseFormat: true,
-	},
-	APITypeVertex: {
-		// Vertex AI's OpenAI-compatible endpoint. The base URL is dynamic — built
-		// from the config's Project/Location by baseURLFunc — so defaultBaseURL is
-		// empty. The OpenAI-compat layer is preview-only and lives under v1beta1
-		// (folded into the base URL); chatPath reaches the chat-completions route.
-		// Auth is ADC (no API key). modelsPath is left empty: the compat endpoint
-		// does not expose a usable /models listing, so users name the model
-		// explicitly (e.g. "google/gemini-2.5-flash").
-		chatPath:    "/endpoints/openapi/chat/completions",
-		baseURLFunc: vertexOpenAIBaseURL,
-		authMode:    authADC,
-		// OpenAI-compatible capability surface: response_format (structured
-		// output) is supported; reasoning_effort / thinking are not exposed
-		// through the compat layer (those are native-Gemini features).
-		supportsResponseFormat: true,
-	},
-	APITypeVertexNative: {
-		// Vertex AI's native Gemini API. Like the compat mode the base URL is
-		// derived from Project/Location (baseURLFunc), but it uses v1 (GA) and the
-		// model name is part of the URL path, not the body — so chatURLFunc and
-		// streamURLFunc build the :generateContent / :streamGenerateContent?alt=sse
-		// routes instead of appending a static chatPath. chatPath is set to the
-		// native models route purely so ListModels reports "not supported" (a
-		// non-empty chatPath with an empty modelsPath) rather than probing a bad
-		// URL; native model listing is a documented limitation. Auth is ADC.
-		baseURLFunc:   vertexNativeBaseURL,
-		chatURLFunc:   vertexNativeChatURL,
-		streamURLFunc: vertexNativeStreamURL,
-		chatPath:      "/publishers/google/models",
-		authMode:      authADC,
-		// Native Gemini capability surface: structured output via responseSchema,
-		// and thinking via thinkingConfig (thought:true parts). reasoning_effort is
-		// not a Gemini concept (it uses thinkingConfig/thinkingBudget), and Gemini
-		// 2.5 "thinking" models accept temperature/top_p normally, so the reasoning
-		// temperature rejection stays off.
-		supportsResponseFormat:      true,
-		supportsThinking:            true,
-		supportsReasoningEffort:     false,
-		reasoningRejectsTemperature: false,
-	},
-	APITypeVertexAnthropic: {
-		// Anthropic Claude on Vertex AI. The base URL is derived from
-		// Project/Location (v1, GA — same as vertexNativeBaseURL), and like the
-		// native Gemini route the model name lives in the URL path, so chatURLFunc /
-		// streamURLFunc build the :rawPredict / :streamRawPredict routes
-		// (publishers/anthropic/...) instead of appending a static chatPath. chatPath
-		// is set to the anthropic models route purely so ListModels reports "not
-		// supported" (a non-empty chatPath with an empty modelsPath) rather than
-		// probing a bad URL. Auth is ADC; the anthropic-version is sent in the body
-		// (see anthropicAdapter), so no extraHeaders are attached here.
-		baseURLFunc:   vertexNativeBaseURL,
-		chatURLFunc:   vertexAnthropicChatURL,
-		streamURLFunc: vertexAnthropicStreamURL,
-		chatPath:      "/publishers/anthropic/models",
-		authMode:      authADC,
-		// Anthropic capability surface on Vertex: extended thinking is supported and
-		// emitted as adaptive thinking (see anthropicAdapter.buildBody). There is no
-		// response_format field (structured output goes through strict tools +
-		// tool_choice forcing), and reasoning_effort is not an Anthropic body
-		// parameter, so both stay off. reasoningRejectsTemperature is left off
-		// because the adapter omits sampling params for this provider unconditionally
-		// (modern Claude rejects temperature/top_p), not via the reasoning gate.
-		supportsThinking:        true,
-		supportsReasoningEffort: false,
-		supportsResponseFormat:  false,
-	},
-}
-
-// vertexAIHost returns the Vertex AI API host for a region. Every location is
-// reached through a regional host ("{location}-aiplatform.googleapis.com")
-// EXCEPT the special "global" location, which uses the unprefixed host
-// (aiplatform.googleapis.com) — though its URL path still carries
-// /locations/global/.
-func vertexAIHost(location string) string {
-	if location == "global" {
-		return "aiplatform.googleapis.com"
+func (e modelURLEndpoints) endpoints(cfg *config.ModelConfig) Endpoints {
+	base := strings.TrimRight(strings.TrimSpace(cfg.Endpoint), "/")
+	if base == "" {
+		base = e.baseURLFunc(cfg)
 	}
-	return location + "-aiplatform.googleapis.com"
-}
-
-// vertexOpenAIBaseURL builds the Vertex AI OpenAI-compatible base URL from a
-// model config's Project and Location:
-//
-//	https://{LOCATION}-aiplatform.googleapis.com/v1beta1/projects/{PROJECT}/locations/{LOCATION}
-//
-// (host prefix dropped for "global"; see vertexAIHost). The concrete chat path
-// (chatPath) is appended by chatURL. Location appears in both the host and the
-// path and must match.
-//
-// Location is lower-cased: GCP region IDs are canonically lowercase, so this
-// makes the "global" host special case (and the host/path generally) robust to a
-// user typing "Global" or "US-CENTRAL1" rather than silently building a bad host
-// like "Global-aiplatform.googleapis.com".
-func vertexOpenAIBaseURL(c *config.ModelConfig) string {
-	loc := strings.ToLower(strings.TrimSpace(c.Location))
-	return fmt.Sprintf("https://%s/v1beta1/projects/%s/locations/%s",
-		vertexAIHost(loc), strings.TrimSpace(c.Project), loc)
-}
-
-// vertexNativeBaseURL builds the Vertex AI NATIVE Gemini base URL from a model
-// config's Project and Location:
-//
-//	https://{LOCATION}-aiplatform.googleapis.com/v1/projects/{PROJECT}/locations/{LOCATION}
-//
-// It differs from vertexOpenAIBaseURL only in the API version — v1 (GA) for the
-// native API rather than v1beta1 for the OpenAI-compat shim. The model name is
-// NOT part of the base; it is interpolated into the path by vertexNativeChatURL /
-// vertexNativeStreamURL. Host prefix is dropped for "global" (see vertexAIHost);
-// Location is lower-cased so the host/path are robust to a mixed-case region.
-func vertexNativeBaseURL(c *config.ModelConfig) string {
-	loc := strings.ToLower(strings.TrimSpace(c.Location))
-	return fmt.Sprintf("https://%s/v1/projects/%s/locations/%s",
-		vertexAIHost(loc), strings.TrimSpace(c.Project), loc)
-}
-
-// vertexNativeChatURL builds the native non-streaming request URL, embedding the
-// model name in the path (Gemini's native API names the model in the URL, not the
-// body):
-//
-//	{base}/publishers/google/models/{MODEL}:generateContent
-func vertexNativeChatURL(base, model string) string {
-	return fmt.Sprintf("%s/publishers/google/models/%s:generateContent",
-		strings.TrimRight(strings.TrimSpace(base), "/"), strings.TrimSpace(model))
-}
-
-// vertexAnthropicChatURL builds the Claude-on-Vertex non-streaming request URL,
-// embedding the model name in the path (Vertex names the Anthropic model in the
-// URL, not the body):
-//
-//	{base}/publishers/anthropic/models/{MODEL}:rawPredict
-func vertexAnthropicChatURL(base, model string) string {
-	return fmt.Sprintf("%s/publishers/anthropic/models/%s:rawPredict",
-		strings.TrimRight(strings.TrimSpace(base), "/"), strings.TrimSpace(model))
-}
-
-// vertexAnthropicStreamURL builds the Claude-on-Vertex streaming request URL. It
-// targets the distinct :streamRawPredict action, which frames the response as
-// Anthropic's native server-sent events (the same message_start / content_block_*
-// / message_stop grammar the direct Messages API streams):
-//
-//	{base}/publishers/anthropic/models/{MODEL}:streamRawPredict
-//
-// Unlike the native Gemini stream route, no ?alt=sse is needed — :streamRawPredict
-// already streams SSE. The request body still carries "stream":true.
-func vertexAnthropicStreamURL(base, model string) string {
-	return fmt.Sprintf("%s/publishers/anthropic/models/%s:streamRawPredict",
-		strings.TrimRight(strings.TrimSpace(base), "/"), strings.TrimSpace(model))
-}
-
-// vertexNativeStreamURL builds the native streaming request URL. It targets the
-// distinct :streamGenerateContent action and appends ?alt=sse so the response is
-// framed as server-sent events (without it Vertex streams a JSON array instead):
-//
-//	{base}/publishers/google/models/{MODEL}:streamGenerateContent?alt=sse
-func vertexNativeStreamURL(base, model string) string {
-	return fmt.Sprintf("%s/publishers/google/models/%s:streamGenerateContent?alt=sse",
-		strings.TrimRight(strings.TrimSpace(base), "/"), strings.TrimSpace(model))
-}
-
-// specFor returns the providerSpec for an APIType, falling back to OpenAI.
-func specFor(t APIType) providerSpec {
-	if s, ok := providerSpecs[t]; ok {
-		return s
-	}
-	return providerSpecs[APITypeOpenAI]
-}
-
-// APITypeIDs lists the selectable api_type values in display order (first is the
-// default). Config UIs use this to populate an API-type dropdown.
-func APITypeIDs() []string {
-	return []string{
-		string(APITypeOpenAI),
-		string(APITypeZAI),
-		string(APITypeAnthropic),
-		string(APITypeOpenRouter),
-		string(APITypeVertex),
-		string(APITypeVertexNative),
-		string(APITypeVertexAnthropic),
+	return Endpoints{
+		ChatURL:   e.chatURLFunc(base, cfg.Model),
+		StreamURL: e.streamURLFunc(base, cfg.Model),
 	}
 }
 
-// authHeaders returns the request headers that authenticate apiKey to this
-// provider, merged with any static extraHeaders (version pins, attribution). For
-// query-parameter auth the key rides in the URL (see authQueryParam), so only
-// the extra headers are returned. An empty key yields just the extra headers.
-func (s providerSpec) authHeaders(apiKey string) http.Header {
+// ---------------------------------------------------------------------------
+// Auth schemes
+// ---------------------------------------------------------------------------
+
+// authMode selects where a key-based scheme puts the API key.
+type authMode string
+
+const (
+	authBearer   authMode = "bearer"    // Authorization: Bearer <key>
+	authXAPIKey  authMode = "x-api-key" // x-api-key: <key> (Anthropic)
+	authAzureKey authMode = "azure"     // api-key: <key> (Azure OpenAI)
+	authQuery    authMode = "query"     // ?<param>=<key> (Gemini-style)
+)
+
+// keyAuth is the API-key auth scheme: it presents cfg.APIKey per authMode and
+// attaches any static extraHeaders (version pins, attribution). With no key it
+// returns nil so the shared transport is used directly (a local server needing no
+// auth still works).
+type keyAuth struct {
+	mode         authMode
+	queryParam   string            // when mode == authQuery
+	extraHeaders map[string]string // static headers (anthropic-version, attribution)
+}
+
+func (a keyAuth) headers(apiKey string) http.Header {
 	h := http.Header{}
-	for k, v := range s.extraHeaders {
+	for k, v := range a.extraHeaders {
 		h.Set(k, v)
 	}
 	if apiKey == "" {
 		return h
 	}
-	switch s.authMode {
+	switch a.mode {
 	case authXAPIKey:
 		h.Set("x-api-key", apiKey)
 	case authAzureKey:
@@ -464,34 +346,61 @@ func (s providerSpec) authHeaders(apiKey string) http.Header {
 	return h
 }
 
-// authQuery returns the URL query parameter name carrying the API key, or ""
-// when this provider authenticates via headers instead.
-func (s providerSpec) authQuery() string {
-	if s.authMode == authQuery {
-		return s.authQueryParam
+func (a keyAuth) query() string {
+	if a.mode == authQuery {
+		return a.queryParam
 	}
 	return ""
 }
 
-// normalizeBaseURL reduces whatever the user put in the config endpoint to a
-// bare base URL: an empty value falls back to the provider default, a full
-// chat-completions URL is trimmed back to its base, and trailing slashes are
-// dropped. This is what lets a user supply just a base URL and have the rest
-// filled in automatically.
-func normalizeBaseURL(endpoint string, spec providerSpec) string {
+func (a keyAuth) roundTripper(cfg *config.ModelConfig) http.RoundTripper {
+	// With static extra headers but no key (e.g. OpenRouter attribution on a
+	// free tier), still attach them; with neither, use the shared transport.
+	if cfg.APIKey == "" && len(a.extraHeaders) == 0 {
+		return nil
+	}
+	return &APIKeyRoundTripper{
+		apiKey:     cfg.APIKey,
+		headers:    a.headers(cfg.APIKey),
+		queryParam: a.query(),
+		transport:  sharedHTTPTransport,
+	}
+}
+
+// adcAuth authenticates with Google Application Default Credentials: a bearer
+// token minted (and auto-refreshed) per request by ADCRoundTripper. No API key.
+// The token source is resolved lazily on first use so construction never fails;
+// an ADC-misconfiguration error surfaces on the first request instead.
+type adcAuth struct{}
+
+func (adcAuth) roundTripper(cfg *config.ModelConfig) http.RoundTripper {
+	return &ADCRoundTripper{
+		tokenSource: &lazyTokenSource{newTS: func() (oauth2.TokenSource, error) {
+			return adcTokenSourceFunc(context.Background(), adcScope)
+		}},
+		transport: sharedHTTPTransport,
+	}
+}
+
+// ---------------------------------------------------------------------------
+// URL helpers (shared by resolvers and listers)
+// ---------------------------------------------------------------------------
+
+// normalizeBaseURL reduces a user-supplied endpoint to a bare base URL: empty
+// falls back to defaultBaseURL, a full chat URL is trimmed back to its base, and
+// trailing slashes are dropped.
+func normalizeBaseURL(endpoint, defaultBaseURL, chatPath string) string {
 	e := strings.TrimSpace(endpoint)
 	if e == "" {
-		e = spec.defaultBaseURL
+		e = defaultBaseURL
 	}
-	return stripChatPath(e, spec.chatPath)
+	return stripChatPath(e, chatPath)
 }
 
 // stripChatPath reduces a URL to its provider base by removing a trailing chat
 // path from the URL's *path component* and dropping trailing slashes, while
-// preserving any query string. Parsing with net/url (rather than raw string
-// surgery on the whole URL) keeps this correct when the endpoint carries a
-// query — e.g. Azure's ?api-version= — or a layout where the chat path is not
-// the literal tail of the string.
+// preserving any query string (e.g. Azure's ?api-version=). Parsing with net/url
+// keeps this correct when the endpoint carries a query.
 func stripChatPath(raw, chatPath string) string {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
@@ -504,15 +413,8 @@ func stripChatPath(raw, chatPath string) string {
 	return u.String()
 }
 
-// chatURL and modelsURL build the concrete endpoints for a base URL, inserting
-// the provider path before any query string so an Azure-style ?api-version= (or
-// other carried query) survives onto the derived endpoint.
-func (s providerSpec) chatURL(base string) string   { return appendPath(base, s.chatPath) }
-func (s providerSpec) modelsURL(base string) string { return appendPath(base, s.modelsPath) }
-
 // appendPath joins a provider path onto a base URL's path component, keeping any
-// query string intact (base + "?q" + "/path" must become ".../path?q", not
-// "...?q/path"). Falls back to plain concatenation if base is unparseable.
+// query string intact (base + "?q" + "/path" must become ".../path?q").
 func appendPath(base, path string) string {
 	u, err := url.Parse(base)
 	if err != nil {
@@ -520,4 +422,45 @@ func appendPath(base, path string) string {
 	}
 	u.Path = strings.TrimRight(u.Path, "/") + path
 	return u.String()
+}
+
+// ---------------------------------------------------------------------------
+// OpenAI listing convention (shared by OpenAI-compatible providers + Anthropic)
+// ---------------------------------------------------------------------------
+
+// openAILister lists models via the OpenAI/OpenRouter "GET <base>/models"
+// convention, parsing {"data":[...]}, {"models":[...]}, or a bare array. It is
+// reused by every provider whose backend exposes that endpoint (OpenAI, Z.AI,
+// OpenRouter, and Anthropic, whose /v1/models returns the same {data:[...]} shape).
+// The models URL is derived from the connection's already-resolved chat URL by
+// stripping chatPath, so it works for hand-built connections that set only a URL
+// (no Config) and preserves any carried query string (Azure's ?api-version=).
+type openAILister struct {
+	chatPath   string
+	modelsPath string
+}
+
+func (l openAILister) list(ctx context.Context, c *ModelConnection) ([]ModelInfo, error) {
+	base := stripChatPath(c.URL, l.chatPath)
+	body, err := c.doJSON(ctx, http.MethodGet, appendPath(base, l.modelsPath), nil)
+	if err != nil {
+		return nil, err
+	}
+	var wrapped struct {
+		Data   []ModelInfo `json:"data"`
+		Models []ModelInfo `json:"models"`
+	}
+	if err := json.Unmarshal(body, &wrapped); err == nil {
+		if len(wrapped.Data) > 0 {
+			return wrapped.Data, nil
+		}
+		if len(wrapped.Models) > 0 {
+			return wrapped.Models, nil
+		}
+	}
+	var bare []ModelInfo
+	if err := json.Unmarshal(body, &bare); err == nil && len(bare) > 0 {
+		return bare, nil
+	}
+	return nil, &ModelError{Type: ErrorGeneric, Message: "no models found in response"}
 }
