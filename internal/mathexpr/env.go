@@ -86,6 +86,13 @@ func mathEnv() map[string]interface{} {
 		}
 	}
 
+	// --- Min / max (variadic) ---
+	// expr ships min/max builtins, but — like abs/floor/ceil/round above — we
+	// register explicit float64 versions so the semantics are pinned, documented
+	// and panic-free (an empty call errors rather than indexing an empty slice).
+	env["min"] = minOf
+	env["max"] = maxOf
+
 	// --- Combinatorics / integer math ---
 	env["fact"] = factorial
 	env["factorial"] = factorial
@@ -93,6 +100,7 @@ func mathEnv() map[string]interface{} {
 	env["lcm"] = lcm
 
 	// --- Simple statistics (variadic over the call arguments) ---
+	env["sum"] = sum
 	env["mean"] = mean
 	env["median"] = median
 
@@ -207,6 +215,46 @@ func gcdInt(a, b int64) int64 {
 		a, b = b, a%b
 	}
 	return a
+}
+
+// minOf returns the smallest of its arguments. A NaN argument is ignored unless
+// it is the only value seen so far. minOf() with no arguments is an error.
+func minOf(xs ...float64) (float64, error) {
+	if len(xs) == 0 {
+		return 0, fmt.Errorf("min: requires at least one argument")
+	}
+	m := xs[0]
+	for _, x := range xs[1:] {
+		if x < m {
+			m = x
+		}
+	}
+	return m, nil
+}
+
+// maxOf returns the largest of its arguments. maxOf() with no arguments is an
+// error.
+func maxOf(xs ...float64) (float64, error) {
+	if len(xs) == 0 {
+		return 0, fmt.Errorf("max: requires at least one argument")
+	}
+	m := xs[0]
+	for _, x := range xs[1:] {
+		if x > m {
+			m = x
+		}
+	}
+	return m, nil
+}
+
+// sum returns the total of its arguments. sum() with no arguments is 0, the
+// natural identity, so it never errors.
+func sum(xs ...float64) float64 {
+	var total float64
+	for _, x := range xs {
+		total += x
+	}
+	return total
 }
 
 // mean returns the arithmetic mean of its arguments. mean() with no arguments is

@@ -669,7 +669,7 @@ apply_patch:
   input: {"type": "object", "properties": {"patch": {"type": "string"}}}
 
 calc:
-  	description: Evaluate a math expression and get the exact result. Operators + - * /, power (** or ^), unary minus, parentheses; % is integer modulo only (use mod(x,y) for non-integers); a comparison is only valid inside a ternary (a>b ? a : b). Functions sqrt cbrt pow exp log log2 log10 sin cos tan asin acos atan atan2 (radians) deg rad sinh cosh tanh abs floor ceil round trunc sign mod min max factorial (also postfix n!) gcd lcm mean median. Constants pi e tau phi sqrt2 c G g h hbar k Na R sigma epsilon0 mu0 echarge me mp. Integers print cleanly (2+2 -> 4); fractionals keep full precision.
+  	description: Evaluate a math expression and get the exact result. Operators + - * /, power (** or ^), unary minus, parentheses; % is integer modulo only (use mod(x,y) for non-integers); a comparison is only valid inside a ternary (a>b ? a : b). Functions sqrt cbrt pow exp log log2 log10 sin cos tan asin acos atan atan2 (radians) deg rad sinh cosh tanh abs floor ceil round trunc sign mod min max factorial (also postfix n!) gcd lcm sum mean median. Constants pi e tau phi sqrt2 c G g h hbar k Na R sigma epsilon0 mu0 echarge me mp. Integers print cleanly (2+2 -> 4); fractionals keep full precision.
   	input: {"type": "object", "properties": {"expression": {"type": "string"}}}
 
   	shell:
