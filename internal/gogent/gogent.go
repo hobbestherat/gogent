@@ -331,9 +331,9 @@ func (g *Gogent) initializeToolRegistry() {
 			"type": "object",
 			"properties": map[string]interface{}{
 				"path":       map[string]interface{}{"type": "string", "description": "File path to read, relative to the workspace root or absolute."},
-				"offset":     map[string]interface{}{"type": "integer", "minimum": 1, "description": "1-based line number to start reading from. Omit for the default of 1; a value below 1 is treated as 1. Set it to a previous read's next_offset to page through a large file."},
-				"limit":      map[string]interface{}{"type": "integer", "minimum": 1, "description": "Maximum number of lines to return. Omit (or pass 0) for the default of 2000. The read is also bounded by max_length, whichever limit is reached first."},
-				"max_length": map[string]interface{}{"type": "integer", "minimum": 1, "description": "Maximum number of characters of content to return. Omit (or pass 0) for the default of 102400. The slice is cut on a character (UTF-8 rune) boundary; raise it to pull more of a dense file in one call."},
+				"offset":     map[string]interface{}{"type": "integer", "description": "1-based line number to start reading from. Omit (or pass 0) for the default of 1; a value below 1 is treated as 1. Set it to a previous read's next_offset to page through a large file."},
+				"limit":      map[string]interface{}{"type": "integer", "description": "Maximum number of lines to return. Omit (or pass 0) for the default of 2000. The read is also bounded by max_length, whichever limit is reached first."},
+				"max_length": map[string]interface{}{"type": "integer", "description": "Maximum number of characters of content to return. Omit (or pass 0) for the default of 102400. The slice is cut on a character (UTF-8 rune) boundary; raise it to pull more of a dense file in one call."},
 			},
 			"required": []string{"path"},
 		},

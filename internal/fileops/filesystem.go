@@ -650,7 +650,7 @@ func BoundContent(content string, offset, limit, maxLength int) ReadRangeResult 
 	shownEnd := startLine + linesShown // 0-based line after the last whole line shown
 	res.Truncated = offset > 1 || shownEnd < totalLines || maxTruncated
 	if shownEnd < totalLines || (maxTruncated && linesShown == 0) {
-		// More remains. When the byte cap cut the very first line (linesShown == 0),
+		// More remains. When the character cap cut the very first line (linesShown == 0),
 		// resume at the same line — the model must raise max_length to make progress.
 		res.NextOffset = offset + linesShown
 		if res.NextOffset < 1 {
@@ -662,8 +662,8 @@ func BoundContent(content string, offset, limit, maxLength int) ReadRangeResult 
 
 // ReadRange reads a file and returns a bounded view of it (issue #352): the whole
 // file is read into memory (cheap; the same as Read) and then sliced by
-// BoundContent to the given 1-based line range and byte cap. See BoundContent for
-// the offset/limit/maxLength semantics and the Authorization note on Read.
+// BoundContent to the given 1-based line range and character cap. See BoundContent
+// for the offset/limit/maxLength semantics and the Authorization note on Read.
 func (fsys *FileSystem) ReadRange(path string, offset, limit, maxLength int, auth Authorization) (*ReadRangeResult, error) {
 	content, err := fsys.ReadFile(path, auth)
 	if err != nil {
