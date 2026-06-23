@@ -427,22 +427,31 @@ func (tr *ToolRegistry) ExecuteToolCall(toolCall *ToolCall, ctx ToolContext) (re
 	name := toolCall.Tool
 	tool := tr.tools[name]
 	if tool == nil {
-		resolved, candidates := tr.resolveMCPBareName(name)
-		switch {
-		case len(candidates) > 1:
-			return &ToolCallResponse{
-				Success: false,
-				Error: fmt.Sprintf("unknown tool: %s (ambiguous MCP bare name; candidates: %s)",
-					name, strings.Join(candidates, ", ")),
-			}, nil
-		case resolved == "":
+		// Bare-name fallback is scoped to the JSON-text tool-call path (models
+		// without native tool-calling), which is exactly the path that carries no
+		// CallID — native calls always have one and are already constrained to the
+		// advertised namespaced name. Gating on CallID keeps native tool-calling
+		// semantics byte-identical: a native call with an unknown bare name still
+		// errors rather than silently routing to a same-suffix MCP tool (issue #360).
+		if toolCall.CallID == "" {
+			resolved, candidates := tr.resolveMCPBareName(name)
+			if len(candidates) > 1 {
+				return &ToolCallResponse{
+					Success: false,
+					Error: fmt.Sprintf("unknown tool: %s (ambiguous MCP bare name; candidates: %s)",
+						name, strings.Join(candidates, ", ")),
+				}, nil
+			}
+			if resolved != "" {
+				name = resolved
+				tool = tr.tools[name]
+			}
+		}
+		if tool == nil {
 			return &ToolCallResponse{
 				Success: false,
 				Error:   fmt.Sprintf("unknown tool: %s", name),
 			}, nil
-		default:
-			name = resolved
-			tool = tr.tools[name]
 		}
 	}
 
