@@ -1068,20 +1068,33 @@ func buildRootHandler(g *gogent.Gogent, apiServer *server.Server) http.Handler {
 	return root
 }
 
-func startHTTPServer(host string, port int, g *gogent.Gogent, apiServer *server.Server, password string) {
-	// A non-loopback host requires a password or token so the instance is not
-	// exposed on the network without an identity gate. Loopback binds need none.
+// tcpListener validates and binds the HTTP API's TCP listener. It enforces the
+// same rule as the embedded server — a non-loopback host requires a password or
+// token — and returns an error (rather than binding) when that is unmet or the
+// bind itself fails. Returning the error lets the daemon surface an explicitly
+// requested --tcp transport that could not be brought up, instead of silently
+// reporting success on the Unix socket alone.
+func tcpListener(host string, port int, password string) (net.Listener, error) {
 	if !isLoopbackHost(host) && password == "" && os.Getenv("GOGENT_HTTP_TOKEN") == "" {
-		fmt.Printf("Refusing to bind HTTP server to non-loopback host %q without a password or token.\n", host)
-		fmt.Println("Set --http-password (or GOGENT_HTTP_PASSWORD / GOGENT_HTTP_TOKEN) to authorize it.")
+		return nil, fmt.Errorf("refusing to bind HTTP server to non-loopback host %q without a password or token (set --http-password / GOGENT_HTTP_PASSWORD / GOGENT_HTTP_TOKEN)", host)
+	}
+	addr := fmt.Sprintf("%s:%d", host, port)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen tcp %s: %w", addr, err)
+	}
+	return ln, nil
+}
+
+func startHTTPServer(host string, port int, g *gogent.Gogent, apiServer *server.Server, password string) {
+	ln, err := tcpListener(host, port, password)
+	if err != nil {
+		fmt.Printf("HTTP server not started: %v\n", err)
 		return
 	}
 
-	root := buildRootHandler(g, apiServer)
-
 	srv := &http.Server{
-		Addr:              fmt.Sprintf("%s:%d", host, port),
-		Handler:           root,
+		Handler:           buildRootHandler(g, apiServer),
 		ReadHeaderTimeout: httpReadHeaderTimeout,
 		ReadTimeout:       httpReadTimeout,
 		IdleTimeout:       httpIdleTimeout,
@@ -1095,7 +1108,7 @@ func startHTTPServer(host string, port int, g *gogent.Gogent, apiServer *server.
 	fmt.Println("  GET  /status  - Tool logs + stats  [legacy; prefer GET /api/sessions/:id/stats]")
 	fmt.Println("  POST /exit    - Exit server (local-only, or X-Gogent-Token)")
 
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		log.Printf("HTTP server error: %v", err)
 	}
 }

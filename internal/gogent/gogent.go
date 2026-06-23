@@ -2090,6 +2090,16 @@ When you have completed the task or need to provide a final answer, use:
 `
 }
 
+// SyncStore flushes any pending debounced session writes to disk (fsync). It is
+// called on graceful shutdown — notably by the daemon (issue #358) before it
+// exits — so dirty transcript deltas survive even when no later start re-saves
+// them. It is a no-op when no session store is configured.
+func (g *Gogent) SyncStore() {
+	if g.store != nil {
+		g.store.Sync()
+	}
+}
+
 // SessionIDs returns the ids of every live in-memory session.
 func (g *Gogent) SessionIDs() []string {
 	g.mu.RLock()

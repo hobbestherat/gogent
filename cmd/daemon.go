@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -123,9 +124,11 @@ func daemonStart(args []string) int {
 		return 1
 	}
 
-	// Wait briefly for the child to bind its socket so we can confirm liveness
-	// (and surface an early crash) before returning success.
-	if !waitRunning(p, 5*time.Second) {
+	// Wait for the child to come up (bind its socket and start serving /health)
+	// so we can confirm liveness — and surface an early crash, e.g. a --tcp bind
+	// failure — before returning success. The window covers RestoreSessions, so
+	// give it generous headroom.
+	if !waitRunning(p, 10*time.Second) {
 		fmt.Fprintf(os.Stderr, "daemon start: spawned pid %d but it did not become ready; see %s\n", pid, p.Log)
 		return 1
 	}
@@ -234,6 +237,35 @@ func runDaemonForeground(p daemon.Paths, opts daemonStartOpts) error {
 		return fmt.Errorf("resolve home directory: %w", err)
 	}
 
+	// Acquire the single-instance lock and bind the listeners BEFORE building the
+	// core. daemon.Listen takes the exclusive flock, so a losing concurrent start
+	// fails right here — without running buildDaemonCore/RestoreSessions or
+	// touching any session state before ownership is established (issue #358).
+	ln, err := daemon.Listen(p.Sock)
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
+	addr := "unix://" + p.Sock
+	if err := daemon.Acquire(p, addr); err != nil {
+		_ = ln.Close()
+		return fmt.Errorf("acquire lifecycle: %w", err)
+	}
+
+	// When --tcp is requested, bind the TCP listener now (synchronously) so a
+	// failure — port in use, or a non-loopback host without auth — fails the
+	// whole start instead of being swallowed in a goroutine while we report
+	// success on the Unix socket alone.
+	var tcpLn net.Listener
+	if opts.tcp {
+		tcpLn, err = tcpListener(opts.httpHost, opts.httpPort, resolveHTTPPassword(opts.password))
+		if err != nil {
+			_ = ln.Close()
+			_ = daemon.Release(p)
+			return fmt.Errorf("tcp transport: %w", err)
+		}
+	}
+	fmt.Printf("daemon listening on %s (pid %d)\n", addr, os.Getpid())
+
 	g := buildDaemonCore(homeDir, opts)
 
 	// The daemon is headless, so the API bridge is the only prompter/reviewer: a
@@ -245,19 +277,6 @@ func runDaemonForeground(p daemon.Paths, opts daemonStartOpts) error {
 	})
 	apiServer.InstallApprovalGates()
 	root := buildRootHandler(g, apiServer)
-
-	// Unix socket is the default local transport. Listen first so a double-start
-	// fails fast (ErrAlreadyRunning) before we touch the pidfile or core state.
-	ln, err := daemon.Listen(p.Sock)
-	if err != nil {
-		return fmt.Errorf("listen: %w", err)
-	}
-	addr := "unix://" + p.Sock
-	if err := daemon.Acquire(p, addr); err != nil {
-		_ = ln.Close()
-		return fmt.Errorf("acquire lifecycle: %w", err)
-	}
-	fmt.Printf("daemon listening on %s (pid %d)\n", addr, os.Getpid())
 
 	unixSrv := &http.Server{
 		Handler:           root,
@@ -271,13 +290,20 @@ func runDaemonForeground(p daemon.Paths, opts daemonStartOpts) error {
 		}
 	}()
 
-	// Optionally also expose the TCP API for curl/remote clients. Off by default
-	// so the daemon does not silently contend for a TCP port (e.g. an embedded
-	// gogent's 8080); --tcp makes the extra surface explicit and its bind result
-	// is logged to the daemon log. The Unix socket remains the primary transport
-	// and the readiness signal.
-	if opts.tcp {
-		go startHTTPServer(opts.httpHost, opts.httpPort, g, apiServer, resolveHTTPPassword(opts.password))
+	var tcpSrv *http.Server
+	if tcpLn != nil {
+		tcpSrv = &http.Server{
+			Handler:           root,
+			ReadHeaderTimeout: httpReadHeaderTimeout,
+			ReadTimeout:       httpReadTimeout,
+			IdleTimeout:       httpIdleTimeout,
+		}
+		fmt.Printf("daemon TCP API on http://%s:%d\n", opts.httpHost, opts.httpPort)
+		go func() {
+			if err := tcpSrv.Serve(tcpLn); err != nil && err != http.ErrServerClosed {
+				log.Printf("daemon tcp server error: %v", err)
+			}
+		}()
 	}
 
 	// Connect MCP servers and start free-running watchers, mirroring the headless
@@ -296,10 +322,15 @@ func runDaemonForeground(p daemon.Paths, opts daemonStartOpts) error {
 	}
 
 	// Graceful shutdown: stop watchers (which may use MCP) before releasing MCP,
-	// then close the listeners and reclaim the lifecycle files.
+	// flush dirty session writes to disk, then close the listeners and reclaim
+	// the lifecycle files (issue #358 shutdown sequence).
 	g.StopWatchers()
 	g.CloseMCPServers()
+	g.SyncStore()
 	_ = unixSrv.Close()
+	if tcpSrv != nil {
+		_ = tcpSrv.Close()
+	}
 	if err := daemon.Release(p); err != nil {
 		log.Printf("daemon: release lifecycle: %v", err)
 	}
