@@ -2627,14 +2627,25 @@ func (s *UserSession) InteractiveAgentStatus(agentID string) (AgentStatus, strin
 	s.mu.RLock()
 	ia := s.interactive[agentID]
 	ba := s.background[agentID]
+	root := s.RootAgent
 	s.mu.RUnlock()
 	if ia != nil {
 		return ia.agent.GetStatus(), ia.agent.GetResult(), nil
 	}
-	// An async (spawn_subagent{async:true}) handle is queryable the same way, so the
-	// model can poll a specific background agent via agent_status (issue #353).
+	// An async (spawn_subagent{async:true}) handle is queryable the same way while the
+	// worker runs (issue #353).
 	if ba != nil {
 		return ba.agent.GetStatus(), ba.agent.GetResult(), nil
+	}
+	// A finished async worker is dropped from the background map but stays in the
+	// agent tree, so resolve a completed/failed handle there: the symbolic-future
+	// handle remains queryable for its terminal status and result after completion,
+	// matching the MCP-task-handle semantics the design cites, rather than going
+	// NotFound the instant the work lands (issue #353).
+	if root != nil {
+		if a := root.GetAgentByID(agentID); a != nil {
+			return a.GetStatus(), a.GetResult(), nil
+		}
 	}
 	return "", "", &NotFoundError{ID: agentID}
 }
@@ -2656,13 +2667,33 @@ func (s *UserSession) ListInteractiveAgents() []string {
 // the work aborts immediately instead of running to the request timeout.
 func (s *UserSession) StopAgent(agentID string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	agent := s.RootAgent.GetAgentByID(agentID)
 	if agent == nil {
+		s.mu.Unlock()
 		return &NotFoundError{ID: agentID}
 	}
+	// Snapshot any async (background) workers within the stopped agent's subtree.
+	// Unlike blocking sub-agents — whose loops inherit the parent's context and so are
+	// cancelled transitively by agent.Cancel below — background workers run on a
+	// session-scoped context (they outlive a single turn by design), so cancelling
+	// only the target would leave them running after a user-visible /stop. Closing
+	// their done channel cancels the worker even before it reaches runLoop, and
+	// cancelling the worker's own agent aborts its in-flight model round-trip (issue
+	// #353, cancellation criterion). GetAgentByID scopes this to the target's subtree,
+	// so StopAgent("root") stops every background worker while StopAgent on a specific
+	// handle stops just that one.
+	var workers []*BackgroundAgent
+	for _, ba := range s.background {
+		if agent.GetAgentByID(ba.agent.ID) != nil {
+			workers = append(workers, ba)
+		}
+	}
+	s.mu.Unlock()
 
+	for _, ba := range workers {
+		ba.once.Do(func() { close(ba.done) })
+		ba.agent.Cancel()
+	}
 	agent.Cancel()
 	agent.SetState(StateIdle)
 	return nil
