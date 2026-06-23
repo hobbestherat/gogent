@@ -52,6 +52,19 @@ type Tool struct {
 	// the safe choice. It is the property the parallel tool-call fast-path keys on
 	// (issue #50).
 	ReadOnly bool
+	// Strict opts a tool into strict tool-use: its advertised schema is marked
+	// strict on providers that enforce it (OpenAI structured outputs /
+	// constrained decoding), so the model's arguments are guaranteed to validate
+	// against InputSchema rather than merely prompted to — eliminating
+	// type-coercion errors ("2" vs 2) and validate-and-retry rounds (issue #359).
+	// It is opt-in and defaults false (the prior all-non-strict behavior). Only
+	// set it for tools whose schema is in the supported subset: a closed object
+	// (additionalProperties:false), no union-typed properties, no recursive $ref.
+	// It is NOT derived from ReadOnly: a read-only tool with a union-typed schema
+	// (e.g. spawn_subagent) must stay non-strict, since a strict tool forces
+	// parallel_tool_calls:false on OpenAI-compatible providers and would suppress
+	// batched spawns (issue #282, see toolDefsFromRegistry).
+	Strict bool
 	// InputExamples are optional, schema-conformant example argument objects for
 	// format-sensitive tools (Anthropic's input_examples guidance, issue #361).
 	// They are prompt-level documentation: surfaced verbatim in the
@@ -645,6 +658,7 @@ func (tr *ToolRegistry) RegisterCalcTool() {
 			"Integer results print cleanly (2+2 -> 4); fractionals keep full precision (1/3 -> 0.3333333333333333). " +
 			`Examples: {"expression":"sqrt(2)"}, {"expression":"sin(pi/2)"}, {"expression":"factorial(5)"}, {"expression":"G*5.97e24/(6.371e6)^2"}.`,
 		ReadOnly: true,
+		Strict:   true,
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -653,7 +667,8 @@ func (tr *ToolRegistry) RegisterCalcTool() {
 					"description": "Math expression, e.g. \"2**10\", \"sqrt(2)\", \"sin(pi/2)\", \"log(e)\", \"factorial(5)\", \"G*5.97e24/(6.371e6)^2\".",
 				},
 			},
-			"required": []string{"expression"},
+			"required":             []string{"expression"},
+			"additionalProperties": false,
 		},
 		Execute: func(args map[string]interface{}, ctx ToolContext) (interface{}, error) {
 			expression, ok := args["expression"].(string)

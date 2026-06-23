@@ -30,6 +30,7 @@ func (tr *ToolRegistry) RegisterGitTool() {
 			"log (recent commits), commit (record staged changes; stage paths first, or all=true " +
 			"to stage tracked modifications), create_branch (create and switch to a branch), " +
 			"restore (discard working-tree changes for the given paths — destructive).",
+		Strict: true,
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -49,7 +50,8 @@ func (tr *ToolRegistry) RegisterGitTool() {
 				"all":       map[string]interface{}{"type": "boolean", "description": "commit: stage all tracked modified files before committing."},
 				"max_count": map[string]interface{}{"type": "integer", "description": "log: number of commits to show (default 20)."},
 			},
-			"required": []string{"operation"},
+			"required":             []string{"operation"},
+			"additionalProperties": false,
 		},
 		Execute: func(args map[string]interface{}, ctx ToolContext) (interface{}, error) {
 			op, ok := args["operation"].(string)

@@ -38,9 +38,11 @@ func (tr *ToolRegistry) RegisterDiagnosticsTool(cmd []string, warningPattern str
 			"running the compiler through the shell: the command is fixed (no shell " +
 			"quoting), output is parsed into actionable diagnostics, and an ok result " +
 			"means the project builds. Call it after edits to catch breakage early.",
+		Strict: true,
 		InputSchema: map[string]interface{}{
-			"type":       "object",
-			"properties": map[string]interface{}{},
+			"type":                 "object",
+			"properties":           map[string]interface{}{},
+			"additionalProperties": false,
 		},
 		Execute: func(args map[string]interface{}, ctx ToolContext) (interface{}, error) {
 			// Gate the run through a dedicated action so an "always" grant scopes
