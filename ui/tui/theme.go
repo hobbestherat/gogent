@@ -167,6 +167,24 @@ func newSelect(desktop *tv.Desktop, options []string, bounds tv.Rect) *tv.Select
 	return s
 }
 
+// newColorPicker constructs a turbotui ColorPicker (issue #366) and seeds its
+// popup drop shadow from the active NoShadow preference (issue #215), mirroring
+// newSelect/newButton. The theme editor builds its per-role swatch pickers
+// through this wrapper so the shadow toggle reaches the picker popup like every
+// other chrome surface, and a live theme switch recolours it: the open popup
+// reads tv.DefaultTheme's Dialog*/Selection* slots at draw time, so it needs no
+// per-role colour vars of its own. The closed-swatch FG/BG are seeded from the
+// dialog roles for tidiness, but the theme editor overrides the picker's DrawFn
+// to render gogent's live field-driven swatch (swatchStyle), so they are only a
+// fallback for the closed control's chrome.
+func newColorPicker(desktop *tv.Desktop, bounds tv.Rect) *tv.ColorPicker {
+	p := tv.NewColorPicker(desktop, bounds)
+	p.FG, p.BG = tv.DefaultTheme.DialogFG, tv.DefaultTheme.DialogBG
+	p.FocusFG, p.FocusBG = tv.DefaultTheme.SelectionFG, tv.DefaultTheme.SelectionBG
+	p.Shadow = shadowsEnabled
+	return p
+}
+
 // ColorLevel describes the colour fidelity of the output terminal. A resolved
 // Theme is degraded to its level so a truecolor palette still renders sensibly
 // on a 256- or 16-colour terminal, and not at all when colour is disabled.
