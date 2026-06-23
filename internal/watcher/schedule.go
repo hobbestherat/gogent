@@ -51,10 +51,17 @@ func (s IntervalSchedule) Next(now time.Time) time.Time {
 }
 
 // DailySchedule fires once per day at Hour:Min in Loc. The next fire is today's
-// Hour:Min if it is still strictly in the future, otherwise tomorrow's. DST
-// transitions are handled correctly because the target instant is constructed
-// with time.Date in Loc, which resolves wall-clock time to the right absolute
-// instant for the location on that day.
+// Hour:Min if it is still strictly in the future, otherwise tomorrow's.
+//
+// The target instant is constructed with time.Date in Loc, so for an ordinary
+// day the local wall-clock time resolves to the correct absolute instant
+// (including the usual ±1h offset shift across a DST boundary). The wall-clock
+// gap and fold cases are handled by Go's normalization rather than special-
+// cased: on a spring-forward day a Hour:Min that does not exist locally (e.g.
+// 02:30 when the clock jumps 02:00→03:00) is normalized by time.Date to a valid
+// neighbouring instant, and on a fall-back day a Hour:Min that occurs twice
+// resolves to the first occurrence. Both are reasonable for a daily watcher;
+// callers needing exact gap/fold semantics should use an interval schedule.
 type DailySchedule struct {
 	Hour int // 0-23
 	Min  int // 0-59

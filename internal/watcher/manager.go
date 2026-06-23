@@ -3,9 +3,18 @@ package watcher
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 )
+
+// minFireDelay is the floor the manager applies to every armed delay. A
+// Schedule may legitimately return an instant only nanoseconds in the future
+// (for example IntervalSchedule clamps a non-positive interval to 1ns); without
+// a floor a misconfigured schedule would spin its goroutine, re-arming a
+// zero-length timer thousands of times a second. The floor keeps a degenerate
+// schedule cheap while staying well below any sane real cadence.
+const minFireDelay = time.Millisecond
 
 // Kind distinguishes the two watcher lifecycles.
 type Kind int
@@ -25,14 +34,15 @@ type Status int
 
 const (
 	// StatusIdle means no fire is in flight and the last fire (if any)
-	// completed successfully.
+	// completed successfully or was intentionally cancelled.
 	StatusIdle Status = iota
 	// StatusRunning means a fire is currently executing.
 	StatusRunning
 	// StatusSkipped means the most recent due fire was skipped because a
 	// previous fire was still running.
 	StatusSkipped
-	// StatusFailed means the most recent fire returned an error.
+	// StatusFailed means the most recent fire returned an error (a cancelled
+	// fire is not a failure — see runFire).
 	StatusFailed
 )
 
@@ -55,9 +65,15 @@ func (s Status) String() string {
 var (
 	// ErrNotFound is returned when no watcher matches the supplied id or name.
 	ErrNotFound = errors.New("watcher: not found")
+	// ErrAmbiguous is returned when a name matches more than one watcher.
+	// Resolution by id is always unambiguous; resolution by name errors rather
+	// than guess.
+	ErrAmbiguous = errors.New("watcher: ambiguous name")
 	// ErrDuplicate is returned by Add when a watcher with the same id already
 	// exists.
 	ErrDuplicate = errors.New("watcher: duplicate id")
+	// ErrNilSchedule is returned by Add when the watcher has no Schedule.
+	ErrNilSchedule = errors.New("watcher: nil schedule")
 	// ErrStopped is returned by control methods after the Manager has been
 	// stopped.
 	ErrStopped = errors.New("watcher: manager stopped")
@@ -74,6 +90,8 @@ type WatcherHost interface {
 	// abort promptly and return ctx.Err() (or another error). The Runner is
 	// passed so the host can read its configuration (ID/Name/Task/Model/Kind/
 	// SessionID) and report a one-line result summary via Runner.SetLastResult.
+	// A panic in RunWatcherFire is recovered by the manager and recorded as a
+	// failed fire, so one misbehaving host cannot crash the process.
 	RunWatcherFire(ctx context.Context, r *Runner) error
 	// Notify delivers a completion notification for a free-running watcher.
 	// reason is a stable token ("watcher"); title and body are human-facing.
@@ -110,6 +128,7 @@ type Runner struct {
 	enabled    bool
 	status     Status
 	running    bool
+	removed    bool // dropped from the manager; suppresses a late completion notify
 	lastRun    time.Time
 	lastResult string
 	lastError  string
@@ -119,7 +138,8 @@ type Runner struct {
 	cancelFire context.CancelFunc // cancels the in-flight fire, if any
 }
 
-// NewRunner builds a Runner from a Spec. Schedule must be non-nil.
+// NewRunner builds a Runner from a Spec. Schedule should be non-nil; a Runner
+// with a nil Schedule is rejected by Manager.Add with ErrNilSchedule.
 func NewRunner(spec Spec) *Runner {
 	return &Runner{
 		id:        spec.ID,
@@ -228,16 +248,17 @@ func WithMaxConcurrent(n int) Option {
 	}
 }
 
-// WithSkipIfRunning sets whether a due fire is skipped (recorded as
-// StatusSkipped) when the watcher's previous fire is still in flight. The
-// default is true. Regardless of this setting the Manager never overlaps a
-// watcher with itself.
+// WithSkipIfRunning sets whether a due fire is recorded as StatusSkipped when
+// the watcher's previous fire is still in flight. The default is true.
+// Regardless of this setting the Manager never overlaps a watcher with itself —
+// a due fire that arrives while a previous one runs is always dropped; this flag
+// only governs whether the drop is surfaced as StatusSkipped.
 func WithSkipIfRunning(skip bool) Option {
 	return func(m *Manager) { m.skipIfRunning = skip }
 }
 
-// WithLogger installs an optional structured-ish log callback used for fire
-// start/skip/complete/failed events. nil disables logging (the default).
+// WithLogger installs an optional log callback used for fire
+// start/skip/complete/failed/panic events. nil disables logging (the default).
 func WithLogger(fn func(format string, args ...any)) Option {
 	return func(m *Manager) { m.logf = fn }
 }
@@ -264,15 +285,28 @@ func (m *Manager) log(format string, args ...any) {
 	}
 }
 
+// ensureCtxLocked lazily creates the manager context. It is idempotent and
+// independent of the started flag, so a RunNow before Start can fire without
+// marking the manager started (which would otherwise short-circuit Start and
+// leave the schedules un-armed). Caller must hold m.mu.
+func (m *Manager) ensureCtxLocked() {
+	if m.ctx == nil {
+		m.ctx, m.cancel = context.WithCancel(context.Background())
+	}
+}
+
 // Add registers a watcher. If the Manager has already started and the watcher is
 // enabled, its schedule loop is launched immediately. Returns ErrDuplicate if a
-// watcher with the same id already exists, or ErrStopped if the Manager has been
-// stopped.
+// watcher with the same id already exists, ErrNilSchedule if it has no schedule,
+// or ErrStopped if the Manager has been stopped.
 func (m *Manager) Add(r *Runner) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.stopped {
 		return ErrStopped
+	}
+	if r.schedule == nil {
+		return ErrNilSchedule
 	}
 	if _, ok := m.runners[r.id]; ok {
 		return ErrDuplicate
@@ -294,10 +328,14 @@ func (m *Manager) Start() {
 	if m.started || m.stopped {
 		return
 	}
-	m.ctx, m.cancel = context.WithCancel(context.Background())
+	m.ensureCtxLocked()
 	m.started = true
 	for _, r := range m.runners {
-		if r.enabled {
+		r.mu.Lock()
+		enabled := r.enabled
+		hasLoop := r.done != nil
+		r.mu.Unlock()
+		if enabled && !hasLoop {
 			m.launchLoopLocked(r)
 		}
 	}
@@ -320,11 +358,15 @@ func (m *Manager) Stop() {
 	m.wg.Wait()
 }
 
-// launchLoopLocked starts a fresh schedule loop for r. Caller must hold m.mu and
-// have verified the Manager is started and not stopped.
+// launchLoopLocked starts a fresh schedule loop for r, unless one is already
+// running. Caller must hold m.mu.
 func (m *Manager) launchLoopLocked(r *Runner) {
-	done := make(chan struct{})
 	r.mu.Lock()
+	if r.done != nil {
+		r.mu.Unlock()
+		return
+	}
+	done := make(chan struct{})
 	r.done = done
 	r.enabled = true
 	r.mu.Unlock()
@@ -334,9 +376,26 @@ func (m *Manager) launchLoopLocked(r *Runner) {
 
 // scheduleLoop arms a timer for r's next fire, waits, fires, and re-arms. It
 // exits when its done channel is closed (per-watcher disable/remove) or the
-// manager context is cancelled (Stop).
+// manager context is cancelled (Stop). A panic in the schedule (e.g. a custom
+// Schedule.Next) is recovered so it cannot crash the process.
 func (m *Manager) scheduleLoop(r *Runner, done chan struct{}) {
 	defer m.wg.Done()
+	defer func() {
+		if rec := recover(); rec != nil {
+			r.mu.Lock()
+			r.status = StatusFailed
+			r.lastError = fmt.Sprintf("watcher schedule panicked: %v", rec)
+			r.mu.Unlock()
+			m.log("watcher schedule panic: name=%s recovered=%v", r.name, rec)
+		}
+	}()
+	if r.schedule == nil {
+		r.mu.Lock()
+		r.status = StatusFailed
+		r.lastError = "watcher has no schedule"
+		r.mu.Unlock()
+		return
+	}
 	for {
 		now := time.Now()
 		next := r.schedule.Next(now)
@@ -344,9 +403,11 @@ func (m *Manager) scheduleLoop(r *Runner, done chan struct{}) {
 		r.nextFire = next
 		r.mu.Unlock()
 
-		d := time.Until(next)
-		if d < 0 {
-			d = 0
+		// Delay relative to the now we handed Next, floored to avoid spinning
+		// on a non-advancing schedule.
+		d := next.Sub(now)
+		if d < minFireDelay {
+			d = minFireDelay
 		}
 		timer := time.NewTimer(d)
 		select {
@@ -377,7 +438,6 @@ func (m *Manager) startFire(r *Runner) {
 		return
 	}
 	r.running = true
-	r.status = StatusRunning
 	name := r.name
 	r.mu.Unlock()
 
@@ -387,33 +447,36 @@ func (m *Manager) startFire(r *Runner) {
 }
 
 // runFire acquires a global concurrency slot, runs one fire to completion, and
-// records the outcome. It always clears the running flag on exit.
+// records the outcome. It always clears the running flag on exit and recovers
+// any panic from the host as a failed fire.
 func (m *Manager) runFire(r *Runner) {
 	defer m.wg.Done()
 	defer func() {
+		rec := recover()
 		r.mu.Lock()
 		r.running = false
 		r.cancelFire = nil
+		if rec != nil {
+			r.status = StatusFailed
+			r.lastError = fmt.Sprintf("watcher fire panicked: %v", rec)
+		}
 		r.mu.Unlock()
+		if rec != nil {
+			m.log("watcher panic: name=%s recovered=%v", r.name, rec)
+		}
 	}()
 
-	// Acquire a global slot, but abort if the manager is shutting down while we
-	// wait. This bounds total concurrent fires across all watchers.
+	// Acquire a global slot, bounding total concurrent fires across all
+	// watchers. Abort if the manager is shutting down while we wait.
 	select {
 	case m.sem <- struct{}{}:
 	case <-m.ctx.Done():
-		r.mu.Lock()
-		r.status = StatusIdle
-		r.mu.Unlock()
 		return
 	}
 	defer func() { <-m.sem }()
 
 	// The manager may have been cancelled while we waited for a slot.
 	if m.ctx.Err() != nil {
-		r.mu.Lock()
-		r.status = StatusIdle
-		r.mu.Unlock()
 		return
 	}
 
@@ -421,33 +484,45 @@ func (m *Manager) runFire(r *Runner) {
 	r.mu.Lock()
 	r.cancelFire = cancel
 	r.lastRun = time.Now()
+	r.status = StatusRunning
+	name := r.name
+	kind := r.kind
 	r.mu.Unlock()
 
 	err := m.host.RunWatcherFire(ctx, r)
+	// A cancelled fire is an intentional stop (manager shutdown, StopWatcher,
+	// Remove), not a failure — detect it before our own cancel() below.
+	cancelled := ctx.Err() != nil
 	cancel()
 
 	r.mu.Lock()
-	if err != nil {
+	switch {
+	case cancelled:
+		r.status = StatusIdle
+	case err != nil:
 		r.status = StatusFailed
 		r.lastError = err.Error()
-	} else {
+	default:
 		r.status = StatusIdle
 		r.lastError = ""
 	}
-	kind := r.kind
-	name := r.name
 	summary := r.lastResult
+	removed := r.removed
 	r.mu.Unlock()
 
-	if err != nil {
+	switch {
+	case cancelled:
+		m.log("watcher cancelled: name=%s", name)
+	case err != nil:
 		m.log("watcher failed: name=%s error=%v", name, err)
-		return
+	default:
+		m.log("watcher complete: name=%s", name)
 	}
-	m.log("watcher complete: name=%s", name)
 
-	// Free-running watchers announce completion through the host notifier;
-	// attached watchers surface their work through the owning session instead.
-	if kind == KindFree {
+	// Free-running watchers announce successful completion through the host
+	// notifier; attached watchers surface their work through the owning session
+	// instead. A cancelled, failed, or already-removed watcher never notifies.
+	if !cancelled && err == nil && kind == KindFree && !removed {
 		body := summary
 		if body == "" {
 			body = "Watcher \"" + name + "\" completed."
@@ -456,17 +531,29 @@ func (m *Manager) runFire(r *Runner) {
 	}
 }
 
-// resolve looks up a watcher by id first, then by name. Caller must hold m.mu.
-func (m *Manager) resolveLocked(idOrName string) (*Runner, bool) {
+// resolveLocked looks up a watcher by exact id first (always unambiguous), then
+// by name. A name matching more than one watcher returns ErrAmbiguous; no match
+// returns ErrNotFound. Caller must hold m.mu.
+func (m *Manager) resolveLocked(idOrName string) (*Runner, error) {
 	if r, ok := m.runners[idOrName]; ok {
-		return r, true
+		return r, nil
 	}
+	var found *Runner
+	count := 0
 	for _, r := range m.runners {
 		if r.name == idOrName {
-			return r, true
+			found = r
+			count++
 		}
 	}
-	return nil, false
+	switch count {
+	case 0:
+		return nil, ErrNotFound
+	case 1:
+		return found, nil
+	default:
+		return nil, ErrAmbiguous
+	}
 }
 
 // Toggle flips a watcher's enabled state. Disabling stops its schedule loop (a
@@ -475,9 +562,9 @@ func (m *Manager) resolveLocked(idOrName string) (*Runner, bool) {
 func (m *Manager) Toggle(idOrName string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	r, ok := m.resolveLocked(idOrName)
-	if !ok {
-		return ErrNotFound
+	r, err := m.resolveLocked(idOrName)
+	if err != nil {
+		return err
 	}
 	r.mu.Lock()
 	enabled := r.enabled
@@ -489,12 +576,13 @@ func (m *Manager) Toggle(idOrName string) error {
 	if m.stopped {
 		return ErrStopped
 	}
+	if m.started {
+		m.launchLoopLocked(r) // also sets enabled = true
+		return nil
+	}
 	r.mu.Lock()
 	r.enabled = true
 	r.mu.Unlock()
-	if m.started {
-		m.launchLoopLocked(r)
-	}
 	return nil
 }
 
@@ -510,28 +598,24 @@ func (m *Manager) disableLocked(r *Runner) {
 	r.mu.Unlock()
 }
 
-// RunNow fires a watcher immediately, ignoring its schedule. It still respects
+// RunNow fires a watcher immediately, ignoring its schedule and its enabled
+// state (a disabled watcher can still be triggered manually). It still respects
 // the no-overlap rule: if a fire is already in flight the request is a no-op
 // (recorded as skipped when skipIfRunning). Identified by id or name.
 func (m *Manager) RunNow(idOrName string) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.stopped {
-		m.mu.Unlock()
 		return ErrStopped
 	}
-	r, ok := m.resolveLocked(idOrName)
-	if !ok {
-		m.mu.Unlock()
-		return ErrNotFound
+	r, err := m.resolveLocked(idOrName)
+	if err != nil {
+		return err
 	}
-	if !m.started {
-		m.ctx, m.cancel = context.WithCancel(context.Background())
-		m.started = true
-	}
+	m.ensureCtxLocked()
 	// startFire's wg.Add happens under m.mu, serialised with Stop's stopped
 	// flag, so it can never race a zero-counter Wait.
 	m.startFire(r)
-	m.mu.Unlock()
 	return nil
 }
 
@@ -539,10 +623,10 @@ func (m *Manager) RunNow(idOrName string) error {
 // schedule — the next fire will still be armed. Identified by id or name.
 func (m *Manager) StopWatcher(idOrName string) error {
 	m.mu.Lock()
-	r, ok := m.resolveLocked(idOrName)
+	r, err := m.resolveLocked(idOrName)
 	m.mu.Unlock()
-	if !ok {
-		return ErrNotFound
+	if err != nil {
+		return err
 	}
 	r.mu.Lock()
 	cancel := r.cancelFire
@@ -555,25 +639,16 @@ func (m *Manager) StopWatcher(idOrName string) error {
 
 // Remove stops a watcher's schedule loop, cancels any in-flight fire, and drops
 // it from the Manager. The in-flight fire (if any) is cancelled and reaped
-// asynchronously; Stop still waits for it. Identified by id or name.
+// asynchronously; Stop still waits for it, and it will not emit a late
+// completion notification. Identified by id or name.
 func (m *Manager) Remove(idOrName string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	r, ok := m.resolveLocked(idOrName)
-	if !ok {
-		return ErrNotFound
+	r, err := m.resolveLocked(idOrName)
+	if err != nil {
+		return err
 	}
-	r.mu.Lock()
-	if r.done != nil {
-		close(r.done)
-		r.done = nil
-	}
-	cancel := r.cancelFire
-	r.enabled = false
-	r.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
+	m.teardownLocked(r)
 	delete(m.runners, r.id)
 	return nil
 }
@@ -588,18 +663,26 @@ func (m *Manager) RemoveAttachedForSession(sessionID string) {
 		if r.kind != KindAttached || r.sessionID != sessionID {
 			continue
 		}
-		r.mu.Lock()
-		if r.done != nil {
-			close(r.done)
-			r.done = nil
-		}
-		cancel := r.cancelFire
-		r.enabled = false
-		r.mu.Unlock()
-		if cancel != nil {
-			cancel()
-		}
+		m.teardownLocked(r)
 		delete(m.runners, id)
+	}
+}
+
+// teardownLocked stops r's loop, cancels its in-flight fire, and marks it
+// removed so a fire completing concurrently does not notify. Caller must hold
+// m.mu.
+func (m *Manager) teardownLocked(r *Runner) {
+	r.mu.Lock()
+	r.removed = true
+	r.enabled = false
+	if r.done != nil {
+		close(r.done)
+		r.done = nil
+	}
+	cancel := r.cancelFire
+	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 }
 
@@ -629,12 +712,13 @@ func (m *Manager) ListWatchers(sessionID string) []WatcherInfo {
 	return out
 }
 
-// Get returns a snapshot of a single watcher by id or name.
+// Get returns a snapshot of a single watcher by id or name. It returns ok=false
+// when the watcher is not found or a name is ambiguous.
 func (m *Manager) Get(idOrName string) (WatcherInfo, bool) {
 	m.mu.Lock()
-	r, ok := m.resolveLocked(idOrName)
+	r, err := m.resolveLocked(idOrName)
 	m.mu.Unlock()
-	if !ok {
+	if err != nil {
 		return WatcherInfo{}, false
 	}
 	return r.snapshot(), true
