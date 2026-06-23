@@ -179,6 +179,96 @@ func (tr *ToolRegistry) ListEnabled() []*Tool {
 	return tools
 }
 
+// RenderToolDocs renders a deterministic, registry-derived plain-text listing of
+// the enabled tools — each tool's name, full Description, and its top-level
+// schema parameters with their descriptions (nested array-item fields are
+// summarized by the parameter's own description, not expanded). It exists so
+// that any prompt wanting an inline tool
+// summary can generate it from the registry instead of hand-maintaining a list
+// that drifts from Tool.Description/InputSchema (issue #357). The authoritative
+// contract sent to the model is still the native function definitions built from
+// Tool.Description + InputSchema; this is only a human-readable echo for the
+// legacy single-shot prompt paths, and being generated it can never drift.
+//
+// Output is sorted by tool name for stable, diff-friendly rendering.
+func (tr *ToolRegistry) RenderToolDocs() string {
+	tools := tr.ListEnabled()
+	sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
+
+	var b strings.Builder
+	for _, t := range tools {
+		fmt.Fprintf(&b, "### %s\n", t.Name)
+		if t.Description != "" {
+			b.WriteString(t.Description)
+			b.WriteString("\n")
+		}
+		for _, line := range renderSchemaParams(t.InputSchema) {
+			b.WriteString(line)
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// renderSchemaParams turns a tool's top-level InputSchema properties into stable,
+// name-sorted "- name (required, type): description" lines. It reads only the
+// schema, so it stays in lockstep with the advertised contract.
+func renderSchemaParams(rawSchema interface{}) []string {
+	schema, ok := rawSchema.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	props, ok := schema["properties"].(map[string]interface{})
+	if !ok || len(props) == 0 {
+		return nil
+	}
+
+	required := map[string]bool{}
+	switch req := schema["required"].(type) {
+	case []string:
+		for _, r := range req {
+			required[r] = true
+		}
+	case []interface{}:
+		for _, r := range req {
+			if s, ok := r.(string); ok {
+				required[s] = true
+			}
+		}
+	}
+
+	names := make([]string, 0, len(props))
+	for name := range props {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	lines := make([]string, 0, len(names))
+	for _, name := range names {
+		sub, _ := props[name].(map[string]interface{})
+		typ, _ := sub["type"].(string)
+		desc, _ := sub["description"].(string)
+
+		var meta []string
+		if required[name] {
+			meta = append(meta, "required")
+		}
+		if typ != "" {
+			meta = append(meta, typ)
+		}
+		line := "- " + name
+		if len(meta) > 0 {
+			line += " (" + strings.Join(meta, ", ") + ")"
+		}
+		if desc != "" {
+			line += ": " + desc
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
 // Invocations returns how many times a tool has been invoked through the
 // registry (validated calls only).
 func (tr *ToolRegistry) Invocations(name string) int {
@@ -440,12 +530,21 @@ func (tr *ToolRegistry) RegisterCalcTool() {
 // RegisterShellTool registers the shell tool for executing shell commands
 func (tr *ToolRegistry) RegisterShellTool() {
 	tr.Register(&Tool{
-		Name:        "shell",
-		Description: "Execute a shell command. Use this when you need to run shell commands like curl, wget, ls, grep, etc.",
+		Name: "shell",
+		Description: "Execute a shell command from the workspace root and return its stdout, stderr and exit code. " +
+			"Use it for tasks the dedicated tools do not cover — running build scripts, package managers, " +
+			"git porcelain beyond the git tool, or arbitrary CLIs. Prefer the purpose-built tools over shell " +
+			"whenever one fits: grep for searching file contents, glob/list for finding files, git for version " +
+			"control, diagnostics for compiling/linting and verify for running tests — they need no permission " +
+			"prompt, no shell quoting, and return structured results. Commands run with a timeout (5 minutes by " +
+			"default) and a 1 MB output cap, are permission-gated (a command touching paths outside the workspace " +
+			"is additionally gated per external root), and cannot be interactive.",
 		InputSchema: map[string]interface{}{
-			"type":       "object",
-			"properties": map[string]interface{}{"command": map[string]interface{}{"type": "string"}},
-			"required":   []string{"command"},
+			"type": "object",
+			"properties": map[string]interface{}{
+				"command": map[string]interface{}{"type": "string", "description": "The shell command line to execute from the workspace root."},
+			},
+			"required": []string{"command"},
 		},
 		Execute: func(args map[string]interface{}, ctx ToolContext) (interface{}, error) {
 			command, ok := args["command"].(string)
