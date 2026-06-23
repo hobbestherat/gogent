@@ -98,6 +98,31 @@ func TestIssue349ForkSessionUnknownParentIsNoOp(t *testing.T) {
 	}
 }
 
+func TestIssue349ForkSessionWithoutBackendHandlerIsNoOp(t *testing.T) {
+	w := newForkWorkbench(t)
+	parent := w.openWindow("parent", "Parent")
+	w.handlers.OnFork = nil
+	w.handlers.GetTranscript = func(sessionID, agentID string) []ChatMessage {
+		return []ChatMessage{{Role: "user", Content: "should not be copied without backend fork"}}
+	}
+
+	if got := w.ForkSession("parent"); got != nil {
+		t.Fatalf("ForkSession without OnFork returned %#v, want nil", got)
+	}
+	if order := w.orderIDs(); !equalOrder(order, []string{"parent"}) {
+		t.Fatalf("ForkSession without OnFork changed session order to %v, want [parent]", order)
+	}
+	if got := w.ActiveID(); got != "parent" {
+		t.Fatalf("ForkSession without OnFork active session = %q, want parent", got)
+	}
+	if !parent.input.Component.Focused() {
+		t.Fatal("ForkSession without OnFork should leave parent focused")
+	}
+	if noteContains(parent, "should not be copied") {
+		t.Fatal("ForkSession without OnFork should not restore copied history anywhere")
+	}
+}
+
 func TestIssue349ForkCommandPaletteDiscoverableAndDispatches(t *testing.T) {
 	w := newForkWorkbench(t)
 	w.openWindow("parent", "Parent")

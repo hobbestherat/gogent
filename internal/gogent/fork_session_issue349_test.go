@@ -3,6 +3,8 @@ package gogent
 import (
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"gogent/internal/agent"
@@ -112,5 +114,56 @@ func TestIssue349ForkSessionErrors(t *testing.T) {
 	g.NewSession("already")
 	if got, err := g.ForkSession("parent", "already"); err == nil || got != nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("ForkSession duplicate id = (%v, %v), want nil duplicate error", got, err)
+	}
+}
+
+func TestIssue349ConcurrentForkSessionSameIDCreatesAtMostOneFork(t *testing.T) {
+	g := NewGogent(t.TempDir())
+	parent := g.NewSession("parent")
+	parent.RootAgent.ThoughtTrain.ReplaceTranscript([]model.Message{
+		{Role: model.RoleUser, Content: "shared starting point"},
+	})
+
+	const workers = 32
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var successes atomic.Int32
+	var failures atomic.Int32
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			forked, err := g.ForkSession("parent", "fork")
+			if err == nil {
+				if forked == nil {
+					t.Errorf("ForkSession returned nil without error")
+					return
+				}
+				successes.Add(1)
+				return
+			}
+			if !strings.Contains(err.Error(), "already exists") {
+				t.Errorf("ForkSession concurrent error = %v, want already-exists error", err)
+			}
+			failures.Add(1)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if successes.Load() != 1 {
+		t.Fatalf("concurrent ForkSession successes = %d, want exactly 1", successes.Load())
+	}
+	if failures.Load() != workers-1 {
+		t.Fatalf("concurrent ForkSession failures = %d, want %d", failures.Load(), workers-1)
+	}
+
+	forked := g.GetUserSession("fork")
+	if forked == nil {
+		t.Fatal("winning fork was not registered")
+	}
+	if got := forked.RootAgent.ThoughtTrain.GetTranscript(); !reflect.DeepEqual(got, parent.RootAgent.ThoughtTrain.GetTranscript()) {
+		t.Fatalf("winning fork transcript = %#v, want parent transcript", got)
 	}
 }
