@@ -1775,11 +1775,13 @@ List the files and subdirectories immediately inside a workspace directory. Read
 - Example: {"tool": "list", "args": {"path": "internal"}}
 
 ### calc
- 	Calculate mathematical expressions. Use this when the user asks you to calculate, compute, or solve a math problem.
- 	- Input: {"expression": "string"} - A mathematical expression like "5+5" or "10*20/5"
- 	- Example: {"tool": "calc", "args": {"expression": "5+5"}}
- 	- Returns: {"success": true, "result": {"expression": "...", "result": "evaluated: ..."}}
- 	- Supports: +, -, *, /, parentheses for grouping
+ 	Evaluate a math expression and get the exact result. Use this whenever you need a number — arithmetic, geometry, trig, logs, combinatorics, physics — instead of doing the arithmetic yourself or shelling out to python/bc.
+ 	- Input: {"expression": "string"} - A math expression like "sqrt(2)", "sin(pi/2)", "2**10", "G*5.97e24/(6.371e6)^2"
+ 	- Example: {"tool": "calc", "args": {"expression": "sqrt(2)"}}
+ 	- Returns: {"success": true, "result": {"expression": "...", "result": "..."}} — the result is a string; integers print cleanly (2+2 -> "4"), fractionals keep full precision (1/3 -> "0.3333333333333333"), non-finite as "+Inf"/"-Inf"/"NaN"
+ 	- Operators: + - * /, power (** or ^), unary minus, parentheses. % is integer modulo only — for non-integers use mod(x,y). A comparison (>, <, ==, !=) is only valid as a ternary condition: (a>b ? a : b)
+ 	- Functions: sqrt cbrt pow hypot exp log log2 log10; sin cos tan asin acos atan atan2 (radians) with deg()/rad() converters; sinh cosh tanh; abs floor ceil round trunc sign mod min max; factorial (alias fact, also postfix n!) gcd lcm; sum mean median
+ 	- Constants: pi e tau phi sqrt2; physics c G g h hbar k Na R sigma epsilon0 mu0 echarge me mp (case-sensitive, flat names)
 
 ### shell
  	Execute shell commands. Use this when you need to run shell commands like curl, wget, ls, grep, etc.

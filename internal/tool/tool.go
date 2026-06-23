@@ -393,13 +393,26 @@ func (tr *ToolRegistry) ExecuteToolCall(toolCall *ToolCall, ctx ToolContext) (re
 // RegisterCalcTool registers the calc tool for calculations
 func (tr *ToolRegistry) RegisterCalcTool() {
 	tr.Register(&Tool{
-		Name:        "calc",
-		Description: "Calculate mathematical expressions like 5+5 or 10*20/5. Returns the result of the calculation.",
-		ReadOnly:    true,
+		Name: "calc",
+		Description: "Evaluate a math expression and return the exact result. " +
+			"Prefer this over guessing arithmetic or shelling out to python/bc. " +
+			"Operators: + - * /, power (** or ^), unary minus, parentheses; % is integer modulo only (for non-integers use mod(x,y)); " +
+			"a comparison (>, <, ==, !=) is only valid as a ternary condition, e.g. (a>b ? a : b). " +
+			"Functions: sqrt cbrt pow hypot exp log log2 log10; sin cos tan asin acos atan atan2 (radians) with deg()/rad() converters; " +
+			"sinh cosh tanh; abs floor ceil round trunc sign mod min max; factorial (or fact, also postfix n!) gcd lcm; sum mean median. " +
+			"Constants: pi e tau phi sqrt2; physics c G g h hbar k Na R sigma epsilon0 mu0 echarge me mp. " +
+			"Integer results print cleanly (2+2 -> 4); fractionals keep full precision (1/3 -> 0.3333333333333333). " +
+			`Examples: {"expression":"sqrt(2)"}, {"expression":"sin(pi/2)"}, {"expression":"factorial(5)"}, {"expression":"G*5.97e24/(6.371e6)^2"}.`,
+		ReadOnly: true,
 		InputSchema: map[string]interface{}{
-			"type":       "object",
-			"properties": map[string]interface{}{"expression": map[string]interface{}{"type": "string"}},
-			"required":   []string{"expression"},
+			"type": "object",
+			"properties": map[string]interface{}{
+				"expression": map[string]interface{}{
+					"type":        "string",
+					"description": "Math expression, e.g. \"2**10\", \"sqrt(2)\", \"sin(pi/2)\", \"log(e)\", \"factorial(5)\", \"G*5.97e24/(6.371e6)^2\".",
+				},
+			},
+			"required": []string{"expression"},
 		},
 		Execute: func(args map[string]interface{}, ctx ToolContext) (interface{}, error) {
 			expression, ok := args["expression"].(string)
@@ -407,15 +420,18 @@ func (tr *ToolRegistry) RegisterCalcTool() {
 				return nil, fmt.Errorf("expression argument is required")
 			}
 
-			// Evaluate using the shared, hardened evaluator.
-			result, err := mathexpr.Eval(expression)
+			// Evaluate using the shared, hardened evaluator and format the result
+			// cleanly (integers without a trailing ".0000", full precision for
+			// fractionals). The /calc command uses the same formatter so both
+			// consumers agree.
+			result, err := mathexpr.EvalFormatted(expression)
 			if err != nil {
 				return nil, fmt.Errorf("calculation error: %v", err)
 			}
 
 			return map[string]interface{}{
 				"expression": expression,
-				"result":     fmt.Sprintf("%.4f", result),
+				"result":     result,
 			}, nil
 		},
 	})

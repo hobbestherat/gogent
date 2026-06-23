@@ -114,8 +114,11 @@ func TestCalcCommand(t *testing.T) {
 
 // TestCalcCommandMalformed ensures malformed expressions surface as errors
 // instead of panicking (the original bug for inputs like "", "()", and "5+").
+// Note: under the expr-lang evaluator "+5" is valid unary plus (-> 5) and "1/0"
+// is a non-finite result (-> +Inf), not errors, so they are no longer listed
+// here. These are genuinely malformed inputs that must surface as errors.
 func TestCalcCommandMalformed(t *testing.T) {
-	exprs := []string{"", "()", "5+", "+5", "1/0", "(1+2", "abc"}
+	exprs := []string{"", "()", "5+", "5*", "(1+2", "1)(2", "abc", "5x", "sqrt(", "*"}
 
 	registry := NewCommandRegistry()
 	registry.RegisterBuiltInCommands()

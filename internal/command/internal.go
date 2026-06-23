@@ -90,8 +90,9 @@ func (r *CommandRegistry) RegisterBuiltInCommands() {
 
 			expr := args[0]
 
-			// Parse and evaluate simple math
-			result, err := mathexpr.Eval(expr)
+			// Evaluate and format with the shared evaluator so /calc and the calc
+			// tool agree on output (clean integers, full-precision fractionals).
+			result, err := mathexpr.EvalFormatted(expr)
 			if err != nil {
 				return &CommandResult{
 					Success:  false,
@@ -102,7 +103,7 @@ func (r *CommandRegistry) RegisterBuiltInCommands() {
 
 			return &CommandResult{
 				Success:  true,
-				Stdout:   fmt.Sprintf("Result: %v", result),
+				Stdout:   fmt.Sprintf("Result: %s", result),
 				ExitCode: 0,
 			}, nil
 		},
