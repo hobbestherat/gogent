@@ -88,6 +88,7 @@ func (w *Workbench) commands() []command {
 	cmds := []command{
 		// Session lifecycle and arrangement.
 		{category: "Session", name: "New session", keys: "Ctrl+N", run: func() { w.NewSession() }},
+		{category: "Session", name: "Fork session", keys: "/fork", run: sessionCmd("/fork")},
 		{category: "Session", name: "Next session", keys: "Ctrl+]", run: func() { w.cycle(1) }},
 		{category: "Session", name: "Previous session", run: func() { w.cycle(-1) }},
 		{category: "Session", name: "Close session", keys: "Ctrl+W", run: w.CloseActive},

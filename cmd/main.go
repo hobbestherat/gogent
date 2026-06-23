@@ -205,6 +205,24 @@ func main() {
 					})
 				}
 			},
+			// OnFork forks parentSessionID into a new peer session seeded with a
+			// deep copy of its full conversation history (issue #349), then bridges
+			// the new session's live events to its window exactly as OnCreate does.
+			OnFork: func(parentSessionID, newSessionID, title string) {
+				g.SetSessionTitle(newSessionID, title)
+				session, err := g.ForkSession(parentSessionID, newSessionID)
+				if err != nil {
+					wb.EmitSessionEvent(newSessionID, agent.SessionEvent{
+						Type: agent.SessionEventError,
+						Err:  err,
+					})
+					return
+				}
+				session.SetObserver(func(ev agent.SessionEvent) {
+					wb.EmitSessionEvent(newSessionID, ev)
+				})
+				g.EmitYoloState(newSessionID)
+			},
 			OnClose: func(sessionID string) {
 				g.RemoveSession(sessionID)
 			},

@@ -1721,6 +1721,12 @@ func (sw *SessionWindow) handleSlashCommand(text string) bool {
 		summary, err := sw.callUndo(true, turns)
 		sw.echoCommand("/rewind", summary, err)
 		return true
+	case "/fork":
+		// Branch off a peer session seeded with this session's full history (issue
+		// #349). ForkSession opens and focuses the new window itself; it is a no-op
+		// for an unknown parent.
+		sw.wb.ForkSession(sw.id)
+		return true
 	case "/plan":
 		sw.togglePlanMode()
 		return true

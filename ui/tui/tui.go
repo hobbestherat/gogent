@@ -43,6 +43,14 @@ type Handlers struct {
 	// per-session reasoning-effort override (issue #177): empty means "no override
 	// — use the selected model config's reasoning_effort".
 	OnSend func(sessionID, message, modelName, effort string)
+	// OnFork is invoked (on the UI thread) when a /fork creates a new session
+	// window that should continue from a copy of an existing session's full
+	// conversation history (issue #349). The backend forks parentSessionID into a
+	// new peer session under newSessionID (deep-copying the transcript) and
+	// registers an observer that forwards events via EmitSessionEvent, exactly as
+	// OnCreate does for a fresh session. The title lets the backend persist a
+	// human-friendly name. May be nil, in which case /fork is a no-op.
+	OnFork func(parentSessionID, newSessionID, title string)
 	// OnClose tears down the backend session when its window is closed.
 	OnClose func(sessionID string)
 	// OnRename notifies the backend that a session was renamed so it can persist
@@ -1047,6 +1055,75 @@ func (w *Workbench) NewSession() *SessionWindow {
 	if w.handlers.OnCreate != nil {
 		w.handlers.OnCreate(id, title)
 	}
+	w.rebuildMenu()
+	w.persistLayout()
+	return sw
+}
+
+// ForkSession opens a new session window seeded with a copy of parentID's full
+// conversation history and asks the backend to fork the parent into it (issue
+// #349). The new session is a peer that diverges independently from the fork
+// point — the parent window is left untouched. It mirrors NewSession but (a)
+// pre-fills the window with the parent's transcript (via the GetTranscript
+// handler, the same source the backend forks from), (b) inherits the parent
+// window's selected model + effort so the fork "continues here" on the same
+// backend, and (c) calls OnFork (which forks the transcript) instead of OnCreate.
+// It is a no-op returning nil when the parent window is unknown, or when no
+// OnFork handler is wired — without a backend fork the window would be a UI-only
+// ghost with copied history and no session behind it, so both checks run before
+// any window/session mutation (see Handlers.OnFork).
+func (w *Workbench) ForkSession(parentID string) *SessionWindow {
+	w.mu.Lock()
+	parent := w.sessions[parentID]
+	if parent == nil {
+		w.mu.Unlock()
+		return nil
+	}
+	// Without a backend fork handler a new window would be a UI-only ghost with
+	// copied history and no session behind it, so /fork is a documented no-op
+	// (see Handlers.OnFork). Bail before any window/session mutation and keep the
+	// user on the parent they forked from.
+	if w.handlers.OnFork == nil {
+		w.mu.Unlock()
+		w.desktop.SetFocus(parent.input)
+		return nil
+	}
+	w.nextNum++
+	num := w.nextNum
+	id := fmt.Sprintf("session-%d", num)
+	title := fmt.Sprintf("Session %d", num)
+	w.mu.Unlock()
+
+	sw := w.openWindow(id, title)
+	// Pre-fill the window with the parent's history so the user sees the context
+	// the fork carries. GetTranscript reads the live parent backend transcript —
+	// the same source ForkSession copies — so the display and the forked session
+	// agree.
+	if w.handlers.GetTranscript != nil {
+		sw.restore(w.handlers.GetTranscript(parentID, "root"))
+	}
+	// Inherit the parent window's selected model + effort (continue-here
+	// semantics): seed the model dropdown, rebuild the effort options for it, then
+	// preserve the parent's effort pick when the model still offers it. SetSelected
+	// does not fire OnChange, so this has no side effects.
+	if parent.modelSelect != nil && sw.modelSelect != nil {
+		if idx := w.modelIndexByName(parent.selectedModelName()); idx >= 0 {
+			sw.modelSelect.SetSelected(idx)
+		}
+		sw.rebuildEffortOptions()
+		if eff := parent.selectedEffort(); eff != "" && sw.effortSelect != nil {
+			for i, opt := range sw.effortSelect.Options {
+				if opt == eff {
+					sw.effortSelect.SetSelected(i)
+					break
+				}
+			}
+		}
+	}
+	w.desktop.SetFocus(sw.input)
+	// OnFork is non-nil (checked at entry): hand the new window to the backend so
+	// it forks parentID's transcript into the matching session.
+	w.handlers.OnFork(parentID, id, title)
 	w.rebuildMenu()
 	w.persistLayout()
 	return sw

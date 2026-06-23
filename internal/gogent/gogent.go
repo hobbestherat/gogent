@@ -1302,10 +1302,19 @@ func readTruncationMarker(res *fileops.ReadRangeResult) string {
 		res.Offset, last, res.TotalLines)
 }
 
-// CreateUserSession creates a new user session
+// CreateUserSession creates a new user session and registers it under id. If a
+// session already exists under id it is returned unchanged and the passed
+// rootAgent is discarded: registration is a single check-and-insert under g.mu,
+// so it never clobbers a live session out from under its observers. This closes
+// the check-then-create race shared by every caller (NewSession, adoptLoaded,
+// ForkSession), whose own existence checks run in a separate critical section.
 func (g *Gogent) CreateUserSession(id string, rootAgent *agent.Agent) *agent.UserSession {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+
+	if existing := g.userSessions[id]; existing != nil {
+		return existing
+	}
 
 	userSession := agent.NewUserSession(id, rootAgent)
 	userSession.SetSubAgentConfig(g.config.SubAgents)
@@ -1429,6 +1438,95 @@ func (g *Gogent) NewSession(id string) *agent.UserSession {
 	rootAgent := agent.NewAgent("root", sess)
 	rootAgent.SetState(agent.StateIdle)
 	return g.CreateUserSession(id, rootAgent)
+}
+
+// ForkSession creates a new top-level peer session (newID) whose root-agent
+// transcript is a deep copy of the live parent session's (parentID), so the user
+// can branch off and explore from the full conversation context without
+// disturbing the original (issue #349). It is the gogent equivalent of Claude
+// Code's opt-in "fork" mode: a peer the user keeps chatting in, not a
+// fresh-context sub-agent.
+//
+// It mirrors adoptLoaded, except the seed transcript comes from the parent's
+// live ModelSession (via GetTranscript — mutex-guarded, returns a copy) rather
+// than from disk. The fork runs on the SAME model backend the parent is using
+// (the connector is stateless HTTP, safe to share, exactly as sub-agents do).
+// The transcript is deep-cloned (cloneTranscript) before seeding, so parent and
+// child share no backing array at any level — neither the outer []Message nor a
+// message's nested Images/ToolCalls slices — and diverge fully from the fork
+// point: appending/undoing/rewinding turns or editing a message in place in one
+// never affects the other.
+//
+// The live todo checklist (session-scoped, not part of the transcript) is copied
+// too, so the fork continues with the same active checklist. The fork is a normal
+// persistent session in every other respect: CreateUserSession wires the tool
+// registry, system-context provider, sub-agent config, limiters, hooks, audit and
+// token callbacks, and it starts in normal (act) mode with no pending plan. It
+// returns an error if the parent does not exist or has no root agent, or if a
+// session already exists under newID.
+func (g *Gogent) ForkSession(parentID, newID string) (*agent.UserSession, error) {
+	parent := g.GetUserSession(parentID)
+	if parent == nil || parent.RootAgent == nil || parent.RootAgent.ThoughtTrain == nil {
+		return nil, fmt.Errorf("fork: parent session %q not found", parentID)
+	}
+	g.mu.RLock()
+	_, exists := g.userSessions[newID]
+	g.mu.RUnlock()
+	if exists {
+		return nil, fmt.Errorf("fork: session %q already exists", newID)
+	}
+
+	parentTrain := parent.RootAgent.ThoughtTrain
+	// Continue on the parent's current model backend (shared stateless connector).
+	sess := model.NewModelSession("main", parentTrain.Model)
+	if msgs := cloneTranscript(parentTrain.GetTranscript()); len(msgs) > 0 {
+		sess.ReplaceTranscript(msgs)
+	}
+	rootAgent := agent.NewAgent("root", sess)
+	rootAgent.SetState(agent.StateIdle)
+	forked := g.CreateUserSession(newID, rootAgent)
+	// CreateUserSession refuses to clobber an existing id, so if a session was
+	// registered under newID between the check above and here, it returns that
+	// session (whose root is not ours) rather than the fork. Honor the duplicate
+	// contract instead of adopting an unrelated session as the fork; the original
+	// is left intact.
+	if forked.RootAgent != rootAgent {
+		return nil, fmt.Errorf("fork: session %q already exists", newID)
+	}
+	// Inherit the parent's reported primary model (issue #266 semantics) so the
+	// fork's first persist/stats read the right model rather than the default.
+	if pm := parent.PrimaryModel(); pm != "" {
+		forked.SetPrimaryModel(pm)
+	}
+	// Carry over the live checklist: it is session-scoped, not in the transcript,
+	// so without this the fork would start with an empty checklist even though the
+	// history contains the todo tool calls (issue #349). SetTodos defensive-copies.
+	if todos := parent.Todos(); len(todos) > 0 {
+		forked.SetTodos(todos)
+	}
+	return forked, nil
+}
+
+// cloneTranscript returns a fully independent copy of a transcript. GetTranscript
+// and ReplaceTranscript each copy only the outer []Message slice, leaving every
+// message's Images and ToolCalls slices still aliasing the source backing arrays.
+// A fork must diverge from its parent at every level (issue #349), so this also
+// clones those two nested slices — after it, mutating a forked message's
+// attachments or tool calls in place can never write through to the parent. The
+// element types (ImageURL, ToolCall/FunctionCall) hold only scalar fields, so a
+// shallow slice copy of each is a complete clone.
+func cloneTranscript(msgs []model.Message) []model.Message {
+	out := make([]model.Message, len(msgs))
+	for i, m := range msgs {
+		if m.Images != nil {
+			m.Images = append([]model.ImageURL(nil), m.Images...)
+		}
+		if m.ToolCalls != nil {
+			m.ToolCalls = append([]model.ToolCall(nil), m.ToolCalls...)
+		}
+		out[i] = m
+	}
+	return out
 }
 
 // NewEphemeralSession is like NewSession but marks the session as ephemeral, so

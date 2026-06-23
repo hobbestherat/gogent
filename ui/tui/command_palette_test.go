@@ -445,7 +445,7 @@ func TestPaletteGoalCommandNoOpWithoutSession(t *testing.T) {
 // represented in the shared command table used by both Ctrl+K and the ? overlay.
 func TestAllClientSlashCommandsInCommandsTable(t *testing.T) {
 	cmds := (&Workbench{}).commands()
-	want := []string{"/undo", "/rewind", "/plan", "/act", "/stop", "/clearqueue", "/goal", "/markdown", "/thinking"}
+	want := []string{"/undo", "/rewind", "/fork", "/plan", "/act", "/stop", "/clearqueue", "/goal", "/markdown", "/thinking"}
 	for _, keys := range want {
 		c := findCommandByKeys(cmds, keys)
 		if c == nil {
