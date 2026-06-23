@@ -334,6 +334,98 @@ func TestRemoteHandlersExposeSavedSessionBrowser(t *testing.T) {
 	}
 }
 
+func TestRemoteHandlersSavedSessionBrowserMapsToSessionsAPI(t *testing.T) {
+	type requestRecord struct {
+		Method     string
+		RequestURI string
+	}
+	records := make(chan requestRecord, 8)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		records <- requestRecord{Method: r.Method, RequestURI: r.RequestURI}
+		switch r.URL.Path {
+		case "/api/sessions":
+			_ = json.NewEncoder(w).Encode([]SessionDTO{
+				{ID: "default", Title: "Default", Persisted: true, Live: true},
+				{ID: "watcher:nightly", Title: "Watcher", Persisted: true, Live: true},
+				{ID: "live-1", Title: "Live", CreatedAt: "2026-06-01T12:00:00Z", PrimaryModel: "m1", Persisted: true, Live: true},
+				{ID: "archived-1", Title: "Archived", CreatedAt: "2026-06-02T12:00:00Z", PrimaryModel: "m2", Persisted: true, Live: false},
+			})
+		case "/api/sessions/live-1":
+			_ = json.NewEncoder(w).Encode(SessionDTO{ID: "live-1", Title: "Live", PrimaryModel: "m1", Persisted: true, Live: true})
+		case "/api/sessions/live-1/transcript":
+			if got := r.URL.Query().Get("agent"); got != "root" {
+				t.Errorf("agent query = %q, want root", got)
+			}
+			_ = json.NewEncoder(w).Encode([]MessageDTO{{Role: "user", Content: "hello"}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client, err := NewAPIClient(srv.URL, "")
+	if err != nil {
+		t.Fatalf("NewAPIClient: %v", err)
+	}
+	h := NewRemoteClient(client, nil, nil).Handlers()
+
+	sessions := h.ListSavedSessions()
+	if len(sessions) != 2 {
+		t.Fatalf("saved sessions = %+v, want live and archived user sessions only", sessions)
+	}
+	if sessions[0].ID != "live-1" || sessions[0].File != "live-1" || sessions[0].Archived {
+		t.Fatalf("first session = %+v, want live session with id file handle", sessions[0])
+	}
+	if sessions[1].ID != "archived-1" || sessions[1].File != "archived-1" || !sessions[1].Archived {
+		t.Fatalf("second session = %+v, want archived session marker", sessions[1])
+	}
+
+	opened, ok := h.OpenSavedSession("live-1", true)
+	if !ok {
+		t.Fatal("OpenSavedSession(live-1) returned ok=false")
+	}
+	if opened.ID != "live-1" || opened.Title != "Live" || opened.Model != "m1" {
+		t.Fatalf("opened session = %+v, want live-1 metadata", opened)
+	}
+	if len(opened.Messages) != 1 || opened.Messages[0].Role != "user" || opened.Messages[0].Content != "hello" {
+		t.Fatalf("opened messages = %+v, want transcript", opened.Messages)
+	}
+
+	want := []requestRecord{
+		{http.MethodGet, "/api/sessions"},
+		{http.MethodGet, "/api/sessions/live-1"},
+		{http.MethodGet, "/api/sessions/live-1/transcript?agent=root"},
+	}
+	for _, w := range want {
+		select {
+		case got := <-records:
+			if got != w {
+				t.Fatalf("request = %+v, want %+v", got, w)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for request %+v", w)
+		}
+	}
+}
+
+func TestRemoteHandlersDoNotExposeDeferredWatcherAPI(t *testing.T) {
+	client, err := NewAPIClient("http://127.0.0.1:1", "")
+	if err != nil {
+		t.Fatalf("NewAPIClient: %v", err)
+	}
+	h := NewRemoteClient(client, nil, nil).Handlers()
+	if h.ListWatchers != nil ||
+		h.CreateWatcher != nil ||
+		h.EnableWatcher != nil ||
+		h.DisableWatcher != nil ||
+		h.RunWatcher != nil ||
+		h.StopWatcher != nil ||
+		h.DeleteWatcher != nil {
+		t.Fatal("remote handlers expose watcher API, but watcher-over-wire is explicitly deferred from this bounded slice")
+	}
+}
+
 type recordingApprover struct {
 	permissions chan permission.Request
 	edits       chan gogent.EditReviewRequest
