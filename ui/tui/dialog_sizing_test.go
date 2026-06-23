@@ -3,6 +3,8 @@ package ui
 import (
 	"testing"
 
+	"gogent/internal/stats"
+
 	tv "github.com/hobbestherat/turbotui/turbotv"
 )
 
@@ -172,6 +174,23 @@ func TestDialogsSizedToContent(t *testing.T) {
 					t.Errorf("%s origin = (%d,%d), want centered", tc.name, b.X, b.Y)
 				}
 			})
+		}
+	})
+
+	t.Run("statistics sizes to its fixed report content", func(t *testing.T) {
+		w := newTestWorkbench(t)
+		w.handlers.GetStatistics = func() stats.Report { return sampleStatsReport() }
+		w.app.Resize(termW, termH)
+		w.showStatisticsDialog()
+		b := dialogBounds(w)
+		if b.W != 100 || b.H != 24 {
+			t.Fatalf("statistics size = %dx%d, want content footprint 100x24", b.W, b.H)
+		}
+		if b.W == defW && b.H == defH {
+			t.Fatalf("statistics is still the regressed %dx%d browser balloon", defW, defH)
+		}
+		if b.X != (termW-b.W)/2 || b.Y != (termH-b.H)/2 {
+			t.Errorf("statistics origin = (%d,%d), want centered", b.X, b.Y)
 		}
 	})
 }
