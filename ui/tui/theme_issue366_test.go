@@ -71,6 +71,21 @@ func issue366RoleSwatch(t *testing.T, w *Workbench, key string) (x, y int, targe
 
 func issue366RenderedField(t *testing.T, w *Workbench, key string) string {
 	t.Helper()
+	row, fieldX := issue366FieldOrigin(t, w, key)
+	grid := editorGrid(w)
+	var b strings.Builder
+	for x := fieldX; x < fieldX+themeEditorFieldW && x < len(grid[row]); x++ {
+		ch := grid[row][x]
+		if ch == 0 {
+			ch = ' '
+		}
+		b.WriteRune(ch)
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func issue366FieldOrigin(t *testing.T, w *Workbench, key string) (row, fieldX int) {
+	t.Helper()
 	label := issue243WantLabels[key] + ":"
 	if !scrollEditorToReveal(w, label) {
 		t.Fatalf("role %q label %q not visible at any editor scroll offset", key, label)
@@ -84,16 +99,28 @@ func issue366RenderedField(t *testing.T, w *Workbench, key string) string {
 	if issue267labelColumn(col) == "right" {
 		labelW = themeEditorLabelW
 	}
-	fieldX := col + labelW + 1
-	var b strings.Builder
-	for x := fieldX; x < fieldX+themeEditorFieldW && x < len(grid[row]); x++ {
-		ch := grid[row][x]
-		if ch == 0 {
-			ch = ' '
-		}
-		b.WriteRune(ch)
+	return row, col + labelW + 1
+}
+
+func issue366SetRenderedField(t *testing.T, w *Workbench, key, value string) {
+	t.Helper()
+	row, fieldX := issue366FieldOrigin(t, w, key)
+	top := w.desktop.TopLayer()
+	if top == nil {
+		t.Fatalf("theme editor layer is not open")
 	}
-	return strings.TrimSpace(b.String())
+	target := top.Root.HitTestDeep(fieldX, row)
+	if target == nil {
+		t.Fatalf("no component hit at field coordinate (%d,%d)", fieldX, row)
+	}
+	w.desktop.SetFocus(target)
+	if !target.Focused() {
+		t.Fatalf("could not focus field for role %q", key)
+	}
+	target.BubbleType(tui.TypeEvent{Key: tui.KeyRune, Rune: 'a', Ctrl: true})
+	for _, r := range value {
+		target.BubbleType(tui.TypeEvent{Key: tui.KeyRune, Rune: r})
+	}
 }
 
 func issue366ClickComponent(c *tv.VisualComponent, x, y int) {
@@ -251,5 +278,78 @@ func TestIssue366NoColorSwatchDoesNotOpenPicker(t *testing.T) {
 	}
 	if got := issue366RenderedField(t, w, "user"); got != "3" {
 		t.Fatalf("NO_COLOR activation changed the field: got %q, want %q", got, "3")
+	}
+}
+
+func TestIssue366CommittingCurrentSelectionCanonicalizesField(t *testing.T) {
+	tests := []struct {
+		name       string
+		level      tui.ColorLevel
+		field      string
+		want       string
+		afterOpen  func(*tv.VisualComponent)
+		wantSeeded string
+	}{
+		{
+			name:  "ansi with leading zeros",
+			level: tui.ColorLevel16,
+			field: "003",
+			want:  "3",
+		},
+		{
+			name:  "default alias",
+			level: tui.ColorLevel16,
+			field: "none",
+			want:  "default",
+		},
+		{
+			name:  "invalid spec falls back to terminal default",
+			level: tui.ColorLevel16,
+			field: "bad",
+			want:  "default",
+		},
+		{
+			name:       "lowercase rgb hex",
+			level:      tui.ColorLevelTrueColor,
+			field:      "#abcdef",
+			want:       "#ABCDEF",
+			wantSeeded: "#abcdef",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			withIssue366ColorLevel(t, tc.level)
+			var saved config.ThemeConfig
+			var saves int
+			w := issue366OpenEditor(t, config.ThemeConfig{}, func(cfg config.ThemeConfig) {
+				saved = cfg
+				saves++
+			})
+			issue366SetRenderedField(t, w, "user", tc.field)
+			if !strings.HasPrefix(tc.field, "#") && issue366RenderedField(t, w, "user") != tc.field {
+				got := issue366RenderedField(t, w, "user")
+				t.Fatalf("setup field = %q, want %q", got, tc.field)
+			}
+
+			popup := issue366ActivateSwatchByKey(t, w, "user", tui.TypeEvent{Key: tui.KeyEnter})
+			if tc.wantSeeded != "" {
+				w.desktop.Redraw()
+				if screen := screenText(w); !containsOnScreen(screen, tc.wantSeeded) {
+					t.Fatalf("picker did not seed from current field; preview lacked %q\n%s", tc.wantSeeded, screen)
+				}
+			}
+			if tc.afterOpen != nil {
+				tc.afterOpen(popup)
+			}
+			popup.BubbleType(tui.TypeEvent{Key: tui.KeyEnter})
+			issue366ClickSave(t, w)
+
+			if saves != 1 {
+				t.Fatalf("Save callback count = %d, want 1", saves)
+			}
+			if got := saved.Overrides["user"]; got != tc.want {
+				t.Fatalf("committing current picker selection saved user override %q, want canonical %q", got, tc.want)
+			}
+		})
 	}
 }
