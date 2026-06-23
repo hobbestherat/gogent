@@ -34,12 +34,34 @@ func validateValue(value, schema interface{}, path string) error {
 	if !ok {
 		return nil
 	}
-	if typ, ok := schemaMap["type"].(string); ok {
+	// A JSON null is accepted for any property whose declared type permits null —
+	// the strict-tool-use representation of an optional field (issue #359). A
+	// strict model passes null when it has nothing to supply, and the tools' arg
+	// helpers already coerce that to the field default, so skip the type/enum
+	// checks rather than rejecting it. A null for a non-nullable property still
+	// falls through and is type-checked (and rejected).
+	if value == nil && schemaTypeAllowsNull(schemaMap) {
+		return nil
+	}
+	switch typ := schemaMap["type"].(type) {
+	case string:
 		if err := validateType(value, typ, path); err != nil {
 			return err
 		}
 		if typ == "object" {
 			if err := validateObject(value, schemaMap, path); err != nil {
+				return err
+			}
+		}
+	case []string, []interface{}:
+		// A union type. It is enforced only when it includes "null": that is the
+		// strict-tool representation of a nullable scalar (issue #359), where a
+		// non-null value must still match its declared type (e.g. read.offset stays
+		// an integer, so 1.5 is rejected). A null-free polymorphic union — like
+		// spawn_subagent's object|string items — stays advisory, since that tool
+		// validates such items itself, per element.
+		if schemaTypeAllowsNull(schemaMap) {
+			if err := validateNullableUnion(value, typeNames(schemaMap["type"]), path); err != nil {
 				return err
 			}
 		}
@@ -133,33 +155,82 @@ func validateObject(value interface{}, schemaMap map[string]interface{}, path st
 		return nil // a type mismatch is already reported by validateType
 	}
 
-	required := requiredKeys(schemaMap)
-	requiredSet := make(map[string]bool, len(required))
-	for _, key := range required {
-		requiredSet[key] = true
-		if _, present := obj[key]; !present {
-			return fmt.Errorf("%s: missing required property %q", path, key)
+	props, _ := schemaMap["properties"].(map[string]interface{})
+	for _, key := range requiredKeys(schemaMap) {
+		if _, present := obj[key]; present {
+			continue
 		}
+		// A nullable property is optional in practice: strict tool-use (issue #359)
+		// lists EVERY property in "required" but expresses the optional ones as
+		// nullable, so their absence is acceptable. A genuinely required
+		// (non-nullable) property must be present.
+		if sub, ok := props[key].(map[string]interface{}); ok && schemaTypeAllowsNull(sub) {
+			continue
+		}
+		return fmt.Errorf("%s: missing required property %q", path, key)
 	}
 
-	props, _ := schemaMap["properties"].(map[string]interface{})
 	for name, sub := range props {
 		field, present := obj[name]
 		if !present {
 			continue
 		}
-		// A JSON null for an OPTIONAL property is treated as "no value". Strict
-		// tool-use advertises optional fields as nullable on the OpenAI wire
-		// (issue #359), so a strict model passes null when it has nothing to
-		// supply; the tools' arg helpers already coerce that to the field default.
-		// A null for a REQUIRED property is still type-checked (and rejected), so
-		// genuinely missing input is never silently accepted.
-		if field == nil && !requiredSet[name] {
-			continue
-		}
 		if err := validateValue(field, sub, path+"."+name); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// schemaTypeAllowsNull reports whether a (sub)schema's declared "type" permits a
+// null value — either the scalar "null" or a union containing it. It is how
+// strict tool-use marks an optional property (issue #359): such a property may be
+// absent (see validateObject) and accepts an explicit null (see validateValue).
+func schemaTypeAllowsNull(schemaMap map[string]interface{}) bool {
+	for _, s := range typeNames(schemaMap["type"]) {
+		if s == "null" {
+			return true
+		}
+	}
+	return false
+}
+
+// validateNullableUnion checks a non-null value against a nullable union type
+// (issue #359): it must match at least one of the union's non-null members, so a
+// nullable scalar still rejects the wrong concrete type (e.g. a fractional value
+// for ["integer","null"]). The "null" member is handled earlier by the
+// nil-value early return in validateValue.
+func validateNullableUnion(value interface{}, types []string, path string) error {
+	var nonNull []string
+	for _, t := range types {
+		if t == "null" {
+			continue
+		}
+		nonNull = append(nonNull, t)
+		if isType(value, t) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s: expected %s, got %s", path, strings.Join(nonNull, " or "), jsonTypeName(value))
+}
+
+// typeNames coerces a schema's "type" value to the list of declared type names,
+// accepting a scalar string, a []string (the Go schema-literal style) or a
+// []interface{} (decoded from JSON). A scalar yields a single-element list.
+func typeNames(t interface{}) []string {
+	switch tt := t.(type) {
+	case string:
+		return []string{tt}
+	case []string:
+		return tt
+	case []interface{}:
+		out := make([]string, 0, len(tt))
+		for _, e := range tt {
+			if s, ok := e.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
 	}
 	return nil
 }
