@@ -146,6 +146,11 @@ func (w *Workbench) showConfirm(title, message string, onResult func(bool)) {
 	}
 
 	layer = tv.NewModalLayer("confirm-dialog", dialog)
+	// User-initiated dialog: it appears in direct response to a user action and so
+	// cannot interrupt mid-keystroke. Opt out of the modal Enter-grace (issue #347,
+	// which scopes the grace to background-triggered modals) so a deliberate Enter
+	// on Yes/No/OK activates immediately.
+	layer.NoEnterGrace = true
 	w.desktop.AddLayer(layer)
 	// The spec's PrefH is measured against the open-time width, so re-resolve
 	// against the live terminal on resize rather than the stale spec dialog.Fit

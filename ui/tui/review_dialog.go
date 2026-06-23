@@ -28,8 +28,12 @@ func (w *Workbench) ReviewEdit(req gogent.EditReviewRequest) gogent.EditReviewDe
 	defer w.markApproval(req.SessionID, -1)
 	return serializePrompt(w, gogent.EditReject, func(resolve func(gogent.EditReviewDecision)) {
 		requester := w.requesterLabel(req.SessionID)
+		// Defer presentation while the user is mid-keystroke so the dialog cannot
+		// hijack their Enter; the badge/notification already fired (issue #346).
 		w.desktop.Post(func() {
-			showReviewDialog(w.desktop, req, requester, resolve)
+			w.presentBackgroundModal(func() {
+				showReviewDialog(w.desktop, req, requester, resolve)
+			})
 		})
 	})
 }

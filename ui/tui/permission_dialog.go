@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"gogent/internal/notify"
 	"gogent/internal/permission"
@@ -10,6 +11,73 @@ import (
 	tui "github.com/hobbestherat/turbotui"
 	tv "github.com/hobbestherat/turbotui/turbotv"
 )
+
+// typingIdleThreshold is how long the focused session input must be free of
+// keystrokes before a deferred background-triggered modal (permission/review) is
+// presented (issue #346). It is the `within` passed to Desktop.RecentlyTyped:
+// while the user typed more recently than this, presentation is held back so a
+// freshly-focused dialog button cannot intercept a keystroke (e.g. an Enter the
+// user meant to submit a message with).
+const typingIdleThreshold = 600 * time.Millisecond
+
+// deferredRecheckInterval is how often a held-back modal re-checks whether the
+// user has gone idle. It is shorter than typingIdleThreshold so the modal appears
+// promptly once typing stops (or the user submits — Enter does not count as
+// typing, so RecentlyTyped decays through it) rather than only on the next full
+// idle window.
+const deferredRecheckInterval = 150 * time.Millisecond
+
+// presentBackgroundModal shows a background-triggered modal immediately when the
+// user is idle, or defers it until they stop typing (issue #346). show performs
+// the actual AddLayer+SetFocus (e.g. showPermissionDialog/showReviewDialog). It
+// must run on the desktop event loop (callers post it). Only the *visual*
+// presentation is deferred — the agent goroutine still blocks on serializePrompt,
+// and the sidebar badge (markApproval) plus the notification already fired, so a
+// deferred prompt is still signalled and nothing is dropped.
+func (w *Workbench) presentBackgroundModal(show func()) {
+	w.deferredModal = show
+	w.maybeShowDeferredModal()
+}
+
+// maybeShowDeferredModal presents the pending deferred modal if the user has
+// stopped typing, otherwise arms a short re-check timer and tries again. It must
+// run on the event loop (the timer re-enters it via Desktop.Post). With no
+// desktop (tests) or no recent typing the modal shows at once; promptMu ensures
+// only one presentation is ever pending.
+func (w *Workbench) maybeShowDeferredModal() {
+	if w.deferredModal == nil {
+		return
+	}
+	if w.desktop != nil && w.desktop.RecentlyTyped(typingIdleThreshold) {
+		w.armDeferredRecheck()
+		return
+	}
+	show := w.deferredModal
+	w.deferredModal = nil
+	w.stopDeferredTimer()
+	show()
+}
+
+// armDeferredRecheck schedules maybeShowDeferredModal to run again on the event
+// loop after deferredRecheckInterval, replacing any pending timer. The timer
+// fires on its own goroutine, so it funnels back through Desktop.Post.
+func (w *Workbench) armDeferredRecheck() {
+	w.stopDeferredTimer()
+	if w.desktop == nil {
+		return
+	}
+	w.deferredTimer = time.AfterFunc(deferredRecheckInterval, func() {
+		w.desktop.Post(w.maybeShowDeferredModal)
+	})
+}
+
+// stopDeferredTimer cancels and clears the pending re-check timer, if any.
+func (w *Workbench) stopDeferredTimer() {
+	if w.deferredTimer != nil {
+		w.deferredTimer.Stop()
+		w.deferredTimer = nil
+	}
+}
 
 // AskPermission implements permission.Prompter. It is called from a background
 // (agent-loop) goroutine, so it marshals the modal onto the UI thread and
@@ -37,8 +105,12 @@ func (w *Workbench) AskPermission(req permission.Request) permission.Decision {
 	defer w.markApproval(req.Context.SessionID, -1)
 	return w.prompt(req, func(req permission.Request, resolve func(permission.Decision)) {
 		requester := w.requesterLabel(req.Context.SessionID)
+		// Defer presentation while the user is mid-keystroke so the dialog cannot
+		// hijack their Enter; the badge/notification already fired (issue #346).
 		w.desktop.Post(func() {
-			showPermissionDialog(w.desktop, req, requester, resolve)
+			w.presentBackgroundModal(func() {
+				showPermissionDialog(w.desktop, req, requester, resolve)
+			})
 		})
 	})
 }
