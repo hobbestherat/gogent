@@ -30,9 +30,11 @@ func (w *Workbench) showStatisticsDialog() {
 	}
 	report := w.overallLifetime.fold(filterPhantomSessions(w.handlers.GetStatistics()))
 
-	// Large by default (≈85% of the terminal), floored so it stays usable on a
-	// small terminal; the list/detail split is derived from width below (#299).
-	x, y, width, height := w.dialogRect(w.browserDialogSpec())
+	// Content-driven, static spec (issue #345): sized to the report's widest
+	// section rather than a share of the terminal, floored so it stays usable on a
+	// small terminal; the layout below is derived from the resolved width/height.
+	spec := w.statisticsDialogSpec()
+	x, y, width, height := w.dialogRect(spec)
 
 	dialog := tv.NewDialog("Statistics", x, y, width, height)
 	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
@@ -118,10 +120,10 @@ func (w *Workbench) showStatisticsDialog() {
 
 	layer = tv.NewModalLayer("statistics-dialog", dialog)
 	w.desktop.AddLayer(layer)
-	// PreferredW is a share of the terminal, so re-resolve against the live
-	// terminal on resize rather than the stale spec dialog.Fit would remember
-	// (issue #299).
-	installResizeReflow(w.desktop, dialog, layer, w.browserDialogSpec)
+	// The spec is static (content-driven, no terminal-share term), so it is
+	// path-independent and dialog.Fit — which remembers the spec and re-resolves
+	// it on resize — is the correct, simpler hook (issue #345).
+	dialog.Fit(spec)
 	render(statsOverview)
 	w.desktop.SetFocus(sel)
 }

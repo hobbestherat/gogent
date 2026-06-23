@@ -49,6 +49,29 @@ func (w *Workbench) sessionsDialogSpec() tv.DialogSpec {
 	}
 }
 
+// statisticsDialogSpec is the content-driven size of the Statistics dialog (issue
+// #345). Unlike browserDialogSpec (shared with Resources, which renders arbitrarily
+// long SKILL.md / input-schema text and genuinely fills the screen), Statistics
+// renders a fixed-column tabular report in a single wrapping TextView: its widest
+// line is 97 cells (the Models footnote) and only the Overview section approaches
+// 30 lines. So it grows toward — but is capped well below — the 80%/85% browser
+// balloon (160×42 on 200×50) instead of always filling it.
+//
+// PreferredW 100 fits the 97-cell widest line plus the 2-cell list margin (listX=2)
+// and the detail pane's width-4 border, capped at MaxW 110 (matching the permission
+// dialog's 110 ceiling) so it never sprawls on an ultrawide terminal. PrefH 24 fits
+// the tallest typical section (a fast-backend Overview is ~20-30 lines) plus the 8
+// rows of chrome, capped at MaxH 36 so a heavy Overview stays under the 42-row
+// balloon. The 60×14 floor keeps it usable on a small terminal. The spec is static
+// (no terminal-share term), so it is path-independent and the dialog uses
+// dialog.Fit on resize, like sessionsDialogSpec.
+func (w *Workbench) statisticsDialogSpec() tv.DialogSpec {
+	return tv.DialogSpec{
+		MinW: 60, MaxW: 110, PreferredW: 100,
+		MinH: 14, MaxH: 36, PrefH: 24,
+	}
+}
+
 // watchersDialogSpec is the content-driven size of the Watchers dialog (issue
 // #329 Phase 4). Like sessionsDialogSpec it expresses a content footprint rather
 // than a share of the terminal: a watcher list beside a detail pane that shows the
