@@ -123,6 +123,10 @@ type SessionWindow struct {
 	// enabling the /act (approve) command (issue #43).
 	planMode    bool
 	planPending bool
+	// yoloMode mirrors the backend yolo flag for the status indicator (issue
+	// #356): when on, permission prompts are auto-approved (except rules.json
+	// hard-deny guardrails) and the step cap is removed.
+	yoloMode bool
 	// pending holds a message typed while the agent was busy (issue #170). Rather
 	// than dropping input mid-turn, the submit handler stows the latest text here
 	// (a single editable, latest-wins slot — simplest UX, matching the backend's
@@ -1531,6 +1535,11 @@ func (sw *SessionWindow) refreshStatus() {
 		// is unmistakable (issue #43).
 		state = "PLAN · " + state
 	}
+	if sw.yoloMode {
+		// Surface yolo at the left of the status line so the auto-approve +
+		// unlimited-steps posture is unmistakable (issue #356).
+		state = "YOLO · " + state
+	}
 	if sw.pending != "" {
 		// Show the queued message distinctly so it is visible (and known to be
 		// editable/cancellable) before it fires (issue #170). Trim long entries so
@@ -1710,6 +1719,9 @@ func (sw *SessionWindow) handleSlashCommand(text string) bool {
 		return true
 	case "/plan":
 		sw.togglePlanMode()
+		return true
+	case "/yolo":
+		sw.toggleYoloMode()
 		return true
 	case "/act":
 		sw.approvePlan()
@@ -2086,6 +2098,26 @@ func (sw *SessionWindow) togglePlanMode() {
 			"Send your request, then approve the plan (/act) to execute it.")
 	} else {
 		sw.addNote("Plan mode off — the agent may make changes directly.")
+	}
+	sw.refreshStatus()
+}
+
+// toggleYoloMode flips the session's yolo mode (issue #356): it mirrors the new
+// state to the backend (auto-approve permissions + remove the step cap) and the
+// status line, and explains the new state. The rules.json hard-deny guardrails
+// (issue #355) still hold under yolo, and cancellation, token budget, and the
+// audit trail remain active — the note says so to keep the mode honest.
+func (sw *SessionWindow) toggleYoloMode() {
+	sw.yoloMode = !sw.yoloMode
+	if sw.wb.handlers.OnSetYoloMode != nil {
+		sw.wb.handlers.OnSetYoloMode(sw.id, sw.yoloMode)
+	}
+	if sw.yoloMode {
+		sw.addNote("YOLO mode on — permission prompts auto-approve (except hard-deny guardrails) " +
+			"and the step cap is removed. Cancellation, token budget, and the audit trail still apply; " +
+			"set a token budget as the brake.")
+	} else {
+		sw.addNote("YOLO mode off — permission prompts return and the configured step cap is restored.")
 	}
 	sw.refreshStatus()
 }

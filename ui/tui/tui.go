@@ -167,6 +167,9 @@ type Handlers struct {
 	OnRewind func(sessionID string, turns int) (summary string, err error)
 	// OnSetPlanMode toggles plan mode for a session (issue #43). May be nil.
 	OnSetPlanMode func(sessionID string, on bool)
+	// OnSetYoloMode toggles yolo mode for a session (issue #356): auto-approve
+	// permissions (except hard-deny guardrails) and remove the step cap. May be nil.
+	OnSetYoloMode func(sessionID string, on bool)
 	// OnApprovePlan executes a session's pending plan with the full tool set
 	// (issue #43). It runs on a background goroutine; progress flows back as
 	// session events. May be nil.

@@ -223,8 +223,23 @@ func NewGogentWithWorkspace(homeDir, workspaceRoot string) *Gogent {
 	// Default posture: file reads/writes inside the workspace are allowed
 	// without prompting. Paths outside the workspace, shell, and sub-agents fall
 	// through to "ask" (resolved interactively, or denied when headless).
-	g.permissions.AddRule(permission.Rule{Action: string(permission.ActionRead), Resource: "*", Effect: string(permission.EffectAllow)})
-	g.permissions.AddRule(permission.Rule{Action: string(permission.ActionWrite), Resource: "*", Effect: string(permission.EffectAllow)})
+	if err := g.permissions.AddRule(permission.Rule{Action: string(permission.ActionRead), Resource: "*", Effect: string(permission.EffectAllow)}); err != nil {
+		log.Warnf("install default read rule: %v", err)
+	}
+	if err := g.permissions.AddRule(permission.Rule{Action: string(permission.ActionWrite), Resource: "*", Effect: string(permission.EffectAllow)}); err != nil {
+		log.Warnf("install default write rule: %v", err)
+	}
+	// User-editable hard-deny guardrails from ~/.gogent/rules.json (issue #355):
+	// loaded once at startup and respected irrespective of mode, including yolo.
+	// Lenient: a missing/corrupt file adds nothing; individual bad rules are
+	// logged and skipped so a typo never bricks the gate.
+	for _, err := range g.permissions.LoadRules(filepath.Join(homeDir, ".gogent")) {
+		log.Warnf("rules.json: %v", err)
+	}
+	// Seed the global yolo default (issue #356) from config; the --yolo CLI flag
+	// overrides this via SetGlobalYolo, and the TUI /yolo command toggles it per
+	// session. Yolo auto-approves "ask" but never the deny guardrails above.
+	g.permissions.SetYolo(cfg.Yolo)
 	g.fileMutation = fileops.NewFileMutation(g.fileSystem, g.locationMutation)
 	// Snapshot touched files before each mutating write/edit so a turn can be
 	// undone (issue #41). Reads through the same file system so snapshots and
@@ -1295,7 +1310,14 @@ func (g *Gogent) CreateUserSession(id string, rootAgent *agent.Agent) *agent.Use
 	userSession := agent.NewUserSession(id, rootAgent)
 	userSession.SetSubAgentConfig(g.config.SubAgents)
 	// Apply the configurable per-task step cap (issue #249); 0 means unlimited.
-	userSession.SetMaxSteps(g.config.MaxStepsOrDefault())
+	// Under yolo (issue #356) the cap is removed so the loop runs unbounded; the
+	// effective state already folds in the config/CLI global default and any
+	// per-session override, so config/CLI-activated yolo is honoured at creation.
+	if g.permissions.EffectiveYolo(id) {
+		userSession.SetMaxSteps(0)
+	} else {
+		userSession.SetMaxSteps(g.config.MaxStepsOrDefault())
+	}
 	// Mid-turn injection of a queued user note (issue #170, phase 2) is now always
 	// on: it is the agent-side path behind the per-message Interject button (issue
 	// #201), which replaced the removed experimental.inject_queued_input flag. The
@@ -2357,6 +2379,38 @@ func (g *Gogent) SetPlanMode(sessionID string, on bool) {
 	if us := g.GetUserSession(sessionID); us != nil {
 		us.SetPlanMode(on)
 	}
+}
+
+// SetYoloMode toggles yolo mode for a session (issue #356): it sets the
+// per-session auto-approve override on the permission gate and switches the
+// session's step cap between unlimited (on) and the configured default (off). It
+// is the backend handler the TUI /yolo command and command-palette entry call.
+// It is a no-op for the step cap when the session is unknown, but the permission
+// override is still recorded so a session created later inherits it.
+func (g *Gogent) SetYoloMode(sessionID string, on bool) {
+	g.permissions.SetSessionYolo(sessionID, on)
+	if us := g.GetUserSession(sessionID); us != nil {
+		if on {
+			us.SetMaxSteps(0)
+		} else {
+			us.SetMaxSteps(g.config.MaxStepsOrDefault())
+		}
+	}
+}
+
+// YoloMode reports the effective yolo state for a session (issue #356): the
+// per-session override if set, otherwise the global config/CLI default.
+func (g *Gogent) YoloMode(sessionID string) bool {
+	return g.permissions.EffectiveYolo(sessionID)
+}
+
+// SetGlobalYolo turns the global yolo default on or off (issue #356). It is the
+// entry point for the --yolo CLI flag, which overrides the config.json value.
+func (g *Gogent) SetGlobalYolo(on bool) {
+	if g.config != nil {
+		g.config.Yolo = on
+	}
+	g.permissions.SetYolo(on)
 }
 
 // PlanMode reports whether a session is in plan mode (issue #43).

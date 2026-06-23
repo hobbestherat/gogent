@@ -114,6 +114,7 @@ func (w *Workbench) commands() []command {
 		{category: "Session", name: "Undo last turn", keys: "/undo", run: sessionCmd("/undo")},
 		{category: "Session", name: "Rewind turns", keys: "/rewind", run: sessionCmd("/rewind")},
 		{category: "Session", name: "Toggle plan mode", keys: "/plan", run: sessionCmd("/plan")},
+		{category: "Session", name: "Toggle YOLO mode", keys: "/yolo", run: sessionCmd("/yolo")},
 		// /act is a no-op unless a plan is pending, so gate it on that state to keep the
 		// palette honest — it mirrors approvePlan()'s own guard in session_window.go.
 		{category: "Session", name: "Approve plan", keys: "/act", run: sessionCmd("/act"),
