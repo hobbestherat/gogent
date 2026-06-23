@@ -185,6 +185,181 @@ func TestRequiredKeysDecoding(t *testing.T) {
 	})
 }
 
+func TestValidateArgsEnumConstraints(t *testing.T) {
+	schema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"mode": map[string]interface{}{
+				"type": "string",
+				"enum": []string{"content", "files_with_matches", "count"},
+			},
+			"optional": map[string]interface{}{
+				"type": "string",
+				"enum": []interface{}{"pending", "in_progress", "completed"},
+			},
+			"label": map[string]interface{}{"type": "string"},
+		},
+		"required": []string{"mode"},
+	}
+
+	tests := []struct {
+		name    string
+		args    map[string]interface{}
+		wantErr string
+	}{
+		{
+			name: "valid enum value passes",
+			args: map[string]interface{}{"mode": "content"},
+		},
+		{
+			name:    "invalid enum value is rejected with field and allowed values",
+			args:    map[string]interface{}{"mode": "json"},
+			wantErr: `args.mode: value must be one of [content files_with_matches count], got "json"`,
+		},
+		{
+			name:    "case variant is outside enum",
+			args:    map[string]interface{}{"mode": "CONTENT"},
+			wantErr: `args.mode: value must be one of [content files_with_matches count], got "CONTENT"`,
+		},
+		{
+			name: "json decoded interface enum value passes",
+			args: map[string]interface{}{"mode": "count", "optional": "in_progress"},
+		},
+		{
+			name:    "json decoded interface enum value rejects",
+			args:    map[string]interface{}{"mode": "count", "optional": "blocked"},
+			wantErr: `args.optional: value must be one of [pending in_progress completed], got "blocked"`,
+		},
+		{
+			name: "optional enum field may be absent",
+			args: map[string]interface{}{"mode": "files_with_matches"},
+		},
+		{
+			name: "field without enum is unaffected",
+			args: map[string]interface{}{"mode": "content", "label": "anything-goes"},
+		},
+		{
+			name:    "type error still wins before enum error",
+			args:    map[string]interface{}{"mode": 7.0},
+			wantErr: "args.mode: expected string, got number",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateArgs(tc.args, schema)
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("expected no error, got: %v", err)
+			case tc.wantErr != "" && err == nil:
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			case tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr):
+				t.Fatalf("error %q does not contain %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateArgsEnumConstraintsNestedArrayItems(t *testing.T) {
+	schema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"todos": map[string]interface{}{
+				"type": "array",
+				"items": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"content": map[string]interface{}{"type": "string"},
+						"status": map[string]interface{}{
+							"type": "string",
+							"enum": []string{"pending", "in_progress", "completed"},
+						},
+					},
+					"required": []string{"content"},
+				},
+			},
+		},
+		"required": []string{"todos"},
+	}
+
+	if err := validateArgs(map[string]interface{}{
+		"todos": []interface{}{
+			map[string]interface{}{"content": "write tests", "status": "completed"},
+			map[string]interface{}{"content": "run tests"},
+		},
+	}, schema); err != nil {
+		t.Fatalf("valid nested enum args rejected: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		args    map[string]interface{}
+		wantErr []string
+	}{
+		{
+			name: "invalid nested enum value rejected",
+			args: map[string]interface{}{
+				"todos": []interface{}{
+					map[string]interface{}{"content": "write tests", "status": "blocked"},
+				},
+			},
+			wantErr: []string{"args.todos[0].status", "[pending in_progress completed]", `"blocked"`},
+		},
+		{
+			name: "nested item required key still enforced",
+			args: map[string]interface{}{
+				"todos": []interface{}{
+					map[string]interface{}{"status": "pending"},
+				},
+			},
+			wantErr: []string{`args.todos[0]: missing required property "content"`},
+		},
+		{
+			name: "nested item type still enforced before enum",
+			args: map[string]interface{}{
+				"todos": []interface{}{
+					map[string]interface{}{"content": "write tests", "status": 42.0},
+				},
+			},
+			wantErr: []string{"args.todos[0].status: expected string, got number"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateArgs(tc.args, schema)
+			if err == nil {
+				t.Fatalf("expected error containing %v, got nil", tc.wantErr)
+			}
+			for _, want := range tc.wantErr {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("nested validation error %q does not contain %q", err.Error(), want)
+				}
+			}
+		})
+	}
+
+	nullOKSchema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"todos": map[string]interface{}{
+				"items": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"status": map[string]interface{}{
+							"type": "string",
+							"enum": []string{"pending", "in_progress", "completed"},
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := validateArgs(map[string]interface{}{"todos": nil}, nullOKSchema); err != nil {
+		t.Fatalf("items schema should not reject null when property has no type: %v", err)
+	}
+}
+
 // TestValidateTypeTable exercises isType/validateType across every supported
 // JSON Schema type name.
 func TestValidateTypeTable(t *testing.T) {

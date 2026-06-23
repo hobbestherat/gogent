@@ -1,6 +1,9 @@
 package tool
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // validateArgs validates tool arguments against the tool's JSON Schema (the
 // InputSchema advertised to the model). It enforces the constructs this codebase
@@ -41,7 +44,85 @@ func validateValue(value, schema interface{}, path string) error {
 			}
 		}
 	}
+	// Array items: walk each element against the "items" subschema so constraints
+	// nested inside arrays (e.g. todo.status under todos.items.properties) are
+	// enforced too. A schema may omit "type" (the todos schema deliberately
+	// permits array-or-null), so this is gated on the value actually being an
+	// array rather than on a declared "array" type.
+	if items, ok := schemaMap["items"].(map[string]interface{}); ok {
+		if arr, ok := value.([]interface{}); ok {
+			for i, elem := range arr {
+				if err := validateValue(elem, items, fmt.Sprintf("%s[%d]", path, i)); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	// An "enum" subschema constrains the value to a fixed allowed set. Enforce it
+	// generically for any property that declares one, so advertised enums
+	// (git.operation, grep.output_mode, todo.status, and any future field) are
+	// rejected at the gate rather than slipping through to a tool-specific error.
+	if allowed := enumValues(schemaMap); allowed != nil {
+		if err := validateEnum(value, allowed, path); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// validateEnum reports an error when value is not among the allowed enum
+// entries. The error names the field path and the full allowed set, e.g.
+// `args.operation: value must be one of [status diff log], got "rebase"`.
+func validateEnum(value interface{}, allowed []interface{}, path string) error {
+	for _, a := range allowed {
+		if enumEqual(value, a) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s: value must be one of %s, got %s", path, formatEnumAllowed(allowed), formatEnumGot(value))
+}
+
+// enumEqual reports whether a provided value matches an allowed enum entry.
+//
+// Matching is exact: JSON Schema enum members are case-sensitive, so "CONTENT"
+// does not match "content". This is what lets the gate reject case-variants
+// uniformly (naming the field and allowed set) instead of letting them slip
+// through to a later, tool-specific error. Any downstream convenience
+// normalization (e.g. NormalizeTodoStatus) runs after validation and must not
+// weaken the advertised constraint.
+//
+// Only when neither side is a string does it fall back to comparing string
+// forms, so a JSON number (float64) still matches a Go integer literal in the
+// schema — a defensive equivalence for non-JSON arg sources.
+func enumEqual(value, allowed interface{}) bool {
+	if value == allowed {
+		return true
+	}
+	_, valueIsString := value.(string)
+	_, allowedIsString := allowed.(string)
+	if valueIsString || allowedIsString {
+		return false
+	}
+	return fmt.Sprintf("%v", value) == fmt.Sprintf("%v", allowed)
+}
+
+// formatEnumAllowed renders the allowed set as `[a b c]` (unquoted, space
+// separated), matching the issue's uniform error format.
+func formatEnumAllowed(allowed []interface{}) string {
+	parts := make([]string, len(allowed))
+	for i, a := range allowed {
+		parts[i] = fmt.Sprintf("%v", a)
+	}
+	return "[" + strings.Join(parts, " ") + "]"
+}
+
+// formatEnumGot renders the offending value for the error message, quoting
+// strings so an empty or whitespace value is visible.
+func formatEnumGot(value interface{}) string {
+	if s, ok := value.(string); ok {
+		return fmt.Sprintf("%q", s)
+	}
+	return fmt.Sprintf("%v", value)
 }
 
 // validateObject enforces required keys and the declared property schemas on an
@@ -86,6 +167,24 @@ func requiredKeys(schemaMap map[string]interface{}) []string {
 			}
 		}
 		return keys
+	}
+	return nil
+}
+
+// enumValues returns the "enum" entries of a property subschema, accepting
+// either a []string (as written in the Go schema literals in this codebase) or a
+// []interface{} (as decoded from JSON), mirroring requiredKeys. It returns nil
+// when the subschema declares no enum, so the check is a no-op for such fields.
+func enumValues(schemaMap map[string]interface{}) []interface{} {
+	switch v := schemaMap["enum"].(type) {
+	case []interface{}:
+		return v
+	case []string:
+		out := make([]interface{}, len(v))
+		for i, s := range v {
+			out[i] = s
+		}
+		return out
 	}
 	return nil
 }

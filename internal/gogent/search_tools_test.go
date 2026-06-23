@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"gogent/internal/tool"
@@ -163,6 +164,36 @@ func TestGrepTool(t *testing.T) {
 		}
 		if resp.Success {
 			t.Errorf("want failure for missing pattern, got success: %+v", resp.Result)
+		}
+	})
+
+	t.Run("rejects out-of-enum output_mode at validation gate", func(t *testing.T) {
+		for _, outputMode := range []string{"json", "CONTENT"} {
+			t.Run(outputMode, func(t *testing.T) {
+				resp, err := g.GetToolRegistry().ExecuteToolCall(&tool.ToolCall{
+					Tool: "grep",
+					Args: map[string]interface{}{"pattern": "Foo", "output_mode": outputMode},
+				}, tool.ToolContext{SessionID: "search"})
+				if err != nil {
+					t.Fatalf("ExecuteToolCall: %v", err)
+				}
+				if resp == nil || resp.Success {
+					t.Fatalf("want failure for invalid output_mode, got %+v", resp)
+				}
+				for _, want := range []string{
+					"invalid args",
+					"args.output_mode",
+					"[content files_with_matches count]",
+					`"` + outputMode + `"`,
+				} {
+					if !strings.Contains(resp.Error, want) {
+						t.Fatalf("grep invalid enum error %q does not contain %q", resp.Error, want)
+					}
+				}
+				if strings.Contains(resp.Error, "failed to grep") || strings.Contains(resp.Error, "invalid output_mode") {
+					t.Fatalf("grep enum was not rejected at the validation gate: %q", resp.Error)
+				}
+			})
 		}
 	})
 }
