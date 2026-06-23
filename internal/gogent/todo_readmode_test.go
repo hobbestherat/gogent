@@ -121,8 +121,8 @@ func TestTodoToolWriteEchoesStoredList(t *testing.T) {
 	res := execTodo(t, g, id, map[string]interface{}{
 		"todos": []interface{}{
 			map[string]interface{}{"content": "read", "status": "completed"},
-			map[string]interface{}{"content": "edit", "status": "IN_PROGRESS"}, // loose case
-			map[string]interface{}{"content": "verify"},                        // default pending
+			map[string]interface{}{"content": "edit", "status": "in_progress"},
+			map[string]interface{}{"content": "verify"}, // default pending
 		},
 	})
 

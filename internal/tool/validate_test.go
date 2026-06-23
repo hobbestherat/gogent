@@ -217,6 +217,11 @@ func TestValidateArgsEnumConstraints(t *testing.T) {
 			wantErr: `args.mode: value must be one of [content files_with_matches count], got "json"`,
 		},
 		{
+			name:    "case variant is outside enum",
+			args:    map[string]interface{}{"mode": "CONTENT"},
+			wantErr: `args.mode: value must be one of [content files_with_matches count], got "CONTENT"`,
+		},
+		{
 			name: "json decoded interface enum value passes",
 			args: map[string]interface{}{"mode": "count", "optional": "in_progress"},
 		},

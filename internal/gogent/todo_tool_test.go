@@ -94,32 +94,36 @@ func TestTodoToolRejectsOutOfEnumStatusAtValidationGate(t *testing.T) {
 		t.Fatalf("session %s not created", id)
 	}
 
-	resp, err := g.GetToolRegistry().ExecuteToolCall(&tool.ToolCall{
-		Tool: "todo",
-		Args: map[string]interface{}{
-			"todos": []interface{}{
-				map[string]interface{}{"content": "write tests", "status": "blocked"},
-			},
-		},
-	}, tool.ToolContext{SessionID: id, AgentID: "root"})
-	if err != nil {
-		t.Fatalf("ExecuteToolCall returned unexpected error: %v", err)
-	}
-	if resp == nil || resp.Success {
-		t.Fatalf("expected invalid enum failure, got %+v", resp)
-	}
-	for _, want := range []string{
-		"invalid args",
-		"status",
-		"[pending in_progress completed]",
-		`"blocked"`,
-	} {
-		if !strings.Contains(resp.Error, want) {
-			t.Fatalf("todo invalid enum error %q does not contain %q", resp.Error, want)
-		}
-	}
-	if got := us.Todos(); len(got) != 0 {
-		t.Fatalf("invalid todo status mutated session todos: %+v", got)
+	for _, status := range []string{"blocked", "IN_PROGRESS"} {
+		t.Run(status, func(t *testing.T) {
+			resp, err := g.GetToolRegistry().ExecuteToolCall(&tool.ToolCall{
+				Tool: "todo",
+				Args: map[string]interface{}{
+					"todos": []interface{}{
+						map[string]interface{}{"content": "write tests", "status": status},
+					},
+				},
+			}, tool.ToolContext{SessionID: id, AgentID: "root"})
+			if err != nil {
+				t.Fatalf("ExecuteToolCall returned unexpected error: %v", err)
+			}
+			if resp == nil || resp.Success {
+				t.Fatalf("expected invalid enum failure, got %+v", resp)
+			}
+			for _, want := range []string{
+				"invalid args",
+				"status",
+				"[pending in_progress completed]",
+				`"` + status + `"`,
+			} {
+				if !strings.Contains(resp.Error, want) {
+					t.Fatalf("todo invalid enum error %q does not contain %q", resp.Error, want)
+				}
+			}
+			if got := us.Todos(); len(got) != 0 {
+				t.Fatalf("invalid todo status mutated session todos: %+v", got)
+			}
+		})
 	}
 }
 
