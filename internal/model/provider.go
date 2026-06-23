@@ -44,16 +44,30 @@ const (
 	// Default Credentials (a bearer token injected by ADCRoundTripper) instead of
 	// an API key (see authADC).
 	APITypeVertex APIType = "vertex"
+	// APITypeVertexNative is Google Vertex AI's NATIVE Gemini API
+	// (:generateContent / :streamGenerateContent), as opposed to the
+	// OpenAI-compatible shim (APITypeVertex). It speaks Gemini's own wire format —
+	// contents/parts, systemInstruction, functionDeclarations, generationConfig —
+	// so it is served by a dedicated geminiAdapter rather than openAIAdapter, and
+	// it unlocks native-only features: thinking/reasoning (thinkingConfig,
+	// thought:true parts), structured output via responseSchema, and image parts.
+	// Like APITypeVertex it derives its base URL from Project/Location and
+	// authenticates with ADC (authADC); unlike it, the model name lives in the URL
+	// path (see chatURLFunc/streamURLFunc), not the request body. The config alias
+	// "gemini" resolves here.
+	APITypeVertexNative APIType = "vertex-native"
 )
 
 var stringToAPITypeMap = map[string]APIType{
-	"openai":     APITypeOpenAI,
-	"zai":        APITypeZAI,
-	"z.ai":       APITypeZAI,
-	"anthropic":  APITypeAnthropic,
-	"claude":     APITypeAnthropic,
-	"openrouter": APITypeOpenRouter,
-	"vertex":     APITypeVertex,
+	"openai":        APITypeOpenAI,
+	"zai":           APITypeZAI,
+	"z.ai":          APITypeZAI,
+	"anthropic":     APITypeAnthropic,
+	"claude":        APITypeAnthropic,
+	"openrouter":    APITypeOpenRouter,
+	"vertex":        APITypeVertex,
+	"vertex-native": APITypeVertexNative,
+	"gemini":        APITypeVertexNative,
 }
 
 // StringToAPIType resolves a config string to an APIType, defaulting to the
@@ -112,6 +126,16 @@ type providerSpec struct {
 	// it in place of defaultBaseURL but only when the user leaves Endpoint empty,
 	// so an explicit endpoint still overrides. See NewModelConnectionFromConfig.
 	baseURLFunc func(*config.ModelConfig) string
+	// chatURLFunc / streamURLFunc build the concrete (non-streaming / streaming)
+	// request URLs from the base URL and the model name, for providers whose
+	// endpoint embeds the model in the URL path rather than the request body —
+	// Vertex AI's native Gemini API uses /publishers/google/models/{MODEL}:generateContent
+	// and a distinct :streamGenerateContent?alt=sse streaming route. They are nil
+	// for every provider whose chat path is static (the model rides in the body);
+	// when set, the constructor uses them in place of spec.chatURL(base) and to
+	// populate ModelConnection.StreamURL. See NewModelConnectionFromConfig.
+	chatURLFunc   func(base, model string) string
+	streamURLFunc func(base, model string) string
 	// chatPath and modelsPath are appended to the base URL to reach the
 	// chat-completions and model-listing endpoints.
 	chatPath   string
@@ -231,6 +255,30 @@ var providerSpecs = map[APIType]providerSpec{
 		// through the compat layer (those are native-Gemini features).
 		supportsResponseFormat: true,
 	},
+	APITypeVertexNative: {
+		// Vertex AI's native Gemini API. Like the compat mode the base URL is
+		// derived from Project/Location (baseURLFunc), but it uses v1 (GA) and the
+		// model name is part of the URL path, not the body — so chatURLFunc and
+		// streamURLFunc build the :generateContent / :streamGenerateContent?alt=sse
+		// routes instead of appending a static chatPath. chatPath is set to the
+		// native models route purely so ListModels reports "not supported" (a
+		// non-empty chatPath with an empty modelsPath) rather than probing a bad
+		// URL; native model listing is a documented limitation. Auth is ADC.
+		baseURLFunc:   vertexNativeBaseURL,
+		chatURLFunc:   vertexNativeChatURL,
+		streamURLFunc: vertexNativeStreamURL,
+		chatPath:      "/publishers/google/models",
+		authMode:      authADC,
+		// Native Gemini capability surface: structured output via responseSchema,
+		// and thinking via thinkingConfig (thought:true parts). reasoning_effort is
+		// not a Gemini concept (it uses thinkingConfig/thinkingBudget), and Gemini
+		// 2.5 "thinking" models accept temperature/top_p normally, so the reasoning
+		// temperature rejection stays off.
+		supportsResponseFormat:      true,
+		supportsThinking:            true,
+		supportsReasoningEffort:     false,
+		reasoningRejectsTemperature: false,
+	},
 }
 
 // vertexAIHost returns the Vertex AI API host for a region. Every location is
@@ -264,6 +312,42 @@ func vertexOpenAIBaseURL(c *config.ModelConfig) string {
 		vertexAIHost(loc), strings.TrimSpace(c.Project), loc)
 }
 
+// vertexNativeBaseURL builds the Vertex AI NATIVE Gemini base URL from a model
+// config's Project and Location:
+//
+//	https://{LOCATION}-aiplatform.googleapis.com/v1/projects/{PROJECT}/locations/{LOCATION}
+//
+// It differs from vertexOpenAIBaseURL only in the API version — v1 (GA) for the
+// native API rather than v1beta1 for the OpenAI-compat shim. The model name is
+// NOT part of the base; it is interpolated into the path by vertexNativeChatURL /
+// vertexNativeStreamURL. Host prefix is dropped for "global" (see vertexAIHost);
+// Location is lower-cased so the host/path are robust to a mixed-case region.
+func vertexNativeBaseURL(c *config.ModelConfig) string {
+	loc := strings.ToLower(strings.TrimSpace(c.Location))
+	return fmt.Sprintf("https://%s/v1/projects/%s/locations/%s",
+		vertexAIHost(loc), strings.TrimSpace(c.Project), loc)
+}
+
+// vertexNativeChatURL builds the native non-streaming request URL, embedding the
+// model name in the path (Gemini's native API names the model in the URL, not the
+// body):
+//
+//	{base}/publishers/google/models/{MODEL}:generateContent
+func vertexNativeChatURL(base, model string) string {
+	return fmt.Sprintf("%s/publishers/google/models/%s:generateContent",
+		strings.TrimRight(strings.TrimSpace(base), "/"), strings.TrimSpace(model))
+}
+
+// vertexNativeStreamURL builds the native streaming request URL. It targets the
+// distinct :streamGenerateContent action and appends ?alt=sse so the response is
+// framed as server-sent events (without it Vertex streams a JSON array instead):
+//
+//	{base}/publishers/google/models/{MODEL}:streamGenerateContent?alt=sse
+func vertexNativeStreamURL(base, model string) string {
+	return fmt.Sprintf("%s/publishers/google/models/%s:streamGenerateContent?alt=sse",
+		strings.TrimRight(strings.TrimSpace(base), "/"), strings.TrimSpace(model))
+}
+
 // specFor returns the providerSpec for an APIType, falling back to OpenAI.
 func specFor(t APIType) providerSpec {
 	if s, ok := providerSpecs[t]; ok {
@@ -281,6 +365,7 @@ func APITypeIDs() []string {
 		string(APITypeAnthropic),
 		string(APITypeOpenRouter),
 		string(APITypeVertex),
+		string(APITypeVertexNative),
 	}
 }
 

@@ -53,6 +53,10 @@ func adapterFor(t APIType) adapter {
 		// format, so it reuses the shared adapter; only its providerSpec (ADC auth
 		// and a dynamic, project/location-derived base URL) differs.
 		return openAIAdapter{}
+	case APITypeVertexNative:
+		// Vertex AI's native Gemini API speaks its own contents/parts wire format,
+		// so it gets a dedicated adapter (see geminiAdapter).
+		return geminiAdapter{}
 	default:
 		return openAIAdapter{}
 	}
@@ -534,6 +538,606 @@ func (anthropicAdapter) parseStream(body io.Reader, streamCh chan<- StreamRespon
 	}
 
 	usage := promptUsage.toTokenUsage(outputTokens)
+	streamCh <- StreamResponse{
+		ToolCalls:    toolCalls,
+		FinishReason: finishReason,
+		Usage:        usage,
+		Done:         true,
+	}
+	return content.String(), usage, nil
+}
+
+// ---------------------------------------------------------------------------
+// Vertex AI native Gemini adapter
+// ---------------------------------------------------------------------------
+
+// geminiAdapter translates gogent's OpenAI-shaped request/response to and from
+// Google's NATIVE Gemini wire format (Vertex AI :generateContent /
+// :streamGenerateContent), as opposed to the OpenAI-compatible shim served by
+// openAIAdapter. The native protocol differs substantially:
+//
+//   - messages become contents[], each a {role, parts[]} block; the system
+//     prompt is hoisted to a top-level systemInstruction;
+//   - roles are user|model|function rather than user|assistant|tool;
+//   - parts are polymorphic (text, inlineData/fileData images, functionCall,
+//     functionResponse, and reasoning text flagged thought:true);
+//   - tools are tools[].functionDeclarations[] and tool_choice is
+//     toolConfig.functionCallingConfig.mode (AUTO|ANY|NONE);
+//   - sampling/limits/structured-output/thinking live under generationConfig
+//     (camelCase: maxOutputTokens, topP, responseMimeType, responseSchema,
+//     thinkingConfig) and JSON-Schema type names are UPPERCASE (OBJECT, STRING…);
+//   - the streaming SSE has no [DONE] sentinel — it ends at EOF, with the
+//     finishReason and usageMetadata carried only in the final chunk.
+//
+// The model name is NOT in the request body for native Gemini — it lives in the
+// URL path (see providerSpec.chatURLFunc) — so buildBody ignores req.Model.
+type geminiAdapter struct{}
+
+// geminiRequest is the native :generateContent / :streamGenerateContent body.
+type geminiRequest struct {
+	Contents          []geminiContent   `json:"contents,omitempty"`
+	SystemInstruction *geminiContent    `json:"systemInstruction,omitempty"`
+	Tools             []geminiTool      `json:"tools,omitempty"`
+	ToolConfig        *geminiToolConfig `json:"toolConfig,omitempty"`
+	GenerationConfig  *geminiGenConfig  `json:"generationConfig,omitempty"`
+}
+
+// geminiContent is one turn: a role (user|model|function) and a polymorphic parts
+// array. Role is omitted for the systemInstruction content (which has none).
+type geminiContent struct {
+	Role  string       `json:"role,omitempty"`
+	Parts []geminiPart `json:"parts"`
+}
+
+// geminiPart is one content part. Exactly one discriminator field is set per part;
+// omitempty keeps each part to just the fields its kind uses.
+type geminiPart struct {
+	Text             string                  `json:"text,omitempty"`
+	InlineData       *geminiInlineData       `json:"inlineData,omitempty"`
+	FileData         *geminiFileData         `json:"fileData,omitempty"`
+	FunctionCall     *geminiFunctionCall     `json:"functionCall,omitempty"`
+	FunctionResponse *geminiFunctionResponse `json:"functionResponse,omitempty"`
+}
+
+// geminiInlineData is an inline (base64) image/media part.
+type geminiInlineData struct {
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"`
+}
+
+// geminiFileData is a by-reference media part (gs:// or http(s) URI). MimeType is
+// optional — Gemini infers it for many types when omitted.
+type geminiFileData struct {
+	MimeType string `json:"mimeType,omitempty"`
+	FileURI  string `json:"fileUri"`
+}
+
+// geminiFunctionCall is a model→tool call. Args is the JSON-object arguments
+// (Gemini wants an object, not the OpenAI arguments-as-string).
+type geminiFunctionCall struct {
+	Name string          `json:"name"`
+	Args json.RawMessage `json:"args,omitempty"`
+	ID   string          `json:"id,omitempty"`
+}
+
+// geminiFunctionResponse is a tool result, carried in a role:"user" content.
+// Response MUST be a JSON object (scalars are wrapped as {"result": …}); ID
+// echoes the originating functionCall id (required for Gemini 3 round-trips).
+type geminiFunctionResponse struct {
+	Name     string          `json:"name"`
+	Response json.RawMessage `json:"response"`
+	ID       string          `json:"id,omitempty"`
+}
+
+type geminiTool struct {
+	FunctionDeclarations []geminiFunctionDeclaration `json:"functionDeclarations,omitempty"`
+}
+
+type geminiFunctionDeclaration struct {
+	Name        string      `json:"name"`
+	Description string      `json:"description,omitempty"`
+	Parameters  interface{} `json:"parameters,omitempty"`
+}
+
+type geminiToolConfig struct {
+	FunctionCallingConfig *geminiFunctionCallingConfig `json:"functionCallingConfig,omitempty"`
+}
+
+type geminiFunctionCallingConfig struct {
+	Mode                 string   `json:"mode,omitempty"`
+	AllowedFunctionNames []string `json:"allowedFunctionNames,omitempty"`
+	// ParallelFunctionCalls advertises whether the model may emit several
+	// functionCall parts in one turn. Gemini enables this by default; it is a
+	// pointer so it is always surfaced explicitly (the native wire reference lists
+	// it) while still letting an explicit gogent override (parallel_tool_calls:false
+	// for strict tool sets) pass through. See geminiToolConfigFor.
+	ParallelFunctionCalls *bool `json:"parallelFunctionCalls,omitempty"`
+}
+
+type geminiGenConfig struct {
+	Temperature      *float32              `json:"temperature,omitempty"`
+	TopP             *float32              `json:"topP,omitempty"`
+	MaxOutputTokens  int                   `json:"maxOutputTokens,omitempty"`
+	ResponseMimeType string                `json:"responseMimeType,omitempty"`
+	ResponseSchema   interface{}           `json:"responseSchema,omitempty"`
+	ThinkingConfig   *geminiThinkingConfig `json:"thinkingConfig,omitempty"`
+}
+
+// geminiThinkingConfig controls reasoning. ThinkingBudget is a pointer so a
+// deliberate 0 (disable, on Flash) is expressible and distinguishable from unset;
+// -1 means dynamic/auto. IncludeThoughts:true surfaces thought summaries as
+// text parts flagged thought:true.
+type geminiThinkingConfig struct {
+	IncludeThoughts bool `json:"includeThoughts,omitempty"`
+	ThinkingBudget  *int `json:"thinkingBudget,omitempty"`
+}
+
+func (geminiAdapter) buildBody(req CompletionRequest, buf *bytes.Buffer) error {
+	out := geminiRequest{}
+
+	// Hoist system messages to the top-level systemInstruction; map the rest to
+	// contents, merging consecutive same-role turns (Gemini wants one turn per
+	// role, and tool results must ride in a user turn).
+	var systemParts []string
+	for _, m := range req.Messages {
+		if m.Role == RoleSystem {
+			if m.Content != "" {
+				systemParts = append(systemParts, m.Content)
+			}
+			continue
+		}
+		role, parts := geminiParts(m)
+		if len(parts) == 0 {
+			continue
+		}
+		if n := len(out.Contents); n > 0 && out.Contents[n-1].Role == role {
+			out.Contents[n-1].Parts = append(out.Contents[n-1].Parts, parts...)
+		} else {
+			out.Contents = append(out.Contents, geminiContent{Role: role, Parts: parts})
+		}
+	}
+	if len(systemParts) > 0 {
+		out.SystemInstruction = &geminiContent{Parts: []geminiPart{{Text: strings.Join(systemParts, "\n\n")}}}
+	}
+
+	// Tools → functionDeclarations (JSON-Schema type names upper-cased).
+	if len(req.Tools) > 0 {
+		decls := make([]geminiFunctionDeclaration, 0, len(req.Tools))
+		for _, t := range req.Tools {
+			params := geminiSchema(t.Function.Parameters)
+			if params == nil {
+				// Gemini requires an object schema even for a no-argument tool.
+				params = map[string]interface{}{"type": "OBJECT", "properties": map[string]interface{}{}}
+			}
+			decls = append(decls, geminiFunctionDeclaration{
+				Name:        t.Function.Name,
+				Description: t.Function.Description,
+				Parameters:  params,
+			})
+		}
+		out.Tools = []geminiTool{{FunctionDeclarations: decls}}
+		if req.ToolChoice != nil {
+			out.ToolConfig = geminiToolConfigFor(*req.ToolChoice, req.ParallelToolCalls)
+		}
+	}
+
+	// generationConfig: sampling, output cap, structured output, thinking.
+	gc := &geminiGenConfig{}
+	hasGen := false
+	if req.Temperature != nil {
+		gc.Temperature = req.Temperature
+		hasGen = true
+	}
+	if req.TopP != nil {
+		gc.TopP = req.TopP
+		hasGen = true
+	}
+	switch {
+	case req.MaxTokens != nil && *req.MaxTokens > 0:
+		gc.MaxOutputTokens = *req.MaxTokens
+		hasGen = true
+	case req.MaxCompletionTokens != nil && *req.MaxCompletionTokens > 0:
+		gc.MaxOutputTokens = *req.MaxCompletionTokens
+		hasGen = true
+	}
+	if req.ResponseFormat != nil {
+		switch req.ResponseFormat.Type {
+		case "json_object", "json_schema":
+			gc.ResponseMimeType = "application/json"
+			hasGen = true
+			if req.ResponseFormat.JSONSchema != nil && req.ResponseFormat.JSONSchema.Schema != nil {
+				gc.ResponseSchema = geminiSchema(req.ResponseFormat.JSONSchema.Schema)
+			}
+		}
+	}
+	if req.Thinking != nil {
+		tc := &geminiThinkingConfig{}
+		if req.Thinking.Type == "enabled" {
+			tc.IncludeThoughts = true
+			budget := -1 // dynamic/auto
+			tc.ThinkingBudget = &budget
+		} else {
+			budget := 0 // disable (Flash; 2.5 Pro cannot fully disable — documented limitation)
+			tc.ThinkingBudget = &budget
+		}
+		gc.ThinkingConfig = tc
+		hasGen = true
+	}
+	if hasGen {
+		out.GenerationConfig = gc
+	}
+
+	return encodeJSON(buf, out)
+}
+
+// geminiParts maps one internal message to its Gemini role and parts. Assistant
+// tool calls become functionCall parts in a model turn; tool/function results
+// become a functionResponse part in a user turn (Gemini carries tool results in
+// the user role).
+func geminiParts(m Message) (string, []geminiPart) {
+	switch m.Role {
+	case RoleAssistant:
+		var parts []geminiPart
+		if m.Content != "" {
+			parts = append(parts, geminiPart{Text: m.Content})
+		}
+		for _, tc := range m.ToolCalls {
+			// Gemini requires functionCall.args to be a JSON object; forward it only
+			// when it parses as one, so a malformed/non-object arguments string from
+			// persisted history is dropped rather than emitted as invalid wire format.
+			var args json.RawMessage
+			if a := strings.TrimSpace(tc.Function.Arguments); a != "" {
+				var obj map[string]interface{}
+				if json.Unmarshal([]byte(a), &obj) == nil {
+					args = json.RawMessage(a)
+				}
+			}
+			parts = append(parts, geminiPart{FunctionCall: &geminiFunctionCall{
+				Name: tc.Function.Name,
+				Args: args,
+				ID:   tc.ID,
+			}})
+		}
+		return "model", parts
+	case RoleTool, RoleFunction:
+		return "user", []geminiPart{{FunctionResponse: &geminiFunctionResponse{
+			Name:     m.Name,
+			Response: geminiToolResponseObject(m.Content),
+			ID:       m.ToolCallID,
+		}}}
+	default: // user
+		var parts []geminiPart
+		if m.Content != "" {
+			parts = append(parts, geminiPart{Text: m.Content})
+		}
+		for _, img := range m.Images {
+			if p, ok := geminiImagePart(img); ok {
+				parts = append(parts, p)
+			}
+		}
+		return "user", parts
+	}
+}
+
+// geminiToolResponseObject wraps a tool result for a functionResponse, whose
+// response field MUST be a JSON object. A result that is already a JSON object is
+// used as-is; any other JSON value (array/number/bool/string/null) is wrapped as
+// {"result": <value>}; a non-JSON string is wrapped as {"result": "<string>"}.
+func geminiToolResponseObject(content string) json.RawMessage {
+	trimmed := strings.TrimSpace(content)
+	if trimmed != "" && json.Valid([]byte(trimmed)) {
+		var v interface{}
+		if json.Unmarshal([]byte(trimmed), &v) == nil {
+			if _, isObj := v.(map[string]interface{}); isObj {
+				return json.RawMessage(trimmed)
+			}
+			if wrapped, err := json.Marshal(map[string]interface{}{"result": v}); err == nil {
+				return json.RawMessage(wrapped)
+			}
+		}
+	}
+	if wrapped, err := json.Marshal(map[string]string{"result": content}); err == nil {
+		return json.RawMessage(wrapped)
+	}
+	return json.RawMessage(`{}`)
+}
+
+// geminiImagePart converts an OpenAI-style image reference into a Gemini part: a
+// data: URL becomes an inlineData (base64) part, any other URI (gs://, http(s))
+// becomes a fileData reference. Returns false for an empty/unusable reference.
+func geminiImagePart(img ImageURL) (geminiPart, bool) {
+	u := strings.TrimSpace(img.URL)
+	if u == "" {
+		return geminiPart{}, false
+	}
+	if mediaType, data, ok := parseDataURL(u); ok {
+		return geminiPart{InlineData: &geminiInlineData{MimeType: mediaType, Data: data}}, true
+	}
+	return geminiPart{FileData: &geminiFileData{FileURI: u}}, true
+}
+
+// geminiToolConfigFor maps the provider-independent ToolChoice onto Gemini's
+// functionCallingConfig: AUTO (model decides), ANY (must call some tool — the
+// "required" analogue), NONE (no calls), or ANY restricted to a single
+// allowedFunctionNames entry for a forced specific tool.
+func geminiToolConfigFor(tc ToolChoice, parallel *bool) *geminiToolConfig {
+	cfg := &geminiFunctionCallingConfig{}
+	switch tc.Mode {
+	case ToolChoiceNone:
+		cfg.Mode = "NONE"
+	case ToolChoiceRequired:
+		cfg.Mode = "ANY"
+	case ToolChoiceTool:
+		cfg.Mode = "ANY"
+		cfg.AllowedFunctionNames = []string{tc.Name}
+	default:
+		cfg.Mode = "AUTO"
+	}
+	// Default to Gemini's native behavior (parallel calls allowed), honoring an
+	// explicit gogent override when one is present.
+	par := true
+	if parallel != nil {
+		par = *parallel
+	}
+	cfg.ParallelFunctionCalls = &par
+	return &geminiToolConfig{FunctionCallingConfig: cfg}
+}
+
+// geminiSchema normalizes a JSON-Schema document for Gemini by deep-copying it
+// (via a JSON round-trip, so it accepts a map, a struct or a json.RawMessage) and
+// upper-casing every "type" enum value (string→STRING, object→OBJECT, …), which
+// is Gemini's canonical Schema form. Returns nil for nil input and falls back to
+// the original value if it is not JSON-encodable.
+func geminiSchema(v interface{}) interface{} {
+	if v == nil {
+		return nil
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return v
+	}
+	var generic interface{}
+	if err := json.Unmarshal(b, &generic); err != nil {
+		return v
+	}
+	return uppercaseSchemaTypes(generic)
+}
+
+// uppercaseSchemaTypes walks a decoded JSON-Schema value and upper-cases the
+// value of every "type" field that is a string, recursing through objects and
+// arrays. A "type" whose value is not a plain string (e.g. a ["string","null"]
+// union) is left as-is — Gemini expresses nullability via the nullable field.
+func uppercaseSchemaTypes(v interface{}) interface{} {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		for k, val := range t {
+			if k == "type" {
+				if s, ok := val.(string); ok {
+					t[k] = strings.ToUpper(s)
+					continue
+				}
+			}
+			t[k] = uppercaseSchemaTypes(val)
+		}
+		return t
+	case []interface{}:
+		for i := range t {
+			t[i] = uppercaseSchemaTypes(t[i])
+		}
+		return t
+	default:
+		return v
+	}
+}
+
+// geminiResponse is the native :generateContent response, and also the shape of
+// each :streamGenerateContent SSE chunk (a partial GenerateContentResponse).
+type geminiResponse struct {
+	Candidates    []geminiCandidate    `json:"candidates"`
+	UsageMetadata *geminiUsageMetadata `json:"usageMetadata"`
+}
+
+type geminiCandidate struct {
+	Content struct {
+		Parts []geminiRespPart `json:"parts"`
+		Role  string           `json:"role"`
+	} `json:"content"`
+	FinishReason string `json:"finishReason"`
+}
+
+// geminiRespPart is one response/stream content part: visible text, a reasoning
+// summary (Thought true), or a complete functionCall.
+type geminiRespPart struct {
+	Text         string                  `json:"text"`
+	Thought      bool                    `json:"thought"`
+	FunctionCall *geminiRespFunctionCall `json:"functionCall"`
+}
+
+type geminiRespFunctionCall struct {
+	Name string          `json:"name"`
+	Args json.RawMessage `json:"args"`
+	ID   string          `json:"id"`
+}
+
+type geminiUsageMetadata struct {
+	PromptTokenCount        int `json:"promptTokenCount"`
+	CandidatesTokenCount    int `json:"candidatesTokenCount"`
+	TotalTokenCount         int `json:"totalTokenCount"`
+	ThoughtsTokenCount      int `json:"thoughtsTokenCount"`
+	CachedContentTokenCount int `json:"cachedContentTokenCount"`
+}
+
+// toTokenUsage maps Gemini usage onto gogent's TokenUsage. candidatesTokenCount
+// excludes thinking, which is reported separately as thoughtsTokenCount and
+// surfaced as ReasoningTokens; cachedContentTokenCount becomes CachedTokens.
+func (u *geminiUsageMetadata) toTokenUsage() *TokenUsage {
+	if u == nil {
+		return nil
+	}
+	return &TokenUsage{
+		PromptTokens:     u.PromptTokenCount,
+		CompletionTokens: u.CandidatesTokenCount,
+		TotalTokens:      u.TotalTokenCount,
+		ReasoningTokens:  u.ThoughtsTokenCount,
+		CachedTokens:     u.CachedContentTokenCount,
+	}
+}
+
+func (geminiAdapter) parseResponse(body []byte) (*CompletionResponse, error) {
+	var gr geminiResponse
+	if err := json.Unmarshal(body, &gr); err != nil {
+		return nil, fmt.Errorf("unmarshal response: %w", err)
+	}
+	// A well-formed :generateContent response always carries at least one
+	// candidate; none means a malformed (or prompt-blocked) provider response, so
+	// surface it as an error rather than a silent blank completion (eval-safety),
+	// mirroring how parseStream rejects a corrupt SSE chunk.
+	if len(gr.Candidates) == 0 {
+		return nil, fmt.Errorf("gemini response has no candidates")
+	}
+	resp := &CompletionResponse{Role: RoleAssistant}
+	var text strings.Builder
+	cand := gr.Candidates[0]
+	for _, p := range cand.Content.Parts {
+		switch {
+		case p.FunctionCall != nil:
+			tc, err := geminiToolCall(p.FunctionCall)
+			if err != nil {
+				return nil, err
+			}
+			resp.ToolCalls = append(resp.ToolCalls, tc)
+		case p.Thought:
+			// Reasoning summary — not part of the visible answer; its token cost
+			// is reported via usageMetadata.thoughtsTokenCount (ReasoningTokens).
+		default:
+			text.WriteString(p.Text)
+		}
+	}
+	resp.Content = text.String()
+	resp.FinishReason = geminiFinishReason(cand.FinishReason, len(resp.ToolCalls) > 0)
+	resp.Usage = gr.UsageMetadata.toTokenUsage()
+	return resp, nil
+}
+
+// geminiToolCall converts a Gemini functionCall part into a gogent ToolCall,
+// carrying the JSON-object args through as the OpenAI arguments-as-string form.
+// Empty args default to "{}" (a no-argument call); a non-empty args that is not a
+// JSON object is malformed provider output and is rejected as an error rather
+// than propagated into a gogent tool call (eval-safety).
+func geminiToolCall(fc *geminiRespFunctionCall) (ToolCall, error) {
+	args := strings.TrimSpace(string(fc.Args))
+	if args == "" {
+		args = "{}"
+	} else {
+		var obj map[string]interface{}
+		if err := json.Unmarshal([]byte(args), &obj); err != nil {
+			return ToolCall{}, fmt.Errorf("gemini functionCall args is not a JSON object: %s", args)
+		}
+	}
+	return ToolCall{
+		ID:       fc.ID,
+		Type:     "function",
+		Function: FunctionCall{Name: fc.Name, Arguments: args},
+	}, nil
+}
+
+// geminiFinishReason maps a Gemini finishReason onto the OpenAI-style
+// finish_reason gogent's callers understand. A turn carrying tool calls always
+// reports "tool_calls" (Gemini reports STOP even for function calls). Safety/
+// policy stops collapse to "content_filter".
+func geminiFinishReason(reason string, hasToolCalls bool) string {
+	if hasToolCalls {
+		return "tool_calls"
+	}
+	switch reason {
+	case "":
+		return ""
+	case "STOP":
+		return "stop"
+	case "MAX_TOKENS":
+		return "length"
+	case "MALFORMED_FUNCTION_CALL":
+		return "tool_calls"
+	case "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY":
+		return "content_filter"
+	default:
+		return "stop"
+	}
+}
+
+func (geminiAdapter) parseStream(body io.Reader, streamCh chan<- StreamResponse) (string, *TokenUsage, error) {
+	reader := bufio.NewReaderSize(body, 64*1024)
+
+	var content strings.Builder
+	var usage *TokenUsage
+	var finishReason *string
+	var toolCalls []ToolCall
+
+	for {
+		line, readErr := reader.ReadString('\n')
+		if data, ok := strings.CutPrefix(strings.TrimSpace(line), "data:"); ok {
+			data = strings.TrimSpace(data)
+			if data != "" {
+				var chunk geminiResponse
+				// A data: frame is a complete JSON GenerateContentResponse; a frame
+				// that fails to parse is a malformed/corrupt response, so surface it
+				// as an error rather than silently dropping it (eval-safety: never
+				// turn broken provider output into a successful empty stream).
+				if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+					return content.String(), usage, &ModelError{
+						Type:    ErrorGeneric,
+						Message: fmt.Sprintf("malformed Gemini SSE chunk: %v", err),
+					}
+				}
+				if chunk.UsageMetadata != nil {
+					usage = chunk.UsageMetadata.toTokenUsage()
+				}
+				if len(chunk.Candidates) > 0 {
+					cand := chunk.Candidates[0]
+					for _, p := range cand.Content.Parts {
+						switch {
+						case p.FunctionCall != nil:
+							// functionCall arrives complete in one chunk; accumulate
+							// and emit only in the terminal Done event (as the
+							// OpenAI/Anthropic adapters do).
+							tc, err := geminiToolCall(p.FunctionCall)
+							if err != nil {
+								return content.String(), usage, &ModelError{
+									Type:    ErrorGeneric,
+									Message: err.Error(),
+								}
+							}
+							toolCalls = append(toolCalls, tc)
+						case p.Thought:
+							if p.Text != "" {
+								streamCh <- StreamResponse{Reasoning: p.Text, Role: RoleAssistant}
+							}
+						default:
+							if p.Text != "" {
+								content.WriteString(p.Text)
+								streamCh <- StreamResponse{Content: p.Text, Role: RoleAssistant}
+							}
+						}
+					}
+					if cand.FinishReason != "" {
+						r := geminiFinishReason(cand.FinishReason, len(toolCalls) > 0)
+						finishReason = &r
+					}
+				}
+			}
+		}
+		if readErr != nil {
+			// Gemini SSE has no [DONE] sentinel — the stream simply ends at EOF.
+			if readErr == io.EOF {
+				break
+			}
+			return content.String(), usage, &ModelError{
+				Type:    ErrorGeneric,
+				Message: fmt.Sprintf("error reading stream: %v", readErr),
+			}
+		}
+	}
+
 	streamCh <- StreamResponse{
 		ToolCalls:    toolCalls,
 		FinishReason: finishReason,

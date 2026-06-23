@@ -502,7 +502,15 @@ func (e *ModelError) Error() string {
 }
 
 type ModelConnection struct {
-	URL       string
+	URL string
+	// StreamURL is the endpoint for streaming completions when it differs from the
+	// blocking URL. It is empty for every OpenAI-compatible provider (which streams
+	// from the same chat URL with stream:true) and set only where the streaming
+	// route is a distinct path — Vertex AI's native Gemini API streams from
+	// :streamGenerateContent?alt=sse rather than :generateContent. completeStream
+	// POSTs here when non-empty, falling back to URL otherwise. See
+	// NewModelConnectionFromConfig and providerSpec.streamURLFunc.
+	StreamURL string
 	ModelName string
 	APIType   APIType
 	Config    *config.ModelConfig
@@ -630,8 +638,22 @@ func NewModelConnectionFromConfig(modelConfig *config.ModelConfig) *ModelConnect
 		base = spec.baseURLFunc(modelConfig)
 	}
 
+	// Most providers append a static chat path and stream from the same URL.
+	// Providers that embed the model name in the URL path (Vertex AI's native
+	// Gemini API) supply chatURLFunc/streamURLFunc instead, which also yield a
+	// distinct streaming endpoint (:streamGenerateContent?alt=sse).
+	chatURL := spec.chatURL(base)
+	streamURL := ""
+	if spec.chatURLFunc != nil {
+		chatURL = spec.chatURLFunc(base, modelConfig.Model)
+	}
+	if spec.streamURLFunc != nil {
+		streamURL = spec.streamURLFunc(base, modelConfig.Model)
+	}
+
 	conn := &ModelConnection{
-		URL:            spec.chatURL(base),
+		URL:            chatURL,
+		StreamURL:      streamURL,
 		ModelName:      modelConfig.Model,
 		APIType:        apiType,
 		Config:         modelConfig,
@@ -1212,7 +1234,14 @@ func (c *ModelConnection) completeStream(ctx context.Context, messages []Message
 	}
 	jsonData := bodyBuf.Bytes()
 
-	req, err := http.NewRequestWithContext(ctx, "POST", c.URL, bytes.NewReader(jsonData))
+	// Stream from StreamURL when the provider's streaming route differs from the
+	// blocking one (Vertex native: :streamGenerateContent?alt=sse); otherwise the
+	// OpenAI-compatible path streams from the same chat URL with stream:true.
+	streamURL := c.URL
+	if c.StreamURL != "" {
+		streamURL = c.StreamURL
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", streamURL, bytes.NewReader(jsonData))
 	if err != nil {
 		return "", &ModelError{
 			Type:    ErrorConnection,
