@@ -393,10 +393,10 @@ func TestResolveThemeEditorLayoutMonotonic(t *testing.T) {
 // scroll math keys off a stable content height.
 func TestThemeEditorContentRowsGeometryIndependent(t *testing.T) {
 	rows := themeEditorContentRows()
-	// Left column: Session output (7) + UI chrome (9) = 16 roles + 2 headers = 18.
+	// Left column: Session output (7) + UI chrome (10, +list_bg #327) = 17 roles + 2 headers = 19.
 	// Right column: Controls (8) + Buttons and inputs (6) + Code (1) = 15 + 3 headers = 18.
-	if rows != 18 {
-		t.Errorf("themeEditorContentRows() = %d, want 18 (tallest column)", rows)
+	if rows != 19 {
+		t.Errorf("themeEditorContentRows() = %d, want 19 (tallest column)", rows)
 	}
 }
 

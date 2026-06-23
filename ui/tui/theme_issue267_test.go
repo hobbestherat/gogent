@@ -39,7 +39,7 @@ var issue267WantGroups = []struct {
 	keys  []string
 }{
 	{"Session output", []string{"user", "agent", "note", "tool", "result", "info", "error"}},
-	{"UI chrome", []string{"desktop_fg", "desktop_bg", "panel_fg", "panel_bg", "window_fg", "window_bg", "title", "divider", "accent"}},
+	{"UI chrome", []string{"desktop_fg", "desktop_bg", "panel_fg", "panel_bg", "window_fg", "window_bg", "list_bg", "title", "divider", "accent"}},
 	{"Controls", []string{"menu_bar_fg", "menu_bar_bg", "dropdown_fg", "dropdown_bg", "dropdown_focus_fg", "dropdown_focus_bg", "dropdown_select_fg", "dropdown_select_bg"}},
 	{"Buttons and inputs", []string{"button_fg", "button_bg", "input_fg", "input_bg", "text_selection_fg", "text_selection_bg"}},
 	{"Code", []string{"code_bg"}},
@@ -84,10 +84,10 @@ func TestIssue267GroupMembership(t *testing.T) {
 }
 
 // TestIssue267GroupCounts pins each group's size and the total. The two-column layout
-// math is sized from these (left = 8+8 rows, right = 9+5+2 rows); a wrong count would
-// overflow a column past the buttons or leave the dialog mis-sized.
+// math is sized from these; a wrong count would overflow a column past the buttons
+// or leave the dialog mis-sized. (UI chrome gained list_bg in #327.)
 func TestIssue267GroupCounts(t *testing.T) {
-	wantCounts := []int{7, 9, 8, 6, 1}
+	wantCounts := []int{7, 10, 8, 6, 1}
 	total := 0
 	for i, g := range themeGroups {
 		if len(g.roles) != wantCounts[i] {
@@ -95,8 +95,8 @@ func TestIssue267GroupCounts(t *testing.T) {
 		}
 		total += len(g.roles)
 	}
-	if total != 31 {
-		t.Errorf("groups hold %d roles total, want 31", total)
+	if total != 32 {
+		t.Errorf("groups hold %d roles total, want 32", total)
 	}
 }
 

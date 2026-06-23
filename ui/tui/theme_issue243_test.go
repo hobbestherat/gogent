@@ -251,8 +251,8 @@ func issue243RoleByKey(t *testing.T) map[string]themeRole {
 // out in two columns sized from len(themeRoles) (half := (len+1)/2), so a wrong count
 // either overflows the widened dialog or leaves empty rows — a layout regression.
 func TestIssue243ThemeRolesCount(t *testing.T) {
-	if got, want := len(themeRoles), 31; got != want {
-		t.Fatalf("len(themeRoles) = %d, want %d (27 original + #291 window_fg/bg + #279 text_selection_fg/bg)", got, want)
+	if got, want := len(themeRoles), 32; got != want {
+		t.Fatalf("len(themeRoles) = %d, want %d (27 original + #291 window_fg/bg + #279 text_selection_fg/bg + #327 list_bg)", got, want)
 	}
 }
 
@@ -683,6 +683,7 @@ var issue243WantLabels = map[string]string{
 	"panel_bg":           "Sidebar background",
 	"window_fg":          "Window text",
 	"window_bg":          "Window background",
+	"list_bg":            "List background",
 	"title":              "Panel titles",
 	"divider":            "Borders / dividers",
 	"accent":             "Indicators / badges",
