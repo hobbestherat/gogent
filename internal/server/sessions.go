@@ -24,7 +24,9 @@ func (svc sessionsSvc) List(r *http.Request) (interface{}, error) {
 	}
 	var views []sessionView
 
-	// Saved sessions (from the store index, no transcript replay).
+	// Saved sessions (from the store index, no transcript replay). A saved
+	// session that is also currently in memory (restored on the daemon's startup)
+	// is marked Live so an attached TUI reopens its window.
 	for _, m := range svc.s.g.ListSessions() {
 		views = append(views, sessionView{
 			ID:           m.ID,
@@ -33,6 +35,7 @@ func (svc sessionsSvc) List(r *http.Request) (interface{}, error) {
 			State:        "idle",
 			PrimaryModel: m.Model,
 			Persisted:    true,
+			Live:         svc.s.g.GetUserSession(m.ID) != nil,
 		})
 	}
 	seen := make(map[string]bool, len(views))
@@ -46,7 +49,9 @@ func (svc sessionsSvc) List(r *http.Request) (interface{}, error) {
 			continue
 		}
 		if us := svc.s.g.GetUserSession(id); us != nil {
-			views = append(views, svc.toView(id, us, "", true))
+			v := svc.toView(id, us, "", true)
+			v.Live = true
+			views = append(views, v)
 		}
 	}
 	sort.Slice(views, func(i, j int) bool { return views[i].ID < views[j].ID })
@@ -58,7 +63,12 @@ func (svc sessionsSvc) Create(r *http.Request, req createSessionRequest) (interf
 	if err := requireHuman(r, svc.s.provider); err != nil {
 		return nil, err
 	}
-	id := randomID("sess")
+	// Honour a caller-supplied id (an attached TUI keeps its window id in sync
+	// with the daemon session id); otherwise generate one as before.
+	id := req.ID
+	if id == "" {
+		id = randomID("sess")
+	}
 	us := svc.s.createSession(id, req.Persisted)
 	if req.Title != "" {
 		svc.s.g.SetSessionTitle(id, req.Title)
@@ -66,14 +76,18 @@ func (svc sessionsSvc) Create(r *http.Request, req createSessionRequest) (interf
 	if req.Model != "" {
 		us.SetPrimaryModel(req.Model)
 	}
-	return svc.toView(id, us, req.Title, req.Persisted), nil
+	v := svc.toView(id, us, req.Title, req.Persisted)
+	v.Live = true
+	return v, nil
 }
 
 // Get handles GET /sessions/:id.
 func (svc sessionsSvc) Get(r *http.Request, id string) (interface{}, error) {
 	us := svc.s.g.GetUserSession(id)
 	if us != nil {
-		return svc.toView(id, us, svc.titleFor(id), !svc.isEphemeral(id)), nil
+		v := svc.toView(id, us, svc.titleFor(id), !svc.isEphemeral(id))
+		v.Live = true
+		return v, nil
 	}
 	// A saved-but-not-live session: reconstruct a minimal view from the index.
 	for _, m := range svc.s.g.ListSessions() {

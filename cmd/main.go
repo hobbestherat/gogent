@@ -20,6 +20,7 @@ import (
 	"gogent/internal/agent"
 	"gogent/internal/command"
 	"gogent/internal/config"
+	"gogent/internal/daemon"
 	"gogent/internal/diag"
 	"gogent/internal/fileops"
 	"gogent/internal/gogent"
@@ -39,6 +40,11 @@ var (
 	noColor      = flag.Bool("no-color", false, "Disable coloured output (also honours the NO_COLOR env var)")
 	httpPassword = flag.String("http-password", "", "Password for HTTP API login (env GOGENT_HTTP_PASSWORD). Setting one authorizes binding to a non-loopback host.")
 	yolo         = flag.Bool("yolo", false, "Yolo mode: remove the step cap and auto-approve every permission prompt except the rules.json hard-deny guardrails (issue #356). Set a token budget as the brake.")
+	// Daemon attach flags (issue #358, Phase 2). The default invocation attaches
+	// the TUI to a live local daemon socket if present, else runs embedded.
+	connectAddr   = flag.String("connect", "", "Attach the TUI to a running daemon at this address (unix:///path | http://host:port | https://host:port). Default: auto-attach to the local daemon socket if a live daemon is present, else run embedded.")
+	connectToken  = flag.String("token", "", "Bearer token for --connect over TCP (env GOGENT_HTTP_TOKEN). Unused for the local Unix socket.")
+	forceEmbedded = flag.Bool("embedded", false, "Force in-process embedded mode even if a local daemon is running (escape hatch / debugging).")
 )
 
 var (
@@ -62,6 +68,22 @@ func main() {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		log.Fatalf("Failed to get home directory: %v", err)
+	}
+
+	// Daemon attach (issue #358, Phase 2): with the TUI enabled, decide whether to
+	// attach to a running daemon (explicit --connect, or auto-attach to a live
+	// local socket) or fall back to the unchanged embedded path below. --embedded
+	// or --no-tui (headless) always take the embedded/headless path.
+	if !*disableTUI {
+		dpaths := daemon.PathsFor(filepath.Join(homeDir, ".gogent"))
+		attach, addr := resolveMode(*forceEmbedded, *connectAddr, "unix://"+dpaths.Sock,
+			func() bool { return daemon.Probe(dpaths.Sock) })
+		if attach {
+			if err := runAttached(homeDir, addr, resolveConnectToken(*connectToken), *noColor); err != nil {
+				log.Fatalf("attach to daemon at %s: %v", addr, err)
+			}
+			return
+		}
 	}
 
 	// Create paths

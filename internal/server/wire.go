@@ -15,7 +15,11 @@ import (
 
 // --- Sessions ---------------------------------------------------------------
 
-// sessionView is the wire representation of a live or saved session.
+// sessionView is the wire representation of a live or saved session. Live
+// reports whether the session is currently in the daemon's memory (a running or
+// restored UserSession) as opposed to merely a saved index entry: an attached
+// TUI reopens windows for the live sessions and lists the rest, so it needs to
+// tell the two apart from a single GET /sessions.
 type sessionView struct {
 	ID           string      `json:"id"`
 	Title        string      `json:"title,omitempty"`
@@ -23,6 +27,7 @@ type sessionView struct {
 	State        string      `json:"state"`
 	PrimaryModel string      `json:"primary_model,omitempty"`
 	Persisted    bool        `json:"persisted"`
+	Live         bool        `json:"live"`
 	Agents       []agentView `json:"agents,omitempty"`
 }
 
@@ -35,8 +40,13 @@ type agentView struct {
 	State  string `json:"state,omitempty"`
 }
 
-// createSessionRequest is the body of POST /sessions.
+// createSessionRequest is the body of POST /sessions. ID is optional: when set
+// (and not already live) the session is created under that exact id rather than
+// a server-generated one, so an attached TUI can keep its window id and the
+// daemon session id in lock-step (the event stream is routed by that id). An
+// empty ID preserves the original server-assigns-the-id behaviour.
 type createSessionRequest struct {
+	ID        string `json:"id,omitempty"`
 	Title     string `json:"title"`
 	Persisted bool   `json:"persisted"`
 	Model     string `json:"model"`
