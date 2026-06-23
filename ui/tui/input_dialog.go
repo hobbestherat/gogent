@@ -102,6 +102,11 @@ func (w *Workbench) showInputDialog(title, label, initial string, onResult func(
 	}
 
 	layer = tv.NewModalLayer("input-dialog", dialog)
+	// User-initiated dialog (rename/goal prompts): it appears in direct response to
+	// a user action, so it cannot interrupt mid-keystroke. Opt out of the modal
+	// Enter-grace (issue #347, which scopes the grace to background-triggered
+	// modals) so a deliberate Enter confirms immediately.
+	layer.NoEnterGrace = true
 	w.desktop.AddLayer(layer)
 	dialog.Fit(spec) // re-resolve the rect when the terminal is resized (issue #299)
 	w.desktop.SetFocus(box)

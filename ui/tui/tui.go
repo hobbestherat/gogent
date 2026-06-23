@@ -404,6 +404,14 @@ type Workbench struct {
 	// sidebar header shows a global indicator while any prompt is waiting (issue
 	// #55). Guarded by w.mu; the badge refresh is marshalled onto the UI thread.
 	approvals map[string]int
+	// deferredModal holds a background-triggered modal (permission/review) whose
+	// visual presentation is deferred while the user is typing in a session input
+	// (issue #346), and deferredTimer is the re-check armed while it waits. Both are
+	// loop-confined: touched only on the desktop event loop (directly or via Post),
+	// so they need no lock. promptMu already serializes prompts one at a time, so at
+	// most one presentation is ever pending.
+	deferredModal func()
+	deferredTimer *time.Timer
 	// clarifyWaiting records which interactive sub-agents are currently blocked on
 	// a CLARIFY question, keyed by the same sub-agent key applySubAgent uses
 	// (agent id, or session/name when the id is empty). It collapses the raw

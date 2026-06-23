@@ -362,11 +362,21 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 			sw.completer.hide()
 			return true
 		}
+		before := input.GetText()
 		handled := false
 		if baseType != nil {
 			handled = baseType(c, event)
 		}
 		sw.completer.update()
+		// Clearing the draft to empty is the "or clears their input — whichever comes
+		// first" trigger for a deferred background prompt (issue #346): once the input
+		// the user was typing in goes empty, present any held-back permission/review
+		// modal immediately rather than wait out the typing-idle window. Guarded on the
+		// non-empty→empty edge so an already-empty input (navigation, a no-op Backspace)
+		// does not repeatedly poke the drain.
+		if before != "" && input.GetText() == "" {
+			wb.drainDeferredModalNow()
+		}
 		return handled
 	}
 	submit := func() {
@@ -374,6 +384,11 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 		if text == "" {
 			return
 		}
+		// Submitting is the "or submits their input — whichever comes first" trigger
+		// for a deferred background prompt (issue #346): the Enter went to the input,
+		// not the dialog, so any held-back permission/review modal can appear now
+		// rather than wait out the typing-idle window.
+		wb.drainDeferredModalNow()
 		// Record the prompt for Up/Down history recall (issue #203). Only user-typed
 		// submissions enter history: supervisor nudges (nudgingSend) are skipped, and
 		// the drain re-entry (draining) is skipped so a message queued while busy is
