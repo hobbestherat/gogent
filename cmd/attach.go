@@ -104,6 +104,16 @@ func runAttached(homeDir, addr, token string, noColorFlag bool) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Establish the remote event stream + approvals polling BEFORE entering the
+	// TUI loop, so a daemon that went away between the health check and the
+	// subscribe fails cleanly without ever launching (and tearing down) UI state.
+	// The consumer's posts are queued on the workbench desktop and delivered once
+	// the loop below starts.
+	if err := rc.Start(ctx); err != nil {
+		rc.Close()
+		return fmt.Errorf("start remote event stream: %w", err)
+	}
+
 	// Run the TUI loop.
 	go func() {
 		if err := wb.Run(); err != nil {
@@ -115,14 +125,6 @@ func runAttached(homeDir, addr, token string, noColorFlag bool) error {
 		default:
 		}
 	}()
-
-	// Start consuming events + polling approvals. A failure here means the daemon
-	// went away between the health check and the subscribe; surface it.
-	if err := rc.Start(ctx); err != nil {
-		rc.Close()
-		wb.QuitFunc()()
-		return fmt.Errorf("start remote event stream: %w", err)
-	}
 
 	// Block until an OS interrupt or the TUI loop exits, then detach cleanly. The
 	// daemon keeps running on its end — detaching never stops it.

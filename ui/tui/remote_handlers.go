@@ -387,6 +387,59 @@ func (rc *RemoteClient) Handlers() Handlers {
 			}
 			return out
 		},
+		// ListSavedSessions lists every session the daemon knows (live + saved) for
+		// the Saved Sessions browser. The daemon addresses sessions by id, so the
+		// id is carried as the File handle the browser later hands to
+		// OpenSavedSession. A non-live persisted session is reported Archived (a
+		// closed window), mirroring the embedded browser's archived marker; richer
+		// per-session counts are a later API-enrichment slice.
+		ListSavedSessions: func() []SessionMeta {
+			sessions, err := c.ListSessions()
+			if err != nil {
+				return nil
+			}
+			out := make([]SessionMeta, 0, len(sessions))
+			for _, s := range sessions {
+				if s.ID == "default" || strings.HasPrefix(s.ID, watcherSessionPrefix) {
+					continue
+				}
+				out = append(out, SessionMeta{
+					ID:        s.ID,
+					Title:     s.Title,
+					CreatedAt: s.CreatedAt,
+					Model:     s.PrimaryModel,
+					File:      s.ID,
+					Archived:  s.Persisted && !s.Live,
+				})
+			}
+			return out
+		},
+		// OpenSavedSession opens one session by the id carried in File, fetching its
+		// metadata + transcript over the wire. It supports sessions the daemon holds
+		// live (the daemon restores all non-archived sessions on startup, so these
+		// are exactly the ones worth opening when attached): for a continue the
+		// session is already live so sends land, and for a read-only open the
+		// workbench raises an analysis window. A non-live archived session has no
+		// over-the-wire transcript yet (its persisted transcript is only readable
+		// once restored live — a later API-enrichment slice), so the fetch fails and
+		// this returns ok=false; the browser reports it could not be opened rather
+		// than fabricating an empty live session on the daemon.
+		OpenSavedSession: func(file string, continueSession bool) (RestoredSession, bool) {
+			id := file
+			meta, err := c.GetSession(id)
+			if err != nil {
+				return RestoredSession{}, false
+			}
+			msgs, err := c.GetTranscript(id, "root")
+			if err != nil {
+				return RestoredSession{}, false
+			}
+			title := meta.Title
+			if title == "" {
+				title = id
+			}
+			return RestoredSession{ID: id, Title: title, Messages: messageDTOsToChat(msgs), Model: meta.PrimaryModel}, true
+		},
 
 		// --- settings (one settingsView; setters read-modify-write) ---
 		GetSettings: func() config.SubAgentConfig {

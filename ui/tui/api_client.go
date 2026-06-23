@@ -349,6 +349,16 @@ func (c *APIClient) ListSessions() ([]SessionDTO, error) {
 	return out, nil
 }
 
+// GetSession returns one session's metadata (live or saved). It backs the saved-
+// session browser's open path, which needs the title + model the bare id lacks.
+func (c *APIClient) GetSession(id string) (SessionDTO, error) {
+	var out SessionDTO
+	if err := c.do(http.MethodGet, "/sessions/"+url.PathEscape(id), nil, &out); err != nil {
+		return SessionDTO{}, err
+	}
+	return out, nil
+}
+
 // CreateSession creates a daemon session under the caller-chosen id (so the
 // TUI window id and the daemon session id stay in lock-step). persisted selects
 // a durable (vs ephemeral) session.
