@@ -360,10 +360,10 @@ func (w *Workbench) showCommandPalette() {
 		listH = 3
 	}
 	list := tv.NewTree(tv.Rect{X: 2, Y: listY, W: width - 4, H: listH})
-	list.FG = tv.DefaultTheme.DialogFG
-	list.BG = tv.DefaultTheme.DialogBG
+	list.FG = tv.DefaultTheme.ListFG
+	list.BG = tv.DefaultTheme.ListBG
 	list.SelFG, list.SelBG = selectionColorsFor(
-		tv.DefaultTheme.DialogFG, tv.DefaultTheme.DialogBG,
+		tv.DefaultTheme.ListFG, tv.DefaultTheme.ListBG,
 		tv.DefaultTheme.SelectionFG, tv.DefaultTheme.SelectionBG)
 	dialog.Window.AddContent(list)
 

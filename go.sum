@@ -10,8 +10,8 @@ github.com/expr-lang/expr v1.17.8 h1:W1loDTT+0PQf5YteHSTpju2qfUfNoBt4yw9+wOEU9VM
 github.com/expr-lang/expr v1.17.8/go.mod h1:8/vRC7+7HBzESEqt5kKpYXxrxkr31SaO8r40VO/1IT4=
 github.com/hexops/gotextdiff v1.0.3 h1:gitA9+qJrrTCsiCl7+kh75nPqQt1cx4ZkudSTLoUqJM=
 github.com/hexops/gotextdiff v1.0.3/go.mod h1:pSWU5MAI3yDq+fZBTazCSJysOMbxWL1BSow5/V2vxeg=
-github.com/hobbestherat/turbotui v0.3.1-0.20260622200300-80aefcce6dc3 h1:iDcaAtViUG69HY+vxO/6BJ3Lq8w/sKzWiPcxpkw59Ow=
-github.com/hobbestherat/turbotui v0.3.1-0.20260622200300-80aefcce6dc3/go.mod h1:+cXzY+fhI8sBSN3k2L1Rb7mp1psKGT+D8R3qcCT+2d0=
+github.com/hobbestherat/turbotui v0.3.1-0.20260623012152-f29390a18ac9 h1:OsOcyHqFltpQSkkO3CXhGF2bFAC7N0YPjjbmumWAgbo=
+github.com/hobbestherat/turbotui v0.3.1-0.20260623012152-f29390a18ac9/go.mod h1:+cXzY+fhI8sBSN3k2L1Rb7mp1psKGT+D8R3qcCT+2d0=
 github.com/hobbestherat/webapi v0.1.0 h1:ggk03gfw7dgS+7zIog/eRctkKL6qBa9KE3arTsSWAXQ=
 github.com/hobbestherat/webapi v0.1.0/go.mod h1:XG9XQ/Jw1iDAyuZnzZFKYeE911Fa1hPd/v30/ZNQj4c=
 github.com/yuin/goldmark v1.8.2 h1:kEGpgqJXdgbkhcOgBxkC0X0PmoPG1ZyoZ117rDVp4zE=

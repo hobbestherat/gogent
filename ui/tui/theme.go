@@ -309,6 +309,14 @@ type Theme struct {
 	// island (issue #200). Whether it is painted at all is decided per palette in
 	// applyMarkdownPalette (the pure-black high-contrast preset suppresses it).
 	CodeBG tui.Color
+
+	// ListBG/ListFG are the background/foreground of filterable dialog lists —
+	// the Resources browser, Saved Sessions browser, command palette and
+	// @-mention popup. They default to DialogBG/DialogFG so the list reads as
+	// part of the dialog unless a theme points them elsewhere (e.g. a darker
+	// inset). ApplyTheme installs them onto tv.DefaultTheme's List* slots.
+	ListBG tui.Color
+	ListFG tui.Color
 }
 
 // Built-in palette names accepted in config (case-insensitive). The
@@ -431,6 +439,11 @@ func defaultPalette() Theme {
 		// still distinct from the blue window and clear of the grey comment foreground
 		// (ANSI 8), so every token stays legible.
 		CodeBG: tui.RGBColor(0x10, 0x14, 0x50),
+		// Dialog lists (issue #327): default to the dialog chrome (== DialogBG/DialogFG)
+		// so the four filterable lists read as part of the dialog until a theme points
+		// them elsewhere; the look is unchanged from before the role existed.
+		ListBG: tui.ANSIColor(7),
+		ListFG: tui.ANSIColor(0),
 	}
 }
 
@@ -508,6 +521,10 @@ func highContrastPalette() Theme {
 		// pure-black preset (a black panel on black would vanish), but the role is
 		// set for completeness so the Theme is fully populated.
 		CodeBG: black,
+		// Dialog lists (issue #327): the black canvas with white text (== DialogBG/DialogFG
+		// for this preset) so the list look is unchanged until a theme repoints it.
+		ListBG: black,
+		ListFG: white,
 	}
 }
 
@@ -576,6 +593,11 @@ func darkPalette() Theme {
 		TextSelectionBG: black,
 		// Code blocks render directly on the pure-black canvas (no distinct panel).
 		CodeBG: black,
+		// Dialog lists (issue #327): pure-black canvas with soft-white text (==
+		// DialogBG/DialogFG, which blackCanvasTVTheme sets to black/white-ish) so the
+		// list look is unchanged until a theme repoints it.
+		ListBG: black,
+		ListFG: softWhite,
 	}
 }
 
@@ -630,6 +652,8 @@ func ResolveTheme(cfg config.ThemeConfig, env func(string) string, noColorFlag b
 	t.TextSelectionFG = degrade(t.TextSelectionFG, level)
 	t.TextSelectionBG = degrade(t.TextSelectionBG, level)
 	t.CodeBG = degrade(t.CodeBG, level)
+	t.ListBG = degrade(t.ListBG, level)
+	t.ListFG = degrade(t.ListFG, level)
 	return t
 }
 
@@ -737,6 +761,10 @@ func applyOverrides(t *Theme, overrides map[string]string) {
 			t.TextSelectionBG = c
 		case "code_bg":
 			t.CodeBG = c
+		case "list_bg":
+			t.ListBG = c
+		case "list_fg":
+			t.ListFG = c
 		}
 	}
 }
@@ -1030,6 +1058,12 @@ func paletteContrast(t Theme, windowBG tui.Color) []contrastFinding {
 		finding("button-focus", t.ButtonFocusFG, t.ButtonFocusBG, minContrastText),
 		finding("input", t.InputFG, t.InputBG, minContrastText),
 		finding("input-focus", t.InputFocusFG, t.InputFocusBG, minContrastText),
+		// Dialog-list role (issue #327): the four filterable lists paint their rows on
+		// ListBG with ListFG, so the pair is audited against each other rather than
+		// windowBG. List rows are body text, so it is held to the body-text tier — a
+		// palette change can't silently reintroduce an illegible list. The defaults equal
+		// DialogBG/DialogFG, so every preset clears this exactly as the dialog text does.
+		finding("list", t.ListFG, t.ListBG, minContrastText),
 	}
 }
 
@@ -1136,6 +1170,14 @@ func ApplyTheme(t Theme) {
 	tv.DefaultTheme.InputFG, tv.DefaultTheme.InputBG = t.InputFG, t.InputBG
 	tv.DefaultTheme.InputFocusFG, tv.DefaultTheme.InputFocusBG = t.InputFocusFG, t.InputFocusBG
 
+	// List roles (issue #327). The four dialog lists read tv.DefaultTheme.ListBG/ListFG
+	// directly at construction (resources/sessions/command-palette/mention), so install
+	// them onto the toolkit slots here over whichever chrome the switch selected. They
+	// default to DialogBG/DialogFG so the lists look unchanged until a theme repoints them.
+	// The black-canvas and neutral builders already source these from the roles; under
+	// NO_COLOR both have degraded to the terminal default.
+	tv.DefaultTheme.ListBG, tv.DefaultTheme.ListFG = t.ListBG, t.ListFG
+
 	// Keep turbotui's active chrome theme in lockstep with the dialog chrome above.
 	// turbotui widgets (windows, the menu bar, labels, selects, buttons, inputs)
 	// seed their colours from tv.ActiveTheme() at construction, and the desktop and
@@ -1170,6 +1212,9 @@ func neutralTVTheme(t Theme) tv.Theme {
 		// under NO_COLOR they too have degraded to the terminal default.
 		MnemonicFG: d, SelectionBG: d, SelectionFG: d,
 		TextSelectionBG: t.TextSelectionBG, TextSelectionFG: t.TextSelectionFG,
+		// List slots come from the (overridable) List* roles (issue #327); under NO_COLOR
+		// ResolveTheme has degraded them to the terminal default, so they equal d.
+		ListBG: t.ListBG, ListFG: t.ListFG,
 	}
 }
 
@@ -1209,5 +1254,9 @@ func blackCanvasTVTheme(t Theme) tv.Theme {
 		MenuBarFG: t.MenuBarFG, MenuBarBG: t.MenuBarBG,
 		MenuHotFG: accent, MenuHotBG: t.MenuBarBG,
 		MenuSelectFG: black, MenuSelectBG: accent, MenuShadow: divider,
+		// List slots come from the (overridable) List* roles (issue #327); for a pristine
+		// black-canvas preset they equal black/white-ish (== DialogBG/DialogFG), so the
+		// ApplyTheme install over this chrome is a no-op and an override flows through.
+		ListBG: t.ListBG, ListFG: t.ListFG,
 	}
 }
