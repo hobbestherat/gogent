@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"gogent/internal/agent"
 	"gogent/internal/config"
 	"gogent/internal/permission"
 )
@@ -164,5 +165,53 @@ func TestYoloSessionOverrideCreatedBeforeSessionAppliesAtCreation(t *testing.T) 
 	}
 	if got := us.MaxSteps(); got != 0 {
 		t.Fatalf("pre-created yolo override MaxSteps = %d, want 0", got)
+	}
+}
+
+func TestSetYoloModeEmitsBackendYoloEvent(t *testing.T) {
+	g := newMaxStepsGogent(t, intptr(5))
+	us := g.NewSession("s-events")
+	if us == nil {
+		t.Fatal("NewSession returned nil")
+	}
+
+	var events []agent.SessionEvent
+	us.SetObserver(func(ev agent.SessionEvent) {
+		events = append(events, ev)
+	})
+
+	g.SetYoloMode("s-events", true)
+	g.SetYoloMode("s-events", false)
+
+	if len(events) != 2 {
+		t.Fatalf("yolo toggle emitted %d events, want 2: %+v", len(events), events)
+	}
+	if events[0].Type != agent.SessionEventYolo || !events[0].Yolo {
+		t.Fatalf("first yolo event = %+v, want yolo=true", events[0])
+	}
+	if events[1].Type != agent.SessionEventYolo || events[1].Yolo {
+		t.Fatalf("second yolo event = %+v, want yolo=false", events[1])
+	}
+}
+
+func TestEmitYoloStateAnnouncesGlobalYoloAfterObserverInstalled(t *testing.T) {
+	g := newMaxStepsGogent(t, intptr(5))
+	g.SetGlobalYolo(true)
+	us := g.NewSession("s-global-event")
+	if us == nil {
+		t.Fatal("NewSession returned nil")
+	}
+
+	var events []agent.SessionEvent
+	us.SetObserver(func(ev agent.SessionEvent) {
+		events = append(events, ev)
+	})
+	g.EmitYoloState("s-global-event")
+
+	if len(events) != 1 {
+		t.Fatalf("EmitYoloState emitted %d events, want 1: %+v", len(events), events)
+	}
+	if events[0].Type != agent.SessionEventYolo || !events[0].Yolo {
+		t.Fatalf("initial yolo event = %+v, want yolo=true", events[0])
 	}
 }
