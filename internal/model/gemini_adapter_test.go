@@ -220,8 +220,10 @@ func TestGeminiAdapterBuildBodyRepresentativeRequest(t *testing.T) {
 	if functionCalling["mode"] != "AUTO" {
 		t.Errorf("functionCallingConfig.mode = %v, want AUTO", functionCalling["mode"])
 	}
-	if functionCalling["parallelFunctionCalls"] != true {
-		t.Errorf("functionCallingConfig.parallelFunctionCalls = %v, want true", functionCalling["parallelFunctionCalls"])
+	// Vertex AI rejects a parallelFunctionCalls field in functionCallingConfig, so
+	// gogent must not emit it (it defaults to parallel calls anyway).
+	if _, ok := functionCalling["parallelFunctionCalls"]; ok {
+		t.Errorf("functionCallingConfig.parallelFunctionCalls present (%v); Vertex rejects this field", functionCalling["parallelFunctionCalls"])
 	}
 
 	gen := got["generationConfig"].(map[string]interface{})
@@ -301,36 +303,33 @@ func TestGeminiAdapterBuildBodyToolChoiceModesAndParallelOverride(t *testing.T) 
 
 	off := false
 	cases := []struct {
-		name         string
-		req          CompletionRequest
-		wantMode     string
-		wantAllowed  []interface{}
-		wantParallel bool
+		name        string
+		req         CompletionRequest
+		wantMode    string
+		wantAllowed []interface{}
 	}{
 		{
-			name:         "auto defaults parallel true",
-			req:          baseReq(ToolChoice{Mode: ToolChoiceAuto}, nil),
-			wantMode:     "AUTO",
-			wantParallel: true,
+			name:     "auto",
+			req:      baseReq(ToolChoice{Mode: ToolChoiceAuto}, nil),
+			wantMode: "AUTO",
 		},
 		{
-			name:         "none",
-			req:          baseReq(ToolChoice{Mode: ToolChoiceNone}, nil),
-			wantMode:     "NONE",
-			wantParallel: true,
+			name:     "none",
+			req:      baseReq(ToolChoice{Mode: ToolChoiceNone}, nil),
+			wantMode: "NONE",
 		},
 		{
-			name:         "required",
-			req:          baseReq(ToolChoice{Mode: ToolChoiceRequired}, nil),
-			wantMode:     "ANY",
-			wantParallel: true,
+			name:     "required",
+			req:      baseReq(ToolChoice{Mode: ToolChoiceRequired}, nil),
+			wantMode: "ANY",
 		},
 		{
-			name:         "forced tool with strict parallel override",
-			req:          baseReq(ToolChoice{Mode: ToolChoiceTool, Name: "lookup"}, &off),
-			wantMode:     "ANY",
-			wantAllowed:  []interface{}{"lookup"},
-			wantParallel: false,
+			// A gogent parallel-disable override (off) must NOT surface a
+			// parallelFunctionCalls field — Vertex rejects it (see below).
+			name:        "forced tool, parallel override ignored",
+			req:         baseReq(ToolChoice{Mode: ToolChoiceTool, Name: "lookup"}, &off),
+			wantMode:    "ANY",
+			wantAllowed: []interface{}{"lookup"},
 		},
 	}
 
@@ -348,8 +347,10 @@ func TestGeminiAdapterBuildBodyToolChoiceModesAndParallelOverride(t *testing.T) 
 			if cfg["mode"] != tc.wantMode {
 				t.Errorf("mode = %v, want %s", cfg["mode"], tc.wantMode)
 			}
-			if cfg["parallelFunctionCalls"] != tc.wantParallel {
-				t.Errorf("parallelFunctionCalls = %v, want %v", cfg["parallelFunctionCalls"], tc.wantParallel)
+			// Vertex AI's functionCallingConfig has no parallelFunctionCalls field
+			// and 400s on it, so gogent must never emit it.
+			if _, ok := cfg["parallelFunctionCalls"]; ok {
+				t.Errorf("parallelFunctionCalls present (%v); Vertex rejects this field", cfg["parallelFunctionCalls"])
 			}
 			if tc.wantAllowed == nil {
 				if _, ok := cfg["allowedFunctionNames"]; ok {
