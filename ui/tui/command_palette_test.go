@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"gogent/internal/stats"
 )
@@ -436,5 +437,217 @@ func TestPaletteGoalCommandNoOpWithoutSession(t *testing.T) {
 	c.run()
 	if top := w.desktop.TopLayer(); top != nil && top.Name == "input-dialog" {
 		t.Error("goal editor should not open with no active session")
+	}
+}
+
+// TestAllClientSlashCommandsInCommandsTable covers issue #340's discoverability
+// contract: every client-side slash command handled by handleSlashCommand is
+// represented in the shared command table used by both Ctrl+K and the ? overlay.
+func TestAllClientSlashCommandsInCommandsTable(t *testing.T) {
+	cmds := (&Workbench{}).commands()
+	want := []string{"/undo", "/rewind", "/plan", "/act", "/stop", "/clearqueue", "/goal", "/markdown", "/thinking"}
+	for _, keys := range want {
+		c := findCommandByKeys(cmds, keys)
+		if c == nil {
+			t.Errorf("commands() missing slash command entry %q", keys)
+			continue
+		}
+		if c.category != "Session" {
+			t.Errorf("%q category = %q, want Session", keys, c.category)
+		}
+		if strings.TrimSpace(c.name) == "" {
+			t.Errorf("%q has an empty display name", keys)
+		}
+		if c.run == nil {
+			t.Errorf("%q has no palette action", keys)
+		}
+	}
+}
+
+// TestIssue340SlashCommandsPaletteAndHelpVisibility verifies the five commands
+// that were missing from issue #340 are visible through the shared table. /act is
+// deliberately state-gated, so it only appears in the palette and cheatsheet once
+// a plan is pending on the active session.
+func TestIssue340SlashCommandsPaletteAndHelpVisibility(t *testing.T) {
+	w := newTestWorkbench(t)
+	sw := w.openWindow("s", "S")
+
+	alwaysVisible := []string{"/undo", "/rewind", "/plan", "/thinking"}
+	for _, keys := range alwaysVisible {
+		if findCommandByKeys(filterCommands(w.commands(), ""), keys) == nil {
+			t.Errorf("palette should offer %q without extra state", keys)
+		}
+		if text := helpText(w.commands()); !strings.Contains(text, keys) {
+			t.Errorf("helpText missing %q without extra state\n%s", keys, text)
+		}
+	}
+
+	if findCommandByKeys(filterCommands(w.commands(), ""), "/act") != nil {
+		t.Error("/act should be hidden from the palette until a plan is pending")
+	}
+	if text := helpText(w.commands()); strings.Contains(text, "/act") {
+		t.Errorf("helpText should hide /act until a plan is pending\n%s", text)
+	}
+
+	sw.planPending = true
+	if findCommandByKeys(filterCommands(w.commands(), ""), "/act") == nil {
+		t.Error("palette should offer /act when the active session has a pending plan")
+	}
+	if text := helpText(w.commands()); !strings.Contains(text, "/act") {
+		t.Errorf("helpText should include /act when a plan is pending\n%s", text)
+	}
+}
+
+// TestIssue340PaletteUndoAndRewindDispatchThroughSlashHandler proves the /undo
+// and bare /rewind palette entries route through handleSlashCommand by observing
+// the exact backend handlers and arguments that the slash command path calls.
+func TestIssue340PaletteUndoAndRewindDispatchThroughSlashHandler(t *testing.T) {
+	w := newTestWorkbench(t)
+	sw := w.openWindow("s", "S")
+	var undoID string
+	var rewindID string
+	rewindTurns := -1
+	w.handlers.OnUndo = func(sessionID string) (string, error) {
+		undoID = sessionID
+		return "undo summary", nil
+	}
+	w.handlers.OnRewind = func(sessionID string, turns int) (string, error) {
+		rewindID = sessionID
+		rewindTurns = turns
+		return "rewind summary", nil
+	}
+
+	undo := findCommandByKeys(w.commands(), "/undo")
+	if undo == nil {
+		t.Fatal("/undo command missing")
+	}
+	undo.run()
+	if undoID != "s" {
+		t.Fatalf("/undo handler sessionID = %q, want s", undoID)
+	}
+	if !noteContains(sw, "undo summary") {
+		t.Error("/undo palette command should echo the undo summary")
+	}
+
+	rewind := findCommandByKeys(w.commands(), "/rewind")
+	if rewind == nil {
+		t.Fatal("/rewind command missing")
+	}
+	rewind.run()
+	if rewindID != "s" {
+		t.Fatalf("/rewind handler sessionID = %q, want s", rewindID)
+	}
+	if rewindTurns != 0 {
+		t.Fatalf("/rewind palette command should use default turns=0, got %d", rewindTurns)
+	}
+	if !noteContains(sw, "rewind summary") {
+		t.Error("/rewind palette command should echo the rewind summary")
+	}
+}
+
+// TestIssue340PalettePlanThinkingAndActDispatchThroughSlashHandler exercises the
+// remaining newly surfaced commands via their palette actions: /plan toggles plan
+// mode, /thinking flips through the StreamThinking handler, and /act approves a
+// pending plan through the same guarded path as the typed slash command.
+func TestIssue340PalettePlanThinkingAndActDispatchThroughSlashHandler(t *testing.T) {
+	w := newTestWorkbench(t)
+	sw := w.openWindow("s", "S")
+	var planID string
+	var planOn bool
+	w.handlers.OnSetPlanMode = func(sessionID string, on bool) {
+		planID = sessionID
+		planOn = on
+	}
+	thinkingOn := false
+	var thinkingID string
+	var thinkingSet *bool
+	w.handlers.StreamThinking = func(sessionID string, set *bool) bool {
+		thinkingID = sessionID
+		if set != nil {
+			v := *set
+			thinkingSet = &v
+			thinkingOn = v
+		}
+		return thinkingOn
+	}
+	approved := make(chan string, 1)
+	w.handlers.OnApprovePlan = func(sessionID string) { approved <- sessionID }
+
+	plan := findCommandByKeys(w.commands(), "/plan")
+	if plan == nil {
+		t.Fatal("/plan command missing")
+	}
+	plan.run()
+	if planID != "s" || !planOn || !sw.planMode {
+		t.Fatalf("/plan did not toggle active session on: id=%q on=%v sw.planMode=%v", planID, planOn, sw.planMode)
+	}
+
+	thinking := findCommandByKeys(w.commands(), "/thinking")
+	if thinking == nil {
+		t.Fatal("/thinking command missing")
+	}
+	thinking.run()
+	if thinkingID != "s" {
+		t.Fatalf("/thinking handler sessionID = %q, want s", thinkingID)
+	}
+	if thinkingSet == nil || !*thinkingSet || !thinkingOn {
+		t.Fatalf("/thinking should flip false to true, set=%v state=%v", thinkingSet, thinkingOn)
+	}
+
+	sw.planPending = true
+	act := findCommandByKeys(filterCommands(w.commands(), ""), "/act")
+	if act == nil {
+		t.Fatal("/act command should be available when planPending is true")
+	}
+	act.run()
+	if sw.planPending {
+		t.Error("/act should clear planPending")
+	}
+	if sw.planMode {
+		t.Error("/act should leave plan mode")
+	}
+	if !sw.busy {
+		t.Error("/act should mark the session busy while approval runs")
+	}
+	select {
+	case got := <-approved:
+		if got != "s" {
+			t.Fatalf("/act handler sessionID = %q, want s", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for /act approval handler")
+	}
+}
+
+// TestIssue340PaletteCommandsAreSafeWithoutActiveSession locks in the edge case
+// promised by sessionCmd: if the workbench has no active session, these palette
+// entries are no-ops rather than panics or backend calls.
+func TestIssue340PaletteCommandsAreSafeWithoutActiveSession(t *testing.T) {
+	w := newTestWorkbench(t)
+	called := false
+	w.handlers.OnUndo = func(string) (string, error) {
+		called = true
+		return "", nil
+	}
+	w.handlers.OnRewind = func(string, int) (string, error) {
+		called = true
+		return "", nil
+	}
+	w.handlers.OnSetPlanMode = func(string, bool) { called = true }
+	w.handlers.OnApprovePlan = func(string) { called = true }
+	w.handlers.StreamThinking = func(string, *bool) bool {
+		called = true
+		return false
+	}
+
+	for _, keys := range []string{"/undo", "/rewind", "/plan", "/act", "/thinking"} {
+		c := findCommandByKeys(w.commands(), keys)
+		if c == nil {
+			t.Fatalf("%s command missing", keys)
+		}
+		c.run()
+	}
+	if called {
+		t.Fatal("palette slash command called a backend handler without an active session")
 	}
 }

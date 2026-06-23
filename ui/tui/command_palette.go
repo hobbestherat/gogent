@@ -76,8 +76,9 @@ func (w *Workbench) commands() []command {
 		return func() { w.transcriptDo(func(m *transcriptModel) { m.toggleKind(k) }) }
 	}
 	// sessionCmd runs a client-side slash command against the active session, then
-	// repaints so its transcript note shows (issue #201): the palette is how /stop,
-	// /clearqueue and /markdown become discoverable.
+	// repaints so its transcript note shows (issue #201): the palette is how the
+	// client-side slash commands (/stop, /clearqueue, /markdown, /undo, /rewind,
+	// /plan, /act, /thinking) become discoverable (issues #201, #340).
 	sessionCmd := func(cmd string) func() {
 		return func() {
 			w.withActiveTranscript(func(sw *SessionWindow) { sw.handleSlashCommand(cmd) })
@@ -104,6 +105,20 @@ func (w *Workbench) commands() []command {
 		{category: "Session", name: "Clear queued message", keys: "/clearqueue", run: sessionCmd("/clearqueue")},
 		{category: "Session", name: "Set / show goal (supervisor)", keys: "/goal", run: w.editActiveGoal},
 		{category: "Session", name: "Toggle Markdown rendering", keys: "/markdown", run: sessionCmd("/markdown")},
+		// The remaining client-side slash commands (issue #340): each was handled in
+		// handleSlashCommand but missing from this table, so it was invisible to both
+		// the palette and the ? cheatsheet. They reuse sessionCmd, so invoking the
+		// palette entry runs the exact same path as typing the command. /rewind is
+		// surfaced bare (revert every recorded turn — its documented default) to match
+		// the toggle-style entries above; a numeric prompt would be a larger change.
+		{category: "Session", name: "Undo last turn", keys: "/undo", run: sessionCmd("/undo")},
+		{category: "Session", name: "Rewind turns", keys: "/rewind", run: sessionCmd("/rewind")},
+		{category: "Session", name: "Toggle plan mode", keys: "/plan", run: sessionCmd("/plan")},
+		// /act is a no-op unless a plan is pending, so gate it on that state to keep the
+		// palette honest — it mirrors approvePlan()'s own guard in session_window.go.
+		{category: "Session", name: "Approve plan", keys: "/act", run: sessionCmd("/act"),
+			enabled: w.activePlanPending},
+		{category: "Session", name: "Toggle thinking stream", keys: "/thinking", run: sessionCmd("/thinking")},
 		{category: "Session", name: "Export transcript (Markdown)", run: func() { w.exportActive("md") },
 			enabled: avail(h.GetTranscript != nil)},
 		{category: "Session", name: "Export transcript (JSON)", run: func() { w.exportActive("json") },
@@ -223,6 +238,29 @@ func displayChord(c tv.Chord) string {
 		}
 	}
 	return c.String()
+}
+
+// activePlanPending reports whether the active session has a plan awaiting
+// approval. It is the availability predicate for the palette's "/act" entry
+// (issue #340) so the approve-plan command is only offered when there is
+// actually a plan to approve — mirroring approvePlan()'s own guard in
+// session_window.go. It reads sw.planPending under w.mu, matching how
+// editActiveGoal looks up the active window, and is safe on an empty workbench.
+func (w *Workbench) activePlanPending() bool {
+	// commands() runs this predicate while filtering, so it must tolerate the
+	// desktop-less zero-value Workbench unit tests build: ActiveID dereferences the
+	// desktop, so without this guard the predicate would panic (cf. chordDisplay).
+	if w.desktop == nil {
+		return false
+	}
+	id := w.ActiveID()
+	if id == "" {
+		return false
+	}
+	w.mu.Lock()
+	sw := w.sessions[id]
+	w.mu.Unlock()
+	return sw != nil && sw.planPending
 }
 
 // editActiveGoal is the palette's "Set / show goal" action (issue #201): it opens
