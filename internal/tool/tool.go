@@ -54,9 +54,10 @@ type Tool struct {
 	ReadOnly bool
 	// InputExamples are optional, schema-conformant example argument objects for
 	// format-sensitive tools (Anthropic's input_examples guidance, issue #361).
-	// They are surfaced verbatim in the human-readable tool docs (RenderToolDocs)
-	// to steer the model toward the right call shape; they do not affect
-	// validation or execution and are omitted when empty.
+	// They are prompt-level documentation: surfaced verbatim in the
+	// registry-rendered tool docs (RenderToolDocs) to steer the model toward the
+	// right call shape, NOT authoritative schema metadata — they do not affect
+	// validation or execution and are omitted from every wire format when empty.
 	InputExamples []map[string]interface{}
 }
 
@@ -151,6 +152,9 @@ func (tr *ToolRegistry) List() []*Tool {
 	for _, t := range tr.tools {
 		tools = append(tools, t)
 	}
+	// Sort by name so the listing is deterministic — tr.tools is a Go map, whose
+	// iteration order is randomized (issue #361).
+	sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
 	return tools
 }
 
@@ -187,6 +191,10 @@ func (tr *ToolRegistry) ListEnabled() []*Tool {
 		}
 		tools = append(tools, t)
 	}
+	// Sort by name so the advertised tool set has a stable order across runs
+	// (tr.tools is a randomized Go map); a deterministic order also keeps the
+	// provider's cached tool-definition prefix stable (issue #361).
+	sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
 	return tools
 }
 
@@ -344,9 +352,11 @@ func (tr *ToolRegistry) recordInvocation(name string) {
 // recordOutcome records the result and duration of a tool execution that already
 // passed validation. success follows the returned ToolCallResponse.Success flag
 // (an error or a non-success response counts as a failure). resultBytes is the
-// serialized size of the tool's result (0 for a failure/panic with no result),
-// accumulated per tool for the Statistics view (issue #361). It pairs with
-// recordInvocation, which bumped the invocation count just before execution.
+// serialized size of the raw value the tool returned (0 when it returned no
+// result at all, e.g. a panic); a payload returned alongside an error still
+// counts. It is accumulated per tool for the Statistics view (issue #361). It
+// pairs with recordInvocation, which bumped the invocation count just before
+// execution.
 func (tr *ToolRegistry) recordOutcome(name string, success bool, durationMs, resultBytes int64) {
 	tr.counts.mu.Lock()
 	defer tr.counts.mu.Unlock()
@@ -561,6 +571,9 @@ func (tr *ToolRegistry) ExecuteToolCall(toolCall *ToolCall, ctx ToolContext) (re
 		}
 	}()
 	result, err := tool.Execute(toolCall.Args, ctx)
+	// Measure the raw result the tool returned. A tool that returns a payload
+	// alongside an error still produced bytes, so they are counted; a call with no
+	// result at all (a panic, see the deferred recover above) contributes zero.
 	tr.recordOutcome(name, err == nil, time.Since(start).Milliseconds(), resultByteLen(result))
 	if err != nil {
 		return &ToolCallResponse{
