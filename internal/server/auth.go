@@ -83,8 +83,13 @@ func (anonymousSession) GetUserState() webapi.UserState { return webapi.UserStat
 // GetSession implements webapi.SessionProvider. It records the resolved scope
 // for the assigned user id so requireHuman can recover it later.
 func (p *composingProvider) GetSession(r *http.Request) (webapi.Session, error) {
-	// 1) Loopback: a same-machine caller is the local user (human scope).
-	if isLoopback(r.RemoteAddr) {
+	// 1) Loopback or Unix socket: a same-machine caller is the local user (human
+	//    scope). A request that arrived over the daemon's Unix-domain socket has no
+	//    IP RemoteAddr (it is empty/"@"), so isLoopback alone would 401 the local
+	//    TUI client driving the daemon over its own 0600 socket. The socket's
+	//    filesystem permissions are the access gate there — exactly as the /exit
+	//    kill switch already treats a Unix-socket connection as local.
+	if isLoopback(r.RemoteAddr) || isUnixRequest(r) {
 		return p.issued(1, "Local", scopeHuman), nil
 	}
 
@@ -145,6 +150,18 @@ func isLoopback(remoteAddr string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// isUnixRequest reports whether the request arrived over a Unix-domain-socket
+// listener, by inspecting the listener address the http server records in the
+// connection context. Such a connection is inherently local — the daemon socket
+// is 0600 and filesystem-permission gated — so it is treated as a loopback
+// (human-scoped) caller for the /api auth gate, mirroring the /exit kill switch.
+func isUnixRequest(r *http.Request) bool {
+	if la, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok {
+		return la.Network() == "unix"
+	}
+	return false
 }
 
 func bearerToken(r *http.Request) string {
