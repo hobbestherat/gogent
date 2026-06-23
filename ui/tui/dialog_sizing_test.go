@@ -340,9 +340,9 @@ func TestDialogShrinksOnResize(t *testing.T) {
 	}
 }
 
-// TestBrowserDialogSpecTracksLiveTerminal locks the fix that the two-pane browsers
-// (Resources / Saved Sessions / Statistics) recompute PreferredW from the CURRENT
-// terminal (issue #299) rather than baking the open-time width. browserDialogSpec
+// TestBrowserDialogSpecTracksLiveTerminal locks the fix that the Resources browser
+// recomputes PreferredW from the CURRENT terminal (issue #299) rather than baking
+// the open-time width. browserDialogSpec
 // is the specFn handed to installResizeReflow, so its PreferredW must follow the
 // live w.app width; otherwise a browser opened small then enlarged would grow only
 // to the 80% default instead of its intended 85%.
@@ -361,13 +361,12 @@ func TestBrowserDialogSpecTracksLiveTerminal(t *testing.T) {
 	}
 }
 
-// TestBrowserPreferredWidthClamped documents a #309 finding: the two-pane browsers
-// (Resources / Saved Sessions / Statistics) still declare PreferredW = 85% of the
-// terminal, but turbotui's percentage is now an 80% CAP, so ResolveDialogRect
-// clamps the 85% request down to 80%. The 85% intent is therefore dead — the
-// browser renders at 80% wide. This is a behaviour change the #309 gogent work did
-// not address (the browsers were assumed "unchanged"); it is benign (the browser
-// stays large and usable) but the spec and reality disagree.
+// TestBrowserPreferredWidthClamped documents a #309 finding: the Resources browser
+// still declares PreferredW = 85% of the terminal, but turbotui's percentage is now
+// an 80% CAP, so ResolveDialogRect clamps the 85% request down to 80%. The 85%
+// intent is therefore dead — the browser renders at 80% wide. This remains
+// intentional for Resources, which genuinely benefits from the large browser
+// footprint.
 func TestBrowserPreferredWidthClamped(t *testing.T) {
 	w := newTestWorkbench(t)
 	for _, screenW := range []int{120, 160, 200} {
