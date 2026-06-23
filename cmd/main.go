@@ -249,6 +249,15 @@ func main() {
 				tuipkg.ApplyTheme(tuipkg.ResolveTheme(t, os.Getenv, *noColor))
 				wb.RefreshTheme()
 			},
+			// Keybinding overrides (issue #269): GetKeybindings seeds the live
+			// registry at startup; SetKeybindings only persists (the customizer
+			// applies each rebind to the registry itself, live).
+			GetKeybindings: func() config.KeybindingsConfig {
+				return g.Keybindings()
+			},
+			SetKeybindings: func(k config.KeybindingsConfig) {
+				g.SetKeybindings(k)
+			},
 			GetModels: func() []config.ModelConfig {
 				return g.Models()
 			},
@@ -510,6 +519,10 @@ func main() {
 		// Push the persisted token-budget config so the status gauge's budget
 		// alert (if any) is active from the first turn.
 		wb.SetBudgetConfig(g.Budget())
+		// Apply persisted keybinding overrides to the registry before sessions are
+		// restored, so '?'/':' and every restored window's transcript keys come up
+		// on the user's customised chords (issue #269).
+		wb.LoadKeybindings(g.Keybindings())
 
 		// Run the TUI in a goroutine.
 		go func() {

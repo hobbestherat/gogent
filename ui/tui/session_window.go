@@ -2335,26 +2335,31 @@ func (sw *SessionWindow) addError(text string) {
 func (sw *SessionWindow) registerTranscriptBindings() {
 	reg := sw.wb.desktop.ScopedBindings()
 	target := sw.history.Component
-	focus := func(id tv.ActionID, chord tv.Chord, handler func() bool) {
-		reg.Register(tv.KeyBinding{Chord: chord, ActionID: id, Scope: tv.ScopeFocus, Target: target}, handler)
+	// The chord comes from chordFor (override-or-catalog-default, issue #269) so a
+	// persisted rebind is applied the moment this window registers; with no override
+	// each is its catalog default (the historical letter/Esc/'/'). The actionID and
+	// scope must match the keybindActions() catalog so the customizer can find, rebind
+	// and reset each one.
+	focus := func(id tv.ActionID, handler func() bool) {
+		reg.Register(tv.KeyBinding{Chord: sw.wb.chordFor(id), ActionID: id, Scope: tv.ScopeFocus, Target: target}, handler)
 	}
 	// Esc clears an active filter/search; when nothing is filtered it declines (returns
 	// false) so the key keeps falling through the dispatch chain exactly as before.
-	focus(actionTranscriptShowAll, tv.Chord{Key: tui.KeyEscape}, func() bool {
+	focus(actionTranscriptShowAll, func() bool {
 		if sw.transcript.filtering() {
 			sw.transcript.showAll()
 			return true
 		}
 		return false
 	})
-	focus(actionTranscriptFind, tv.Chord{Rune: '/'}, func() bool { sw.promptFind(); return true })
-	focus(actionTranscriptToggleMsg, tv.Chord{Rune: 'a'}, func() bool { sw.transcript.toggleKind(kindAssistant); return true })
-	focus(actionTranscriptToggleTool, tv.Chord{Rune: 't'}, func() bool { sw.transcript.toggleKind(kindTool); return true })
-	focus(actionTranscriptToggleThink, tv.Chord{Rune: 'r'}, func() bool { sw.transcript.toggleKind(kindThinking); return true })
-	focus(actionTranscriptToggleErr, tv.Chord{Rune: 'e'}, func() bool { sw.transcript.toggleKind(kindError); return true })
-	focus(actionTranscriptFoldAll, tv.Chord{Rune: 'f'}, func() bool { sw.transcript.setFold(true); return true })
-	focus(actionTranscriptUnfoldAll, tv.Chord{Rune: 'u'}, func() bool { sw.transcript.setFold(false); return true })
-	focus(actionTranscriptCopyAnswer, tv.Chord{Rune: 'y'}, func() bool { sw.copyLastAnswer(); return true })
+	focus(actionTranscriptFind, func() bool { sw.promptFind(); return true })
+	focus(actionTranscriptToggleMsg, func() bool { sw.transcript.toggleKind(kindAssistant); return true })
+	focus(actionTranscriptToggleTool, func() bool { sw.transcript.toggleKind(kindTool); return true })
+	focus(actionTranscriptToggleThink, func() bool { sw.transcript.toggleKind(kindThinking); return true })
+	focus(actionTranscriptToggleErr, func() bool { sw.transcript.toggleKind(kindError); return true })
+	focus(actionTranscriptFoldAll, func() bool { sw.transcript.setFold(true); return true })
+	focus(actionTranscriptUnfoldAll, func() bool { sw.transcript.setFold(false); return true })
+	focus(actionTranscriptCopyAnswer, func() bool { sw.copyLastAnswer(); return true })
 }
 
 // promptFind opens the search prompt and applies the entered query as a

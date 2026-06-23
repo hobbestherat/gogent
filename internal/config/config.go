@@ -457,6 +457,18 @@ type ThemeConfig struct {
 	Overrides map[string]string `json:"overrides,omitempty"`
 }
 
+// KeybindingsConfig holds the user's keyboard-shortcut overrides (issue #269).
+// Overrides maps an opaque turbotui actionID (e.g. "transcript.toggle.thinking",
+// "app.commandPalette") to a chord spec string the TUI layer parses — "Ctrl+Shift+R",
+// "b", "Esc", "F1", "/". Only actions rebound away from their built-in default are
+// recorded, so a pristine install persists nothing and an unknown key/value is ignored
+// on load. The value strings are opaque to this package (like ThemeConfig.Overrides'
+// colour specs): the tui layer owns parse/format, keeping config decoupled from
+// turbotui.
+type KeybindingsConfig struct {
+	Overrides map[string]string `json:"overrides,omitempty"`
+}
+
 // Config represents the full configuration
 type Config struct {
 	DefaultModel string `json:"default_model"`
@@ -506,6 +518,10 @@ type Config struct {
 	// value is the coloured "default" palette, so an older config.json without the
 	// key is unaffected.
 	Theme ThemeConfig `json:"theme,omitempty"`
+	// Keybindings customises the TUI keyboard shortcuts (issue #269). The zero
+	// value leaves every action at its built-in default, so an older config.json
+	// without the key behaves exactly as before.
+	Keybindings KeybindingsConfig `json:"keybindings,omitempty"`
 	// Experimental gates opt-in, not-yet-default behaviours (issue #170). The zero
 	// value leaves every experimental feature off, so an older config.json without
 	// the key behaves exactly as before.

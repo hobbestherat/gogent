@@ -159,6 +159,7 @@ func (w *Workbench) commands() []command {
 		{category: "App", name: "Pin / unpin sidebar", run: w.ToggleSidebarPin},
 		{category: "App", name: "Command palette", keys: "Ctrl+K, :"},
 		{category: "App", name: "Keybinding help", keys: "?", actionID: actionHelpOverlay, run: w.showHelpOverlay},
+		{category: "App", name: "Customize keybindings", run: w.showKeybindingCustomizer},
 		{category: "App", name: "Quit", keys: "Ctrl+Q", run: w.confirmQuit},
 	}
 	// Derive the key hint from the live registry for every entry that names an action
@@ -541,8 +542,14 @@ func (w *Workbench) showHelpOverlay() {
 	dialog.Window.AddContent(body)
 
 	dialog.Window.AddContent(dialogLabel("↑↓/PgUp/PgDn scroll · Ctrl+K palette · Esc close",
-		tv.Rect{X: 2, Y: height - 2, W: width - 16, H: 1}))
+		tv.Rect{X: 2, Y: height - 2, W: width - 30, H: 1}))
 
+	// "Customize…" roots the keybinding customizer in the cheatsheet (issue #269): it
+	// closes the read-only overlay and opens the editable customizer for the same
+	// bindings. Close stays rightmost.
+	dialog.Window.AddContent(newButton("&Customize…",
+		tv.Rect{X: width - 27, Y: height - 2, W: 14, H: 1},
+		func() { closeFn(); w.showKeybindingCustomizer() }))
 	dialog.Window.AddContent(newButton("Close",
 		tv.Rect{X: width - 11, Y: height - 2, W: 9, H: 1}, closeFn))
 
