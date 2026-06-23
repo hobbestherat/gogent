@@ -545,6 +545,15 @@ func (g *Gogent) initializeToolRegistry() {
 			},
 			"required": []string{"path", "edits"},
 		},
+		InputExamples: []map[string]interface{}{
+			{
+				"path": "internal/server/server.go",
+				"edits": []map[string]interface{}{
+					{"find": "port := 8080", "replace": "port := 9090"},
+					{"find": "\"localhost\"", "replace": "\"0.0.0.0\"", "replace_all": true},
+				},
+			},
+		},
 		Execute: func(args map[string]interface{}, ctx tool.ToolContext) (interface{}, error) {
 			path, ok := args["path"].(string)
 			if !ok {
@@ -604,6 +613,11 @@ func (g *Gogent) initializeToolRegistry() {
 				"patch": map[string]interface{}{"type": "string", "description": "The full patch text, from \"*** Begin Patch\" to \"*** End Patch\"."},
 			},
 			"required": []string{"patch"},
+		},
+		InputExamples: []map[string]interface{}{
+			{
+				"patch": "*** Begin Patch\n*** Update File: internal/config/config.go\n@@\n func Default() Config {\n-\treturn Config{Port: 8080}\n+\treturn Config{Port: 9090}\n }\n*** End Patch",
+			},
 		},
 		Execute: func(args map[string]interface{}, ctx tool.ToolContext) (interface{}, error) {
 			patch, ok := args["patch"].(string)
@@ -709,6 +723,10 @@ func (g *Gogent) initializeToolRegistry() {
 			if err != nil {
 				return nil, fmt.Errorf("failed to list: %v", err)
 			}
+			// Sort by name so the listing is deterministic across platforms —
+			// os.ReadDir order is unspecified, while glob already sorts via
+			// sort.Strings (issue #361).
+			sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 			out := make([]map[string]interface{}, 0, len(entries))
 			for _, e := range entries {
 				out = append(out, map[string]interface{}{
@@ -793,6 +811,14 @@ func (g *Gogent) initializeToolRegistry() {
 							"task": map[string]interface{}{"type": "string", "description": "What this sub-agent should do."},
 						},
 					},
+				},
+			},
+		},
+		InputExamples: []map[string]interface{}{
+			{
+				"subtasks": []map[string]interface{}{
+					{"name": "diagnostics", "task": "Run diagnostics on the package and report any errors."},
+					{"name": "tests", "task": "Run the test suite and summarize failures."},
 				},
 			},
 		},
@@ -2292,6 +2318,7 @@ func (g *Gogent) Statistics() stats.Report {
 				Success:     ts.Success,
 				Failure:     ts.Failure,
 				TotalMs:     ts.TotalMs,
+				ResultBytes: ts.ResultBytes,
 			})
 		}
 	}

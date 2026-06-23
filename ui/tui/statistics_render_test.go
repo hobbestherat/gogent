@@ -33,8 +33,8 @@ func sampleStatsReport() stats.Report {
 				Primary: stats.ConnectorStat{Requests: 60, Errors: 1}},
 		},
 		Tools: []stats.ToolStat{
-			{Name: "calc", Invocations: 4, Success: 4, TotalMs: 80},
-			{Name: "shell", Invocations: 5, Success: 3, Failure: 2, TotalMs: 12000},
+			{Name: "calc", Invocations: 4, Success: 4, TotalMs: 80, ResultBytes: 42},
+			{Name: "shell", Invocations: 5, Success: 3, Failure: 2, TotalMs: 12000, ResultBytes: 4096},
 		},
 		Skills: []stats.SkillStat{
 			{Name: "writer", Success: 2, Failure: 0, TotalCalls: 2},
@@ -105,7 +105,7 @@ func TestRenderStatisticsSessions(t *testing.T) {
 // (seconds for long durations).
 func TestRenderStatisticsTools(t *testing.T) {
 	got := renderStatistics(statsTools, sampleStatsReport())
-	for _, want := range []string{"Tools", "Name", "Calls", "OK", "Fail", "Avg ms", "calc", "shell"} {
+	for _, want := range []string{"Tools", "Name", "Calls", "OK", "Fail", "Avg ms", "Bytes", "calc", "shell"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("tools view missing %q:\n%s", want, got)
 		}
@@ -113,6 +113,9 @@ func TestRenderStatisticsTools(t *testing.T) {
 	// shell: 12000ms / 5 = 2400ms -> "2400 ms"; calc: 80/4 = 20 -> "20 ms".
 	if !strings.Contains(got, "20 ms") {
 		t.Errorf("tools view missing calc avg 20 ms:\n%s", got)
+	}
+	if !strings.Contains(got, "42") || !strings.Contains(got, "4096") {
+		t.Errorf("tools view missing result byte counts:\n%s", got)
 	}
 }
 

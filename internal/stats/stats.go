@@ -203,6 +203,9 @@ type ToolStat struct {
 	Success     int    `json:"success"`
 	Failure     int    `json:"failure"`
 	TotalMs     int64  `json:"total_ms"`
+	// ResultBytes is the cumulative serialized size of this tool's results, a
+	// diagnostic for which tools dump the most context (issue #361).
+	ResultBytes int64 `json:"result_bytes"`
 }
 
 // AvgMs is the mean execution time per invocation in milliseconds, or 0 when the
@@ -303,6 +306,7 @@ func (r Report) CSV() (string, error) {
 		row("tool", tl.Name, "failure", int64(tl.Failure))
 		row("tool", tl.Name, "total_ms", tl.TotalMs)
 		row("tool", tl.Name, "avg_ms", tl.AvgMs())
+		row("tool", tl.Name, "result_bytes", tl.ResultBytes)
 	}
 	for _, sk := range r.Skills {
 		row("skill", sk.Name, "success", int64(sk.Success))

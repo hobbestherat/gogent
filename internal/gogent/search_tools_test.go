@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strings"
 	"testing"
 
@@ -230,6 +229,12 @@ func TestGlobTool(t *testing.T) {
 func TestListTool(t *testing.T) {
 	g, workspace := newCheckpointGogent(t)
 	seedSearchFixture(t, workspace)
+	if err := os.WriteFile(filepath.Join(workspace, "sub", "z-last.txt"), []byte("z\n"), 0o644); err != nil {
+		t.Fatalf("write z-last.txt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "sub", "aa-first.txt"), []byte("a\n"), 0o644); err != nil {
+		t.Fatalf("write aa-first.txt: %v", err)
+	}
 
 	out := callTool(t, g, "list", map[string]interface{}{"path": "sub"})
 	entries, ok := out["entries"].([]map[string]interface{})
@@ -241,10 +246,9 @@ func TestListTool(t *testing.T) {
 	for _, e := range entries {
 		names = append(names, e["name"].(string))
 	}
-	sort.Strings(names)
-	want := []string{"b.go", "note.md"}
+	want := []string{"aa-first.txt", "b.go", "note.md", "z-last.txt"}
 	if !reflect.DeepEqual(names, want) {
-		t.Errorf("names: got %v want %v", names, want)
+		t.Errorf("names order: got %v want sorted %v", names, want)
 	}
 
 	// list defaults to the workspace root when no path is given.

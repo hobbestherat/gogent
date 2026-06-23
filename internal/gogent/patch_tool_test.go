@@ -3,6 +3,7 @@ package gogent
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gogent/internal/tool"
@@ -137,4 +138,64 @@ func TestApplyPatchToolRejectsDuplicatePath(t *testing.T) {
 	if _, err := pt.Execute(map[string]any{"patch": patch}, ctx); err == nil {
 		t.Fatal("expected error for duplicate path in patch")
 	}
+}
+
+func TestPatchToolsDeclareInputExamples(t *testing.T) {
+	g, _ := newCheckpointGogent(t)
+	reg := g.GetToolRegistry()
+
+	tests := []struct {
+		name      string
+		wantKeys  []string
+		docNeedle string
+	}{
+		{
+			name:      "multi_edit",
+			wantKeys:  []string{"path", "edits"},
+			docNeedle: `"edits":[{"find":"port := 8080","replace":"port := 9090"},{"find":"\"localhost\"","replace":"\"0.0.0.0\"","replace_all":true}],"path":"internal/server/server.go"`,
+		},
+		{
+			name:      "apply_patch",
+			wantKeys:  []string{"patch"},
+			docNeedle: `"patch":"*** Begin Patch\n*** Update File: internal/config/config.go`,
+		},
+	}
+
+	docs := reg.RenderToolDocs()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tl := reg.Get(tt.name)
+			if tl == nil {
+				t.Fatalf("%s tool not registered", tt.name)
+			}
+			if len(tl.InputExamples) == 0 {
+				t.Fatalf("%s InputExamples is empty", tt.name)
+			}
+			for _, key := range tt.wantKeys {
+				if _, ok := tl.InputExamples[0][key]; !ok {
+					t.Fatalf("%s first InputExample missing key %q: %+v", tt.name, key, tl.InputExamples[0])
+				}
+			}
+			section := renderToolDocSection(t, docs, tt.name)
+			if !strings.Contains(section, "Examples:\n") {
+				t.Fatalf("%s docs missing Examples header:\n%s", tt.name, section)
+			}
+			if !strings.Contains(section, tt.docNeedle) {
+				t.Fatalf("%s docs missing compact JSON input example %q:\n%s", tt.name, tt.docNeedle, section)
+			}
+		})
+	}
+}
+
+func renderToolDocSection(t *testing.T, docs, name string) string {
+	t.Helper()
+	start := strings.Index(docs, "### "+name)
+	if start == -1 {
+		t.Fatalf("docs missing %s section:\n%s", name, docs)
+	}
+	rest := docs[start+len("### "+name):]
+	if next := strings.Index(rest, "\n### "); next != -1 {
+		return docs[start : start+len("### "+name)+next]
+	}
+	return docs[start:]
 }
