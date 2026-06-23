@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -66,13 +65,6 @@ func keybindByID(id tv.ActionID) (keybindAction, bool) {
 func keybindDefault(id tv.ActionID) tv.Chord {
 	a, _ := keybindByID(id)
 	return a.deflt
-}
-
-// keybindScope returns the dispatch scope of the catalog action id, or ScopeGlobal for
-// an action not in the catalog (the zero value).
-func keybindScope(id tv.ActionID) tv.Scope {
-	a, _ := keybindByID(id)
-	return a.scope
 }
 
 // keybindActionName returns the human label for id, falling back to the raw actionID
@@ -348,67 +340,97 @@ func (w *Workbench) persistKeybindings() {
 // before windows open is sufficient; the rebuild here applies the '?'/':' overrides
 // immediately.
 func (w *Workbench) LoadKeybindings(cfg config.KeybindingsConfig) {
-	// current holds the effective chord of every catalog action; seed it with the
-	// defaults, which are conflict-free, then fold accepted overrides in one at a time.
+	// First, accept each individually-valid override into a candidate set: known
+	// actionID, parseable spec, and (for a real chord) deliverable and scope-legal. The
+	// unbound sentinel is always individually valid (it registers nothing). Validity here
+	// is per-override; cross-override conflicts are resolved in the next step. `overridden`
+	// tracks which actions still carry a candidate override so the conflict pass can tell
+	// an override apart from a default-valued action.
 	current := make(map[tv.ActionID]tv.Chord)
+	overridden := make(map[tv.ActionID]bool)
 	for _, a := range keybindActions() {
 		current[a.id] = a.deflt
 	}
-	for _, idStr := range sortedKeys(cfg.Overrides) {
-		id := tv.ActionID(idStr)
-		if _, ok := keybindByID(id); !ok {
-			continue // unknown action
+	for _, a := range keybindActions() {
+		spec, ok := cfg.Overrides[string(a.id)]
+		if !ok {
+			continue
 		}
-		chord, ok := parseChordSpec(cfg.Overrides[idStr])
+		chord, ok := parseChordSpec(spec)
 		if !ok {
 			continue // unparseable spec
 		}
-		// A deliberately cleared action ("none") is always accepted: it registers
-		// nothing, so it can neither be undeliverable nor collide with anything.
-		if chord == unboundChord {
-			current[id] = unboundChord
-			continue
-		}
-		scope := keybindScope(id)
-		if deliverable, _ := chord.Deliverable(); !deliverable {
-			continue // a chord the terminal can't deliver
-		}
-		if allowed, _ := validateScopeRule(scope, chord); !allowed {
-			continue // breaks the scope rule
-		}
-		collides := false
-		for _, other := range keybindActions() {
-			if other.id == id || other.scope != scope {
-				continue
+		if chord != unboundChord {
+			if deliverable, _ := chord.Deliverable(); !deliverable {
+				continue // a chord the terminal can't deliver
 			}
-			if sameChord(current[other.id], chord) {
-				collides = true
-				break
+			if allowed, _ := validateScopeRule(a.scope, chord); !allowed {
+				continue // breaks the scope rule
 			}
 		}
-		if collides {
-			continue // another action already holds this chord in the same scope
+		current[a.id] = chord
+		overridden[a.id] = true
+	}
+	// Now apply ALL accepted overrides at once and resolve any genuine same-scope
+	// collision in the resulting assignment. Applying them together is what lets a
+	// legitimately-saved permutation reload — e.g. a conflict-confirm swap (messages→R,
+	// thinking→A) is conflict-free as a whole even though each leg collides with the
+	// OTHER action's default. Only a corrupt/hand-edited config yields a real collision;
+	// when it does, revert an offending override to its default (preferring to drop an
+	// override over a default, and the later catalog action when both are overrides), and
+	// rescan. Each revert removes one override, so this terminates — in the worst case at
+	// the all-defaults assignment, which is conflict-free by construction.
+	for {
+		victim, found := w.firstCollisionVictim(current, overridden)
+		if !found {
+			break
 		}
-		current[id] = chord
+		current[victim] = keybindDefault(victim)
+		delete(overridden, victim)
 	}
 	w.keybindings = make(map[tv.ActionID]tv.Chord)
-	for _, a := range keybindActions() {
-		if !sameChord(current[a.id], a.deflt) {
-			w.keybindings[a.id] = current[a.id]
+	for id := range overridden {
+		if sameChord(current[id], keybindDefault(id)) {
+			continue // a redundant override equal to the default — leave it implicit
 		}
+		w.keybindings[id] = current[id]
 	}
 	w.rebuildScopedBindings()
 }
 
-// sortedKeys returns m's keys in lexical order, so the override accept loop is
-// deterministic regardless of map iteration order.
-func sortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
+// firstCollisionVictim finds the first same-scope chord collision in current (catalog
+// order) and names the override that should be reverted to resolve it: the colliding
+// action that still carries an override, or the later one in catalog order when both do.
+// Unbound (cleared) actions are excluded — they register nothing and so never collide.
+// found is false when the assignment is already collision-free.
+func (w *Workbench) firstCollisionVictim(current map[tv.ActionID]tv.Chord, overridden map[tv.ActionID]bool) (victim tv.ActionID, found bool) {
+	actions := keybindActions()
+	for i := range actions {
+		for j := i + 1; j < len(actions); j++ {
+			a, b := actions[i], actions[j]
+			if a.scope != b.scope {
+				continue
+			}
+			if current[a.id] == unboundChord || current[b.id] == unboundChord {
+				continue
+			}
+			if !sameChord(current[a.id], current[b.id]) {
+				continue
+			}
+			// Prefer reverting an override; when both are overrides, drop the later one.
+			switch {
+			case overridden[b.id]:
+				return b.id, true
+			case overridden[a.id]:
+				return a.id, true
+			default:
+				// Two defaults colliding is impossible (catalog defaults are unique), so
+				// this is unreachable; skip rather than loop forever if it ever arises.
+				continue
+			}
+		}
 	}
-	sort.Strings(keys)
-	return keys
+	return "", false
 }
 
 // --- Chord helpers ----------------------------------------------------------
