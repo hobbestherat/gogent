@@ -188,6 +188,34 @@ func TestGitToolValidation(t *testing.T) {
 	}
 }
 
+func TestGitToolRejectsOutOfEnumOperationAtValidationGate(t *testing.T) {
+	tr, _ := gitRepoRegistry(t)
+
+	resp, err := tr.ExecuteToolCall(&ToolCall{
+		Tool: "git",
+		Args: map[string]interface{}{"operation": "rebase"},
+	}, ToolContext{})
+	if err != nil {
+		t.Fatalf("ExecuteToolCall returned unexpected error: %v", err)
+	}
+	if resp == nil || resp.Success {
+		t.Fatalf("expected invalid enum failure, got %+v", resp)
+	}
+	for _, want := range []string{
+		"invalid args",
+		"args.operation",
+		"[status diff log commit create_branch restore]",
+		`"rebase"`,
+	} {
+		if !strings.Contains(resp.Error, want) {
+			t.Fatalf("git invalid enum error %q does not contain %q", resp.Error, want)
+		}
+	}
+	if strings.Contains(resp.Error, "unknown git operation") {
+		t.Fatalf("git enum was not rejected at the validation gate: %q", resp.Error)
+	}
+}
+
 func TestGitToolGatesMutation(t *testing.T) {
 	if !vcs.Available() {
 		t.Skip("git not installed")
