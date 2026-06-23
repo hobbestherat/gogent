@@ -20,13 +20,14 @@ func (w *Workbench) dialogRect(spec tv.DialogSpec) (x, y, wid, h int) {
 	return tv.ResolveDialogRect(spec, w.app.Width(), w.app.Height())
 }
 
-// browserDialogSpec is the shared sizing intent of the two-pane read-only browsers
-// that still fill the screen (Resources, Statistics): large by default at ≈85% of
-// the terminal width with a 60×14 floor so each stays usable on a small terminal.
+// browserDialogSpec is the sizing intent of the Resources browser: a two-pane
+// read-only browser that still fills the screen, large by default at ≈85% of the
+// terminal width with a 60×14 floor so it stays usable on a small terminal.
 // PreferredW is a share of the *current* terminal, so it is recomputed (via this
 // method as the specFn) on every resize rather than baked at open time (issue
 // #299). The list/detail split is derived from the resolved width, so the panes
-// grow with the dialog.
+// grow with the dialog. (The Statistics dialog used to share this spec but now has
+// its own content-driven statisticsDialogSpec — issue #345.)
 func (w *Workbench) browserDialogSpec() tv.DialogSpec {
 	return tv.DialogSpec{MinW: 60, MinH: 14, PreferredW: w.app.Width() * 85 / 100}
 }
@@ -46,6 +47,32 @@ func (w *Workbench) sessionsDialogSpec() tv.DialogSpec {
 	return tv.DialogSpec{
 		MinW: 60, MaxW: 160, PreferredW: 104,
 		MinH: 14, MaxH: 40, PrefH: 26,
+	}
+}
+
+// statisticsDialogSpec is the content-driven size of the Statistics dialog (issue
+// #345). Unlike browserDialogSpec (shared with Resources, which renders arbitrarily
+// long SKILL.md / input-schema text and genuinely fills the screen), Statistics
+// renders a fixed-column tabular report in a single wrapping TextView: its widest
+// line is 97 cells (the Models footnote) and only the Overview section approaches
+// 30 lines. So it grows toward — but is capped well below — the 80%/85% browser
+// balloon (160×42 on 200×50) instead of always filling it.
+//
+// PreferredW 100 sizes the detail pane to width-4 = 96 cells (after the listX=2
+// margin and the right border), which holds the 73-cell Sessions table outright and
+// all but one cell of the 97-cell Models footnote — it wraps by a single cell, which
+// is acceptable — instead of the old browser balloon's ~156-cell pane. It is capped
+// at MaxW 110 (matching the permission dialog's 110 ceiling) so it never sprawls on
+// an ultrawide terminal. PrefH 24 fits
+// the tallest typical section (a fast-backend Overview is ~20-30 lines) plus the 8
+// rows of chrome, capped at MaxH 36 so a heavy Overview stays under the 42-row
+// balloon. The 60×14 floor keeps it usable on a small terminal. The spec is static
+// (no terminal-share term), so it is path-independent and the dialog uses
+// dialog.Fit on resize, like sessionsDialogSpec.
+func (w *Workbench) statisticsDialogSpec() tv.DialogSpec {
+	return tv.DialogSpec{
+		MinW: 60, MaxW: 110, PreferredW: 100,
+		MinH: 14, MaxH: 36, PrefH: 24,
 	}
 }
 

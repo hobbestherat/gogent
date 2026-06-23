@@ -165,32 +165,127 @@ func TestFormatMs(t *testing.T) {
 	}
 }
 
-// TestStatisticsDialogSize covers clamping to the terminal and the min floors.
+// TestStatisticsDialogSize covers the content-driven statistics dialog footprint:
+// it uses a static 100x24 preferred size with 110x36 caps and 60x14 floors, not
+// the browser dialog's terminal-share spec that ballooned to 160x42 on 200x50.
 func TestStatisticsDialogSize(t *testing.T) {
-	// statisticsSpec mirrors the inline DialogSpec in showStatisticsDialog (issue
-	// #299): 85% wide, 60×14 floor, no upper cap — shared with Resources/Sessions.
-	statisticsSpec := func(screenW int) tv.DialogSpec {
-		return tv.DialogSpec{MinW: 60, MinH: 14, PreferredW: screenW * 85 / 100}
+	wb := newTestWorkbench(t)
+	spec := wb.statisticsDialogSpec()
+	if spec.PreferredW != 100 || spec.PrefH != 24 {
+		t.Fatalf("statistics preferred size = %dx%d, want 100x24", spec.PreferredW, spec.PrefH)
 	}
+	if spec.MinW != 60 || spec.MinH != 14 || spec.MaxW != 110 || spec.MaxH != 36 {
+		t.Fatalf("statistics spec = %+v, want floors 60x14 and caps 110x36", spec)
+	}
+
 	for _, tc := range []struct {
 		name             string
 		screenW, screenH int
 		wantW, wantH     int
 	}{
-		// The 85% PreferredW is clamped to the 80% width cap (#309 finding); see
-		// TestBrowserPreferredWidthClamped.
-		{"large screen capped at 80% wide", 200, 100, 160, 85},
-		{"medium terminal capped at 80% wide", 120, 40, 96, 34},
-		{"short terminal floors height", 120, 16, 96, 14},
-		{"tiny terminal floors both", 50, 20, 60, 16},
+		{"roomy terminal uses content size", 200, 50, 100, 24},
+		{"wide terminal stays capped to content", 300, 80, 100, 24},
+		{"120 wide terminal clamps width to 80 percent cap", 120, 40, 96, 24},
+		{"short terminal clamps height above floor", 120, 16, 96, 14},
+		{"tiny terminal floors both dimensions", 50, 12, 60, 14},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, gotW, gotH := tv.ResolveDialogRect(statisticsSpec(tc.screenW), tc.screenW, tc.screenH)
+			_, _, gotW, gotH := tv.ResolveDialogRect(spec, tc.screenW, tc.screenH)
 			if gotW != tc.wantW || gotH != tc.wantH {
 				t.Errorf("statistics size(%d,%d) = %dx%d, want %dx%d",
 					tc.screenW, tc.screenH, gotW, gotH, tc.wantW, tc.wantH)
 			}
 		})
+	}
+}
+
+func TestStatisticsDialogOpensContentDriven(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		screenW, screenH int
+		wantW, wantH     int
+	}{
+		{"roomy terminal is not browser balloon", 200, 50, 100, 24},
+		{"120 wide terminal respects percentage cap", 120, 40, 96, 24},
+		{"tiny terminal floors both dimensions", 50, 12, 60, 14},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newTestWorkbench(t)
+			w.handlers.GetStatistics = func() stats.Report { return sampleStatsReport() }
+			w.app.Resize(tc.screenW, tc.screenH)
+			w.showStatisticsDialog()
+
+			top := w.desktop.TopLayer()
+			if top == nil || top.Name != "statistics-dialog" {
+				t.Fatalf("top layer = %v, want statistics-dialog", top)
+			}
+			b := dialogBounds(w)
+			if b.W != tc.wantW || b.H != tc.wantH {
+				t.Fatalf("statistics dialog on %dx%d = %dx%d, want %dx%d",
+					tc.screenW, tc.screenH, b.W, b.H, tc.wantW, tc.wantH)
+			}
+			if b.W == 160 && b.H == 42 {
+				t.Fatal("statistics dialog still opened as the 160x42 browser balloon")
+			}
+			wantX, wantY := (tc.screenW-b.W)/2, (tc.screenH-b.H)/2
+			if wantX < 0 {
+				wantX = 0
+			}
+			if wantY < 0 {
+				wantY = 0
+			}
+			if b.X != wantX || b.Y != wantY {
+				t.Errorf("statistics origin = (%d,%d), want centered (%d,%d)", b.X, b.Y, wantX, wantY)
+			}
+		})
+	}
+}
+
+func TestStatisticsDialogResizePathIndependent(t *testing.T) {
+	resized := newTestWorkbench(t)
+	resized.handlers.GetStatistics = func() stats.Report { return sampleStatsReport() }
+	resized.app.Resize(80, 24)
+	resized.showStatisticsDialog()
+	before := dialogBounds(resized)
+
+	resized.app.Resize(200, 50)
+	got := dialogBounds(resized)
+
+	fresh := newTestWorkbench(t)
+	fresh.handlers.GetStatistics = func() stats.Report { return sampleStatsReport() }
+	fresh.app.Resize(200, 50)
+	fresh.showStatisticsDialog()
+	want := dialogBounds(fresh)
+
+	if before.W != 64 || before.H != 20 {
+		t.Fatalf("statistics opened on 80x24 = %dx%d, want 64x20", before.W, before.H)
+	}
+	if got.W != want.W || got.H != want.H {
+		t.Fatalf("statistics after resize = %dx%d, want fresh-open size %dx%d", got.W, got.H, want.W, want.H)
+	}
+	if got.W != 100 || got.H != 24 {
+		t.Fatalf("statistics after resize to 200x50 = %dx%d, want 100x24", got.W, got.H)
+	}
+	if got.X != (200-got.W)/2 || got.Y != (50-got.H)/2 {
+		t.Errorf("statistics not re-centered after resize: origin (%d,%d)", got.X, got.Y)
+	}
+}
+
+func TestStatisticsDialogUnavailableUsesCompactFallback(t *testing.T) {
+	w := newTestWorkbench(t)
+	w.app.Resize(200, 50)
+	w.showStatisticsDialog()
+
+	top := w.desktop.TopLayer()
+	if top == nil {
+		t.Fatal("expected an unavailable confirmation dialog")
+	}
+	if top.Name == "statistics-dialog" {
+		t.Fatal("showStatisticsDialog opened statistics dialog without a GetStatistics handler")
+	}
+	b := dialogBounds(w)
+	if b.W >= 100 || b.H >= 24 {
+		t.Errorf("unavailable fallback size = %dx%d, want compact confirmation smaller than statistics dialog", b.W, b.H)
 	}
 }
 

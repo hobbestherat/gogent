@@ -303,6 +303,27 @@ func TestResourcesDialogSize(t *testing.T) {
 	}
 }
 
+func TestResourcesDialogOpensWithBrowserFootprint(t *testing.T) {
+	w := newTestWorkbench(t)
+	w.app.Resize(200, 50)
+	w.showResourcesDialog()
+
+	top := w.desktop.TopLayer()
+	if top == nil || top.Name != "resources-dialog" {
+		t.Fatalf("top layer = %v, want resources-dialog", top)
+	}
+	b := dialogBounds(w)
+	if b.W != 160 || b.H != 42 {
+		t.Fatalf("resources dialog on 200x50 = %dx%d, want unchanged browser footprint 160x42", b.W, b.H)
+	}
+	if b.W == 100 && b.H == 24 {
+		t.Fatal("resources dialog was accidentally moved to the statistics content footprint")
+	}
+	if b.X != (200-b.W)/2 || b.Y != (50-b.H)/2 {
+		t.Errorf("resources origin = (%d,%d), want centered", b.X, b.Y)
+	}
+}
+
 // TestSortResourceItems covers ordering by kind then name.
 func TestSortResourceItems(t *testing.T) {
 	items := []resourceItem{
