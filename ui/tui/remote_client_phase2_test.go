@@ -123,6 +123,99 @@ func TestAPIClientSendMessageAndStreamEvents(t *testing.T) {
 	}
 }
 
+func TestAPIClientReportsHTTPErrorBodies(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/health":
+			http.Error(w, "daemon unavailable", http.StatusTeapot)
+		case "/api/sessions/s1/messages":
+			http.Error(w, "model failed", http.StatusBadGateway)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client, err := NewAPIClient(srv.URL, "")
+	if err != nil {
+		t.Fatalf("NewAPIClient: %v", err)
+	}
+
+	if err := client.Health(); err == nil || !strings.Contains(err.Error(), "418") || !strings.Contains(err.Error(), "daemon unavailable") {
+		t.Fatalf("Health error = %v, want status and response body", err)
+	}
+	_, err = client.SendMessage(context.Background(), "s1", "hello", "m1", "")
+	if err == nil || !strings.Contains(err.Error(), "502") || !strings.Contains(err.Error(), "model failed") {
+		t.Fatalf("SendMessage error = %v, want status and response body", err)
+	}
+}
+
+func TestAPIClientStreamEventsReportsOpenFailureAndSkipsMalformedFrames(t *testing.T) {
+	t.Run("open failure", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/api/events" {
+				http.NotFound(w, r)
+				return
+			}
+			http.Error(w, "denied", http.StatusUnauthorized)
+		}))
+		defer srv.Close()
+
+		client, err := NewAPIClient(srv.URL, "")
+		if err != nil {
+			t.Fatalf("NewAPIClient: %v", err)
+		}
+		_, err = client.StreamEvents(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "401") || !strings.Contains(err.Error(), "denied") {
+			t.Fatalf("StreamEvents error = %v, want status and response body", err)
+		}
+	})
+
+	t.Run("malformed frames skipped", func(t *testing.T) {
+		started := make(chan struct{})
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/api/events" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher := w.(http.Flusher)
+			close(started)
+			fmt.Fprint(w, "event: broken\n")
+			fmt.Fprint(w, "data: {not-json}\n\n")
+			fmt.Fprint(w, "event: final\n")
+			fmt.Fprint(w, `data: {"session_id":"s1","event":{"type":"final","text":"ok"}}`+"\n\n")
+			flusher.Flush()
+			<-r.Context().Done()
+		}))
+		defer srv.Close()
+
+		client, err := NewAPIClient(srv.URL, "")
+		if err != nil {
+			t.Fatalf("NewAPIClient: %v", err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		events, err := client.StreamEvents(ctx)
+		if err != nil {
+			t.Fatalf("StreamEvents: %v", err)
+		}
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("event stream did not start")
+		}
+		select {
+		case ev := <-events:
+			if ev.SessionID != "s1" || ev.Event.Text != "ok" {
+				t.Fatalf("event = %+v, want valid frame after malformed frame", ev)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for valid frame")
+		}
+	})
+}
+
 func TestAPIClientUnixSocketTransportHealth(t *testing.T) {
 	dir := t.TempDir()
 	sock := filepath.Join(dir, "daemon.sock")
