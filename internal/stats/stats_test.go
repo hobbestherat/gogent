@@ -101,8 +101,8 @@ func sampleReport() Report {
 				Primary: ConnectorStat{Requests: 4, Errors: 1}},
 		},
 		Tools: []ToolStat{
-			{Name: "calc", Invocations: 4, Success: 4, TotalMs: 80},
-			{Name: "shell", Invocations: 5, Success: 4, Failure: 1, TotalMs: 1200},
+			{Name: "calc", Invocations: 4, Success: 4, TotalMs: 80, ResultBytes: 12},
+			{Name: "shell", Invocations: 5, Success: 4, Failure: 1, TotalMs: 1200, ResultBytes: 4096},
 		},
 		Skills: []SkillStat{
 			{Name: "writer", Success: 2, Failure: 0, TotalCalls: 2},
@@ -135,6 +135,9 @@ func TestReportJSONRoundTrip(t *testing.T) {
 	}
 	if back.Models[0] != orig.Models[0] {
 		t.Errorf("Models[0] mismatch: got %+v want %+v", back.Models[0], orig.Models[0])
+	}
+	if back.Tools[1].ResultBytes != orig.Tools[1].ResultBytes {
+		t.Errorf("Tools[1].ResultBytes mismatch: got %d want %d", back.Tools[1].ResultBytes, orig.Tools[1].ResultBytes)
 	}
 }
 
@@ -175,6 +178,9 @@ func TestReportCSV(t *testing.T) {
 	// avg_ms is derived (TotalMs/Invocations): calc = 80/4 = 20.
 	if !strings.Contains(s, ",calc,avg_ms,20") {
 		t.Errorf("CSV missing derived calc avg_ms=20 row\n%s", s)
+	}
+	if !strings.Contains(s, ",shell,result_bytes,4096") {
+		t.Errorf("CSV missing shell result_bytes=4096 row\n%s", s)
 	}
 }
 

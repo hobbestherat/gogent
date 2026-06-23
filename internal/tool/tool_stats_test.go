@@ -1,6 +1,8 @@
 package tool
 
 import (
+	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -64,6 +66,132 @@ func TestToolStatsRecordsFailure(t *testing.T) {
 	}
 }
 
+func TestToolStatsResultBytes(t *testing.T) {
+	reg := NewToolRegistry()
+	result := map[string]interface{}{
+		"message": "hello",
+		"items":   []interface{}{"a", "b"},
+	}
+	reg.Register(&Tool{
+		Name:        "payload",
+		Description: "returns a structured payload",
+		InputSchema: nil,
+		Execute: func(map[string]interface{}, ToolContext) (interface{}, error) {
+			return result, nil
+		},
+	})
+
+	resp, err := reg.ExecuteToolCall(&ToolCall{Tool: "payload", Args: map[string]interface{}{}}, ToolContext{})
+	if err != nil {
+		t.Fatalf("ExecuteToolCall: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("payload failed: %s", resp.Error)
+	}
+	wantBytes := jsonByteLen(t, result)
+	if got := reg.ResultBytes("payload"); got != wantBytes {
+		t.Fatalf("ResultBytes(payload) = %d, want %d", got, wantBytes)
+	}
+	stats := reg.GetAllToolStats()
+	if len(stats) != 1 {
+		t.Fatalf("stats rows = %d, want 1", len(stats))
+	}
+	if got := stats[0].ResultBytes; got != wantBytes {
+		t.Fatalf("stats[0].ResultBytes = %d, want %d", got, wantBytes)
+	}
+
+	resp, err = reg.ExecuteToolCall(&ToolCall{Tool: "payload", Args: map[string]interface{}{}}, ToolContext{})
+	if err != nil || !resp.Success {
+		t.Fatalf("second ExecuteToolCall = resp %+v err %v", resp, err)
+	}
+	if got, want := reg.ResultBytes("payload"), wantBytes*2; got != want {
+		t.Fatalf("ResultBytes after two calls = %d, want %d", got, want)
+	}
+}
+
+func TestToolStatsResultBytesFailureAndPanicEdges(t *testing.T) {
+	reg := NewToolRegistry()
+	errorResult := map[string]interface{}{"partial": "diagnostic"}
+	reg.Register(&Tool{
+		Name:        "error_with_payload",
+		Description: "returns a payload and an error",
+		InputSchema: nil,
+		Execute: func(map[string]interface{}, ToolContext) (interface{}, error) {
+			return errorResult, errSentinel
+		},
+	})
+	reg.Register(&Tool{
+		Name:        "panic",
+		Description: "panics",
+		InputSchema: nil,
+		Execute: func(map[string]interface{}, ToolContext) (interface{}, error) {
+			panic("boom")
+		},
+	})
+
+	resp, err := reg.ExecuteToolCall(&ToolCall{Tool: "error_with_payload", Args: map[string]interface{}{}}, ToolContext{})
+	if err == nil {
+		t.Fatal("expected error_with_payload to return an error")
+	}
+	if resp == nil || resp.Success {
+		t.Fatalf("error_with_payload response = %+v, want failure", resp)
+	}
+	if got, want := reg.ResultBytes("error_with_payload"), jsonByteLen(t, errorResult); got != want {
+		t.Fatalf("ResultBytes(error_with_payload) = %d, want %d", got, want)
+	}
+
+	resp, err = reg.ExecuteToolCall(&ToolCall{Tool: "panic", Args: map[string]interface{}{}}, ToolContext{})
+	if err == nil {
+		t.Fatal("expected panic to return an error")
+	}
+	if resp == nil || resp.Success {
+		t.Fatalf("panic response = %+v, want failure", resp)
+	}
+	if got := reg.ResultBytes("panic"); got != 0 {
+		t.Fatalf("ResultBytes(panic) = %d, want 0", got)
+	}
+
+	stats := statsByName(reg.GetAllToolStats())
+	if got := stats["error_with_payload"]; got.Failure != 1 || got.ResultBytes != jsonByteLen(t, errorResult) {
+		t.Fatalf("error_with_payload stats = %+v", got)
+	}
+	if got := stats["panic"]; got.Failure != 1 || got.ResultBytes != 0 {
+		t.Fatalf("panic stats = %+v", got)
+	}
+}
+
+func TestToolStatsResultBytesNotRecordedForRejectedCalls(t *testing.T) {
+	reg := NewToolRegistry()
+	reg.Register(&Tool{
+		Name: "needs_arg",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"value": map[string]interface{}{"type": "string"},
+			},
+			"required": []string{"value"},
+		},
+		Execute: func(map[string]interface{}, ToolContext) (interface{}, error) {
+			return "should not run", nil
+		},
+	})
+
+	resp, err := reg.ExecuteToolCall(&ToolCall{Tool: "needs_arg", Args: map[string]interface{}{}}, ToolContext{})
+	if err != nil {
+		t.Fatalf("ExecuteToolCall: %v", err)
+	}
+	if resp == nil || resp.Success {
+		t.Fatalf("invalid args response = %+v, want failure", resp)
+	}
+	stats := reg.GetAllToolStats()
+	if len(stats) != 1 {
+		t.Fatalf("stats rows = %d, want 1", len(stats))
+	}
+	if stats[0].Invocations != 0 || stats[0].ResultBytes != 0 {
+		t.Fatalf("rejected call stats = %+v, want zero counters", stats[0])
+	}
+}
+
 // TestCloneSharesCounters is the regression test for the latent bug where a
 // session's mode-filtered clone kept its own counters, so invocations recorded
 // on the clone never reached the global registry the UI/Statistics view reads.
@@ -102,6 +230,77 @@ func TestCloneSharesCounters(t *testing.T) {
 	if parent.LastUsed("calc").After(time.Now().Add(time.Second)) {
 		t.Error("parent LastUsed(calc) is in the future")
 	}
+}
+
+func TestCloneSharesResultBytes(t *testing.T) {
+	parent := NewToolRegistry()
+	result := map[string]interface{}{"text": "from clone"}
+	parent.Register(&Tool{
+		Name:        "payload",
+		Description: "returns a payload",
+		InputSchema: nil,
+		Execute: func(map[string]interface{}, ToolContext) (interface{}, error) {
+			return result, nil
+		},
+	})
+	parent.Register(&Tool{Name: "spawn_subagent", Execute: func(map[string]interface{}, ToolContext) (interface{}, error) {
+		return nil, nil
+	}})
+
+	clone := parent.CloneWithout("spawn_subagent")
+	resp, err := clone.ExecuteToolCall(&ToolCall{Tool: "payload", Args: map[string]interface{}{}}, ToolContext{})
+	if err != nil || !resp.Success {
+		t.Fatalf("clone ExecuteToolCall = resp %+v err %v", resp, err)
+	}
+	if got, want := parent.ResultBytes("payload"), jsonByteLen(t, result); got != want {
+		t.Fatalf("parent ResultBytes(payload) = %d, want %d", got, want)
+	}
+}
+
+func TestToolRegistryListMethodsAreSorted(t *testing.T) {
+	reg := NewToolRegistry()
+	for _, name := range []string{"zeta", "alpha", "middle", "hidden"} {
+		name := name
+		reg.Register(&Tool{
+			Name: name,
+			Execute: func(map[string]interface{}, ToolContext) (interface{}, error) {
+				return nil, nil
+			},
+		})
+	}
+	reg.SetEnabled("hidden", false)
+
+	if got, want := toolNames(reg.List()), []string{"alpha", "hidden", "middle", "zeta"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("List names = %v, want sorted %v", got, want)
+	}
+	if got, want := toolNames(reg.ListEnabled()), []string{"alpha", "middle", "zeta"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ListEnabled names = %v, want sorted %v", got, want)
+	}
+}
+
+func jsonByteLen(t *testing.T, v interface{}) int64 {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal %T: %v", v, err)
+	}
+	return int64(len(b))
+}
+
+func statsByName(stats []ToolStats) map[string]ToolStats {
+	out := make(map[string]ToolStats, len(stats))
+	for _, s := range stats {
+		out[s.Name] = s
+	}
+	return out
+}
+
+func toolNames(tools []*Tool) []string {
+	out := make([]string, 0, len(tools))
+	for _, tl := range tools {
+		out = append(out, tl.Name)
+	}
+	return out
 }
 
 // errSentinel is a trivial error for the failure-path test tool.
