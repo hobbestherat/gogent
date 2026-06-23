@@ -612,21 +612,12 @@ func (w *Workbench) showThemeEditor() {
 		tv.Rect{X: 2, Y: 2, W: 40, H: 1}))
 
 	// One row per role across two columns of labelled sections (issue #267); fields[i]
-	// edits themeRoles[i] and swatches[i] previews it. The placement loop below walks
-	// themeGroups in flatten order, so fields/swatches stay keyed by the single flat
-	// role index — the grouping only changes where each row is drawn.
+	// edits themeRoles[i] and pickers[i] previews it and opens the colour picker for it
+	// (issue #366). The placement loop below walks themeGroups in flatten order, so
+	// fields/pickers stay keyed by the single flat role index — the grouping only
+	// changes where each row is drawn.
 	fields := make([]*tv.TextBox, len(themeRoles))
-	swatches := make([]*tv.Label, len(themeRoles))
-
-	// updateSwatch recomputes swatches[i] from fields[i]'s current text via
-	// swatchStyle (issue #243). It is the single place a swatch is derived, called
-	// both from refresh and from each swatch's per-render DrawFn, so the preview
-	// always reflects the field's current value rather than one cached at open.
-	updateSwatch := func(i int) {
-		text, fg := swatchStyle(fields[i].GetText(), noColor.IsChecked())
-		swatches[i].SetText(text)
-		swatches[i].FG = fg
-	}
+	pickers := make([]*tv.ColorPicker, len(themeRoles))
 
 	// Two columns of labelled sections inside a scrolling viewport (issues #267/#279/#291).
 	// The viewport is a clipping container spanning the rows between the toggles and the
@@ -703,18 +694,64 @@ func (w *Workbench) showThemeEditor() {
 				addRow(box.Root(), logical, colIdx, rowField)
 				fields[idx] = box
 				sx, sWid := cellRect(col, rowSwatch)
-				sw := tv.NewLabel(swatchSample, tv.Rect{X: sx, Y: logical, W: sWid, H: 1})
-				sw.BG = tv.DefaultTheme.DialogBG
-				// Drive the swatch from the field's current value on every render (issue
-				// #243) so it tracks the field as the user types or moves focus away, not
-				// only on Enter. baseDraw is the Label's own renderer, run after the recolour.
-				baseDraw := sw.Component.DrawFn
-				sw.Component.DrawFn = func(c *tv.VisualComponent, surface tv.Surface) {
-					updateSwatch(idx)
-					baseDraw(c, surface)
+				// The swatch is an interactive colour picker (issue #366): it renders the
+				// live preview AND, on click or Enter/Space, opens turbotui's ColorPicker
+				// popup. The text field stays the canonical spec input; the picker is an
+				// accelerator that writes a spec back into it, so the save/override path is
+				// untouched.
+				pk := newColorPicker(w.desktop, tv.Rect{X: sx, Y: logical, W: sWid, H: 1})
+				// Render the swatch from the field's current value on every render (issue
+				// #243) so it tracks the field as the user types or moves focus away, with a
+				// focus-background cue so keyboard activation is visible. This replaces the
+				// picker's own closed-swatch draw, keeping gogent's "▉▉ Aa"/"invalid"/neutral
+				// look and the noColor toggle behaviour.
+				pk.Component.DrawFn = func(c *tv.VisualComponent, surface tv.Surface) {
+					text, fg := swatchStyle(fields[idx].GetText(), noColor.IsChecked())
+					bg := tv.DefaultTheme.DialogBG
+					if c.Focused() {
+						bg = tv.DefaultTheme.SelectionBG
+					}
+					abs := c.AbsoluteBounds()
+					surface.Fill(abs, tui.Cell{Ch: ' ', FG: fg, BG: bg})
+					surface.WriteStringClipped(abs.X, abs.Y, abs.W, text, tui.Cell{Ch: ' ', FG: fg, BG: bg})
 				}
-				addRow(sw.Root(), logical, colIdx, rowSwatch)
-				swatches[idx] = sw
+				// Seed the picker from the field's current colour just before it opens, and
+				// gate on the gogent "Disable colours" toggle (when colours are off there is
+				// nothing to pick). The wrappers delegate to the picker's own open handlers,
+				// so its keyboard/mouse model (Enter/Space/click → open) is unchanged.
+				seedPicker := func() {
+					if c, ok := parseColor(fields[idx].GetText()); ok {
+						pk.SetColor(c)
+					} else {
+						pk.SetColor(tui.DefaultColor())
+					}
+				}
+				openType, openClick := pk.Component.OnTypeFn, pk.Component.OnClickFn
+				pk.Component.OnTypeFn = func(c *tv.VisualComponent, ev tui.TypeEvent) bool {
+					if noColor.IsChecked() {
+						return false // colours off: leave the key to focus navigation
+					}
+					seedPicker()
+					return openType(c, ev)
+				}
+				pk.Component.OnClickFn = func(c *tv.VisualComponent, ev tui.ClickEvent) bool {
+					if noColor.IsChecked() {
+						return true // colours off: swallow the click, nothing to pick
+					}
+					seedPicker()
+					return openClick(c, ev)
+				}
+				// A committed colour is written back as the canonical spec for this role and
+				// the editor refreshed, so the swatch updates and Save reads it from the field
+				// exactly as a hand-typed spec — the existing applyOverrides/ResolveTheme/
+				// SetTheme round-trip is unchanged. Escape in the popup cancels without firing
+				// OnChange, leaving the field untouched.
+				pk.OnChange = func(c tui.Color) {
+					fields[idx].SetText(colorSpec(c))
+					refresh()
+				}
+				addRow(pk.Root(), logical, colIdx, rowSwatch)
+				pickers[idx] = pk
 				i++
 				logical++
 			}
@@ -738,9 +775,16 @@ func (w *Workbench) showThemeEditor() {
 	// otherwise strand keyboard scrolling until the user clicked or wheel-scrolled; moving
 	// focus to a still-visible field keeps Up/Down/PageUp/PageDown bubbling to this dialog.
 	keepFocusVisible := func() {
+		// Both the spec field and its colour picker are focusable (issue #366), so either
+		// can be the focused row widget the scroll just hid; check both, then park focus on
+		// the first still-visible field so keyboard scrolling keeps bubbling to the dialog.
 		focusedHidden := false
-		for _, f := range fields {
-			if f.Root().Focused() && !f.Root().Visible {
+		for i := range fields {
+			if fields[i].Root().Focused() && !fields[i].Root().Visible {
+				focusedHidden = true
+				break
+			}
+			if pickers[i].Root().Focused() && !pickers[i].Root().Visible {
 				focusedHidden = true
 				break
 			}
@@ -796,9 +840,8 @@ func (w *Workbench) showThemeEditor() {
 	}
 
 	refresh = func() {
-		for i := range themeRoles {
-			updateSwatch(i)
-		}
+		// Each swatch recomputes from its field on every render (issue #243/#366), so a
+		// refresh only needs to redraw — the picker DrawFns pick up the new field values.
 		w.desktop.Redraw()
 	}
 
