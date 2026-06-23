@@ -1068,12 +1068,24 @@ func (w *Workbench) NewSession() *SessionWindow {
 // handler, the same source the backend forks from), (b) inherits the parent
 // window's selected model + effort so the fork "continues here" on the same
 // backend, and (c) calls OnFork (which forks the transcript) instead of OnCreate.
-// It is a no-op returning nil when the parent window is unknown.
+// It is a no-op returning nil when the parent window is unknown, or when no
+// OnFork handler is wired — without a backend fork the window would be a UI-only
+// ghost with copied history and no session behind it, so both checks run before
+// any window/session mutation (see Handlers.OnFork).
 func (w *Workbench) ForkSession(parentID string) *SessionWindow {
 	w.mu.Lock()
 	parent := w.sessions[parentID]
 	if parent == nil {
 		w.mu.Unlock()
+		return nil
+	}
+	// Without a backend fork handler a new window would be a UI-only ghost with
+	// copied history and no session behind it, so /fork is a documented no-op
+	// (see Handlers.OnFork). Bail before any window/session mutation and keep the
+	// user on the parent they forked from.
+	if w.handlers.OnFork == nil {
+		w.mu.Unlock()
+		w.desktop.SetFocus(parent.input)
 		return nil
 	}
 	w.nextNum++
@@ -1109,9 +1121,9 @@ func (w *Workbench) ForkSession(parentID string) *SessionWindow {
 		}
 	}
 	w.desktop.SetFocus(sw.input)
-	if w.handlers.OnFork != nil {
-		w.handlers.OnFork(parentID, id, title)
-	}
+	// OnFork is non-nil (checked at entry): hand the new window to the backend so
+	// it forks parentID's transcript into the matching session.
+	w.handlers.OnFork(parentID, id, title)
 	w.rebuildMenu()
 	w.persistLayout()
 	return sw
