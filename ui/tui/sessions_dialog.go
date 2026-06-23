@@ -243,12 +243,18 @@ func filterSessions(items []SessionMeta, query string) []SessionMeta {
 const sessionRowTitleWidth = 26
 
 // formatSessionRow renders one row of the list: a padded title followed by the
-// date, turn count and message count.
+// date, turn count and message count. Archived (closed) sessions get an
+// "(archived)" suffix so the user can tell them from currently-open ones (issue
+// #325).
 func formatSessionRow(m SessionMeta) string {
-	return fmt.Sprintf("%s %s  %dt %dm",
+	row := fmt.Sprintf("%s %s  %dt %dm",
 		padName(fallbackTitle(m), sessionRowTitleWidth),
 		formatSessionDate(m.CreatedAt),
 		m.Turns, m.Messages)
+	if m.Archived {
+		row += "  (archived)"
+	}
+	return row
 }
 
 // formatSessionDetail renders the side-pane metadata for the selected session.
@@ -262,6 +268,11 @@ func formatSessionDetail(m SessionMeta) string {
 	fmt.Fprintf(&b, "Tokens: %s / %s\n", formatTokens(m.TokensIn), formatTokens(m.TokensOut))
 	if m.Model != "" {
 		fmt.Fprintf(&b, "Model: %s\n", m.Model)
+	}
+	if m.Archived {
+		// Closed session: Continue re-opens it live (and unarchives it); Open loads
+		// a read-only snapshot, leaving it closed (issue #325).
+		fmt.Fprintf(&b, "Status: archived (closed)\n")
 	}
 	return b.String()
 }

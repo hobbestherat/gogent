@@ -352,6 +352,7 @@ func main() {
 						TokensOut: m.TokensOut,
 						Model:     m.Model,
 						File:      m.File,
+						Archived:  m.Archived,
 					})
 				}
 				return out

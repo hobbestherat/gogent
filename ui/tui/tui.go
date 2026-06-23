@@ -217,6 +217,10 @@ type SessionMeta struct {
 	TokensOut int
 	Model     string
 	File      string
+	// Archived is true when the session's window was closed (its on-disk base is
+	// "_session_archived"). The browser lists archived sessions too and marks them
+	// so the user can tell a closed session from an open one (issue #325).
+	Archived bool
 }
 
 // SkillInfo is a UI-facing view of a loaded skill and its usage stats.
