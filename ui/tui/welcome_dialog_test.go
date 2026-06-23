@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -49,7 +51,7 @@ func closeWelcomeWithEscape(t *testing.T, w *Workbench) {
 }
 
 func TestWelcomeDialogCheckboxPersistsOnEveryClosePath(t *testing.T) {
-	t.Run("unchecked close persists show true", func(t *testing.T) {
+	t.Run("unchanged unchecked close persists nothing", func(t *testing.T) {
 		w := newTestWorkbench(t)
 		var calls []bool
 		w.SetHandlers(Handlers{
@@ -61,8 +63,8 @@ func TestWelcomeDialogCheckboxPersistsOnEveryClosePath(t *testing.T) {
 			t.Fatalf("top layer = %v, want welcome-dialog", top)
 		}
 		closeWelcomeWithEscape(t, w)
-		if len(calls) != 1 || !calls[0] {
-			t.Fatalf("SetShowWelcome calls = %v, want [true]", calls)
+		if len(calls) != 0 {
+			t.Fatalf("SetShowWelcome calls = %v, want none for unchanged unchecked close", calls)
 		}
 		if top := w.desktop.TopLayer(); top != nil && top.Name == "welcome-dialog" {
 			t.Fatal("welcome dialog still open after Escape")
@@ -92,6 +94,20 @@ func TestWelcomeDialogCheckboxPersistsOnEveryClosePath(t *testing.T) {
 		win.OnClose(win)
 		if len(calls) != 1 || calls[0] {
 			t.Fatalf("SetShowWelcome calls = %v, want [false]", calls)
+		}
+	})
+
+	t.Run("unchanged checked close persists nothing", func(t *testing.T) {
+		w := newTestWorkbench(t)
+		var calls []bool
+		w.SetHandlers(Handlers{
+			GetShowWelcome: func() bool { return false },
+			SetShowWelcome: func(show bool) { calls = append(calls, show) },
+		})
+		w.showWelcomeDialog()
+		closeWelcomeWithEscape(t, w)
+		if len(calls) != 0 {
+			t.Fatalf("SetShowWelcome calls = %v, want none for unchanged checked close", calls)
 		}
 	})
 }
@@ -248,6 +264,25 @@ func TestWelcomeStartupGate(t *testing.T) {
 			t.Fatal("welcome dialog opened with no GetShowWelcome handler")
 		}
 	})
+}
+
+func TestSettingsDialogExposesShowWelcomePreference(t *testing.T) {
+	// Issue #339 requires the TUI settings surface to include ShowWelcome so the
+	// startup dialog preference is not only reachable from the dialog itself.
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	src, err := os.ReadFile(filepath.Join(root, "settings_dialog.go"))
+	if err != nil {
+		t.Fatalf("read settings_dialog.go: %v", err)
+	}
+	text := string(src)
+	for _, want := range []string{"GetShowWelcome", "SetShowWelcome"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("settings dialog does not reference %s; ShowWelcome is not exposed through settings", want)
+		}
+	}
 }
 
 func runWorkbenchForTest(t *testing.T, w *Workbench) chan error {
