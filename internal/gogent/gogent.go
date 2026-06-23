@@ -1302,10 +1302,19 @@ func readTruncationMarker(res *fileops.ReadRangeResult) string {
 		res.Offset, last, res.TotalLines)
 }
 
-// CreateUserSession creates a new user session
+// CreateUserSession creates a new user session and registers it under id. If a
+// session already exists under id it is returned unchanged and the passed
+// rootAgent is discarded: registration is a single check-and-insert under g.mu,
+// so it never clobbers a live session out from under its observers. This closes
+// the check-then-create race shared by every caller (NewSession, adoptLoaded,
+// ForkSession), whose own existence checks run in a separate critical section.
 func (g *Gogent) CreateUserSession(id string, rootAgent *agent.Agent) *agent.UserSession {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+
+	if existing := g.userSessions[id]; existing != nil {
+		return existing
+	}
 
 	userSession := agent.NewUserSession(id, rootAgent)
 	userSession.SetSubAgentConfig(g.config.SubAgents)
@@ -1476,6 +1485,14 @@ func (g *Gogent) ForkSession(parentID, newID string) (*agent.UserSession, error)
 	rootAgent := agent.NewAgent("root", sess)
 	rootAgent.SetState(agent.StateIdle)
 	forked := g.CreateUserSession(newID, rootAgent)
+	// CreateUserSession refuses to clobber an existing id, so if a session was
+	// registered under newID between the check above and here, it returns that
+	// session (whose root is not ours) rather than the fork. Honor the duplicate
+	// contract instead of adopting an unrelated session as the fork; the original
+	// is left intact.
+	if forked.RootAgent != rootAgent {
+		return nil, fmt.Errorf("fork: session %q already exists", newID)
+	}
 	// Inherit the parent's reported primary model (issue #266 semantics) so the
 	// fork's first persist/stats read the right model rather than the default.
 	if pm := parent.PrimaryModel(); pm != "" {
