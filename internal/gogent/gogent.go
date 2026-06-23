@@ -1418,6 +1418,23 @@ func (g *Gogent) ContinueSession(file string) (LoadedSession, bool) {
 	if g.store == nil {
 		return LoadedSession{}, false
 	}
+	// Continuing re-attaches the session for appending, so an archived (closed)
+	// session must be unarchived first — otherwise later saves would append to the
+	// "_session_archived" base and the session would never re-enter the active/
+	// restore set (issue #325). UnarchiveBase is a no-op for an already-active base
+	// and returns the (possibly renamed) active index path to load from. The
+	// read-only Open path (LoadSavedSession) deliberately does NOT unarchive.
+	// UnarchiveBase always reports the path to load from — including the
+	// already-active path when a partial rename moved the index but not every
+	// shard — so adopt the returned path even on error rather than re-loading the
+	// (now possibly renamed-away) archived file.
+	activeFile, err := g.store.UnarchiveBase(file)
+	if err != nil {
+		g.warnf("failed to unarchive session %s: %v", file, err)
+	}
+	if activeFile != "" {
+		file = activeFile
+	}
 	ls, err := g.store.LoadSession(file)
 	if err != nil {
 		g.warnf("failed to load session %s: %v", file, err)
@@ -1809,14 +1826,16 @@ func (g *Gogent) SessionIDs() []string {
 
 // ListSessions returns the metadata of every persisted session straight from the
 // store's index files (issue #58): an O(sessions) listing for the Sessions
-// browser that never replays a transcript. It returns nil when persistence is
-// unavailable; a read error is warned and yields an empty slice rather than
-// failing the caller.
+// browser that never replays a transcript. It lists ALL sessions on disk —
+// active (open) and archived (closed) — each tagged with SessionMeta.Archived,
+// so a session closed by the user stays findable and re-openable from the browser
+// (issue #325). It returns nil when persistence is unavailable; a read error is
+// warned and yields an empty slice rather than failing the caller.
 func (g *Gogent) ListSessions() []SessionMeta {
 	if g.store == nil {
 		return nil
 	}
-	metas, err := g.store.ListSessions()
+	metas, err := g.store.ListAllSessions()
 	if err != nil {
 		g.warnf("failed to list saved sessions: %v", err)
 		return nil

@@ -605,6 +605,31 @@ func (s *SessionStore) activeBases() ([]string, error) {
 	return bases, nil
 }
 
+// allBases lists the base prefixes of every session on disk — active (_session)
+// AND archived (_session_archived) — oldest first. It is the counterpart to
+// activeBases used by ListAllSessions so the Saved Sessions browser can show
+// closed (archived) sessions alongside open ones (issue #325). The ISO timestamp
+// prefixing each base makes the lexical sort chronological.
+func (s *SessionStore) allBases() ([]string, error) {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, fmt.Errorf("read sessions dir: %w", err)
+	}
+	var bases []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, indexFileExt) {
+			continue
+		}
+		baseName := strings.TrimSuffix(name, indexFileExt)
+		// Keep both "_session" and "_session_archived" bases (the only difference
+		// from activeBases, which skips the archived ones).
+		bases = append(bases, filepath.Join(s.dir, baseName))
+	}
+	sort.Strings(bases)
+	return bases, nil
+}
+
 // SessionMeta is the lightweight, index-only view of one persisted session used
 // by the Sessions browser (issue #58): enough metadata to list, search and pick
 // a session without replaying its transcript. Messages is the total message
@@ -620,6 +645,11 @@ type SessionMeta struct {
 	TokensOut int
 	Model     string
 	File      string
+	// Archived is true when this session's on-disk base is "_session_archived"
+	// (its window was closed). Only ListAllSessions sets it; the active-only
+	// ListSessions always leaves it false. The browser uses it to mark closed
+	// sessions (issue #325).
+	Archived bool
 }
 
 // ListSessions returns the metadata of every live session straight from the
@@ -654,6 +684,100 @@ func (s *SessionStore) ListSessions() ([]SessionMeta, error) {
 		})
 	}
 	return out, nil
+}
+
+// ListAllSessions returns the metadata of every persisted session on disk —
+// active (open) AND archived (closed) — straight from the index files (oldest
+// first), tagging each with Archived so the Saved Sessions browser can show and
+// mark closed sessions (issue #325). It mirrors ListSessions but iterates
+// allBases() instead of activeBases(); the index read is identical for either
+// base (an archived session's .index is the same JSON at a "_archived" path). It
+// never reads a shard, so listing stays O(sessions) regardless of transcript
+// size. The active-only ListSessions is deliberately left unchanged so startup
+// restore keeps excluding archived sessions.
+func (s *SessionStore) ListAllSessions() ([]SessionMeta, error) {
+	bases, err := s.allBases()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SessionMeta, 0, len(bases))
+	for _, base := range bases {
+		idx, err := loadIndexFile(base)
+		if err != nil || idx.SessionID == "" {
+			continue
+		}
+		messages := 0
+		for _, sm := range idx.Shards {
+			messages += sm.Events
+		}
+		out = append(out, SessionMeta{
+			ID:        idx.SessionID,
+			Title:     idx.Title,
+			CreatedAt: idx.CreatedAt,
+			Turns:     idx.Turns,
+			Messages:  messages,
+			TokensIn:  idx.TokensIn,
+			TokensOut: idx.TokensOut,
+			Model:     idx.Model,
+			File:      indexFilePath(base),
+			Archived:  strings.HasSuffix(base, archivedTag),
+		})
+	}
+	return out, nil
+}
+
+// UnarchiveBase reverses Archive for a single session addressed by its index file
+// path (or bare base): it renames the base back from "_session_archived" to
+// "_session" across the index and every shard, so subsequent saves append to the
+// active base and the session re-enters the active/restore set. It is the
+// counterpart the codebase lacked, used when a user CONTINUES a closed (archived)
+// session from the browser (issue #325); the read-only Open path must NOT call it.
+// A base that is already active is returned unchanged (no-op). It returns the
+// index file path of the now-active base for the caller to load from.
+func (s *SessionStore) UnarchiveBase(file string) (string, error) {
+	base := strings.TrimSuffix(file, indexFileExt)
+	if !strings.HasSuffix(base, archivedTag) {
+		return indexFilePath(base), nil // already active: nothing to do
+	}
+	activeBase := strings.TrimSuffix(base, archivedTag)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Refuse to clobber a live active base. If an active index already exists for
+	// this prefix (a same-second/same-id active session coexisting with the
+	// archived one), os.Rename would silently overwrite it and destroy the open
+	// session's data, so bail out and let the caller load the active base as-is.
+	if _, err := os.Stat(indexFilePath(activeBase)); err == nil {
+		return indexFilePath(activeBase), fmt.Errorf("unarchive %s: an active session already exists at %s", base, activeBase)
+	}
+
+	// The shard table lives in the (archived) index, so read it to learn which
+	// shard files to rename alongside the index.
+	idx, err := loadIndexFile(base)
+	if err != nil {
+		return indexFilePath(base), err
+	}
+
+	// Best-effort rename of the index and every shard. A missing source (e.g. a
+	// shard that was never created) is silently skipped, mirroring Archive.
+	renameFile := func(from, to string) error {
+		err := os.Rename(from, to)
+		if err == nil || os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("rename session file: %w", err)
+	}
+	if err := renameFile(indexFilePath(base), indexFilePath(activeBase)); err != nil {
+		return indexFilePath(base), err
+	}
+	for _, sm := range idx.Shards {
+		if err := renameFile(shardFilePath(base, sm.Index), shardFilePath(activeBase, sm.Index)); err != nil {
+			return indexFilePath(activeBase), err
+		}
+	}
+	s.cache.evictPrefix(base)
+	return indexFilePath(activeBase), nil
 }
 
 // LoadSession reads one session's transcript (current shard only) on demand,
