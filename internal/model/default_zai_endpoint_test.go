@@ -20,8 +20,7 @@ func TestDefaultZAIEndpointsResolve(t *testing.T) {
 			continue
 		}
 		seen[m.Name] = true
-		spec := specFor(APIType(m.APIType))
-		got := spec.chatURL(normalizeBaseURL(m.Endpoint, spec))
+		got := NewModelConnectionFromConfig(m).URL
 		if got != exp {
 			t.Errorf("%s: chat URL = %q, want %q", m.Name, got, exp)
 		}

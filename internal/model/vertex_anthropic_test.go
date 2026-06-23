@@ -55,24 +55,22 @@ func TestVertexAnthropicAPITypeAndSpec(t *testing.T) {
 		t.Fatalf("APITypeIDs() = %v, missing vertex-anthropic", APITypeIDs())
 	}
 
-	spec := specFor(APITypeVertexAnthropic)
-	if spec.authMode != authADC {
-		t.Errorf("authMode = %q, want adc", spec.authMode)
+	p := providerFor(APITypeVertexAnthropic)
+	if _, ok := p.auth.(adcAuth); !ok {
+		t.Errorf("auth = %T, want adcAuth", p.auth)
 	}
-	if !spec.supportsThinking {
-		t.Error("supportsThinking = false, want true (Claude on Vertex supports extended thinking)")
+	if !p.caps.SupportsThinking {
+		t.Error("SupportsThinking = false, want true (Claude on Vertex supports extended thinking)")
 	}
-	if spec.supportsResponseFormat {
-		t.Error("supportsResponseFormat = true, want false (Anthropic has no response_format field)")
+	if p.caps.SupportsResponseFormat {
+		t.Error("SupportsResponseFormat = true, want false (Anthropic has no response_format field)")
 	}
-	if spec.supportsReasoningEffort {
-		t.Error("supportsReasoningEffort = true, want false (reasoning_effort is not an Anthropic body param)")
+	if p.caps.SupportsReasoningEffort {
+		t.Error("SupportsReasoningEffort = true, want false (reasoning_effort is not an Anthropic body param)")
 	}
-	if spec.modelsPath != "" {
-		t.Errorf("modelsPath = %q, want empty (Vertex anthropic model listing is unsupported)", spec.modelsPath)
-	}
-	if len(spec.extraHeaders) != 0 {
-		t.Errorf("extraHeaders = %v, want none (anthropic_version travels in the body)", spec.extraHeaders)
+	// Claude on Vertex lists models via the Model Garden anthropic publisher.
+	if vl, ok := p.lister.(vertexPublisherLister); !ok || vl.publisher != "anthropic" {
+		t.Errorf("lister = %#v, want vertexPublisherLister{publisher: anthropic}", p.lister)
 	}
 	a, ok := adapterFor(APITypeVertexAnthropic).(anthropicAdapter)
 	if !ok {

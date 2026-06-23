@@ -73,21 +73,26 @@ func TestVertexAPITypeAndSpec(t *testing.T) {
 		t.Fatalf("APITypeIDs() = %v, missing vertex", APITypeIDs())
 	}
 
-	spec := specFor(APITypeVertex)
-	if spec.authMode != authADC {
-		t.Errorf("authMode = %q, want adc", spec.authMode)
+	p := providerFor(APITypeVertex)
+	if _, ok := p.auth.(adcAuth); !ok {
+		t.Errorf("auth = %T, want adcAuth", p.auth)
 	}
-	if !spec.supportsResponseFormat {
-		t.Error("supportsResponseFormat = false, want true for OpenAI-compatible Vertex endpoint")
+	if !p.caps.SupportsResponseFormat {
+		t.Error("SupportsResponseFormat = false, want true for OpenAI-compatible Vertex endpoint")
 	}
-	if spec.supportsReasoningEffort {
-		t.Error("supportsReasoningEffort = true, want false for Vertex OpenAI-compatible endpoint")
+	if p.caps.SupportsReasoningEffort {
+		t.Error("SupportsReasoningEffort = true, want false for Vertex OpenAI-compatible endpoint")
 	}
-	if spec.supportsThinking {
-		t.Error("supportsThinking = true, want false for Vertex OpenAI-compatible endpoint")
+	if p.caps.SupportsThinking {
+		t.Error("SupportsThinking = true, want false for Vertex OpenAI-compatible endpoint")
 	}
-	if spec.modelsPath != "" {
-		t.Errorf("modelsPath = %q, want empty because Vertex compat model listing is unsupported", spec.modelsPath)
+	// Vertex now lists models via the Model Garden (the Scan button works).
+	vl, ok := p.lister.(vertexPublisherLister)
+	if !ok {
+		t.Fatalf("lister = %T, want vertexPublisherLister", p.lister)
+	}
+	if vl.publisher != "google" {
+		t.Errorf("lister publisher = %q, want google", vl.publisher)
 	}
 	if _, ok := adapterFor(APITypeVertex).(openAIAdapter); !ok {
 		t.Errorf("adapterFor(vertex) = %T, want openAIAdapter", adapterFor(APITypeVertex))

@@ -63,8 +63,8 @@ func TestParallelToolCallsMustBeDisabledMatrix(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			spec := providerSpec{supportsResponseFormat: tc.respFmt}
-			if got := parallelToolCallsMustBeDisabled(spec, tc.tools); got != tc.wantDisable {
+			caps := Capabilities{SupportsResponseFormat: tc.respFmt}
+			if got := parallelToolCallsMustBeDisabled(caps, tc.tools); got != tc.wantDisable {
 				t.Errorf("parallelToolCallsMustBeDisabled = %v, want %v", got, tc.wantDisable)
 			}
 		})

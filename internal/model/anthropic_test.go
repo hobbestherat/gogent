@@ -27,9 +27,6 @@ func TestAnthropicEndpoints(t *testing.T) {
 	if want := "https://api.anthropic.com/v1/messages"; conn.URL != want {
 		t.Errorf("chat URL = %q, want %q", conn.URL, want)
 	}
-	if want := "https://api.anthropic.com/v1/models"; conn.modelsURL() != want {
-		t.Errorf("models URL = %q, want %q", conn.modelsURL(), want)
-	}
 	if _, ok := conn.wireAdapter().(anthropicAdapter); !ok {
 		t.Errorf("adapter = %T, want anthropicAdapter", conn.wireAdapter())
 	}

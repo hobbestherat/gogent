@@ -32,21 +32,24 @@ func TestVertexNativeAPITypeSpecAndURLs(t *testing.T) {
 		t.Fatalf("APITypeIDs() = %v, missing vertex-native", APITypeIDs())
 	}
 
-	spec := specFor(APITypeVertexNative)
-	if spec.authMode != authADC {
-		t.Errorf("authMode = %q, want adc", spec.authMode)
+	p := providerFor(APITypeVertexNative)
+	if _, ok := p.auth.(adcAuth); !ok {
+		t.Errorf("auth = %T, want adcAuth", p.auth)
 	}
-	if !spec.supportsThinking {
-		t.Error("supportsThinking = false, want true for native Gemini")
+	if !p.caps.SupportsThinking {
+		t.Error("SupportsThinking = false, want true for native Gemini")
 	}
-	if !spec.supportsResponseFormat {
-		t.Error("supportsResponseFormat = false, want true for native Gemini responseSchema")
+	if !p.caps.SupportsResponseFormat {
+		t.Error("SupportsResponseFormat = false, want true for native Gemini responseSchema")
 	}
-	if spec.supportsReasoningEffort {
-		t.Error("supportsReasoningEffort = true, want false for native Gemini")
+	if p.caps.SupportsReasoningEffort {
+		t.Error("SupportsReasoningEffort = true, want false for native Gemini")
 	}
-	if spec.reasoningRejectsTemperature {
-		t.Error("reasoningRejectsTemperature = true, want false because Gemini thinking accepts temperature/topP")
+	if p.caps.ReasoningRejectsTemperature {
+		t.Error("ReasoningRejectsTemperature = true, want false because Gemini thinking accepts temperature/topP")
+	}
+	if vl, ok := p.lister.(vertexPublisherLister); !ok || vl.publisher != "google" {
+		t.Errorf("lister = %#v, want vertexPublisherLister{publisher: google}", p.lister)
 	}
 	if _, ok := adapterFor(APITypeVertexNative).(geminiAdapter); !ok {
 		t.Errorf("adapterFor(vertex-native) = %T, want geminiAdapter", adapterFor(APITypeVertexNative))
