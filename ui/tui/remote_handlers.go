@@ -392,8 +392,17 @@ func (rc *RemoteClient) Handlers() Handlers {
 		// the Saved Sessions browser. The daemon addresses sessions by id, so the
 		// id is carried as the File handle the browser later hands to
 		// OpenSavedSession. A non-live persisted session is reported Archived (a
-		// closed window), mirroring the embedded browser's archived marker; richer
-		// per-session counts are a later API-enrichment slice.
+		// closed window), mirroring the embedded browser's archived marker.
+		//
+		// Deliberate bounded-slice limitations of this remote contract: SessionMeta
+		// is degraded — File is the daemon's session id (not an on-disk path, which
+		// is meaningless across the wire) and the per-session turn/message/token
+		// counts are omitted, because GET /sessions carries only index metadata. An
+		// archived (non-live) session is listed for parity with the embedded browser
+		// but cannot be OPENED over the wire yet (OpenSavedSession returns ok=false):
+		// reading a non-live session's persisted transcript needs a server endpoint
+		// that is a later API-enrichment slice. Live sessions — every non-archived
+		// session, which the daemon restores on startup — open normally.
 		ListSavedSessions: func() []SessionMeta {
 			sessions, err := c.ListSessions()
 			if err != nil {
