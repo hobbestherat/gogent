@@ -540,8 +540,14 @@ func cleanupProcess(t *testing.T, cmd *exec.Cmd, reap <-chan error) {
 	if cmd.Process == nil {
 		return
 	}
-	if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+	// Determine whether the process already exited via the reap channel rather
+	// than reading cmd.ProcessState directly: the reapCommand goroutine owns
+	// cmd.Wait() (which writes ProcessState), so touching ProcessState here would
+	// race it. A non-blocking receive tells us if Wait already returned.
+	select {
+	case <-reap:
 		return
+	default:
 	}
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	select {
