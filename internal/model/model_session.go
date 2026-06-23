@@ -489,11 +489,15 @@ func (s *ModelSession) sendCtx(ctx context.Context, messages []Message, tools []
 	}
 
 	s.mu.Lock()
-	// Append the assistant turn to the transcript (content + any tool calls).
+	// Append the assistant turn to the transcript (content + any tool calls, plus
+	// any extended-thinking block to replay on the next turn — required for tool
+	// use with thinking enabled on Anthropic/Vertex; inert for other providers).
 	s.Transcript = append(s.Transcript, Message{
-		Role:      RoleAssistant,
-		Content:   resp.Content,
-		ToolCalls: resp.ToolCalls,
+		Role:              RoleAssistant,
+		Content:           resp.Content,
+		ToolCalls:         resp.ToolCalls,
+		Thinking:          resp.Thinking,
+		ThinkingSignature: resp.ThinkingSignature,
 	})
 	s.History[len(s.History)-1].Response = resp.Content
 	s.History[len(s.History)-1].Usage = resp.Usage

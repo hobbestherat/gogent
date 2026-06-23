@@ -56,18 +56,37 @@ const (
 	// path (see chatURLFunc/streamURLFunc), not the request body. The config alias
 	// "gemini" resolves here.
 	APITypeVertexNative APIType = "vertex-native"
+	// APITypeVertexAnthropic is Anthropic's Claude models served through Google
+	// Vertex AI (:rawPredict / :streamRawPredict). It speaks the Anthropic Messages
+	// wire format — so it reuses anthropicAdapter — but differs from the direct
+	// Anthropic API in three Vertex-specific ways: (1) auth is Google ADC (a bearer
+	// token via authADC), not x-api-key; (2) the model name lives in the URL path
+	// (publishers/anthropic/models/{MODEL}:rawPredict), not the request body, so the
+	// body omits "model"; and (3) the API version travels in the body as
+	// "anthropic_version":"vertex-2023-10-16" rather than the anthropic-version
+	// header. Like the other Vertex types its base URL is derived from
+	// Project/Location (v1, GA). The config alias "claude-vertex" resolves here.
+	APITypeVertexAnthropic APIType = "vertex-anthropic"
 )
 
+// vertexAnthropicVersion is the value carried in the request body's
+// anthropic_version field for Claude on Vertex AI. Unlike the direct Anthropic
+// API — which pins the version via the anthropic-version HEADER (see
+// anthropicVersion) — Vertex names it in the body and uses its own dated token.
+const vertexAnthropicVersion = "vertex-2023-10-16"
+
 var stringToAPITypeMap = map[string]APIType{
-	"openai":        APITypeOpenAI,
-	"zai":           APITypeZAI,
-	"z.ai":          APITypeZAI,
-	"anthropic":     APITypeAnthropic,
-	"claude":        APITypeAnthropic,
-	"openrouter":    APITypeOpenRouter,
-	"vertex":        APITypeVertex,
-	"vertex-native": APITypeVertexNative,
-	"gemini":        APITypeVertexNative,
+	"openai":           APITypeOpenAI,
+	"zai":              APITypeZAI,
+	"z.ai":             APITypeZAI,
+	"anthropic":        APITypeAnthropic,
+	"claude":           APITypeAnthropic,
+	"openrouter":       APITypeOpenRouter,
+	"vertex":           APITypeVertex,
+	"vertex-native":    APITypeVertexNative,
+	"gemini":           APITypeVertexNative,
+	"vertex-anthropic": APITypeVertexAnthropic,
+	"claude-vertex":    APITypeVertexAnthropic,
 }
 
 // StringToAPIType resolves a config string to an APIType, defaulting to the
@@ -279,6 +298,32 @@ var providerSpecs = map[APIType]providerSpec{
 		supportsReasoningEffort:     false,
 		reasoningRejectsTemperature: false,
 	},
+	APITypeVertexAnthropic: {
+		// Anthropic Claude on Vertex AI. The base URL is derived from
+		// Project/Location (v1, GA — same as vertexNativeBaseURL), and like the
+		// native Gemini route the model name lives in the URL path, so chatURLFunc /
+		// streamURLFunc build the :rawPredict / :streamRawPredict routes
+		// (publishers/anthropic/...) instead of appending a static chatPath. chatPath
+		// is set to the anthropic models route purely so ListModels reports "not
+		// supported" (a non-empty chatPath with an empty modelsPath) rather than
+		// probing a bad URL. Auth is ADC; the anthropic-version is sent in the body
+		// (see anthropicAdapter), so no extraHeaders are attached here.
+		baseURLFunc:   vertexNativeBaseURL,
+		chatURLFunc:   vertexAnthropicChatURL,
+		streamURLFunc: vertexAnthropicStreamURL,
+		chatPath:      "/publishers/anthropic/models",
+		authMode:      authADC,
+		// Anthropic capability surface on Vertex: extended thinking is supported and
+		// emitted as adaptive thinking (see anthropicAdapter.buildBody). There is no
+		// response_format field (structured output goes through strict tools +
+		// tool_choice forcing), and reasoning_effort is not an Anthropic body
+		// parameter, so both stay off. reasoningRejectsTemperature is left off
+		// because the adapter omits sampling params for this provider unconditionally
+		// (modern Claude rejects temperature/top_p), not via the reasoning gate.
+		supportsThinking:        true,
+		supportsReasoningEffort: false,
+		supportsResponseFormat:  false,
+	},
 }
 
 // vertexAIHost returns the Vertex AI API host for a region. Every location is
@@ -338,6 +383,30 @@ func vertexNativeChatURL(base, model string) string {
 		strings.TrimRight(strings.TrimSpace(base), "/"), strings.TrimSpace(model))
 }
 
+// vertexAnthropicChatURL builds the Claude-on-Vertex non-streaming request URL,
+// embedding the model name in the path (Vertex names the Anthropic model in the
+// URL, not the body):
+//
+//	{base}/publishers/anthropic/models/{MODEL}:rawPredict
+func vertexAnthropicChatURL(base, model string) string {
+	return fmt.Sprintf("%s/publishers/anthropic/models/%s:rawPredict",
+		strings.TrimRight(strings.TrimSpace(base), "/"), strings.TrimSpace(model))
+}
+
+// vertexAnthropicStreamURL builds the Claude-on-Vertex streaming request URL. It
+// targets the distinct :streamRawPredict action, which frames the response as
+// Anthropic's native server-sent events (the same message_start / content_block_*
+// / message_stop grammar the direct Messages API streams):
+//
+//	{base}/publishers/anthropic/models/{MODEL}:streamRawPredict
+//
+// Unlike the native Gemini stream route, no ?alt=sse is needed — :streamRawPredict
+// already streams SSE. The request body still carries "stream":true.
+func vertexAnthropicStreamURL(base, model string) string {
+	return fmt.Sprintf("%s/publishers/anthropic/models/%s:streamRawPredict",
+		strings.TrimRight(strings.TrimSpace(base), "/"), strings.TrimSpace(model))
+}
+
 // vertexNativeStreamURL builds the native streaming request URL. It targets the
 // distinct :streamGenerateContent action and appends ?alt=sse so the response is
 // framed as server-sent events (without it Vertex streams a JSON array instead):
@@ -366,6 +435,7 @@ func APITypeIDs() []string {
 		string(APITypeOpenRouter),
 		string(APITypeVertex),
 		string(APITypeVertexNative),
+		string(APITypeVertexAnthropic),
 	}
 }
 

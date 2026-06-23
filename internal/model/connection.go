@@ -57,6 +57,13 @@ type Message struct {
 	Name       string     `json:"name,omitempty"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
+	// Thinking / ThinkingSignature carry an assistant turn's extended-thinking
+	// block so it can be replayed on the next request. They are kept off the
+	// OpenAI wire (json:"-") and are read only by the Anthropic-on-Vertex adapter,
+	// which re-emits them as a thinking content block ahead of the turn's tool_use
+	// blocks. Empty for every other provider and for the common text-only turn.
+	Thinking          string `json:"-"`
+	ThinkingSignature string `json:"-"`
 }
 
 // ImageURL is a single image attachment, matching OpenAI's image_url content
@@ -344,6 +351,13 @@ type CompletionResponse struct {
 	Usage        *TokenUsage `json:"usage,omitempty"`
 	Choices      []Choice    `json:"choices,omitempty"`
 	ToolCalls    []ToolCall  `json:"-"`
+	// Thinking / ThinkingSignature carry the assistant turn's extended-thinking
+	// block (summarized text + opaque signature) when the backend returns one
+	// (Anthropic on Vertex with thinking enabled). They are round-tripped into the
+	// transcript so the block can be replayed unmodified on the next turn, which
+	// Anthropic requires for tool use with thinking enabled. Empty otherwise.
+	Thinking          string `json:"-"`
+	ThinkingSignature string `json:"-"`
 }
 
 type Choice struct {
@@ -425,7 +439,13 @@ type StreamResponse struct {
 	ToolCalls    []ToolCall  `json:"tool_calls,omitempty"`
 	FinishReason *string     `json:"finish_reason,omitempty"`
 	Usage        *TokenUsage `json:"usage,omitempty"`
-	Done         bool        `json:"done,omitempty"`
+	// Thinking / ThinkingSignature are carried on the terminal (Done) event: the
+	// fully accumulated extended-thinking block (text + signature) for the turn,
+	// for round-tripping on the next request. Empty for turns/providers that
+	// stream no thinking. See CompletionResponse.Thinking.
+	Thinking          string `json:"thinking,omitempty"`
+	ThinkingSignature string `json:"thinking_signature,omitempty"`
+	Done              bool   `json:"done,omitempty"`
 }
 
 // streamChunk is the wire shape of a single OpenAI SSE "data:" payload. Streamed
@@ -948,12 +968,15 @@ func (c *ModelConnection) CompleteWithToolsStreamCtx(ctx context.Context, messag
 		}
 		if ev.Done {
 			// The terminal event carries the authoritative assembled tool calls,
-			// finish reason and usage (see parseOpenAIStream / anthropic parseStream).
+			// finish reason, usage and any extended-thinking block to round-trip
+			// (see parseOpenAIStream / anthropic parseStream).
 			resp.ToolCalls = ev.ToolCalls
 			if ev.FinishReason != nil {
 				resp.FinishReason = *ev.FinishReason
 			}
 			resp.Usage = ev.Usage
+			resp.Thinking = ev.Thinking
+			resp.ThinkingSignature = ev.ThinkingSignature
 		}
 	}
 	if err := <-errCh; err != nil {
