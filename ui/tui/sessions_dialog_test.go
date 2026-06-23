@@ -167,15 +167,17 @@ func TestSessionsDialogSize(t *testing.T) {
 		screenW, screenH int
 		wantW, wantH     int
 	}{
-		// PreferredW 90 sits below the 80% cap on a roomy terminal, so the dialog is
-		// its content size (90×20) — NOT the old 160×42 balloon.
-		{"roomy terminal sizes to content not the balloon", 200, 50, 90, 20},
-		// And it does not keep growing on an ultrawide terminal: still 90×20.
-		{"ultrawide stays at content size", 300, 80, 90, 20},
+		// PreferredW 104 sits below the 80% cap on a roomy terminal, so the dialog is
+		// its content size (104×26, #338) — NOT the old 160×42 balloon, and wide
+		// enough that a full list row fits without truncation.
+		{"roomy terminal sizes to content not the balloon", 200, 50, 104, 26},
+		// And it does not keep growing on an ultrawide terminal: still 104×26.
+		{"ultrawide stays at content size", 300, 80, 104, 26},
 		// On a narrow-ish terminal the 80% width cap (64) bites before PreferredW.
 		{"medium terminal width capped at 80%", 80, 24, 64, 20},
-		// A mid terminal is wide enough for the full PreferredW.
-		{"mid terminal honours preferred width", 120, 40, 90, 20},
+		// On a 120-wide terminal the 80% cap (96) is below the 104 preferred, so the
+		// dialog is 96 wide; height takes the full PrefH 26.
+		{"mid terminal width capped at 80%", 120, 40, 96, 26},
 		// Tiny terminal: both floors win (MinW 60, MinH 14), even past the edge.
 		{"small terminal floors both", 50, 16, 60, 14},
 	} {
