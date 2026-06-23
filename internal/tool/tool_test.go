@@ -114,6 +114,206 @@ func TestExecuteUnknownTool(t *testing.T) {
 	}
 }
 
+func TestExecuteToolCallMCPBareNameFallback(t *testing.T) {
+	reg := NewToolRegistry()
+	registerReturningTool(t, reg, "mcp__demo__greet", "prefixed")
+
+	resp, err := reg.ExecuteToolCall(&ToolCall{
+		Tool: "greet",
+		Args: map[string]interface{}{},
+	}, ToolContext{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("bare MCP call should resolve via fallback, got error %q", resp.Error)
+	}
+	if resp.Result != "prefixed" {
+		t.Fatalf("fallback executed wrong tool: got %v", resp.Result)
+	}
+	if got := reg.Invocations("mcp__demo__greet"); got != 1 {
+		t.Fatalf("resolved MCP tool should receive invocation count, got %d", got)
+	}
+	if got := reg.Invocations("greet"); got != 0 {
+		t.Fatalf("bare name must not receive invocation count, got %d", got)
+	}
+}
+
+func TestExecuteToolCallExactNameWinsOverMCPBareFallback(t *testing.T) {
+	reg := NewToolRegistry()
+	registerReturningTool(t, reg, "greet", "local")
+	registerReturningTool(t, reg, "mcp__demo__greet", "mcp")
+
+	resp, err := reg.ExecuteToolCall(&ToolCall{
+		Tool: "greet",
+		Args: map[string]interface{}{},
+	}, ToolContext{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("exact call should succeed, got error %q", resp.Error)
+	}
+	if resp.Result != "local" {
+		t.Fatalf("exact registered tool must win before fallback, got %v", resp.Result)
+	}
+	if got := reg.Invocations("greet"); got != 1 {
+		t.Fatalf("exact tool should receive invocation count, got %d", got)
+	}
+	if got := reg.Invocations("mcp__demo__greet"); got != 0 {
+		t.Fatalf("MCP fallback target must not execute on exact match, got %d", got)
+	}
+}
+
+func TestExecuteToolCallNativeMCPNameResolvesDirectly(t *testing.T) {
+	reg := NewToolRegistry()
+	registerReturningTool(t, reg, "mcp__demo__greet", "mcp")
+
+	var callbackName string
+	resp, err := reg.ExecuteToolCall(&ToolCall{
+		Tool:   "mcp__demo__greet",
+		Args:   map[string]interface{}{},
+		CallID: "native-call-1",
+	}, ToolContext{
+		ToolCallback: func(toolName string, args map[string]interface{}) error {
+			callbackName = toolName
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("native namespaced call should succeed, got error %q", resp.Error)
+	}
+	if resp.Result != "mcp" {
+		t.Fatalf("native namespaced call executed wrong tool: got %v", resp.Result)
+	}
+	if callbackName != "mcp__demo__greet" {
+		t.Fatalf("callback should see the exact native tool name, got %q", callbackName)
+	}
+}
+
+func TestExecuteToolCallDoesNotFallbackForNativeBareName(t *testing.T) {
+	reg := NewToolRegistry()
+	registerReturningTool(t, reg, "mcp__demo__greet", "mcp")
+
+	resp, err := reg.ExecuteToolCall(&ToolCall{
+		Tool:   "greet",
+		Args:   map[string]interface{}{},
+		CallID: "native-call-1",
+	}, ToolContext{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Success {
+		t.Fatalf("native call with unknown bare name must not use JSON-fallback resolution, got result %v", resp.Result)
+	}
+	if !strings.Contains(resp.Error, "unknown tool: greet") {
+		t.Fatalf("expected unknown-tool error for native bare name, got %q", resp.Error)
+	}
+	if got := reg.Invocations("mcp__demo__greet"); got != 0 {
+		t.Fatalf("native bare call must not execute MCP fallback target, got %d invocations", got)
+	}
+}
+
+func TestExecuteToolCallMCPBareNameAmbiguous(t *testing.T) {
+	reg := NewToolRegistry()
+	registerReturningTool(t, reg, "mcp__alpha__greet", "alpha")
+	registerReturningTool(t, reg, "mcp__beta__greet", "beta")
+
+	resp, err := reg.ExecuteToolCall(&ToolCall{
+		Tool: "greet",
+		Args: map[string]interface{}{},
+	}, ToolContext{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Success {
+		t.Fatalf("ambiguous bare MCP call must not succeed, got result %v", resp.Result)
+	}
+	for _, want := range []string{
+		"unknown tool: greet",
+		"ambiguous MCP bare name",
+		"mcp__alpha__greet",
+		"mcp__beta__greet",
+	} {
+		if !strings.Contains(resp.Error, want) {
+			t.Fatalf("ambiguous error %q does not contain %q", resp.Error, want)
+		}
+	}
+	if got := reg.Invocations("mcp__alpha__greet"); got != 0 {
+		t.Fatalf("ambiguous fallback must not execute alpha, got %d invocations", got)
+	}
+	if got := reg.Invocations("mcp__beta__greet"); got != 0 {
+		t.Fatalf("ambiguous fallback must not execute beta, got %d invocations", got)
+	}
+}
+
+func TestExecuteToolCallMCPBareNameUnknownAndSuffixRules(t *testing.T) {
+	reg := NewToolRegistry()
+	registerReturningTool(t, reg, "notmcp__demo__greet", "wrong-prefix")
+	registerReturningTool(t, reg, "mcp__demo__do_greet", "partial-suffix")
+	registerReturningTool(t, reg, "mcp__demo__greet_extra", "longer-suffix")
+
+	resp, err := reg.ExecuteToolCall(&ToolCall{
+		Tool: "greet",
+		Args: map[string]interface{}{},
+	}, ToolContext{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Success {
+		t.Fatalf("unknown bare name must not resolve by non-MCP prefix or partial suffix, got result %v", resp.Result)
+	}
+	if resp.Error != "unknown tool: greet" {
+		t.Fatalf("unexpected unknown-tool error: %q", resp.Error)
+	}
+	for _, name := range []string{"notmcp__demo__greet", "mcp__demo__do_greet", "mcp__demo__greet_extra"} {
+		if got := reg.Invocations(name); got != 0 {
+			t.Fatalf("%s must not execute for unknown bare name, got %d invocations", name, got)
+		}
+	}
+}
+
+func TestExecuteToolCallMCPBareNameFallbackHonorsResolvedToolDisabledState(t *testing.T) {
+	reg := NewToolRegistry()
+	registerReturningTool(t, reg, "mcp__demo__greet", "mcp")
+	reg.SetEnabled("mcp__demo__greet", false)
+
+	resp, err := reg.ExecuteToolCall(&ToolCall{
+		Tool: "greet",
+		Args: map[string]interface{}{},
+	}, ToolContext{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Success {
+		t.Fatalf("fallback to disabled MCP tool must not execute, got result %v", resp.Result)
+	}
+	if !strings.Contains(resp.Error, "tool is disabled: mcp__demo__greet") {
+		t.Fatalf("disabled error should name resolved MCP tool, got %q", resp.Error)
+	}
+	if got := reg.Invocations("mcp__demo__greet"); got != 0 {
+		t.Fatalf("disabled resolved MCP tool must not count as invoked, got %d", got)
+	}
+}
+
+func registerReturningTool(t *testing.T, reg *ToolRegistry, name string, result string) {
+	t.Helper()
+	reg.Register(&Tool{
+		Name:        name,
+		Description: "test tool",
+		InputSchema: map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		},
+		Execute: func(args map[string]interface{}, ctx ToolContext) (interface{}, error) {
+			return result, nil
+		},
+	})
+}
+
 // TestSchemaJSON covers the nil case and that object keys are sorted and
 // indented, so the Resources browser shows stable, readable schemas.
 func TestSchemaJSON(t *testing.T) {
