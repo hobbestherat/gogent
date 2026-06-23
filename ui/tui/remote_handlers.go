@@ -37,9 +37,9 @@ type Approver interface {
 const approvalPollInterval = 750 * time.Millisecond
 
 // watcherSessionPrefix mirrors the backend's session id for a free-running
-// watcher's dedicated session ("watcher:<name>"). The remote WatcherInfo
-// conversion resolves it exactly as cmd/main.go's embedded mapping does, so the
-// sidebar's Open Session button raises the same id.
+// watcher's dedicated session ("watcher:<name>"). Those sessions are backend-only
+// (no user window), so the session-restore/browse handlers filter them out of the
+// session list.
 const watcherSessionPrefix = "watcher:"
 
 // RemoteClient backs the TUI's Handlers seam with an APIClient when the TUI is
@@ -293,11 +293,12 @@ func editDecisionToWire(d gogent.EditReviewDecision) string {
 // Handlers builds the Handlers struct that drives the daemon over HTTP/SSE. It
 // populates only the fields that map to an existing /api endpoint; the attach
 // wiring (cmd) fills the TUI-machine presentation handlers (theme, keybindings,
-// layout, notifications, default model). Handlers with no daemon endpoint in this
+// layout, notifications, default model). Handlers explicitly deferred from this
 // bounded slice — OnFork, OnRename (the window title still persists via the local
-// layout), StreamThinking, the supervisor check, and the @-file workspace bridge
-// — are intentionally left nil and degrade gracefully (the feature is simply
-// unavailable while attached), as those API gaps are a later Phase-2/3 slice.
+// layout), StreamThinking, the supervisor check, the @-file workspace bridge, and
+// the watcher-management API — are intentionally left nil and degrade gracefully
+// (the feature is simply unavailable while attached), as those are a later
+// Phase-2/3 slice.
 func (rc *RemoteClient) Handlers() Handlers {
 	c := rc.client
 	return Handlers{
@@ -555,39 +556,11 @@ func (rc *RemoteClient) Handlers() Handlers {
 			return r
 		},
 
-		// --- watchers ---
-		ListWatchers: func(sessionID string) []WatcherInfo {
-			ws, err := c.ListWatchers(sessionID)
-			if err != nil {
-				return nil
-			}
-			out := make([]WatcherInfo, 0, len(ws))
-			for _, w := range ws {
-				out = append(out, watcherDTOToInfo(w))
-			}
-			return out
-		},
-		CreateWatcher: func(cfg WatcherConfig, sessionID string) (WatcherInfo, error) {
-			enabled := true
-			req := CreateWatcherRequest{
-				Name:            cfg.Name,
-				Task:            cfg.Task,
-				Model:           cfg.Model,
-				Enabled:         &enabled,
-				Schedule:        config.ScheduleConfig{Every: cfg.Every, DailyAt: cfg.DailyAt, Timezone: cfg.Timezone},
-				ReportToSession: cfg.ReportToSession,
-			}
-			w, err := c.CreateWatcher(req)
-			if err != nil {
-				return WatcherInfo{}, fmt.Errorf("create watcher: %w", err)
-			}
-			return watcherDTOToInfo(w), nil
-		},
-		EnableWatcher:  func(idOrName string) error { return c.SetWatcherEnabled(idOrName, true) },
-		DisableWatcher: func(idOrName string) error { return c.SetWatcherEnabled(idOrName, false) },
-		RunWatcher:     func(idOrName string) error { return c.RunWatcher(idOrName) },
-		StopWatcher:    func(idOrName string) error { return c.StopWatcher(idOrName) },
-		DeleteWatcher:  func(idOrName string) error { return c.DeleteWatcher(idOrName) },
+		// NOTE: the watcher handlers (ListWatchers/CreateWatcher/…) are deliberately
+		// left nil. Watcher management over the wire is an explicitly deferred
+		// Phase-3 API-gap item, out of scope for this bounded remote-client slice; an
+		// attached TUI simply hides the watcher dialog/sidebar nodes until that slice
+		// lands.
 	}
 }
 
@@ -622,36 +595,4 @@ func messageDTOsToChat(msgs []MessageDTO) []ChatMessage {
 		out = append(out, ChatMessage{Role: m.Role, Content: m.Content})
 	}
 	return out
-}
-
-// watcherDTOToInfo maps a wire watcher view to the UI-facing WatcherInfo,
-// resolving the reporting session id exactly as the embedded toWatcherInfo does:
-// a free-running watcher reports into its dedicated watcher:<name> session, an
-// attached one into its target session.
-func watcherDTOToInfo(w WatcherDTO) WatcherInfo {
-	free := w.Kind == "free"
-	target := w.Target
-	if target == "free" {
-		target = ""
-	}
-	sessionID := target
-	if free {
-		sessionID = watcherSessionPrefix + w.Name
-	}
-	return WatcherInfo{
-		ID:            w.ID,
-		Name:          w.Name,
-		Free:          free,
-		TargetSession: target,
-		SessionID:     sessionID,
-		Enabled:       w.Enabled,
-		Status:        w.Status,
-		Running:       w.Status == "running",
-		Task:          w.Task,
-		Schedule:      w.Schedule,
-		NextFire:      w.NextFire,
-		LastRun:       w.LastRun,
-		LastResult:    w.LastResult,
-		LastError:     w.LastError,
-	}
 }

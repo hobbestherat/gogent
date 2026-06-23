@@ -304,32 +304,6 @@ type SettingsDTO struct {
 	ReviewEdits bool                  `json:"review_edits"`
 }
 
-// WatcherDTO mirrors the server's watcherView.
-type WatcherDTO struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Kind       string `json:"kind"`
-	Target     string `json:"target"`
-	Task       string `json:"task"`
-	Schedule   string `json:"schedule"`
-	Enabled    bool   `json:"enabled"`
-	Status     string `json:"status"`
-	NextFire   string `json:"next_fire"`
-	LastRun    string `json:"last_run"`
-	LastResult string `json:"last_result"`
-	LastError  string `json:"last_error"`
-}
-
-// CreateWatcherRequest mirrors the server's createWatcherRequest body.
-type CreateWatcherRequest struct {
-	Name            string                `json:"name"`
-	Task            string                `json:"task"`
-	Schedule        config.ScheduleConfig `json:"schedule"`
-	Model           string                `json:"model,omitempty"`
-	Enabled         *bool                 `json:"enabled,omitempty"`
-	ReportToSession *string               `json:"report_to_session,omitempty"`
-}
-
 // --- health & sessions ------------------------------------------------------
 
 // Health reports whether the daemon answers GET /api/health. It is used to
@@ -565,51 +539,9 @@ func (c *APIClient) GetStatistics() (stats.Report, error) {
 	return out, nil
 }
 
-// --- watchers ---------------------------------------------------------------
-
-// ListWatchers returns the watchers visible to sessionID (free-running plus that
-// session's attached watchers; "" yields the free-running ones only).
-func (c *APIClient) ListWatchers(sessionID string) ([]WatcherDTO, error) {
-	path := "/watchers"
-	if sessionID != "" {
-		path += "?session_id=" + url.QueryEscape(sessionID)
-	}
-	var out []WatcherDTO
-	if err := c.do(http.MethodGet, path, nil, &out); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-// CreateWatcher registers a new watcher on the daemon.
-func (c *APIClient) CreateWatcher(req CreateWatcherRequest) (WatcherDTO, error) {
-	var out WatcherDTO
-	if err := c.do(http.MethodPost, "/watchers", req, &out); err != nil {
-		return WatcherDTO{}, err
-	}
-	return out, nil
-}
-
-// SetWatcherEnabled enables or disables a watcher (by id or name).
-func (c *APIClient) SetWatcherEnabled(idOrName string, enabled bool) error {
-	return c.do(http.MethodPut, "/watchers/"+url.PathEscape(idOrName)+"/enabled",
-		map[string]bool{"enabled": enabled}, nil)
-}
-
-// RunWatcher fires a watcher immediately (by id or name).
-func (c *APIClient) RunWatcher(idOrName string) error {
-	return c.do(http.MethodPost, "/watchers/"+url.PathEscape(idOrName)+"/run", nil, nil)
-}
-
-// StopWatcher cancels a watcher's in-flight fire (by id or name).
-func (c *APIClient) StopWatcher(idOrName string) error {
-	return c.do(http.MethodPost, "/watchers/"+url.PathEscape(idOrName)+"/stop", nil, nil)
-}
-
-// DeleteWatcher unregisters a watcher (by id or name).
-func (c *APIClient) DeleteWatcher(idOrName string) error {
-	return c.do(http.MethodDelete, "/watchers/"+url.PathEscape(idOrName), nil, nil)
-}
+// NOTE: watcher management over the wire (GET/POST/PUT/DELETE /api/watchers*) is
+// intentionally not exposed by this client. It is an explicitly deferred Phase-3
+// API-gap item, out of scope for this bounded remote-client slice.
 
 // --- approvals --------------------------------------------------------------
 
