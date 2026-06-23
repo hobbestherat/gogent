@@ -416,7 +416,46 @@ func newSidebar(wb *Workbench) *sidebar {
 	s.overallModelKeys = []string{""}
 	s.layer = tv.NewWindowLayer("sidebar", panel)
 	s.rebuildModelOptions()
+	// Seed the tree / dropdown colours from the active palette explicitly, so the
+	// sidebar is correct on a fresh start regardless of whether ApplyTheme ran
+	// before construction, and so the live-switch reseed has a single funnel
+	// (issue #379).
+	s.refreshTheme()
 	return s
+}
+
+// refreshTheme re-seeds the sidebar's already-built turbotui widgets from the
+// active palette so a live theme switch recolours them without a restart (issue
+// #379). The panel fill, the "Sessions & Agents"/"TODOs"/"Overall" titles, the
+// dividers, the TODO/Overall bands and the resize handle all read the package
+// chrome vars (chromePanelBG/FG, chromeTitle, chromeDivider, chromeAccent) at
+// draw time, so they already follow the theme on a redraw. But the session /
+// sub-agent / watcher tree and the Overall band's model dropdown froze their
+// colours at construction — tv.NewTree seeds its row FG/BG/selection from the
+// active theme once, and newSelect seeds the closed control once — so after a
+// default→dark switch the tree's row region kept the old blue WindowBG while the
+// rest of the panel went black (the reported bug). Reseeding them here, from the
+// same theme slots they were built from, keeps the whole sidebar in lockstep
+// across every preset. This mirrors SessionWindow.refreshTheme's reseed of the
+// transcript view (issue #204), the same frozen-WindowBG class of bug.
+//
+// No colour SOURCE changes: the tree is reseeded to the exact slots tv.NewTree
+// uses, so the default look is unchanged and no preset is special-cased. Across
+// every gogent preset WindowBG == PanelBG, so the reseeded tree row region blends
+// with the panel fill. Runs on the UI thread, from Workbench.RefreshTheme and
+// once at construction.
+func (s *sidebar) refreshTheme() {
+	th := tv.ActiveTheme()
+	if s.tree != nil {
+		s.tree.FG, s.tree.BG = th.WindowFG, th.WindowBG
+		s.tree.SelFG, s.tree.SelBG = th.SelectionFG, th.SelectionBG
+		// Match tv.NewTree's dimmed unfocused bar (window foreground over the ANSI 8
+		// dark grey) so the selection reads identically to a freshly built tree.
+		s.tree.SelFGUnfocused, s.tree.SelBGUnfocused = th.WindowFG, tui.ANSIColor(8)
+	}
+	// The Overall band's model selector is a closed control seeded once from the
+	// dropdown palette (issue #260); reseed it like every other live Select.
+	reseedSelect(s.overallSelect, th)
 }
 
 // reposition pins the sidebar to the right edge of the desktop, using the
