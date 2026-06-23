@@ -123,6 +123,10 @@ type SessionWindow struct {
 	// enabling the /act (approve) command (issue #43).
 	planMode    bool
 	planPending bool
+	// yoloMode mirrors the backend yolo flag for the status indicator (issue
+	// #356): when on, permission prompts are auto-approved (except rules.json
+	// hard-deny guardrails) and the step cap is removed.
+	yoloMode bool
 	// pending holds a message typed while the agent was busy (issue #170). Rather
 	// than dropping input mid-turn, the submit handler stows the latest text here
 	// (a single editable, latest-wins slot — simplest UX, matching the backend's
@@ -1531,6 +1535,11 @@ func (sw *SessionWindow) refreshStatus() {
 		// is unmistakable (issue #43).
 		state = "PLAN · " + state
 	}
+	if sw.yoloMode {
+		// Surface yolo at the left of the status line so the auto-approve +
+		// unlimited-steps posture is unmistakable (issue #356).
+		state = "YOLO · " + state
+	}
 	if sw.pending != "" {
 		// Show the queued message distinctly so it is visible (and known to be
 		// editable/cancellable) before it fires (issue #170). Trim long entries so
@@ -1610,6 +1619,10 @@ func (sw *SessionWindow) apply(ev agent.SessionEvent) {
 		if sw.planPending {
 			sw.addNote("Plan ready for review — approve with /act (or Session → Approve Plan) to execute it.")
 		}
+	case agent.SessionEventYolo:
+		// Backend-owned yolo indicator (issue #356): the display field is set here
+		// (never from the local toggle) so it is correct however yolo was activated.
+		sw.applyYoloMode(ev.Yolo)
 	case agent.SessionEventTodo:
 		// The checklist is rendered in the sidebar; nothing to add to the
 		// transcript (issue #43).
@@ -1710,6 +1723,9 @@ func (sw *SessionWindow) handleSlashCommand(text string) bool {
 		return true
 	case "/plan":
 		sw.togglePlanMode()
+		return true
+	case "/yolo":
+		sw.toggleYoloMode()
 		return true
 	case "/act":
 		sw.approvePlan()
@@ -2086,6 +2102,39 @@ func (sw *SessionWindow) togglePlanMode() {
 			"Send your request, then approve the plan (/act) to execute it.")
 	} else {
 		sw.addNote("Plan mode off — the agent may make changes directly.")
+	}
+	sw.refreshStatus()
+}
+
+// toggleYoloMode requests a yolo-mode flip for the session (issue #356). It is
+// request-only: it asks the backend to toggle and does NOT flip the local display
+// field. The backend applies the change (auto-approve permissions + remove the
+// step cap) and emits a SessionEventYolo carrying the new state, which apply()
+// renders — so the indicator is backend-owned and correct regardless of how yolo
+// was activated (toggle, config, or --yolo), unlike plan mode's local mirror.
+func (sw *SessionWindow) toggleYoloMode() {
+	if sw.wb.handlers.OnSetYoloMode == nil {
+		sw.addNote("YOLO mode unavailable")
+		return
+	}
+	sw.wb.handlers.OnSetYoloMode(sw.id, !sw.yoloMode)
+}
+
+// applyYoloMode renders a backend-announced yolo state (issue #356). It sets the
+// display-only field, refreshes the status line, and explains the new state on a
+// real change. The change guard keeps the silent default (yolo off) quiet at
+// session creation while still announcing config/CLI-activated yolo and toggles.
+func (sw *SessionWindow) applyYoloMode(on bool) {
+	if sw.yoloMode == on {
+		return
+	}
+	sw.yoloMode = on
+	if on {
+		sw.addNote("YOLO mode on — permission prompts auto-approve (except hard-deny guardrails) " +
+			"and the step cap is removed. Cancellation, token budget, and the audit trail still apply; " +
+			"set a token budget as the brake.")
+	} else {
+		sw.addNote("YOLO mode off — permission prompts return and the configured step cap is restored.")
 	}
 	sw.refreshStatus()
 }

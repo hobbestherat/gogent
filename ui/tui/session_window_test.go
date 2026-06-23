@@ -119,6 +119,39 @@ func TestFormatStatusLine(t *testing.T) {
 	}
 }
 
+func TestToggleYoloModeRequestsBackendWithoutLocalFlip(t *testing.T) {
+	var calls int
+	var gotID string
+	var gotOn bool
+	sw := &SessionWindow{
+		id: "s1",
+		wb: &Workbench{handlers: Handlers{
+			OnSetYoloMode: func(sessionID string, on bool) {
+				calls++
+				gotID = sessionID
+				gotOn = on
+			},
+		}},
+	}
+
+	sw.toggleYoloMode()
+	if calls != 1 || gotID != "s1" || !gotOn {
+		t.Fatalf("first toggle call = (%d, %q, %v), want (1, s1, true)", calls, gotID, gotOn)
+	}
+	if sw.yoloMode {
+		t.Fatal("toggleYoloMode must not flip local yoloMode before backend event")
+	}
+
+	sw.yoloMode = true
+	sw.toggleYoloMode()
+	if calls != 2 || gotID != "s1" || gotOn {
+		t.Fatalf("second toggle call = (%d, %q, %v), want (2, s1, false)", calls, gotID, gotOn)
+	}
+	if !sw.yoloMode {
+		t.Fatal("toggleYoloMode must leave existing local yoloMode untouched until backend event")
+	}
+}
+
 // TestContextGauge covers the bar fill: zero/unknown usage is empty, any nonzero
 // usage shows at least one cell, mid usage rounds to the nearest cell, and usage
 // at/over the window fills every cell.

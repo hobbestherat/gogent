@@ -38,6 +38,7 @@ var (
 	disableTUI   = flag.Bool("no-tui", false, "Disable TUI (for API testing)")
 	noColor      = flag.Bool("no-color", false, "Disable coloured output (also honours the NO_COLOR env var)")
 	httpPassword = flag.String("http-password", "", "Password for HTTP API login (env GOGENT_HTTP_PASSWORD). Setting one authorizes binding to a non-loopback host.")
+	yolo         = flag.Bool("yolo", false, "Yolo mode: remove the step cap and auto-approve every permission prompt except the rules.json hard-deny guardrails (issue #356). Set a token budget as the brake.")
 )
 
 var (
@@ -60,6 +61,11 @@ func main() {
 
 	// Create Gogent instance (loads skills + AGENTS.md and owns the registry)
 	g := gogent.NewGogent(homeDir)
+	// --yolo overrides config.json's "yolo" (issue #356): when passed it forces
+	// the global auto-approve + unlimited-steps default on for every session.
+	if *yolo {
+		g.SetGlobalYolo(true)
+	}
 	fmt.Printf("\nWorking directory (file & shell ops): %s\n", g.GetWorkspaceRoot())
 
 	// In TUI mode, redirect diagnostics to a log file so warnings/errors never
@@ -169,6 +175,10 @@ func main() {
 				session.SetObserver(func(ev agent.SessionEvent) {
 					wb.EmitSessionEvent(sessionID, ev)
 				})
+				// Announce the session's effective yolo state now that its observer
+				// is installed, so config/CLI-activated yolo lights the status line
+				// from the backend (issue #356) rather than a UI-local mirror.
+				g.EmitYoloState(sessionID)
 			},
 			// OnSend runs the task loop in the background; progress (thoughts,
 			// tool calls, final answer) flows back through the observer above.
@@ -407,6 +417,7 @@ func main() {
 			// plan with the full tool set, mirroring OnSend's goroutine + event
 			// emission so the result flows back into the session window.
 			OnSetPlanMode: func(sessionID string, on bool) { g.SetPlanMode(sessionID, on) },
+			OnSetYoloMode: func(sessionID string, on bool) { g.SetYoloMode(sessionID, on) },
 			OnApprovePlan: func(sessionID string) {
 				defer func() {
 					if r := recover(); r != nil {

@@ -62,6 +62,20 @@ func editCall(g *Gogent, session, path, find, replace string) (*tool.ToolCallRes
 	}, session, "root", "")
 }
 
+func multiEditCall(g *Gogent, session, path string, edits []interface{}) (*tool.ToolCallResponse, error) {
+	return g.ExecuteToolCall(&tool.ToolCall{
+		Tool: "multi_edit",
+		Args: map[string]interface{}{"path": path, "edits": edits},
+	}, session, "root", "")
+}
+
+func applyPatchCall(g *Gogent, session, patch string) (*tool.ToolCallResponse, error) {
+	return g.ExecuteToolCall(&tool.ToolCall{
+		Tool: "apply_patch",
+		Args: map[string]interface{}{"patch": patch},
+	}, session, "root", "")
+}
+
 // TestReviewDisabledByDefault confirms writes/edits apply immediately when the
 // feature is off, even with a reviewer installed (no behavior change).
 func TestReviewDisabledByDefault(t *testing.T) {
@@ -97,6 +111,76 @@ func TestReviewRejectBlocksWrite(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(workspace, "a.txt")); !os.IsNotExist(statErr) {
 		t.Fatalf("file should not exist after rejection, stat err = %v", statErr)
+	}
+}
+
+func TestYoloBypassesEditReviewGate(t *testing.T) {
+	g, workspace := newReviewGogent(t)
+	rv := &fakeReviewer{decision: EditReject}
+	g.SetReviewer(rv)
+	g.SetReviewEdits(true)
+	g.SetYoloMode("s1", true)
+
+	if _, err := writeCall(g, "s1", "a.txt", "hello\n"); err != nil {
+		t.Fatalf("yolo write should bypass review rejection, got %v", err)
+	}
+	if n := len(rv.calls()); n != 0 {
+		t.Fatalf("yolo write consulted reviewer %d times, want 0", n)
+	}
+	got, err := os.ReadFile(filepath.Join(workspace, "a.txt"))
+	if err != nil {
+		t.Fatalf("read written file: %v", err)
+	}
+	if string(got) != "hello\n" {
+		t.Fatalf("file = %q, want %q", string(got), "hello\n")
+	}
+}
+
+func TestYoloBypassesEditReviewGateForAllMutationTools(t *testing.T) {
+	g, workspace := newReviewGogent(t)
+	rv := &fakeReviewer{decision: EditReject}
+	g.SetReviewer(rv)
+	g.SetReviewEdits(true)
+	g.SetYoloMode("s1", true)
+
+	if err := os.WriteFile(filepath.Join(workspace, "edit.txt"), []byte("hello world\n"), 0644); err != nil {
+		t.Fatalf("seed edit target: %v", err)
+	}
+	if _, err := editCall(g, "s1", "edit.txt", "world", "yolo"); err != nil {
+		t.Fatalf("yolo edit should bypass review rejection, got %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(workspace, "edit.txt")); err != nil || string(got) != "hello yolo\n" {
+		t.Fatalf("edit target = %q, err=%v; want %q", string(got), err, "hello yolo\n")
+	}
+
+	if err := os.WriteFile(filepath.Join(workspace, "multi.txt"), []byte("one two three\n"), 0644); err != nil {
+		t.Fatalf("seed multi_edit target: %v", err)
+	}
+	if _, err := multiEditCall(g, "s1", "multi.txt", []interface{}{
+		map[string]interface{}{"find": "one", "replace": "1"},
+		map[string]interface{}{"find": "three", "replace": "3"},
+	}); err != nil {
+		t.Fatalf("yolo multi_edit should bypass review rejection, got %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(workspace, "multi.txt")); err != nil || string(got) != "1 two 3\n" {
+		t.Fatalf("multi_edit target = %q, err=%v; want %q", string(got), err, "1 two 3\n")
+	}
+
+	if err := os.WriteFile(filepath.Join(workspace, "patch.txt"), []byte("old\n"), 0644); err != nil {
+		t.Fatalf("seed patch target: %v", err)
+	}
+	patch := "*** Begin Patch\n" +
+		"*** Update File: patch.txt\n@@\n-old\n+new\n" +
+		"*** End Patch"
+	if _, err := applyPatchCall(g, "s1", patch); err != nil {
+		t.Fatalf("yolo apply_patch should bypass review rejection, got %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(workspace, "patch.txt")); err != nil || string(got) != "new\n" {
+		t.Fatalf("patch target = %q, err=%v; want %q", string(got), err, "new\n")
+	}
+
+	if n := len(rv.calls()); n != 0 {
+		t.Fatalf("yolo mutation tools consulted reviewer %d times, want 0", n)
 	}
 }
 

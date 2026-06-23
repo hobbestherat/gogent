@@ -38,7 +38,39 @@ So, in summary: **workspace allow / outside ask / shell ask / headless deny**.
 
 ### How "always" grants persist
 
-`DecisionAlways` / `DecisionAlwaysDeny` → `persist(action, resource, decision)`: records in the in-memory saved map, marshals to `~/.gogent/permissions.json` (dir `0700`, file `0600`), reloaded on startup. Persisted decisions win over rules. For path-style actions an allowed ancestor root covers descendants. Every resolved decision is recorded on the append-only audit trail.
+`DecisionAlways` / `DecisionAlwaysDeny` → `persist(action, resource, decision)`: records in the in-memory saved map, marshals to `~/.gogent/permissions.json` (dir `0700`, file `0600`), reloaded on startup. For path-style actions an allowed ancestor root covers descendants. Every resolved decision is recorded on the append-only audit trail.
+
+### The resolution cascade (`Service.effect`)
+
+`effect(action, resource, detail)` resolves a request as a fixed priority cascade — **deny guardrails first**, so a saved "always allow" can never silently defeat a guardrail:
+
+1. **`rules.json` DENY guardrails** — if any matches → **deny**. *Hard stop; nothing below overrides it (not persisted allows, not allow rules, not yolo).*
+2. **Persisted decisions** (`permissions.json`) — `always`→allow, `always_deny`→deny.
+3. **ALLOW rules** — the default workspace allow-alls and any `rules.json` allow.
+4. Fall through → **ask** (→ prompter; or yolo auto-approve; or deny when headless).
+
+### Hard-deny guardrails (`~/.gogent/rules.json`, issue #355)
+
+A user-editable file of policy rules that are respected **irrespective of mode**, including yolo. Loaded once at startup (restart to pick up edits); a missing/corrupt file or an individual malformed rule is logged and skipped — it never bricks the gate.
+
+```json
+{
+  "rules": [
+    {"action": "external", "resource": "/etc/*", "effect": "deny"},
+    {"action": "network",  "resource": "evil.com", "effect": "deny"},
+    {"action": "shell",    "resource": "*", "effect": "deny", "detail_pattern": "rm\\s+-rf\\s+/"}
+  ]
+}
+```
+
+- `action` — an `Action` constant, or `*` for any.
+- `resource` — `*`, a trailing-`*` prefix wildcard, or a literal; for path actions (`read`/`write`/`external`) a literal also matches any path nested under it.
+- `effect` — `allow` or `deny`. A **deny** rule is a hard guardrail (cascade step 1).
+- `detail_pattern` (optional) — a Go regex matched against the request's `detail`. Because `shell` gates with `resource: ""` and carries the command text in `detail`, this is what enables command-level guardrails such as blocking `rm -rf /`.
+
+### Yolo mode (issue #356)
+
+A single switch that (a) removes the step cap (every session runs unlimited steps) and (b) auto-approves every permission prompt — **except** the hard-deny guardrails above, which always hold. Enable it via `"yolo": true` in `config.json`, the `--yolo` CLI flag (overrides config), or the TUI `/yolo` command / command-palette entry (per session). In `CheckWithContext` a yolo-active request whose cascade result is **ask** becomes **allow**; `deny` is resolved by `effect()` *before* this conversion, so guardrails are never bypassed. Cancellation, the optional token budget, and the audit trail remain in force under yolo — set a token budget as the financial brake.
 
 ## 3. Every tool
 

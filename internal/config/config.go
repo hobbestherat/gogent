@@ -569,6 +569,14 @@ type Config struct {
 	// config documents the setting. Resolve it through the nil-tolerant
 	// Gogent.GetShowWelcome accessor rather than reading the pointer directly.
 	ShowWelcome *bool `json:"show_welcome,omitempty"`
+	// Yolo, when true, enables yolo mode globally at startup (issue #356): the
+	// per-task step cap is removed (every session runs unlimited steps) and any
+	// permission request that would otherwise prompt is auto-approved. It never
+	// bypasses the rules.json hard-deny guardrails (issue #355), the token budget,
+	// cancellation, or the audit trail. Off by default, so an older config.json
+	// without the key behaves exactly as before. The --yolo CLI flag overrides
+	// this, and the TUI /yolo command toggles it per session.
+	Yolo bool `json:"yolo,omitempty"`
 }
 
 // DefaultMaxSteps is the built-in per-turn step (model round-trip) cap applied
