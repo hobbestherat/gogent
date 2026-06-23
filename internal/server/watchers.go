@@ -99,7 +99,7 @@ func (svc watchersSvc) Create(r *http.Request, req createWatcherRequest) (interf
 		Schedule:        req.Schedule,
 		Model:           strings.TrimSpace(req.Model),
 		Enabled:         enabled,
-		ReportToSession: req.ReportToSession,
+		ReportToSession: normalizeReportToSession(req.ReportToSession),
 		Output:          req.Output,
 	}
 	info, err := svc.s.g.CreateWatcher(cfg, "")
@@ -204,6 +204,24 @@ func (svc watchersSvc) Delete(r *http.Request, id string) (interface{}, error) {
 }
 
 // --- helpers ----------------------------------------------------------------
+
+// normalizeReportToSession resolves the create request's report_to_session into
+// the WatcherConfig.ReportToSession the gogent wrapper expects, matching the
+// watcher tool's semantics (internal/tool reportToSession): nil, an empty/blank
+// string, or the case-insensitive sentinel "independent" all mean free-running
+// (nil); any other non-empty string is an attached target session id. Keeping
+// this identical to the tool path means the same create concept behaves the same
+// whether it arrives over HTTP or from the agent tools.
+func normalizeReportToSession(p *string) *string {
+	if p == nil {
+		return nil
+	}
+	s := strings.TrimSpace(*p)
+	if s == "" || strings.EqualFold(s, "independent") {
+		return nil
+	}
+	return &s
+}
 
 // watcherToView maps a backend watcher snapshot to its wire view, matching the
 // agent tools' watcherInfoMap shape (target = owning session id for attached
