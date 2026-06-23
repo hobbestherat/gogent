@@ -99,10 +99,18 @@ type Gogent struct {
 	// torn down by StopWatchers. See watcher.go.
 	watchers *watcher.Manager
 	// notifier emits desktop/terminal notifications for backend-originated events
-	// — currently free-running watcher completions (issue #329). It is independent
-	// of the TUI's own notifier (which handles session events) and is gated by the
-	// same NotifyConfig. Built in NewGogentWithWorkspace.
+	// — currently free-running watcher completions (issue #329). It is the
+	// fallback delivery path used in headless mode (no TUI owns the screen); when
+	// a TUI is running the entry point installs notifySink instead so terminal
+	// escapes are not written to os.Stdout from a background goroutine. Built in
+	// NewGogentWithWorkspace.
 	notifier *notify.Notifier
+	// notifySink, when set, takes over backend notification delivery from notifier
+	// (issue #329). The TUI entry point points it at a workbench callback that
+	// posts the notification onto the UI thread and reuses the TUI's single
+	// notifier, so a watcher completion is render-coordinated and focus-gated
+	// rather than racing the alternate-screen draw loop. nil = use notifier.
+	notifySink func(reason, title, body string)
 }
 
 // HookEvent represents an event that triggers hooks

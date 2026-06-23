@@ -469,6 +469,11 @@ func main() {
 		// Push the persisted notification config into the workbench's live
 		// notifier so the very first notification respects the user's settings.
 		wb.SetNotifyConfig(g.Notifications())
+		// Route backend-originated notifications (free-running watcher completions,
+		// issue #329) through the workbench's UI-thread notifier instead of the
+		// backend's fallback os.Stdout notifier, so they never write terminal
+		// escapes mid-frame from a watcher goroutine.
+		g.SetNotifySink(wb.NotifyFromBackend)
 		// Push the persisted token-budget config so the status gauge's budget
 		// alert (if any) is active from the first turn.
 		wb.SetBudgetConfig(g.Budget())

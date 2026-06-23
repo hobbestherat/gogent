@@ -39,6 +39,14 @@ func (g *Gogent) StartWatchers() {
 	if cfg == nil || !cfg.Experimental.Watchers {
 		return
 	}
+	// Idempotent: a manager already exists, so a second call must not orphan its
+	// goroutines by overwriting the field (mirrors Manager.Start's started guard).
+	g.mu.RLock()
+	already := g.watchers != nil
+	g.mu.RUnlock()
+	if already {
+		return
+	}
 
 	store := g.LoadWatchers()
 	wcfg := cfg.Watchers
@@ -129,11 +137,7 @@ func (g *Gogent) ListWatchers(sessionID string) []watcher.WatcherInfo {
 // list).
 func (g *Gogent) RunWatcherFire(ctx context.Context, r *watcher.Runner) error {
 	sessionID := watcherSessionPrefix + r.Name()
-	if g.GetUserSession(sessionID) == nil {
-		// A normal, non-ephemeral session: persisted and restored like any session
-		// so context accumulates across fires.
-		g.NewSession(sessionID)
-	}
+	g.ensureWatcherSession(sessionID)
 
 	message := fmt.Sprintf("[Watcher %q fired]\n\n%s", r.Name(), r.Task())
 	resp, err := g.SendMessageToSessionWithModel(ctx, sessionID, "root", message, r.Model())
@@ -146,15 +150,54 @@ func (g *Gogent) RunWatcherFire(ctx context.Context, r *watcher.Runner) error {
 	return nil
 }
 
+// ensureWatcherSession makes a free-running watcher's dedicated, persistent
+// "watcher:<name>" session live for a fire. If it is already in memory it is
+// reused. Otherwise, when a transcript was persisted on a previous run it is
+// adopted from disk so context accumulates across restarts — the free-running
+// "memory across fires" goal. This adoption matters in two cases the blind
+// NewSession path missed: headless mode, where the startup restore (a TUI-only
+// callback) never runs, and the TUI startup race, where a fire could otherwise
+// create an empty session before RestoreSessions adopts the saved one. Only when
+// nothing is on disk is a fresh session created.
+func (g *Gogent) ensureWatcherSession(sessionID string) {
+	if g.GetUserSession(sessionID) != nil {
+		return
+	}
+	if g.store != nil {
+		if metas, err := g.store.ListSessions(); err == nil {
+			for _, m := range metas {
+				if m.ID != sessionID {
+					continue
+				}
+				// ContinueSession loads the persisted transcript and adopts it as a
+				// live session (so the next turn appends rather than starting over).
+				if _, ok := g.ContinueSession(m.File); ok {
+					return
+				}
+				break
+			}
+		}
+	}
+	// First-ever fire (nothing persisted) — start a fresh non-ephemeral session.
+	g.NewSession(sessionID)
+}
+
 // Notify delivers a backend-originated notification, satisfying
-// watcher.WatcherHost. reason is a stable token (the manager passes "watcher");
-// it is gated through the notifier's per-event toggle (ShouldNotify) just like
-// the TUI's session-event notifications. A free-running watcher fire is never
-// "focused", so focus suppression does not apply.
+// watcher.WatcherHost. reason is a stable token (the manager passes "watcher").
+// When a notify sink is installed (TUI mode) delivery is delegated to it so the
+// notification is posted on the UI thread and gated there; otherwise (headless)
+// it is gated through the fallback notifier's per-event toggle (ShouldNotify)
+// and written directly. A free-running watcher fire is never "focused", so focus
+// suppression does not apply.
 func (g *Gogent) Notify(reason, title, body string) {
 	g.mu.RLock()
+	sink := g.notifySink
 	notifier := g.notifier
 	g.mu.RUnlock()
+	if sink != nil {
+		sink(reason, title, body)
+		return
+	}
 	if notifier == nil {
 		return
 	}
@@ -162,6 +205,16 @@ func (g *Gogent) Notify(reason, title, body string) {
 		return
 	}
 	notifier.Notify(title, body)
+}
+
+// SetNotifySink installs the backend notification delivery callback, replacing
+// the fallback os.Stdout notifier (issue #329). The TUI entry point uses it to
+// route watcher-completion notifications through the workbench's UI thread. A nil
+// fn restores the fallback notifier.
+func (g *Gogent) SetNotifySink(fn func(reason, title, body string)) {
+	g.mu.Lock()
+	g.notifySink = fn
+	g.mu.Unlock()
 }
 
 // watcherLaunchDetail renders a human-readable summary of what starting a
@@ -197,8 +250,8 @@ func firstLine(s string) string {
 			continue
 		}
 		const max = 200
-		if len(line) > max {
-			return line[:max]
+		if r := []rune(line); len(r) > max {
+			return string(r[:max])
 		}
 		return line
 	}
