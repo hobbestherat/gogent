@@ -22,8 +22,9 @@ const (
 	// modelEditorHeight is the editor's fixed footprint: the field rows (the Model
 	// select down to the Thinking row) plus the button row at height-3. The layout
 	// never grows vertically, so the height is pinned here rather than inflating to
-	// the 85% vertical default (issue #309).
-	modelEditorHeight = 18
+	// the 85% vertical default (issue #309). Two extra rows (Project, Location)
+	// for Vertex AI bump this from 18 to 20.
+	modelEditorHeight = 20
 )
 
 // longestRuneLen returns the display width (in cells) of the widest string in ss,
@@ -162,6 +163,13 @@ func (w *Workbench) showModelEditor() {
 	thinking := newSelect(w.desktop, thinkingOpts, tv.Rect{X: boxX, Y: 11, W: boxW, H: 1})
 	dialog.Window.AddContent(thinking)
 
+	// Project and Location target a Google Vertex AI deployment (api_type
+	// "vertex"); they build the endpoint URL when Endpoint is left empty and are
+	// ignored by every other provider, so — like Thinking — they are safe to show
+	// for every model.
+	project := field("Project:", 12)
+	location := field("Location:", 13)
+
 	// currentModelID reads the model id from whichever model widget is active.
 	currentModelID := func() string {
 		if modelSelect.Root().Visible {
@@ -185,6 +193,8 @@ func (w *Workbench) showModelEditor() {
 		maxTokens.SetText(strconv.Itoa(m.MaxTokens))
 		reasoningEffort.SetText(m.ReasoningEffort)
 		thinking.SetSelected(thinkingIndex(m.Thinking))
+		project.SetText(m.Project)
+		location.SetText(m.Location)
 	}
 	store := func(i int) {
 		models[i].DisplayName = display.GetText()
@@ -198,6 +208,8 @@ func (w *Workbench) showModelEditor() {
 		models[i].MaxTokens = atoiOr(maxTokens.GetText(), models[i].MaxTokens)
 		models[i].ReasoningEffort = strings.TrimSpace(reasoningEffort.GetText())
 		models[i].Thinking = thinkingValue(thinking.Value())
+		models[i].Project = strings.TrimSpace(project.GetText())
+		models[i].Location = strings.TrimSpace(location.GetText())
 	}
 	scanModels = func() {
 		if w.handlers.ScanModels == nil {

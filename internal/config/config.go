@@ -21,10 +21,18 @@ type ModelConfig struct {
 	// APIType selects the provider conventions used to talk to this backend
 	// ("openai" for any OpenAI-compatible server, "zai" for the Z.AI platform).
 	// Empty defaults to "openai".
-	APIType     string  `json:"api_type,omitempty"`
-	Endpoint    string  `json:"endpoint"`
-	Model       string  `json:"model"`
-	APIKey      string  `json:"api_key,omitempty"`
+	APIType  string `json:"api_type,omitempty"`
+	Endpoint string `json:"endpoint"`
+	Model    string `json:"model"`
+	APIKey   string `json:"api_key,omitempty"`
+	// Project and Location target a Google Vertex AI deployment (api_type
+	// "vertex"). Project is the GCP project ID; Location is the region (e.g.
+	// "us-central1", or the special "global"). They build the Vertex endpoint URL
+	// when Endpoint is left empty, and are unused by every other provider.
+	// Vertex authenticates with Application Default Credentials, so no API key is
+	// needed (see model.ADCRoundTripper).
+	Project     string  `json:"project,omitempty"`
+	Location    string  `json:"location,omitempty"`
 	Temperature float32 `json:"temperature"`
 	TopP        float32 `json:"top_p,omitempty"`
 	// MaxTokens is the per-request output cap sent as the API's max_tokens field.
@@ -1040,6 +1048,28 @@ func GetDefaultConfig() *Config {
 				ReasoningEffort: "high",
 				// models.dev reasoning_options for glm-5.2 (type "effort").
 				EffortOptions: []string{"high", "max"},
+				Free:          false,
+			},
+			{
+				// Google Vertex AI via its OpenAI-compatible endpoint (api_type
+				// "vertex"). It authenticates with Application Default Credentials,
+				// so NO API key is used — run `gcloud auth application-default login`
+				// or set GOOGLE_APPLICATION_CREDENTIALS. Fill in your GCP project and
+				// a region (e.g. "us-central1"; "global" is also valid); leaving
+				// Endpoint empty derives the URL from project/location.
+				Name:        "vertex-gemini",
+				DisplayName: "Vertex AI Gemini (ADC — set project/location)",
+				APIType:     "vertex",
+				Endpoint:    "",
+				Project:     "",
+				Location:    "",
+				Model:       "google/gemini-2.5-flash",
+				APIKey:      "",
+				Temperature: 0.7,
+				// models.dev: gemini-2.5-flash caps output at 64K.
+				MaxTokens: 65536,
+				// Gemini 2.5 Flash serves a ~1M input context window.
+				ContextWindow: 1048576,
 				Free:          false,
 			},
 		},

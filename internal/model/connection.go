@@ -15,6 +15,9 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
+
 	"gogent/internal/config"
 )
 
@@ -611,6 +614,13 @@ func NewModelConnectionFromConfig(modelConfig *config.ModelConfig) *ModelConnect
 	apiType := StringToAPIType(modelConfig.APIType)
 	spec := specFor(apiType)
 	base := normalizeBaseURL(modelConfig.Endpoint, spec)
+	// Providers whose endpoint is not a single static default (Vertex AI derives
+	// its host and path from Project/Location) supply a baseURLFunc. Use it only
+	// when the user left Endpoint empty, so an explicit endpoint still overrides
+	// (and normalizeBaseURL above already trimmed any chat path off it).
+	if spec.baseURLFunc != nil && strings.TrimSpace(modelConfig.Endpoint) == "" {
+		base = spec.baseURLFunc(modelConfig)
+	}
 
 	conn := &ModelConnection{
 		URL:            spec.chatURL(base),
@@ -633,7 +643,20 @@ func NewModelConnectionFromConfig(modelConfig *config.ModelConfig) *ModelConnect
 	// persist regardless of auth; without a key the client uses that shared
 	// transport directly (issue #19).
 	var rt http.RoundTripper
-	if modelConfig.APIKey != "" {
+	switch {
+	case spec.authMode == authADC:
+		// Vertex AI: no API key. Authenticate with a Google Application Default
+		// Credentials bearer token injected (and auto-refreshed) per request. The
+		// token source is resolved lazily on first use so this constructor — which
+		// returns no error — need not fail eagerly when ADC is unconfigured; the
+		// guiding error then surfaces on the first request instead.
+		rt = &ADCRoundTripper{
+			tokenSource: &lazyTokenSource{newTS: func() (oauth2.TokenSource, error) {
+				return adcTokenSourceFunc(context.Background(), adcScope)
+			}},
+			transport: sharedHTTPTransport,
+		}
+	case modelConfig.APIKey != "":
 		rt = &APIKeyRoundTripper{
 			apiKey:     modelConfig.APIKey,
 			headers:    spec.authHeaders(modelConfig.APIKey),
@@ -679,6 +702,78 @@ func (rt *APIKeyRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 		req.URL.RawQuery = q.Encode()
 	}
 	resp, err := rt.transport.RoundTrip(req)
+	if err != nil {
+		return nil, fmt.Errorf("round trip: %w", err)
+	}
+	return resp, nil
+}
+
+// adcScope is the OAuth2 scope Vertex AI access tokens are minted for. The
+// calling principal needs roles/aiplatform.user on the project.
+const adcScope = "https://www.googleapis.com/auth/cloud-platform"
+
+// adcTokenSourceFunc resolves the Application Default Credentials token source.
+// It is a package-level seam (defaulting to google.DefaultTokenSource) so tests
+// can inject a fake source returning a static token without real GCP
+// credentials. The returned oauth2.TokenSource auto-refreshes the (~1h-lived)
+// access token, so a raw token is never cached. ADC search order is
+// GOOGLE_APPLICATION_CREDENTIALS, then `gcloud auth application-default login`
+// user creds, then the GCE/GKE/Cloud Run metadata server.
+var adcTokenSourceFunc = func(ctx context.Context, scopes ...string) (oauth2.TokenSource, error) {
+	return google.DefaultTokenSource(ctx, scopes...)
+}
+
+// lazyTokenSource defers ADC credential resolution to the first Token() call.
+// NewModelConnectionFromConfig cannot return an error, so credentials must not
+// be resolved eagerly at construction; instead the first request triggers
+// resolution and any failure (no ADC configured) surfaces there — once, since
+// the result is memoized. It is safe for concurrent use.
+type lazyTokenSource struct {
+	newTS func() (oauth2.TokenSource, error)
+	once  sync.Once
+	ts    oauth2.TokenSource
+	err   error
+}
+
+func (l *lazyTokenSource) Token() (*oauth2.Token, error) {
+	l.once.Do(func() { l.ts, l.err = l.newTS() })
+	if l.err != nil {
+		return nil, l.err
+	}
+	tok, err := l.ts.Token()
+	if err != nil {
+		return nil, fmt.Errorf("adc token: %w", err)
+	}
+	return tok, nil
+}
+
+// ADCRoundTripper authenticates Vertex AI requests with a Google Application
+// Default Credentials bearer token instead of an API key. It is the ADC analogue
+// of APIKeyRoundTripper: it wraps the SAME shared pooled transport so keep-alive
+// connections persist across turns and sub-agent fan-out (issue #19), and on
+// each request it fetches a fresh access token from tokenSource (which
+// auto-refreshes when the ~1h token expires) and sets Authorization: Bearer
+// <token> on a clone of the request. tokenSource is injectable so tests can use
+// a static fake without real credentials.
+type ADCRoundTripper struct {
+	tokenSource oauth2.TokenSource
+	transport   http.RoundTripper
+}
+
+func (rt *ADCRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	tok, err := rt.tokenSource.Token()
+	if err != nil {
+		return nil, fmt.Errorf("vertex ADC credentials not found — run `gcloud auth application-default login` or set GOOGLE_APPLICATION_CREDENTIALS: %w", err)
+	}
+	base := rt.transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	// Clone before mutating headers so the caller's request (which may be retried
+	// or shared) is left untouched, mirroring the standard RoundTripper contract.
+	clone := req.Clone(req.Context())
+	clone.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+	resp, err := base.RoundTrip(clone)
 	if err != nil {
 		return nil, fmt.Errorf("round trip: %w", err)
 	}

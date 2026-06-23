@@ -230,6 +230,8 @@ type modelView struct {
 	DisplayName     string   `json:"display_name"`
 	APIType         string   `json:"api_type,omitempty"`
 	Endpoint        string   `json:"endpoint"`
+	Project         string   `json:"project,omitempty"`
+	Location        string   `json:"location,omitempty"`
 	Model           string   `json:"model"`
 	HasAPIKey       bool     `json:"has_api_key"`
 	Temperature     float32  `json:"temperature"`
@@ -302,6 +304,8 @@ func modelToView(m *config.ModelConfig) modelView {
 		DisplayName:     m.DisplayName,
 		APIType:         m.APIType,
 		Endpoint:        m.Endpoint,
+		Project:         m.Project,
+		Location:        m.Location,
 		Model:           m.Model,
 		HasAPIKey:       m.APIKey != "",
 		Temperature:     m.Temperature,
