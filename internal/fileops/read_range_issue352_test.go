@@ -75,6 +75,32 @@ func TestBoundContentIssue352MaxLength(t *testing.T) {
 			t.Fatalf("lines/next = %d/%d, want 0/1 so caller can retry with a larger max_length", got.LinesShown, got.NextOffset)
 		}
 	})
+
+	t.Run("max length counts characters", func(t *testing.T) {
+		got := BoundContent("αβγ\nnext\n", 1, 10, 3)
+		if got.Content != "αβγ" {
+			t.Fatalf("content = %q, want first 3 characters %q", got.Content, "αβγ")
+		}
+		if !got.Truncated || got.NextOffset != 1 {
+			t.Fatalf("paging = truncated %v next %d, want true/1", got.Truncated, got.NextOffset)
+		}
+	})
+}
+
+func TestBoundContentIssue352OffsetPastEOFClamps(t *testing.T) {
+	got := BoundContent("one\ntwo\nthree\n", 99, 2, 1024)
+	if got.Offset != 3 {
+		t.Fatalf("offset = %d, want clamped final line offset 3", got.Offset)
+	}
+	if got.Content != "three\n" {
+		t.Fatalf("content = %q, want final line after clamping", got.Content)
+	}
+	if got.LinesShown != 1 || got.NextOffset != 0 {
+		t.Fatalf("lines/next = %d/%d, want 1/0", got.LinesShown, got.NextOffset)
+	}
+	if !got.Truncated {
+		t.Fatal("clamped past-EOF read should still report truncation because earlier lines were skipped")
+	}
 }
 
 func TestBoundContentIssue352DefaultCapAndSmallFile(t *testing.T) {

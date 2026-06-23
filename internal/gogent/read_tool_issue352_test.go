@@ -63,6 +63,14 @@ func TestReadToolIssue352SchemaDocumentsBounds(t *testing.T) {
 			t.Fatalf("description should mention %q: %q", want, read.Description)
 		}
 	}
+	maxLength, ok := props["max_length"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("max_length property missing or wrong type: %T", props["max_length"])
+	}
+	desc, _ := maxLength["description"].(string)
+	if !strings.Contains(strings.ToLower(desc), "character") {
+		t.Fatalf("max_length description should document the issue-specified character cap, got %q", desc)
+	}
 }
 
 func TestReadToolIssue352LineRangeMaxLengthAndPaging(t *testing.T) {
@@ -116,6 +124,25 @@ func TestReadToolIssue352LineRangeMaxLengthAndPaging(t *testing.T) {
 		}
 	})
 
+	t.Run("max_length counts characters for utf8 content", func(t *testing.T) {
+		writeIssue352File(t, workspace, "utf8.txt", "αβγ\nnext\n")
+		out := callTool(t, g, "read", map[string]interface{}{
+			"path":       "utf8.txt",
+			"limit":      10,
+			"max_length": 3,
+		})
+		content := readToolContent(t, out)
+		if !strings.HasPrefix(content, "αβγ") {
+			t.Fatalf("content = %q, want first 3 characters before marker", content)
+		}
+		if strings.HasPrefix(content, "α\n") || strings.HasPrefix(content, "α…") {
+			t.Fatalf("max_length appears to be counted as bytes, not characters: %q", content)
+		}
+		if out["truncated"] != true {
+			t.Fatalf("truncated = %v, want true", out["truncated"])
+		}
+	})
+
 	t.Run("offset paging returns continuation", func(t *testing.T) {
 		first := callTool(t, g, "read", map[string]interface{}{
 			"path":       "notes.txt",
@@ -142,6 +169,25 @@ func TestReadToolIssue352LineRangeMaxLengthAndPaging(t *testing.T) {
 		}
 		if second["next_offset"] != 5 {
 			t.Fatalf("second next_offset = %v, want 5", second["next_offset"])
+		}
+	})
+
+	t.Run("offset past eof clamps to file bounds", func(t *testing.T) {
+		out := callTool(t, g, "read", map[string]interface{}{
+			"path":       "notes.txt",
+			"offset":     99,
+			"limit":      2,
+			"max_length": 1024,
+		})
+		content := readToolContent(t, out)
+		if !strings.HasPrefix(content, "five\n") {
+			t.Fatalf("content = %q, want final line after clamping offset to file bounds", content)
+		}
+		if out["offset"] != 5 || out["lines_shown"] != 1 || out["next_offset"] != 0 {
+			t.Fatalf("metadata = offset %v lines %v next %v, want 5/1/0", out["offset"], out["lines_shown"], out["next_offset"])
+		}
+		if out["truncated"] != true {
+			t.Fatalf("truncated = %v, want true because earlier lines were skipped", out["truncated"])
 		}
 	})
 }
@@ -204,5 +250,28 @@ func TestReadToolIssue352Errors(t *testing.T) {
 	}
 	if resp == nil || resp.Success || !strings.Contains(resp.Error, "failed to read file") {
 		t.Fatalf("missing file response = %#v error %v, want read failure", resp, err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		args map[string]interface{}
+	}{
+		{
+			name: "fractional offset",
+			args: map[string]interface{}{"path": "exists.txt", "offset": 1.5},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := g.GetToolRegistry().ExecuteToolCall(&tool.ToolCall{
+				Tool: "read",
+				Args: tc.args,
+			}, tool.ToolContext{SessionID: "issue352"})
+			if err != nil {
+				t.Fatalf("invalid numeric argument should be a validation response, got error: %v", err)
+			}
+			if resp.Success {
+				t.Fatalf("read accepted invalid numeric argument %v; response = %#v", tc.args, resp.Result)
+			}
+		})
 	}
 }
