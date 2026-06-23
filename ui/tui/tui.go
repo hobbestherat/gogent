@@ -79,6 +79,13 @@ type Handlers struct {
 	// is hidden.
 	GetTheme func() config.ThemeConfig
 	SetTheme func(config.ThemeConfig)
+	// GetKeybindings / SetKeybindings read and persist the keyboard-shortcut
+	// overrides (issue #269). SetKeybindings only persists; the customizer applies
+	// each rebind to the live registry itself so the new key works without a
+	// restart. May be nil, in which case overrides are not persisted (the
+	// customizer still applies them live for the session).
+	GetKeybindings func() config.KeybindingsConfig
+	SetKeybindings func(config.KeybindingsConfig)
 	// GetModels returns editable copies of the configured models; UpdateModel
 	// persists changes to one model (matched by Name). May be nil.
 	GetModels   func() []config.ModelConfig
@@ -346,7 +353,15 @@ type Workbench struct {
 	// "analysis-N" ids never collide with backend "session-N" ids.
 	nextAnalysis int
 	handlers     Handlers
-	sidebar      *sidebar
+	// keybindings holds the user's keyboard-shortcut overrides (issue #269): an
+	// actionID -> chord map carrying ONLY actions rebound away from their catalog
+	// default. registerTranscriptBindings / registerFallthroughBindings consult it
+	// (via chordFor) when registering, so a persisted override is applied the moment
+	// a binding is registered; the customizer mutates it and persists via the
+	// GetKeybindings/SetKeybindings handlers. Touched only on the UI thread, like the
+	// rest of the workbench's binding state.
+	keybindings map[tv.ActionID]tv.Chord
+	sidebar     *sidebar
 	// sidebarPinned reserves the right-hand sidebar strip as a hard window
 	// boundary when true (the default): windows are dragged, resized, maximized,
 	// created and restored within the area left of the "Sessions & Agents" panel
@@ -449,6 +464,7 @@ func NewWorkbench(models []*config.ModelConfig) *Workbench {
 		app:           app,
 		desktop:       tv.NewDesktop(app),
 		sessions:      make(map[string]*SessionWindow),
+		keybindings:   make(map[tv.ActionID]tv.Chord),
 		pinned:        make(map[string]bool),
 		sidebarPinned: true,
 		sidebarW:      defaultSidebarWidth,
@@ -531,10 +547,19 @@ func NewWorkbench(models []*config.ModelConfig) *Workbench {
 // that tail position.
 func (w *Workbench) registerFallthroughBindings() {
 	reg := w.desktop.ScopedBindings()
-	reg.Register(tv.KeyBinding{Chord: tv.Chord{Rune: '?'}, ActionID: actionHelpOverlay, Scope: tv.ScopeFallthrough},
-		func() bool { w.showHelpOverlay(); return true })
-	reg.Register(tv.KeyBinding{Chord: tv.Chord{Rune: ':'}, ActionID: actionCommandPalette, Scope: tv.ScopeFallthrough},
-		func() bool { w.showCommandPalette(); return true })
+	// Chords come from chordFor (override-or-catalog-default, issue #269) so a
+	// persisted rebind of '?'/':' takes effect; with no override these are the
+	// catalog defaults '?' and ':'. A cleared (unbound) action registers nothing, so
+	// its key fires nothing.
+	register := func(id tv.ActionID, handler func() bool) {
+		chord := w.chordFor(id)
+		if chord == unboundChord {
+			return
+		}
+		reg.Register(tv.KeyBinding{Chord: chord, ActionID: id, Scope: tv.ScopeFallthrough}, handler)
+	}
+	register(actionHelpOverlay, func() bool { w.showHelpOverlay(); return true })
+	register(actionCommandPalette, func() bool { w.showCommandPalette(); return true })
 }
 
 // SetModels updates the list of available models offered in each session window.

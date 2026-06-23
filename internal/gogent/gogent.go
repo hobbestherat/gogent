@@ -2701,6 +2701,27 @@ func (g *Gogent) SetTheme(t config.ThemeConfig) {
 	}
 }
 
+// Keybindings returns the keyboard-shortcut override configuration (issue #269).
+// The zero value leaves every action at its built-in default, so a config.json
+// predating the setting yields the original shortcuts.
+func (g *Gogent) Keybindings() config.KeybindingsConfig {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.config.Keybindings
+}
+
+// SetKeybindings updates the keyboard-shortcut overrides and persists them to disk
+// so the customised bindings are restored on the next launch (issue #269). The UI
+// re-applies the bindings to its live registry separately (live apply, no restart).
+func (g *Gogent) SetKeybindings(k config.KeybindingsConfig) {
+	g.mu.Lock()
+	g.config.Keybindings = k
+	g.mu.Unlock()
+	if err := g.SaveConfig(); err != nil {
+		g.warnf("Failed to persist config: %v", err)
+	}
+}
+
 // Budget returns the per-session token-budget configuration that drives the
 // status-bar budget alert (issue #63, the UI side of #28). A zero TokenBudget
 // means alerting is off.
