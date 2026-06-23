@@ -118,12 +118,19 @@ func newMCPTool(server string, client *mcp.Client, mt mcp.Tool) *tool.Tool {
 	if mt.InputSchema == nil {
 		schema = map[string]interface{}{"type": "object"}
 	}
+	name := mcpToolPrefix + server + "__" + mt.Name
 	desc := mt.Description
 	if strings.TrimSpace(desc) == "" {
 		desc = fmt.Sprintf("MCP tool %q from server %q.", mt.Name, server)
 	}
+	// Instruct models on the JSON-text tool-call fallback (no native tool-calling)
+	// to call this tool by its full namespaced name. The bare name (mt.Name) only
+	// resolves via the best-effort fallback in ExecuteToolCall and is ambiguous
+	// when several servers expose the same bare name (issue #360).
+	desc = strings.TrimRight(desc, "\n") +
+		fmt.Sprintf("\n\nWhen calling this tool, use its full name %q.", name)
 	return &tool.Tool{
-		Name:        mcpToolPrefix + server + "__" + mt.Name,
+		Name:        name,
 		Description: desc,
 		InputSchema: schema,
 		Execute: func(args map[string]interface{}, ctx tool.ToolContext) (interface{}, error) {
