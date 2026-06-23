@@ -1778,9 +1778,9 @@ List the files and subdirectories immediately inside a workspace directory. Read
  	Evaluate a math expression and get the exact result. Use this whenever you need a number — arithmetic, geometry, trig, logs, combinatorics, physics — instead of doing the arithmetic yourself or shelling out to python/bc.
  	- Input: {"expression": "string"} - A math expression like "sqrt(2)", "sin(pi/2)", "2**10", "G*5.97e24/(6.371e6)^2"
  	- Example: {"tool": "calc", "args": {"expression": "sqrt(2)"}}
- 	- Returns: {"success": true, "result": {"expression": "...", "result": "..."}} — integers print cleanly (2+2 -> "4"), fractionals keep full precision (1/3 -> "0.3333333333333333")
- 	- Operators: + - * / %, power (** or ^), unary minus, parentheses, comparison, ternary (?:)
- 	- Functions: sqrt cbrt pow hypot exp log log2 log10; sin cos tan asin acos atan atan2 (radians) with deg()/rad() converters; sinh cosh tanh; abs floor ceil round trunc sign mod min max; factorial (alias fact) gcd lcm; mean median
+ 	- Returns: {"success": true, "result": {"expression": "...", "result": "..."}} — the result is a string; integers print cleanly (2+2 -> "4"), fractionals keep full precision (1/3 -> "0.3333333333333333"), non-finite as "+Inf"/"-Inf"/"NaN"
+ 	- Operators: + - * /, power (** or ^), unary minus, parentheses. % is integer modulo only — for non-integers use mod(x,y). A comparison (>, <, ==, !=) is only valid as a ternary condition: (a>b ? a : b)
+ 	- Functions: sqrt cbrt pow hypot exp log log2 log10; sin cos tan asin acos atan atan2 (radians) with deg()/rad() converters; sinh cosh tanh; abs floor ceil round trunc sign mod min max; factorial (alias fact, also postfix n!) gcd lcm; mean median
  	- Constants: pi e tau phi sqrt2; physics c G g h hbar k Na R sigma epsilon0 mu0 echarge me mp (case-sensitive, flat names)
 
 ### shell

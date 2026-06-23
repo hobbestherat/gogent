@@ -170,6 +170,19 @@ func operandStart(s string, i int) int {
 	for k >= 0 && isIdentByte(s[k]) {
 		k--
 	}
+	// Keep a scientific-notation exponent sign attached to its literal: the run
+	// above stops at the '-'/'+' of "1e-3", which would otherwise split the
+	// number ("1e-" + factorial(3)). Only absorb a sign that directly follows an
+	// 'e'/'E' that is itself part of a number (digit or '.' before it), so an
+	// ordinary subtraction like "2-3!" is left as 2 - factorial(3).
+	if k >= 2 && (s[k] == '-' || s[k] == '+') && (s[k-1] == 'e' || s[k-1] == 'E') {
+		if c := s[k-2]; c >= '0' && c <= '9' || c == '.' {
+			k-- // step onto the 'e', which the ident run below re-consumes
+			for k >= 0 && isIdentByte(s[k]) {
+				k--
+			}
+		}
+	}
 	return k + 1
 }
 

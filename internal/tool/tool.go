@@ -396,12 +396,13 @@ func (tr *ToolRegistry) RegisterCalcTool() {
 		Name: "calc",
 		Description: "Evaluate a math expression and return the exact result. " +
 			"Prefer this over guessing arithmetic or shelling out to python/bc. " +
-			"Operators: + - * / %, power (** or ^), unary minus, parentheses, comparison and ternary (?:). " +
+			"Operators: + - * /, power (** or ^), unary minus, parentheses; % is integer modulo only (for non-integers use mod(x,y)); " +
+			"a comparison (>, <, ==, !=) is only valid as a ternary condition, e.g. (a>b ? a : b). " +
 			"Functions: sqrt cbrt pow hypot exp log log2 log10; sin cos tan asin acos atan atan2 (radians) with deg()/rad() converters; " +
-			"sinh cosh tanh; abs floor ceil round trunc sign mod min max; factorial (or fact) gcd lcm; mean median. " +
+			"sinh cosh tanh; abs floor ceil round trunc sign mod min max; factorial (or fact, also postfix n!) gcd lcm; mean median. " +
 			"Constants: pi e tau phi sqrt2; physics c G g h hbar k Na R sigma epsilon0 mu0 echarge me mp. " +
 			"Integer results print cleanly (2+2 -> 4); fractionals keep full precision (1/3 -> 0.3333333333333333). " +
-			`Examples: {"expression":"sqrt(2)"}, {"expression":"sin(pi/2)"}, {"expression":"5!"} is written factorial(5), {"expression":"G*5.97e24/(6.371e6)^2"}.`,
+			`Examples: {"expression":"sqrt(2)"}, {"expression":"sin(pi/2)"}, {"expression":"factorial(5)"}, {"expression":"G*5.97e24/(6.371e6)^2"}.`,
 		ReadOnly: true,
 		InputSchema: map[string]interface{}{
 			"type": "object",

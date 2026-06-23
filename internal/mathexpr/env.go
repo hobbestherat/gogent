@@ -138,10 +138,11 @@ func factorial(n float64) (float64, error) {
 	if n < 0 || n != math.Trunc(n) {
 		return 0, fmt.Errorf("factorial: requires a non-negative integer, got %v", n)
 	}
-	// Bound the work: 170! already overflows float64 to +Inf, and the cap keeps a
-	// hostile expression from spinning on a huge big.Int multiply.
-	if n > 10000 {
-		return 0, fmt.Errorf("factorial: argument too large (max 10000)")
+	// 171! already overflows float64 to +Inf, so short-circuit there: it gives the
+	// correct float64 result (+Inf) without spinning a huge, ultimately-discarded
+	// big.Int multiply for a hostile argument like factorial(1e9).
+	if n > 170 {
+		return math.Inf(1), nil
 	}
 	r := big.NewInt(1)
 	for i := int64(2); i <= int64(n); i++ {
