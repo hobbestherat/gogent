@@ -1,8 +1,8 @@
 package ui
 
 import (
-	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -66,6 +66,13 @@ func keybindByID(id tv.ActionID) (keybindAction, bool) {
 func keybindDefault(id tv.ActionID) tv.Chord {
 	a, _ := keybindByID(id)
 	return a.deflt
+}
+
+// keybindScope returns the dispatch scope of the catalog action id, or ScopeGlobal for
+// an action not in the catalog (the zero value).
+func keybindScope(id tv.ActionID) tv.Scope {
+	a, _ := keybindByID(id)
+	return a.scope
 }
 
 // keybindActionName returns the human label for id, falling back to the raw actionID
@@ -186,105 +193,80 @@ func (w *Workbench) recordOverride(id tv.ActionID, chord tv.Chord) {
 	w.keybindings[id] = chord
 }
 
-// applyBinding assigns chord to id and applies it live (issue #269). It rebinds the
-// registered binding through registry.Rebind — so the new key works at once and the
-// cheatsheet/palette (which derive their hints from the registry) update on next open —
-// and records the override for persistence. It returns false only when Rebind reports a
-// genuine same-scope ConflictError, which the caller must resolve first (via swap or a
-// reassign confirm); a "no binding registered yet" outcome (e.g. a Focus action with no
-// window open) is not a failure — the override is still recorded so the next window to
-// register picks it up.
-func (w *Workbench) applyBinding(id tv.ActionID, chord tv.Chord) bool {
-	if reg := w.scopedBindings(); reg != nil {
-		if _, registered := reg.BindingFor(id); registered {
-			if err := reg.Rebind(id, chord); err != nil {
-				var conflict *tv.ConflictError
-				if errors.As(err, &conflict) {
-					return false
-				}
-				// Any other error (only "no binding registered for action", which the
-				// guard above already excludes) is non-fatal: fall through and record
-				// the override so a future registration applies it.
-				//
-				// Rebind updates the FIRST entry carrying id. Fallthrough actions
-				// ('?'/':') have exactly one entry, so they update fully; the per-window
-				// transcript Focus actions have one entry per open window, so a rebind
-				// while several windows are open updates the first and is picked up by
-				// the others as they reopen (their registration reads chordFor). This
-				// mirrors the pre-existing per-window registration model (see
-				// registerTranscriptBindings) and keeps the override map the durable
-				// source of truth.
-			}
-		}
-	}
-	w.recordOverride(id, chord)
-	return true
-}
-
-// fKeyChords is the pool of parking chords used to break the transient conflicts a swap
-// or a reset-all would otherwise hit (issue #269): function keys are deliverable and no
-// catalog action binds them, so any subset is mutually free and free of the letters /
-// punctuation the actions use. There are more than the catalog has actions, so a unique
-// park is always available.
-var fKeyChords = []tv.Chord{
-	{Key: tui.KeyF1}, {Key: tui.KeyF2}, {Key: tui.KeyF3}, {Key: tui.KeyF4},
-	{Key: tui.KeyF5}, {Key: tui.KeyF6}, {Key: tui.KeyF7}, {Key: tui.KeyF8},
-	{Key: tui.KeyF9}, {Key: tui.KeyF10}, {Key: tui.KeyF11}, {Key: tui.KeyF12},
-}
-
-// firstFreeChord returns a chord currently unbound in scope, scanning the function-key
-// pool. It backs the swap's parking step; with at most a dozen catalog actions and
-// twelve function keys one is always free in practice, but it falls back to F12 if the
-// scan somehow exhausts.
-func (w *Workbench) firstFreeChord(scope tv.Scope) tv.Chord {
+// rebuildScopedBindings makes the live scoped registry a faithful projection of the
+// current override map (issue #269). It clears the scoped registry and re-registers
+// every scoped binding from scratch — the app-fallthrough '?'/':' keys and every OPEN
+// window's transcript keys — each taking its chord from chordFor, so a rebind takes
+// effect at once in EVERY open window, not just the first one registered. This is the
+// only safe way to update the per-window Focus bindings with the toolkit's API (Rebind
+// touches one entry, and there is no Unregister); only these two sites register into the
+// scoped registry, so the rebuild restores it completely. Menu accelerators live in the
+// separate Global (menu) registry and are untouched.
+func (w *Workbench) rebuildScopedBindings() {
 	reg := w.scopedBindings()
-	for _, c := range fKeyChords {
-		if reg == nil {
-			return c
-		}
-		if _, taken := reg.ConflictFor(c, scope); !taken {
-			return c
-		}
+	if reg == nil {
+		return
 	}
-	return tv.Chord{Key: tui.KeyF12}
+	reg.Clear()
+	w.registerFallthroughBindings()
+	w.mu.Lock()
+	windows := make([]*SessionWindow, 0, len(w.sessions))
+	for _, sw := range w.sessions {
+		windows = append(windows, sw)
+	}
+	w.mu.Unlock()
+	for _, sw := range windows {
+		sw.registerTranscriptBindings()
+	}
+}
+
+// applyBinding assigns chord to id and applies it live (issue #269): it records the
+// override and rebuilds the scoped registry so the new key works at once — in every open
+// window — and the cheatsheet/palette (which derive their hints from the registry) track
+// it. It is a force-set: the customizer's commit path resolves any same-scope conflict
+// first (via conflictHolder + a swap), so the chord it passes here is always free; tests
+// and resets likewise pass conflict-free chords.
+func (w *Workbench) applyBinding(id tv.ActionID, chord tv.Chord) {
+	w.recordOverride(id, chord)
+	w.rebuildScopedBindings()
 }
 
 // swapBindings reassigns chord (currently held by holder) to target, giving holder
 // target's previous chord in return (issue #269's "Reassign?" path). The swap is
-// lossless — both actions stay bound — and uses only the toolkit's conflict-checked
-// Rebind: holder is first parked on a free function key so chord frees up, target then
-// takes chord, and finally holder takes target's vacated chord. Callers persist once
-// afterwards.
+// lossless — both actions stay bound — and conflict-free by construction: target takes
+// holder's chord while holder takes target's, so the two never collide. It updates the
+// override map for both and rebuilds the registry once. Callers persist afterwards.
 func (w *Workbench) swapBindings(target keybindAction, holder tv.ActionID, chord tv.Chord) {
 	oldTarget := w.chordFor(target.id)
-	park := w.firstFreeChord(target.scope)
-	w.applyBinding(holder, park) // holder off `chord`; `chord` now free
-	w.applyBinding(target.id, chord)
-	w.applyBinding(holder, oldTarget) // `oldTarget` now free; holder lands there
+	w.recordOverride(target.id, chord)
+	w.recordOverride(holder, oldTarget)
+	w.rebuildScopedBindings()
 }
 
 // resetBinding restores id to its catalog default and clears its override (issue #269,
 // per-row Reset). It returns false when the default is currently held by a DIFFERENT
 // action — a clash the user created by overriding that other action onto this default —
-// in which case nothing changes and the caller surfaces the holder; reset-all avoids
-// this by parking everything first.
+// in which case nothing changes and the caller surfaces the holder. reset-all avoids
+// this by clearing every override at once.
 func (w *Workbench) resetBinding(id tv.ActionID) bool {
-	return w.applyBinding(id, keybindDefault(id))
+	a, ok := keybindByID(id)
+	if !ok {
+		return false
+	}
+	if _, clash := w.conflictHolder(a, a.deflt); clash {
+		return false
+	}
+	w.applyBinding(id, a.deflt)
+	return true
 }
 
 // resetAllBindings restores every catalog action to its default (issue #269,
-// dialog-level "Reset all"). It parks every action on a distinct function key first so
-// no default is still held by another action, then assigns each its default — the
-// defaults are mutually conflict-free by construction, so every assignment succeeds —
-// and clears the override map. Callers persist once afterwards.
+// dialog-level "Reset all"): it drops every override and rebuilds the registry. The
+// catalog defaults are mutually conflict-free by construction, so the rebuilt registry
+// has no collisions. Callers persist afterwards.
 func (w *Workbench) resetAllBindings() {
-	actions := keybindActions()
-	for i, a := range actions {
-		w.applyBinding(a.id, fKeyChords[i%len(fKeyChords)])
-	}
-	for _, a := range actions {
-		w.applyBinding(a.id, a.deflt)
-	}
+	w.keybindings = make(map[tv.ActionID]tv.Chord)
+	w.rebuildScopedBindings()
 }
 
 // --- Persistence ------------------------------------------------------------
@@ -318,41 +300,74 @@ func (w *Workbench) persistKeybindings() {
 	}
 }
 
-// LoadKeybindings installs the persisted overrides at startup (issue #269): it rebuilds
-// the override map from cfg — ignoring unknown actionIDs and unparseable specs so a
-// hand-edited or stale config can't break startup — and re-applies each override to any
-// already-registered scoped binding (the '?'/':' fallthrough keys, registered at
-// construction). Transcript Focus bindings are registered per window and pick their
-// override up from chordFor when their window opens, so a load before sessions are
-// restored is sufficient. Call it once, after SetHandlers and before windows open.
+// LoadKeybindings installs the persisted overrides at startup (issue #269) and rebuilds
+// the scoped registry to match. It accepts overrides defensively so a stale or
+// hand-edited config can neither break startup nor leave the registry inconsistent with
+// the map: an override is skipped when its actionID is unknown, its spec is unparseable,
+// its chord is undeliverable, it breaks the scope rule, or it would collide (same scope)
+// with another action's effective binding. The accept loop keeps a running, always
+// conflict-free assignment (it starts from every action at its default — mutually free —
+// and only takes a change that preserves freeness), so the resulting override map never
+// disagrees with the live registry. Transcript Focus bindings are registered per window
+// from chordFor when their window opens, so calling this once after SetHandlers and
+// before windows open is sufficient; the rebuild here applies the '?'/':' overrides
+// immediately.
 func (w *Workbench) LoadKeybindings(cfg config.KeybindingsConfig) {
-	w.keybindings = make(map[tv.ActionID]tv.Chord)
-	for idStr, spec := range cfg.Overrides {
+	// current holds the effective chord of every catalog action; seed it with the
+	// defaults, which are conflict-free, then fold accepted overrides in one at a time.
+	current := make(map[tv.ActionID]tv.Chord)
+	for _, a := range keybindActions() {
+		current[a.id] = a.deflt
+	}
+	for _, idStr := range sortedKeys(cfg.Overrides) {
 		id := tv.ActionID(idStr)
 		if _, ok := keybindByID(id); !ok {
-			continue // unknown action — ignore rather than fail
+			continue // unknown action
 		}
-		chord, ok := parseChordSpec(spec)
+		chord, ok := parseChordSpec(cfg.Overrides[idStr])
 		if !ok {
-			continue
+			continue // unparseable spec
 		}
-		if sameChord(chord, keybindDefault(id)) {
-			continue // redundant override; leave the action at its default
+		scope := keybindScope(id)
+		if deliverable, _ := chord.Deliverable(); !deliverable {
+			continue // a chord the terminal can't deliver
 		}
-		w.keybindings[id] = chord
+		if allowed, _ := validateScopeRule(scope, chord); !allowed {
+			continue // breaks the scope rule
+		}
+		collides := false
+		for _, other := range keybindActions() {
+			if other.id == id || other.scope != scope {
+				continue
+			}
+			if sameChord(current[other.id], chord) {
+				collides = true
+				break
+			}
+		}
+		if collides {
+			continue // another action already holds this chord in the same scope
+		}
+		current[id] = chord
 	}
-	reg := w.scopedBindings()
-	if reg == nil {
-		return
-	}
-	for id, chord := range w.keybindings {
-		if _, registered := reg.BindingFor(id); registered {
-			// Ignore a conflict: overrides were validated when saved, so this only
-			// fails on a hand-edited config — in which case the binding keeps its
-			// default, which is a safe degradation.
-			_ = reg.Rebind(id, chord)
+	w.keybindings = make(map[tv.ActionID]tv.Chord)
+	for _, a := range keybindActions() {
+		if !sameChord(current[a.id], a.deflt) {
+			w.keybindings[a.id] = current[a.id]
 		}
 	}
+	w.rebuildScopedBindings()
+}
+
+// sortedKeys returns m's keys in lexical order, so the override accept loop is
+// deterministic regardless of map iteration order.
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // --- Chord helpers ----------------------------------------------------------

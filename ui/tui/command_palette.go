@@ -23,8 +23,10 @@ type command struct {
 	// phase 4a). When set and the binding resolves, commands() overwrites keys with
 	// the registry's real chord (registry.BindingFor(actionID).Chord.String()) so the
 	// palette and cheatsheet can never drift from the live binding. Empty leaves the
-	// hardcoded keys hint in place (slash commands, menu accelerators, and the
-	// composite "Ctrl+F, /" / "Ctrl+K, :" hints that name more than one chord).
+	// keys hint as built in the table (slash commands and menu accelerators). The two
+	// composite hints that name more than one chord ("Ctrl+F, /" and "Ctrl+K, :") also
+	// leave actionID empty, but build their variable half from chordFor so a phase-4b
+	// rebind of the '/' or ':' chord still shows through (issue #269).
 	actionID tv.ActionID
 	run      func()      // palette action; nil marks a reference-only binding
 	enabled  func() bool // availability predicate; nil means always available
@@ -125,7 +127,7 @@ func (w *Workbench) commands() []command {
 		// Transcript view controls. The single-letter keys only fire while a
 		// transcript is focused; listing them here is exactly the cheatsheet the
 		// help overlay exists to provide.
-		{category: "Transcript", name: "Find in transcript", keys: "Ctrl+F, /",
+		{category: "Transcript", name: "Find in transcript", keys: "Ctrl+F, " + displayChord(w.chordFor(actionTranscriptFind)),
 			run: func() { w.withActiveTranscript((*SessionWindow).promptFind) }},
 		{category: "Transcript", name: "Show all (clear filter)", keys: "Esc", actionID: actionTranscriptShowAll,
 			run: func() { w.transcriptDo((*transcriptModel).showAll) }},
@@ -157,7 +159,7 @@ func (w *Workbench) commands() []command {
 		// Application-wide actions. The palette itself is reference-only (you are
 		// already in it); the sidebar pin and help/quit are runnable.
 		{category: "App", name: "Pin / unpin sidebar", run: w.ToggleSidebarPin},
-		{category: "App", name: "Command palette", keys: "Ctrl+K, :"},
+		{category: "App", name: "Command palette", keys: "Ctrl+K, " + displayChord(w.chordFor(actionCommandPalette))},
 		{category: "App", name: "Keybinding help", keys: "?", actionID: actionHelpOverlay, run: w.showHelpOverlay},
 		{category: "App", name: "Customize keybindings", run: w.showKeybindingCustomizer},
 		{category: "App", name: "Quit", keys: "Ctrl+Q", run: w.confirmQuit},
@@ -165,8 +167,8 @@ func (w *Workbench) commands() []command {
 	// Derive the key hint from the live registry for every entry that names an action
 	// (issue #269, phase 4a): the binding is the single source of truth, so the
 	// palette and cheatsheet can never drift from what the key actually does. Entries
-	// without an actionID (slash commands, menu accelerators, composite hints) keep
-	// their hardcoded keys.
+	// without an actionID (slash commands, menu accelerators) keep their table keys;
+	// the two composite hints already folded their live chord in above via chordFor.
 	for i := range cmds {
 		if cmds[i].actionID == "" {
 			continue

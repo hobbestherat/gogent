@@ -145,10 +145,9 @@ func (w *Workbench) showKeybindingCustomizer() {
 					})
 				return
 			}
-			if !w.applyBinding(a.id, chord) {
-				setStatus("✗ Could not bind (unexpected conflict).")
-				return
-			}
+			// No conflict (checked above): a plain force-set applies it live in every
+			// open window and records the override.
+			w.applyBinding(a.id, chord)
 			w.persistKeybindings()
 			render()
 			setStatus(fmt.Sprintf("%s → %s.", a.name, displayChord(chord)))
@@ -195,7 +194,24 @@ func (w *Workbench) showKeybindingCustomizer() {
 				setStatus(fmt.Sprintf("Rebind of %q cancelled.", a.name))
 				return true
 			case tui.KeyBackspace:
-				setStatus(capturePrompt(*capturing))
+				// "Clear" the action: drop its override and restore its catalog default,
+				// then leave capture. (Capture commits on the first chord, so there is no
+				// pending buffer to erase — clearing the customization is the useful and
+				// honest meaning of Backspace here.)
+				a := *capturing
+				capturing = nil
+				if !w.isOverridden(a.id) {
+					setStatus(fmt.Sprintf("%q is already at its default (%s).", a.name, displayChord(a.deflt)))
+					return true
+				}
+				if !w.resetBinding(a.id) {
+					holder, _ := w.conflictHolder(a, a.deflt)
+					setStatus(fmt.Sprintf("Can't clear %q: default %s is in use by %q.", a.name, displayChord(a.deflt), keybindActionName(holder)))
+					return true
+				}
+				w.persistKeybindings()
+				render()
+				setStatus(fmt.Sprintf("%q cleared to its default %s.", a.name, displayChord(a.deflt)))
 				return true
 			}
 			a := *capturing
