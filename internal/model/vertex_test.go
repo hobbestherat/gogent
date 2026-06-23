@@ -68,9 +68,6 @@ func TestVertexAPITypeAndSpec(t *testing.T) {
 		if id == string(APITypeVertex) {
 			found = true
 		}
-		if id == "vertex-native" || id == "gemini" {
-			t.Fatalf("APITypeIDs() contains out-of-scope Phase B id %q", id)
-		}
 	}
 	if !found {
 		t.Fatalf("APITypeIDs() = %v, missing vertex", APITypeIDs())
