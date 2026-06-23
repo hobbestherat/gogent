@@ -206,6 +206,50 @@ func TestSpawnSubagentAsyncReinjectsCompletedResultOnNextRootTurn(t *testing.T) 
 	}
 }
 
+func TestSpawnSubagentAsyncCompletedHandleRemainsQueryable(t *testing.T) {
+	childDone := make(chan struct{})
+	var once sync.Once
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(childDone) })
+		writeModelFinal(w, "SUCCESS: completed handle result")
+	}
+	g, reg, cleanup := newBatchSession(t, handler, 1)
+	defer cleanup()
+	us := g.GetUserSession("session_test")
+	events := make(chan agent.SessionEvent, 8)
+	us.SetObserver(func(ev agent.SessionEvent) { events <- ev })
+
+	resp, err := executeAsyncSpawn(t, reg, map[string]interface{}{
+		"async": true,
+		"name":  "future",
+		"task":  "finish and remain queryable",
+	})
+	if err != nil {
+		t.Fatalf("async spawn returned error: %v", err)
+	}
+	got := decodeAsyncSpawnResult(t, resp)
+	if len(got.Tasks) != 1 || got.Tasks[0].Handle == "" {
+		t.Fatalf("async spawn tasks = %+v, want one handle", got.Tasks)
+	}
+	select {
+	case <-childDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("child did not complete")
+	}
+	waitBackgroundEvent(t, events, false)
+
+	status, result, err := us.InteractiveAgentStatus(got.Tasks[0].Handle)
+	if err != nil {
+		t.Fatalf("completed async handle should remain queryable via agent_status: %v", err)
+	}
+	if status != agent.StatusCompleted {
+		t.Fatalf("completed async handle status = %q, want %q", status, agent.StatusCompleted)
+	}
+	if !strings.Contains(result, "SUCCESS: completed handle result") {
+		t.Fatalf("completed async handle result = %q, want final result text", result)
+	}
+}
+
 func TestSpawnSubagentAsyncLimiterSlotReleasedAfterSessionStop(t *testing.T) {
 	arrived := make(chan struct{}, 2)
 	release := make(chan struct{})
