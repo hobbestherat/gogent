@@ -321,18 +321,19 @@ func (g *Gogent) initializeToolRegistry() {
 			"file before editing so your find text matches what is actually there. The path may be relative to the " +
 			"workspace root or absolute; reads are read-only and run without a permission prompt for in-workspace " +
 			"paths. By default the read is bounded so a huge file cannot flood the context: it returns at most the " +
-			"first 2000 lines or 100 KB, whichever comes first. A normal small file is returned in full, unchanged. " +
-			"When the result is bounded, the returned content ends with a \"… (truncated …)\" marker and the result " +
-			"reports truncated, total_lines, total_bytes and next_offset — page through the rest by calling read " +
-			"again with offset set to next_offset, and use grep first to jump straight to the relevant lines of a " +
-			"large file. Use offset/limit to read a specific line range and max_length to raise or lower the byte cap.",
+			"first 2000 lines or 102400 characters, whichever comes first. A normal small file is returned in full, " +
+			"unchanged. When the result is bounded, the returned content ends with a \"… (truncated …)\" marker and " +
+			"the result reports truncated, total_lines, total_bytes and next_offset — page through the rest by calling " +
+			"read again with offset set to next_offset, and use grep first to jump straight to the relevant lines of a " +
+			"large file. Use offset/limit to read a specific line range and max_length to raise or lower the character " +
+			"cap.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"path":       map[string]interface{}{"type": "string", "description": "File path to read, relative to the workspace root or absolute."},
 				"offset":     map[string]interface{}{"type": "integer", "minimum": 1, "description": "1-based line number to start reading from. Omit for the default of 1; a value below 1 is treated as 1. Set it to a previous read's next_offset to page through a large file."},
 				"limit":      map[string]interface{}{"type": "integer", "minimum": 1, "description": "Maximum number of lines to return. Omit (or pass 0) for the default of 2000. The read is also bounded by max_length, whichever limit is reached first."},
-				"max_length": map[string]interface{}{"type": "integer", "minimum": 1, "description": "Maximum number of bytes of content to return. Omit (or pass 0) for the default of 102400 (100 KB). The slice is cut on a UTF-8 boundary; raise it to pull more of a dense file in one call."},
+				"max_length": map[string]interface{}{"type": "integer", "minimum": 1, "description": "Maximum number of characters of content to return. Omit (or pass 0) for the default of 102400. The slice is cut on a character (UTF-8 rune) boundary; raise it to pull more of a dense file in one call."},
 			},
 			"required": []string{"path"},
 		},
@@ -1263,17 +1264,16 @@ func intArg(args map[string]interface{}, key string) int {
 // at — when the file ends within the slice (NextOffset == 0) it only reports the
 // skipped leading lines.
 func readTruncationMarker(res *fileops.ReadRangeResult) string {
-	// Nothing shown: either offset is past EOF, or the byte cap cut the very first
-	// line. Point the model at where to resume (next_offset) or note the overshoot.
+	// No whole line fit: the character cap cut the very first line of the slice.
+	// Point the model at the line to resume from with a larger max_length.
 	if res.LinesShown == 0 {
-		if res.NextOffset > 0 {
-			return fmt.Sprintf(
-				"\n\n… (truncated: line %d exceeds max_length of this read; %d total lines. Read again with offset=%d and a larger max_length to continue.)",
-				res.Offset, res.TotalLines, res.NextOffset)
+		resume := res.NextOffset
+		if resume == 0 {
+			resume = res.Offset
 		}
 		return fmt.Sprintf(
-			"\n\n… (offset %d is past the end of the file; it has %d line(s).)",
-			res.Offset, res.TotalLines)
+			"\n\n… (truncated: line %d exceeds the max_length of this read; %d total line(s). Read again with offset=%d and a larger max_length to continue.)",
+			res.Offset, res.TotalLines, resume)
 	}
 	last := res.Offset + res.LinesShown - 1
 	if res.NextOffset > 0 {

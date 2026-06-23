@@ -496,14 +496,16 @@ func (fsys *FileSystem) ReadFile(path string, auth Authorization) (string, error
 // dump) cannot flood the model's context window — the "tool result is context"
 // anti-pattern — while a normal small file stays under both caps and is returned
 // in full, unchanged. A caller pages past the line cap with offset/limit and
-// raises the byte cap with max_length.
+// raises the character cap with max_length.
 const (
 	// DefaultReadMaxLines caps how many lines a bounded read returns when the
 	// caller gives no limit. A file with fewer lines is returned whole.
 	DefaultReadMaxLines = 2000
-	// DefaultReadMaxBytes caps how many bytes a bounded read returns when the
+	// DefaultReadMaxBytes caps how many characters a bounded read returns when the
 	// caller gives no max_length. It bounds dense files (and single huge lines)
-	// that would slip under the line cap; a smaller slice is returned whole.
+	// that would slip under the line cap; a smaller slice is returned whole. Its
+	// name is retained for API compatibility, but per issue #352 the cap counts
+	// characters (runes), not bytes; for the common ASCII file the two coincide.
 	DefaultReadMaxBytes = 100 * 1024
 )
 
@@ -513,7 +515,7 @@ const (
 // the paging metadata a caller surfaces so the model can continue rather than
 // assume it saw the whole file.
 type ReadRangeResult struct {
-	// Content is the (possibly sliced and byte-capped) file text.
+	// Content is the (possibly sliced and character-capped) file text.
 	Content string
 	// Offset is the 1-based line number of the first line in Content.
 	Offset int
@@ -526,29 +528,47 @@ type ReadRangeResult struct {
 	// TotalBytes is the total size of the file in bytes.
 	TotalBytes int
 	// Truncated is true when Content is not the whole file (lines skipped before,
-	// lines remaining after, or the byte cap cut the slice).
+	// lines remaining after, or the character cap cut the slice).
 	Truncated bool
 	// NextOffset is the 1-based line to resume at to continue paging, or 0 when
 	// the file ended within Content (nothing more to read).
 	NextOffset int
 }
 
-// BoundContent slices file content to a 1-based line range and a byte cap,
+// runePrefixBytes returns the byte length of the first n runes of s (the byte
+// index at which the (n+1)-th rune begins), or len(s) when s has at most n runes.
+// Ranging a string yields each rune's start byte index, so s[:runePrefixBytes(s,
+// n)] is the first n runes cut on a rune boundary.
+func runePrefixBytes(s string, n int) int {
+	count := 0
+	for i := range s {
+		if count == n {
+			return i
+		}
+		count++
+	}
+	return len(s)
+}
+
+// BoundContent slices file content to a 1-based line range and a character cap,
 // returning a bounded view plus the metadata needed to page through the rest
 // (issue #352). It is the pure core behind the read tool's bounding, kept here
 // with the file primitives and free of I/O so it is trivially testable.
 //
-// offset is the 1-based first line (values < 1 are treated as 1). limit is the
-// number of lines to include; limit <= 0 applies DefaultReadMaxLines. maxLength
-// caps the returned bytes; maxLength <= 0 applies DefaultReadMaxBytes and the cut
-// is made on a UTF-8 rune boundary so Content is never invalid UTF-8. When the
-// returned slice is not the whole file, Truncated is set and NextOffset points at
-// the next unread line (0 when the file ended within the slice).
+// offset is the 1-based first line (values < 1 are treated as 1; an offset past
+// the last line is clamped to the last line so a past-end read returns the final
+// line rather than nothing). limit is the number of lines to include; limit <= 0
+// applies DefaultReadMaxLines. maxLength caps the returned characters (runes), not
+// bytes — mirroring Anthropic's text-editor max_characters; maxLength <= 0 applies
+// DefaultReadMaxBytes. The cut always lands on a rune boundary, so Content is never
+// invalid UTF-8. When the returned slice is not the whole file, Truncated is set
+// and NextOffset points at the next unread line (0 when the file ended within the
+// slice).
 //
 // Line offsets are computed by byte position, so Content is the exact original
 // bytes of the slice (a trailing newline does not open an empty final line, and
 // an empty file has zero lines) — reading offset 1 with a limit at least the line
-// count and no byte cut returns the file verbatim.
+// count and no character cut returns the file verbatim.
 func BoundContent(content string, offset, limit, maxLength int) ReadRangeResult {
 	totalBytes := len(content)
 
@@ -572,9 +592,23 @@ func BoundContent(content string, offset, limit, maxLength int) ReadRangeResult 
 	if effLimit <= 0 {
 		effLimit = DefaultReadMaxLines
 	}
-	maxBytes := maxLength
-	if maxBytes <= 0 {
-		maxBytes = DefaultReadMaxBytes
+	maxChars := maxLength
+	if maxChars <= 0 {
+		maxChars = DefaultReadMaxBytes
+	}
+
+	// An empty file has no lines to slice; report it as a complete (untruncated)
+	// empty read.
+	if totalLines == 0 {
+		return ReadRangeResult{Offset: offset, Limit: effLimit, TotalLines: 0, TotalBytes: totalBytes}
+	}
+
+	// Clamp an offset past the last line to the last line, so a past-end read
+	// returns the final line rather than nothing (issue #352: the 1-based range is
+	// clamped to file bounds). Truncated still ends up true below because earlier
+	// lines were skipped.
+	if offset > totalLines {
+		offset = totalLines
 	}
 
 	res := ReadRangeResult{
@@ -582,13 +616,6 @@ func BoundContent(content string, offset, limit, maxLength int) ReadRangeResult 
 		Limit:      effLimit,
 		TotalLines: totalLines,
 		TotalBytes: totalBytes,
-	}
-
-	// Offset past the last line: nothing to return, but flag truncation if the
-	// file had content the caller skipped past.
-	if offset > totalLines {
-		res.Truncated = totalLines > 0
-		return res
 	}
 
 	startLine := offset - 1
@@ -604,17 +631,15 @@ func BoundContent(content string, offset, limit, maxLength int) ReadRangeResult 
 	slice := content[byteStart:byteEnd]
 	linesShown := endLine - startLine
 
-	// Byte cap: trim to maxBytes on a rune boundary, then recompute how many WHOLE
-	// (newline-terminated) lines survived so paging resumes at a clean boundary. A
-	// partial trailing line left after the cut is intentionally not counted as
-	// shown — the caller resumes at it and re-reads it in full.
+	// Character cap: keep the first maxChars runes (issue #352 mirrors Anthropic's
+	// text-editor max_characters), then recompute how many WHOLE (newline-
+	// terminated) lines survived so paging resumes at a clean boundary. The cut is
+	// on a rune boundary by construction, so Content stays valid UTF-8. A partial
+	// trailing line left after the cut is intentionally not counted as shown — the
+	// caller resumes at it and re-reads it in full.
 	maxTruncated := false
-	if len(slice) > maxBytes {
-		cut := maxBytes
-		for cut > 0 && !utf8.RuneStart(slice[cut]) {
-			cut--
-		}
-		slice = slice[:cut]
+	if utf8.RuneCountInString(slice) > maxChars {
+		slice = slice[:runePrefixBytes(slice, maxChars)]
 		maxTruncated = true
 		linesShown = strings.Count(slice, "\n")
 	}
