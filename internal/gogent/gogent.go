@@ -1424,9 +1424,15 @@ func (g *Gogent) ContinueSession(file string) (LoadedSession, bool) {
 	// restore set (issue #325). UnarchiveBase is a no-op for an already-active base
 	// and returns the (possibly renamed) active index path to load from. The
 	// read-only Open path (LoadSavedSession) deliberately does NOT unarchive.
-	if activeFile, err := g.store.UnarchiveBase(file); err != nil {
+	// UnarchiveBase always reports the path to load from — including the
+	// already-active path when a partial rename moved the index but not every
+	// shard — so adopt the returned path even on error rather than re-loading the
+	// (now possibly renamed-away) archived file.
+	activeFile, err := g.store.UnarchiveBase(file)
+	if err != nil {
 		g.warnf("failed to unarchive session %s: %v", file, err)
-	} else {
+	}
+	if activeFile != "" {
 		file = activeFile
 	}
 	ls, err := g.store.LoadSession(file)

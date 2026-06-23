@@ -744,6 +744,14 @@ func (s *SessionStore) UnarchiveBase(file string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Refuse to clobber a live active base. If an active index already exists for
+	// this prefix (a same-second/same-id active session coexisting with the
+	// archived one), os.Rename would silently overwrite it and destroy the open
+	// session's data, so bail out and let the caller load the active base as-is.
+	if _, err := os.Stat(indexFilePath(activeBase)); err == nil {
+		return indexFilePath(activeBase), fmt.Errorf("unarchive %s: an active session already exists at %s", base, activeBase)
+	}
+
 	// The shard table lives in the (archived) index, so read it to learn which
 	// shard files to rename alongside the index.
 	idx, err := loadIndexFile(base)
