@@ -316,16 +316,23 @@ func (g *Gogent) initializeToolRegistry() {
 	g.toolRegistry.Register(&tool.Tool{
 		Name:     "read",
 		ReadOnly: true,
-		Description: "Read a file from the workspace and return its complete contents. Use it before reasoning " +
-			"about, quoting, or editing a file — never assume a file's contents without reading it first, and always " +
-			"read a file before editing so your find text matches what is actually there. The path may be relative " +
-			"to the workspace root or absolute; reads are read-only and run without a permission prompt for " +
-			"in-workspace paths. It returns the whole file untruncated, so for a very large file use grep first to " +
-			"locate the relevant lines.",
+		Description: "Read a file from the workspace and return its contents. Use it before reasoning about, " +
+			"quoting, or editing a file — never assume a file's contents without reading it first, and always read a " +
+			"file before editing so your find text matches what is actually there. The path may be relative to the " +
+			"workspace root or absolute; reads are read-only and run without a permission prompt for in-workspace " +
+			"paths. By default the read is bounded so a huge file cannot flood the context: it returns at most the " +
+			"first 2000 lines or 100 KB, whichever comes first. A normal small file is returned in full, unchanged. " +
+			"When the result is bounded, the returned content ends with a \"… (truncated …)\" marker and the result " +
+			"reports truncated, total_lines, total_bytes and next_offset — page through the rest by calling read " +
+			"again with offset set to next_offset, and use grep first to jump straight to the relevant lines of a " +
+			"large file. Use offset/limit to read a specific line range and max_length to raise or lower the byte cap.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"path": map[string]interface{}{"type": "string", "description": "File path to read, relative to the workspace root or absolute."},
+				"path":       map[string]interface{}{"type": "string", "description": "File path to read, relative to the workspace root or absolute."},
+				"offset":     map[string]interface{}{"type": "integer", "description": "1-based line number to start reading from (default 1). Set it to a previous read's next_offset to page through a large file."},
+				"limit":      map[string]interface{}{"type": "integer", "description": "Maximum number of lines to return (default 2000). The read is also bounded by max_length, whichever limit is reached first."},
+				"max_length": map[string]interface{}{"type": "integer", "description": "Maximum number of bytes of content to return (default 102400, i.e. 100 KB). The slice is cut on a UTF-8 boundary; raise it to pull more of a dense file in one call."},
 			},
 			"required": []string{"path"},
 		},
@@ -341,15 +348,27 @@ func (g *Gogent) initializeToolRegistry() {
 				return nil, fmt.Errorf("check file access: %w", err)
 			}
 
-			content, err := g.fileSystem.ReadFile(path, auth)
+			res, err := g.fileSystem.ReadRange(path, intArg(args, "offset"), intArg(args, "limit"), intArg(args, "max_length"), auth)
 			if err != nil {
 				return nil, fmt.Errorf("failed to read file: %v", err)
 			}
 
+			content := res.Content
+			if res.Truncated {
+				content += readTruncationMarker(res)
+			}
+
 			return map[string]interface{}{
-				"success": true,
-				"path":    path,
-				"content": content,
+				"success":     true,
+				"path":        path,
+				"content":     content,
+				"offset":      res.Offset,
+				"limit":       res.Limit,
+				"lines_shown": res.LinesShown,
+				"total_lines": res.TotalLines,
+				"total_bytes": res.TotalBytes,
+				"truncated":   res.Truncated,
+				"next_offset": res.NextOffset,
 			}, nil
 		},
 	})
@@ -1217,6 +1236,55 @@ func stringArg(args map[string]interface{}, key string) string {
 func boolArg(args map[string]interface{}, key string) bool {
 	b, _ := args[key].(bool)
 	return b
+}
+
+// intArg returns args[key] as an int, or 0 when it is absent or not numeric. It
+// accepts the float64 a JSON number decodes to as well as the native integer
+// types a Go caller (e.g. a test) may pass, mirroring the loose coercion the
+// other tools use for optional numeric parameters.
+func intArg(args map[string]interface{}, key string) int {
+	switch v := args[key].(type) {
+	case float64:
+		return int(v)
+	case float32:
+		return int(v)
+	case int:
+		return v
+	case int64:
+		return int(v)
+	default:
+		return 0
+	}
+}
+
+// readTruncationMarker is the human-readable notice appended to a bounded read's
+// content so the model knows it did NOT see the whole file and how to page on
+// (issue #352). It names the shown range, what remains, and the offset to resume
+// at — when the file ends within the slice (NextOffset == 0) it only reports the
+// skipped leading lines.
+func readTruncationMarker(res *fileops.ReadRangeResult) string {
+	// Nothing shown: either offset is past EOF, or the byte cap cut the very first
+	// line. Point the model at where to resume (next_offset) or note the overshoot.
+	if res.LinesShown == 0 {
+		if res.NextOffset > 0 {
+			return fmt.Sprintf(
+				"\n\n… (truncated: line %d exceeds max_length of this read; %d total lines. Read again with offset=%d and a larger max_length to continue.)",
+				res.Offset, res.TotalLines, res.NextOffset)
+		}
+		return fmt.Sprintf(
+			"\n\n… (offset %d is past the end of the file; it has %d line(s).)",
+			res.Offset, res.TotalLines)
+	}
+	last := res.Offset + res.LinesShown - 1
+	if res.NextOffset > 0 {
+		remaining := res.TotalLines - last
+		return fmt.Sprintf(
+			"\n\n… (truncated: showing lines %d-%d of %d; %d more line(s). Read again with offset=%d to continue.)",
+			res.Offset, last, res.TotalLines, remaining, res.NextOffset)
+	}
+	return fmt.Sprintf(
+		"\n\n… (truncated: showing lines %d-%d of %d; earlier lines skipped. Read again with a smaller offset to see them.)",
+		res.Offset, last, res.TotalLines)
 }
 
 // CreateUserSession creates a new user session
