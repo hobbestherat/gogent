@@ -24,9 +24,11 @@ func (w *Workbench) showSessionsDialog() {
 		return
 	}
 
-	// Large by default (≈85% of the terminal), floored so it stays usable on a
-	// small terminal; the list/detail split is derived from width below (#299).
-	x, y, width, height := w.dialogRect(w.browserDialogSpec())
+	// Sized to its content (a short list + small detail pane), not a share of the
+	// terminal, so it no longer balloons mostly-empty on a wide screen (#322); the
+	// list/detail split is derived from the resolved width below (#299).
+	spec := w.sessionsDialogSpec()
+	x, y, width, height := w.dialogRect(spec)
 
 	dialog := tv.NewDialog("Saved Sessions", x, y, width, height)
 	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
@@ -35,7 +37,12 @@ func (w *Workbench) showSessionsDialog() {
 	listX := 2
 	headerY := 3
 	listY := 4
-	paneH := height - listY - 4 // hint/button row + bottom margin + border
+	// The footer is two rows: the keyboard hint on its own row (so it can never
+	// overlap the buttons) and the action-button row beneath it (issue #321),
+	// mirroring the Statistics dialog.
+	hintY := height - 4
+	buttonY := height - 3
+	paneH := height - listY - 5 // hint row + button row + bottom margin + border
 	if paneH < 3 {
 		paneH = 3
 	}
@@ -76,8 +83,10 @@ func (w *Workbench) showSessionsDialog() {
 	detail.BG = tv.DefaultTheme.DialogBG
 	dialog.Window.AddContent(detail)
 
+	// The hint sits on its own row above the buttons, spanning the full content
+	// width, so it never collides with the action buttons (issue #321).
 	dialog.Window.AddContent(dialogLabel("Tab move · Enter open (analysis) · Esc close",
-		tv.Rect{X: 2, Y: height - 3, W: width - 40, H: 1}))
+		tv.Rect{X: 2, Y: hintY, W: width - 4, H: 1}))
 
 	var layer *tv.Layer
 	closeFn := func() { w.desktop.RemoveLayer(layer) }
@@ -161,12 +170,16 @@ func (w *Workbench) showSessionsDialog() {
 	list.OnActivate = func(*tv.TreeNode) { openAnalysis() }
 	searchBox.OnSubmit = func() { render() }
 
-	dialog.Window.AddContent(newButton("&Open (analysis)",
-		tv.Rect{X: width - 38, Y: height - 3, W: 17, H: 1}, openAnalysis))
-	dialog.Window.AddContent(newButton("&Continue",
-		tv.Rect{X: width - 20, Y: height - 3, W: 10, H: 1}, continueSession))
-	dialog.Window.AddContent(newButton("Close",
-		tv.Rect{X: width - 9, Y: height - 3, W: 7, H: 1}, closeFn))
+	// Action buttons are sized from their rendered labels and right-aligned to the
+	// dialog interior, so they stay a clean, non-overlapping row at any width
+	// (issue #321) instead of the previous hand-tuned fixed offsets that clipped
+	// every caption.
+	footer := footerButtonRects(
+		[]string{"&Open (analysis)", "&Continue", "Close"},
+		2, width-3, buttonY, tv.DefaultButtonGap)
+	dialog.Window.AddContent(newButton("&Open (analysis)", footer[0], openAnalysis))
+	dialog.Window.AddContent(newButton("&Continue", footer[1], continueSession))
+	dialog.Window.AddContent(newButton("Close", footer[2], closeFn))
 
 	dialog.Root().OnTypeFn = func(_ *tv.VisualComponent, event tui.TypeEvent) bool {
 		if event.Key == tui.KeyEscape {
@@ -178,10 +191,10 @@ func (w *Workbench) showSessionsDialog() {
 
 	layer = tv.NewModalLayer("sessions-dialog", dialog)
 	w.desktop.AddLayer(layer)
-	// PreferredW is a share of the terminal, so re-resolve against the live
-	// terminal on resize rather than the stale spec dialog.Fit would remember
-	// (issue #299).
-	installResizeReflow(w.desktop, dialog, layer, w.browserDialogSpec)
+	// The spec is static (content-driven, no terminal-share term), so it is
+	// path-independent and dialog.Fit — which remembers the spec and re-resolves
+	// it on resize — is the correct, simpler hook (issue #322).
+	dialog.Fit(spec)
 	render()
 	w.desktop.SetFocus(list)
 }

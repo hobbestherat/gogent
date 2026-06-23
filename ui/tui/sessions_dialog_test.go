@@ -151,32 +151,47 @@ func TestEmptySessionsDetail(t *testing.T) {
 	}
 }
 
-// TestSessionsDialogSize covers the spec-driven sizing (issue #299): the saved
-// sessions browser shares the Resources/Statistics 85%-wide, 60×14-floor spec, so
-// it grows with the terminal instead of capping at 80×22.
+// TestSessionsDialogSize covers the content-driven sizing the Saved Sessions
+// browser adopted in issue #322. Unlike the shared browserDialogSpec (an 85%
+// terminal-share that resolves to the 80%×85% balloon — 160×42 on 200×50), the
+// dedicated sessionsDialogSpec is a fixed content footprint: PreferredW 90 / PrefH
+// 20, capped at 120×30 and floored at 60×14. So it sizes to its content and STAYS
+// there — it never balloons to fill a wide terminal, which is the whole point of
+// the fix. This test drives the REAL w.sessionsDialogSpec() (not an inline mirror)
+// so a drift in the source spec — including the PrefH-vs-PreferredH field-name trap
+// the issue snippet warns about — is caught here.
 func TestSessionsDialogSize(t *testing.T) {
-	// sessionsSpec mirrors the inline DialogSpec in showSessionsDialog.
-	sessionsSpec := func(screenW int) tv.DialogSpec {
-		return tv.DialogSpec{MinW: 60, MinH: 14, PreferredW: screenW * 85 / 100}
-	}
+	spec := newTestWorkbench(t).sessionsDialogSpec()
 	for _, tc := range []struct {
 		name             string
 		screenW, screenH int
 		wantW, wantH     int
 	}{
-		// The 85% PreferredW is clamped to the 80% width cap (#309 finding); see
-		// TestBrowserPreferredWidthClamped.
-		{"large screen capped at 80% wide", 200, 100, 160, 85},
-		{"medium terminal capped at 80% wide", 120, 40, 96, 34},
-		{"short terminal floors height", 120, 16, 96, 14},
-		{"tiny terminal floors both", 50, 20, 60, 16},
+		// PreferredW 90 sits below the 80% cap on a roomy terminal, so the dialog is
+		// its content size (90×20) — NOT the old 160×42 balloon.
+		{"roomy terminal sizes to content not the balloon", 200, 50, 90, 20},
+		// And it does not keep growing on an ultrawide terminal: still 90×20.
+		{"ultrawide stays at content size", 300, 80, 90, 20},
+		// On a narrow-ish terminal the 80% width cap (64) bites before PreferredW.
+		{"medium terminal width capped at 80%", 80, 24, 64, 20},
+		// A mid terminal is wide enough for the full PreferredW.
+		{"mid terminal honours preferred width", 120, 40, 90, 20},
+		// Tiny terminal: both floors win (MinW 60, MinH 14), even past the edge.
+		{"small terminal floors both", 50, 16, 60, 14},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, gotW, gotH := tv.ResolveDialogRect(sessionsSpec(tc.screenW), tc.screenW, tc.screenH)
+			_, _, gotW, gotH := tv.ResolveDialogRect(spec, tc.screenW, tc.screenH)
 			if gotW != tc.wantW || gotH != tc.wantH {
 				t.Errorf("sessions size(%d,%d) = %dx%d, want %dx%d",
 					tc.screenW, tc.screenH, gotW, gotH, tc.wantW, tc.wantH)
 			}
 		})
+	}
+
+	// The crux of #322: on a roomy terminal it must NOT be the 160×42 percentage
+	// balloon that motivated the issue.
+	_, _, bw, bh := tv.ResolveDialogRect(spec, 200, 50)
+	if bw >= 160 || bh >= 42 {
+		t.Errorf("sessions dialog on 200x50 = %dx%d — it still balloons toward the 160x42 box (#322)", bw, bh)
 	}
 }

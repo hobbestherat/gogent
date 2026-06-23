@@ -20,19 +20,8 @@ func (w *Workbench) dialogRect(spec tv.DialogSpec) (x, y, wid, h int) {
 	return tv.ResolveDialogRect(spec, w.app.Width(), w.app.Height())
 }
 
-// installResizeReflow makes an open dialog re-resolve against the CURRENT terminal
-// on every resize by recomputing its spec from scratch via specFn, then applying
-// the new centered bounds. Dialogs whose spec encodes the terminal dimensions —
-// the confirm/message and permission content sizes, and the browsers' percentage
-// widths — must use this instead of dialog.Fit, because Fit remembers the
-// open-time spec and would pin the dialog to the terminal it was opened on (a
-// confirm opened on 80×24 then grown to 200×50 would stay capped at the stale
-// MaxH=22 rather than growing to ~85% of the new screen). Static-spec dialogs —
-// those whose spec is pure Min/Max floors — stay on dialog.Fit, which is already
-// path-independent. This mirrors the agent-monologue window's own resize hook
-// (issue #299).
-// browserDialogSpec is the shared sizing intent of the three two-pane read-only
-// browsers (Resources, Saved Sessions, Statistics): large by default at ≈85% of
+// browserDialogSpec is the shared sizing intent of the two-pane read-only browsers
+// that still fill the screen (Resources, Statistics): large by default at ≈85% of
 // the terminal width with a 60×14 floor so each stays usable on a small terminal.
 // PreferredW is a share of the *current* terminal, so it is recomputed (via this
 // method as the specFn) on every resize rather than baked at open time (issue
@@ -42,6 +31,31 @@ func (w *Workbench) browserDialogSpec() tv.DialogSpec {
 	return tv.DialogSpec{MinW: 60, MinH: 14, PreferredW: w.app.Width() * 85 / 100}
 }
 
+// sessionsDialogSpec is the content-driven size of the Saved Sessions browser
+// (issue #322). Unlike browserDialogSpec it expresses a content footprint rather
+// than a share of the terminal: a list + small metadata detail pane needs ~90
+// cols and ~20 rows, so it grows toward — but is capped well below — the 80%/85%
+// browser balloon (120×30 cap) instead of always filling it. The 60×14 floor
+// keeps it usable on a small terminal. The spec is static (no terminal-share
+// term), so it is path-independent and the dialog uses dialog.Fit on resize.
+func (w *Workbench) sessionsDialogSpec() tv.DialogSpec {
+	return tv.DialogSpec{
+		MinW: 60, MaxW: 120, PreferredW: 90,
+		MinH: 14, MaxH: 30, PrefH: 20,
+	}
+}
+
+// installResizeReflow makes an open dialog re-resolve against the CURRENT terminal
+// on every resize by recomputing its spec from scratch via specFn, then applying
+// the new centered bounds. Dialogs whose spec encodes the terminal dimensions —
+// the confirm/message and permission content sizes, and browserDialogSpec's
+// percentage width — must use this instead of dialog.Fit, because Fit remembers the
+// open-time spec and would pin the dialog to the terminal it was opened on (a
+// confirm opened on 80×24 then grown to 200×50 would stay capped at the stale
+// MaxH=22 rather than growing to ~85% of the new screen). Static-spec dialogs —
+// those whose spec is pure Min/Max floors or a fixed content size (e.g.
+// sessionsDialogSpec) — stay on dialog.Fit, which is already path-independent. This
+// mirrors the agent-monologue window's own resize hook (issue #299).
 func installResizeReflow(desktop *tv.Desktop, dialog *tv.Dialog, layer *tv.Layer, specFn func() tv.DialogSpec) {
 	layer.OnResize = func(tv.Rect) {
 		app := desktop.App()
