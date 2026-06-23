@@ -108,6 +108,12 @@ type Spec struct {
 	SessionID string // owning/target session for KindAttached; "" for KindFree
 	Schedule  Schedule
 	Enabled   bool
+	// SuppressNotify opts a free-running watcher out of the completion
+	// notification the manager otherwise emits on every successful free-running
+	// fire. The zero value (false) keeps the default-on behaviour, so a watcher
+	// configured on_complete.notify=false sets this to true. It has no effect on
+	// attached watchers, which never notify.
+	SuppressNotify bool
 }
 
 // Runner owns a single watcher: its immutable configuration plus the mutable
@@ -116,13 +122,14 @@ type Spec struct {
 // reached only through Manager methods (or Runner.SetLastResult).
 type Runner struct {
 	// Immutable after construction.
-	id        string
-	name      string
-	task      string
-	model     string
-	kind      Kind
-	sessionID string
-	schedule  Schedule
+	id             string
+	name           string
+	task           string
+	model          string
+	kind           Kind
+	sessionID      string
+	schedule       Schedule
+	suppressNotify bool
 
 	mu         sync.Mutex
 	enabled    bool
@@ -142,15 +149,16 @@ type Runner struct {
 // with a nil Schedule is rejected by Manager.Add with ErrNilSchedule.
 func NewRunner(spec Spec) *Runner {
 	return &Runner{
-		id:        spec.ID,
-		name:      spec.Name,
-		task:      spec.Task,
-		model:     spec.Model,
-		kind:      spec.Kind,
-		sessionID: spec.SessionID,
-		schedule:  spec.Schedule,
-		enabled:   spec.Enabled,
-		status:    StatusIdle,
+		id:             spec.ID,
+		name:           spec.Name,
+		task:           spec.Task,
+		model:          spec.Model,
+		kind:           spec.Kind,
+		sessionID:      spec.SessionID,
+		schedule:       spec.Schedule,
+		suppressNotify: spec.SuppressNotify,
+		enabled:        spec.Enabled,
+		status:         StatusIdle,
 	}
 }
 
@@ -508,6 +516,7 @@ func (m *Manager) runFire(r *Runner) {
 	}
 	summary := r.lastResult
 	removed := r.removed
+	suppressNotify := r.suppressNotify
 	r.mu.Unlock()
 
 	switch {
@@ -521,8 +530,9 @@ func (m *Manager) runFire(r *Runner) {
 
 	// Free-running watchers announce successful completion through the host
 	// notifier; attached watchers surface their work through the owning session
-	// instead. A cancelled, failed, or already-removed watcher never notifies.
-	if !cancelled && err == nil && kind == KindFree && !removed {
+	// instead. A cancelled, failed, already-removed, or notify-suppressed
+	// (on_complete.notify=false) watcher never notifies.
+	if !cancelled && err == nil && kind == KindFree && !removed && !suppressNotify {
 		body := summary
 		if body == "" {
 			body = "Watcher \"" + name + "\" completed."
@@ -713,13 +723,29 @@ func (m *Manager) ListWatchers(sessionID string) []WatcherInfo {
 }
 
 // Get returns a snapshot of a single watcher by id or name. It returns ok=false
-// when the watcher is not found or a name is ambiguous.
+// when the watcher is not found or a name is ambiguous. Callers that need to tell
+// those two cases apart (to report "ambiguous; use the id" rather than "not
+// found") should use Resolve instead.
 func (m *Manager) Get(idOrName string) (WatcherInfo, bool) {
+	info, err := m.Resolve(idOrName)
+	if err != nil {
+		return WatcherInfo{}, false
+	}
+	return info, true
+}
+
+// Resolve looks up a single watcher by id or name and returns its snapshot, or
+// the resolution error: ErrNotFound when nothing matches, or ErrAmbiguous when a
+// name matches more than one watcher (resolution by id is always unambiguous).
+// It is the error-surfacing counterpart of Get, so control surfaces can tell the
+// agent "ambiguous; use the id" instead of misreporting a duplicate name as "not
+// found".
+func (m *Manager) Resolve(idOrName string) (WatcherInfo, error) {
 	m.mu.Lock()
 	r, err := m.resolveLocked(idOrName)
 	m.mu.Unlock()
 	if err != nil {
-		return WatcherInfo{}, false
+		return WatcherInfo{}, err
 	}
-	return r.snapshot(), true
+	return r.snapshot(), nil
 }

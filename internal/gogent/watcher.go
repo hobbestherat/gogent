@@ -75,13 +75,14 @@ func (g *Gogent) StartWatchers() {
 			continue
 		}
 		runner := watcher.NewRunner(watcher.Spec{
-			ID:       wc.ID,
-			Name:     wc.Name,
-			Task:     wc.Task,
-			Model:    wc.Model,
-			Kind:     watcher.KindFree,
-			Schedule: sched,
-			Enabled:  true,
+			ID:             wc.ID,
+			Name:           wc.Name,
+			Task:           wc.Task,
+			Model:          wc.Model,
+			Kind:           watcher.KindFree,
+			Schedule:       sched,
+			Enabled:        true,
+			SuppressNotify: suppressWatcherNotify(wc.Output),
 		})
 		if err := mgr.Add(runner); err != nil {
 			g.logger().Warn("watcher add failed", "name", wc.Name, "error", err)
@@ -261,6 +262,14 @@ func (g *Gogent) CreateWatcher(cfg config.WatcherConfig, sessionID string) (watc
 		if target == "" {
 			return watcher.WatcherInfo{}, fmt.Errorf("attached watcher needs an owning session")
 		}
+		// The target must be a live session. An attached watcher is serialized with
+		// its session's index, so one pointed at a session that is not in memory
+		// could never be persisted (persistSession is a no-op for an unknown
+		// session) and would silently vanish on restart. Reject it up front rather
+		// than register a watcher that cannot survive (issue #329).
+		if g.GetUserSession(target) == nil {
+			return watcher.WatcherInfo{}, fmt.Errorf("attached watcher target session %q is not active", target)
+		}
 		// Normalise the stored config so the persisted target matches the registered
 		// runner (the tool may have passed an empty-string sentinel).
 		t := target
@@ -288,13 +297,14 @@ func (g *Gogent) CreateWatcher(cfg config.WatcherConfig, sessionID string) (watc
 		g.persistSession(target)
 	} else {
 		runner := watcher.NewRunner(watcher.Spec{
-			ID:       cfg.ID,
-			Name:     cfg.Name,
-			Task:     cfg.Task,
-			Model:    cfg.Model,
-			Kind:     watcher.KindFree,
-			Schedule: sched,
-			Enabled:  cfg.Enabled,
+			ID:             cfg.ID,
+			Name:           cfg.Name,
+			Task:           cfg.Task,
+			Model:          cfg.Model,
+			Kind:           watcher.KindFree,
+			Schedule:       sched,
+			Enabled:        cfg.Enabled,
+			SuppressNotify: suppressWatcherNotify(cfg.Output),
 		})
 		if err := mgr.Add(runner); err != nil {
 			return watcher.WatcherInfo{}, fmt.Errorf("register free-running watcher: %w", err)
@@ -325,9 +335,9 @@ func (g *Gogent) UpdateWatcher(patch config.WatcherConfig, sessionID string) (wa
 	if idOrName == "" {
 		idOrName = patch.Name
 	}
-	info, ok := mgr.Get(idOrName)
-	if !ok {
-		return watcher.WatcherInfo{}, watcher.ErrNotFound
+	info, err := mgr.Resolve(idOrName)
+	if err != nil {
+		return watcher.WatcherInfo{}, fmt.Errorf("resolve watcher: %w", err)
 	}
 	if g.permissions != nil {
 		if err := g.permissions.CheckWithDetail(permission.ActionWatcher, info.Name, "update watcher "+info.Name); err != nil {
@@ -362,14 +372,15 @@ func (g *Gogent) UpdateWatcher(patch config.WatcherConfig, sessionID string) (wa
 		return watcher.WatcherInfo{}, fmt.Errorf("update watcher: %w", err)
 	}
 	runner := watcher.NewRunner(watcher.Spec{
-		ID:        cur.ID,
-		Name:      cur.Name,
-		Task:      cur.Task,
-		Model:     cur.Model,
-		Kind:      kind,
-		SessionID: owner,
-		Schedule:  sched,
-		Enabled:   cur.Enabled,
+		ID:             cur.ID,
+		Name:           cur.Name,
+		Task:           cur.Task,
+		Model:          cur.Model,
+		Kind:           kind,
+		SessionID:      owner,
+		Schedule:       sched,
+		Enabled:        cur.Enabled,
+		SuppressNotify: suppressWatcherNotify(cur.Output),
 	})
 	if err := mgr.Add(runner); err != nil {
 		return watcher.WatcherInfo{}, fmt.Errorf("re-register updated watcher: %w", err)
@@ -397,9 +408,9 @@ func (g *Gogent) DeleteWatcher(idOrName string) error {
 	if mgr == nil {
 		return fmt.Errorf("watcher engine is not running")
 	}
-	info, ok := mgr.Get(idOrName)
-	if !ok {
-		return watcher.ErrNotFound
+	info, err := mgr.Resolve(idOrName)
+	if err != nil {
+		return fmt.Errorf("resolve watcher: %w", err)
 	}
 	if g.permissions != nil {
 		if err := g.permissions.CheckWithDetail(permission.ActionWatcher, info.Name, "delete watcher "+info.Name); err != nil {
@@ -433,9 +444,9 @@ func (g *Gogent) ToggleWatcher(idOrName string) error {
 	if mgr == nil {
 		return fmt.Errorf("watcher engine is not running")
 	}
-	info, ok := mgr.Get(idOrName)
-	if !ok {
-		return watcher.ErrNotFound
+	info, err := mgr.Resolve(idOrName)
+	if err != nil {
+		return fmt.Errorf("resolve watcher: %w", err)
 	}
 	return g.SetWatcherEnabled(info.ID, !info.Enabled)
 }
@@ -451,9 +462,9 @@ func (g *Gogent) SetWatcherEnabled(idOrName string, enabled bool) error {
 	if mgr == nil {
 		return fmt.Errorf("watcher engine is not running")
 	}
-	info, ok := mgr.Get(idOrName)
-	if !ok {
-		return watcher.ErrNotFound
+	info, err := mgr.Resolve(idOrName)
+	if err != nil {
+		return fmt.Errorf("resolve watcher: %w", err)
 	}
 	if g.permissions != nil {
 		if err := g.permissions.CheckWithDetail(permission.ActionWatcher, info.Name, "toggle watcher "+info.Name); err != nil {
@@ -478,9 +489,9 @@ func (g *Gogent) RunWatcherNow(idOrName string) error {
 	if mgr == nil {
 		return fmt.Errorf("watcher engine is not running")
 	}
-	info, ok := mgr.Get(idOrName)
-	if !ok {
-		return watcher.ErrNotFound
+	info, err := mgr.Resolve(idOrName)
+	if err != nil {
+		return fmt.Errorf("resolve watcher: %w", err)
 	}
 	if g.permissions != nil {
 		if err := g.permissions.CheckWithDetail(permission.ActionWatcher, info.Name, "run watcher "+info.Name); err != nil {
@@ -502,9 +513,9 @@ func (g *Gogent) StopWatcher(idOrName string) error {
 	if mgr == nil {
 		return fmt.Errorf("watcher engine is not running")
 	}
-	info, ok := mgr.Get(idOrName)
-	if !ok {
-		return watcher.ErrNotFound
+	info, err := mgr.Resolve(idOrName)
+	if err != nil {
+		return fmt.Errorf("resolve watcher: %w", err)
 	}
 	if g.permissions != nil {
 		if err := g.permissions.CheckWithDetail(permission.ActionWatcher, info.Name, "stop watcher "+info.Name); err != nil {
@@ -658,7 +669,11 @@ func (g *Gogent) RunWatcherFire(ctx context.Context, r *watcher.Runner) error {
 			return fmt.Errorf("attached watcher %q has no owning session", r.Name())
 		}
 		// The owning session is live for an attached watcher; if it has gone away
-		// (closed mid-fire) there is nothing to report into.
+		// (closed mid-fire) there is nothing to report into. This check is
+		// best-effort: a RemoveSession racing in *after* it still tears the watcher
+		// down via OnSessionClosed -> RemoveAttachedForSession, which cancels this
+		// fire's ctx, so the in-flight turn aborts and its output is discarded
+		// rather than landing in a detached session (benign — no panic, no leak).
 		if g.GetUserSession(sessionID) == nil {
 			return fmt.Errorf("attached watcher %q owning session %q is not live", r.Name(), sessionID)
 		}
@@ -743,6 +758,14 @@ func (g *Gogent) SetNotifySink(fn func(reason, title, body string)) {
 	g.mu.Lock()
 	g.notifySink = fn
 	g.mu.Unlock()
+}
+
+// suppressWatcherNotify maps a watcher's on_complete config to the manager's
+// SuppressNotify flag (issue #329). A nil Output keeps the default-on
+// notification ("nil = notify on"); a non-nil Output honours its Notify field, so
+// on_complete.notify=false suppresses the completion notification.
+func suppressWatcherNotify(out *config.WatcherOutput) bool {
+	return out != nil && !out.Notify
 }
 
 // watcherLaunchDetail renders a human-readable summary of what starting a

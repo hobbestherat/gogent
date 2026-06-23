@@ -1093,12 +1093,14 @@ func (g *Gogent) initializeToolRegistry() {
 	g.enableWatcherTools()
 }
 
-// enableWatcherTools registers the agent-facing watcher tools and propagates them
-// to existing sessions, when Experimental.Watchers is on (issue #329 Phase 3). It
-// runs once from initializeToolRegistry and is safe to call again if the feature
-// is toggled on at runtime, so a running session gains create_watcher/
-// list_watchers/update_watcher/enable_watcher/disable_watcher/delete_watcher the
-// moment watchers are enabled. It is a no-op when the feature is off.
+// enableWatcherTools registers the agent-facing watcher tools when
+// Experimental.Watchers is on (issue #329 Phase 3). In the current product it is
+// called once from initializeToolRegistry at construction; it is written to be
+// idempotent and to re-clone the registry into existing sessions
+// (refreshSessionRegistries) so that, should a future runtime toggle of the
+// feature call it again, an already-running session still gains create_watcher/
+// list_watchers/update_watcher/enable_watcher/disable_watcher/delete_watcher. It
+// is a no-op when the feature is off.
 func (g *Gogent) enableWatcherTools() {
 	g.mu.RLock()
 	on := g.config != nil && g.config.Experimental.Watchers
