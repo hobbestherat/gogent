@@ -34,6 +34,7 @@ commands:
 // restart flag sets through to the foreground runner.
 type daemonStartOpts struct {
 	foreground bool
+	tcp        bool
 	httpHost   string
 	httpPort   int
 	password   string
@@ -81,8 +82,9 @@ func daemonStart(args []string) int {
 	fs := flag.NewFlagSet("daemon start", flag.ContinueOnError)
 	opts := daemonStartOpts{}
 	fs.BoolVar(&opts.foreground, "foreground", false, "run the daemon in this process instead of detaching (debugging, systemd, launchd)")
-	fs.StringVar(&opts.httpHost, "http-host", "127.0.0.1", "TCP host for the HTTP API (in addition to the Unix socket)")
-	fs.IntVar(&opts.httpPort, "http-port", 8080, "TCP port for the HTTP API")
+	fs.BoolVar(&opts.tcp, "tcp", false, "also expose the HTTP API over TCP (in addition to the default Unix socket) for curl/remote clients")
+	fs.StringVar(&opts.httpHost, "http-host", "127.0.0.1", "TCP host for the HTTP API (with --tcp)")
+	fs.IntVar(&opts.httpPort, "http-port", 8080, "TCP port for the HTTP API (with --tcp)")
 	fs.StringVar(&opts.password, "http-password", "", "password for HTTP API login (env GOGENT_HTTP_PASSWORD); authorizes a non-loopback bind")
 	fs.BoolVar(&opts.yolo, "yolo", false, "yolo mode: auto-approve prompts except rules.json hard-deny guardrails")
 	if err := fs.Parse(args); err != nil {
@@ -104,17 +106,14 @@ func daemonStart(args []string) int {
 		return 0
 	}
 
-	// Pre-flight: refuse to start a second instance; reclaim crash residue.
-	st := daemon.Query(p)
-	if st.Running {
+	// Pre-flight: avoid spawning when a daemon is already live (the authoritative
+	// single-instance guard is the flock the foreground child takes in
+	// daemon.Listen, which also reclaims any crash residue safely under the lock —
+	// so we deliberately do not clean stale files here, where a concurrent start
+	// could race and unlink a peer's freshly-bound socket).
+	if st := daemon.Query(p); st.Running {
 		fmt.Printf("daemon already running (pid %d) at %s\n", st.PID, st.Addr)
 		return 0
-	}
-	if st.Stale {
-		if err := daemon.CleanStale(p); err != nil {
-			fmt.Fprintf(os.Stderr, "daemon start: clean stale files: %v\n", err)
-			return 1
-		}
 	}
 
 	// Spawn a detached copy of ourselves running the foreground path.
@@ -130,7 +129,7 @@ func daemonStart(args []string) int {
 		fmt.Fprintf(os.Stderr, "daemon start: spawned pid %d but it did not become ready; see %s\n", pid, p.Log)
 		return 1
 	}
-	st = daemon.Query(p)
+	st := daemon.Query(p)
 	fmt.Printf("daemon started (pid %d) at %s\n", st.PID, st.Addr)
 	return 0
 }
@@ -272,10 +271,14 @@ func runDaemonForeground(p daemon.Paths, opts daemonStartOpts) error {
 		}
 	}()
 
-	// Also expose the TCP API so curl/headless clients can reach the daemon
-	// immediately (Phase 1's "usable by HTTP/curl users today" outcome). Reuses
-	// the same auth-gated server path as the embedded invocation.
-	go startHTTPServer(opts.httpHost, opts.httpPort, g, apiServer, resolveHTTPPassword(opts.password))
+	// Optionally also expose the TCP API for curl/remote clients. Off by default
+	// so the daemon does not silently contend for a TCP port (e.g. an embedded
+	// gogent's 8080); --tcp makes the extra surface explicit and its bind result
+	// is logged to the daemon log. The Unix socket remains the primary transport
+	// and the readiness signal.
+	if opts.tcp {
+		go startHTTPServer(opts.httpHost, opts.httpPort, g, apiServer, resolveHTTPPassword(opts.password))
+	}
 
 	// Connect MCP servers and start free-running watchers, mirroring the headless
 	// startup order so the permission prompter is installed first.

@@ -20,6 +20,7 @@ const (
 	sockFile = "daemon.sock"
 	addrFile = "daemon.addr"
 	logFile  = "daemon.log"
+	lockFile = "daemon.lock"
 )
 
 // Paths holds the absolute lifecycle-file locations for a daemon rooted at Dir.
@@ -31,6 +32,7 @@ type Paths struct {
 	Sock string // Unix listening socket: <Dir>/daemon.sock
 	Addr string // chosen listen address, for discovery: <Dir>/daemon.addr
 	Log  string // detached stdout/stderr log: <Dir>/daemon.log
+	Lock string // single-instance flock file: <Dir>/daemon.lock
 }
 
 // PathsFor derives the lifecycle-file set for a daemon rooted at dir.
@@ -41,6 +43,7 @@ func PathsFor(dir string) Paths {
 		Sock: filepath.Join(dir, sockFile),
 		Addr: filepath.Join(dir, addrFile),
 		Log:  filepath.Join(dir, logFile),
+		Lock: filepath.Join(dir, lockFile),
 	}
 }
 

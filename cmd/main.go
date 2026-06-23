@@ -890,6 +890,17 @@ func sanitizeSessionID(s string) string {
 	return b.String()
 }
 
+// isUnixConn reports whether the request arrived over a Unix-domain-socket
+// listener, by inspecting the listener address the http server records in the
+// connection context. Such a connection is inherently local (the daemon socket
+// is 0600), so it is treated like a loopback caller for the /exit gate.
+func isUnixConn(r *http.Request) bool {
+	if la, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok {
+		return la.Network() == "unix"
+	}
+	return false
+}
+
 // isLoopbackAddr reports whether a RemoteAddr ("host:port") is a loopback
 // address, used to gate the /exit kill switch to local callers.
 func isLoopbackAddr(remoteAddr string) bool {
@@ -986,8 +997,11 @@ func newHTTPHandler(backend httpBackend, exitToken string, shutdown func()) http
 			return
 		}
 		// Gate the kill switch: local callers always pass; remote callers must
-		// present the configured token. Without either, refuse.
-		authorized := isLoopbackAddr(r.RemoteAddr)
+		// present the configured token. Without either, refuse. A connection over
+		// the daemon's Unix socket counts as local — the socket is 0600 and
+		// filesystem-permission gated, and it carries no IP RemoteAddr — so the
+		// `gogent daemon stop` /exit fallback can shut the daemon down over it.
+		authorized := isLoopbackAddr(r.RemoteAddr) || isUnixConn(r)
 		if !authorized && exitToken != "" {
 			tok := r.Header.Get("X-Gogent-Token")
 			authorized = subtle.ConstantTimeCompare([]byte(tok), []byte(exitToken)) == 1
