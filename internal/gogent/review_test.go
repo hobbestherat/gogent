@@ -100,6 +100,28 @@ func TestReviewRejectBlocksWrite(t *testing.T) {
 	}
 }
 
+func TestYoloBypassesEditReviewGate(t *testing.T) {
+	g, workspace := newReviewGogent(t)
+	rv := &fakeReviewer{decision: EditReject}
+	g.SetReviewer(rv)
+	g.SetReviewEdits(true)
+	g.SetYoloMode("s1", true)
+
+	if _, err := writeCall(g, "s1", "a.txt", "hello\n"); err != nil {
+		t.Fatalf("yolo write should bypass review rejection, got %v", err)
+	}
+	if n := len(rv.calls()); n != 0 {
+		t.Fatalf("yolo write consulted reviewer %d times, want 0", n)
+	}
+	got, err := os.ReadFile(filepath.Join(workspace, "a.txt"))
+	if err != nil {
+		t.Fatalf("read written file: %v", err)
+	}
+	if string(got) != "hello\n" {
+		t.Fatalf("file = %q, want %q", string(got), "hello\n")
+	}
+}
+
 // TestReviewApproveWrites verifies an approved review applies the write and that
 // the reviewer was handed a unified diff of the change.
 func TestReviewApproveWrites(t *testing.T) {

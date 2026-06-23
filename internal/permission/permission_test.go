@@ -1,6 +1,7 @@
 package permission
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -337,5 +338,129 @@ func TestAuditSinkRecordsPromptedDecision(t *testing.T) {
 	}
 	if allowed == nil || !*allowed {
 		t.Fatalf("expected an audited allow, got %v", allowed)
+	}
+}
+
+func TestRulesJSONLoadDenyByDetailPatternAndNetworkHost(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "rules.json"), []byte(`{
+		"rules": [
+			{"action":"shell","resource":"*","effect":"deny","detail_pattern":"rm\\s+-rf\\s+/"},
+			{"action":"network","resource":"evil.com","effect":"deny"}
+		]
+	}`), 0600); err != nil {
+		t.Fatalf("write rules.json: %v", err)
+	}
+
+	s := New(dir)
+	if errs := s.LoadRules(dir); len(errs) != 0 {
+		t.Fatalf("LoadRules returned errors: %v", errs)
+	}
+	s.SetYolo(true)
+
+	if err := s.CheckWithDetail(ActionShell, "", "rm -rf /"); err == nil {
+		t.Fatal("expected detail_pattern shell guardrail to deny rm -rf /")
+	}
+	if err := s.CheckWithDetail(ActionShell, "", "printf ok"); err != nil {
+		t.Fatalf("yolo should allow non-guarded shell ask, got %v", err)
+	}
+	if err := s.Check(ActionNetwork, "evil.com"); err == nil {
+		t.Fatal("expected network host guardrail to deny evil.com")
+	}
+	if err := s.Check(ActionNetwork, "example.com"); err != nil {
+		t.Fatalf("yolo should allow non-guarded network ask, got %v", err)
+	}
+}
+
+func TestDenyRuleBeatsPersistedAllowStaticAllowAndYolo(t *testing.T) {
+	s := New("")
+	s.saved[key(ActionShell, "")] = DecisionAlways
+	if err := s.AddRule(Rule{Action: "*", Resource: "*", Effect: "allow"}); err != nil {
+		t.Fatalf("add broad allow rule: %v", err)
+	}
+	if err := s.AddRule(Rule{Action: "shell", Resource: "*", Effect: "deny", DetailPattern: `rm\s+-rf\s+/`}); err != nil {
+		t.Fatalf("add deny guardrail: %v", err)
+	}
+	s.SetYolo(true)
+
+	err := s.CheckWithDetail(ActionShell, "", "sudo rm -rf /")
+	if err == nil {
+		t.Fatal("expected hard deny guardrail to win")
+	}
+	var denied *DeniedError
+	if !errors.As(err, &denied) {
+		t.Fatalf("error = %T %v, want *DeniedError", err, err)
+	}
+}
+
+func TestRulesJSONMissingAndCorruptAreLenient(t *testing.T) {
+	t.Run("missing", func(t *testing.T) {
+		s := New("")
+		if errs := s.LoadRules(t.TempDir()); len(errs) != 0 {
+			t.Fatalf("missing rules.json returned errors: %v", errs)
+		}
+		if err := s.Check(ActionShell, ""); err == nil {
+			t.Fatal("without yolo, missing rules.json must preserve ask-without-prompter denial")
+		}
+	})
+
+	t.Run("corrupt", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "rules.json"), []byte(`{"rules":[`), 0600); err != nil {
+			t.Fatalf("write corrupt rules.json: %v", err)
+		}
+		s := New(dir)
+		_ = s.LoadRules(dir)
+		s.SetYolo(true)
+		if err := s.CheckWithDetail(ActionShell, "", "rm -rf /"); err != nil {
+			t.Fatalf("corrupt rules.json should add no guardrails; yolo ask should allow, got %v", err)
+		}
+	})
+}
+
+func TestMalformedRulesAreSkippedButValidRulesStillLoad(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "rules.json"), []byte(`{
+		"rules": [
+			{"action":"shell","resource":"*","effect":"deny","detail_pattern":"["},
+			{"action":"network","resource":"blocked.test","effect":"deny"},
+			{"action":"shell","resource":"*","effect":"bogus"}
+		]
+	}`), 0600); err != nil {
+		t.Fatalf("write rules.json: %v", err)
+	}
+
+	s := New(dir)
+	if errs := s.LoadRules(dir); len(errs) != 2 {
+		t.Fatalf("LoadRules errors = %d %v, want 2 malformed-rule errors", len(errs), errs)
+	}
+	s.SetYolo(true)
+	if err := s.Check(ActionNetwork, "blocked.test"); err == nil {
+		t.Fatal("valid rule after malformed rule should still be loaded and enforced")
+	}
+	if err := s.CheckWithDetail(ActionShell, "", "rm -rf /"); err != nil {
+		t.Fatalf("invalid shell guardrail should have been skipped; yolo should allow ask, got %v", err)
+	}
+}
+
+func TestYoloTurnsAskIntoAllowWithoutPromptAndCanBeOverriddenPerSession(t *testing.T) {
+	s := New("")
+	p := &stubPrompter{decision: DecisionDeny}
+	s.SetPrompter(p)
+	s.SetYolo(true)
+
+	if err := s.CheckWithContext(RequestContext{SessionID: "global"}, ActionShell, "", "echo hi"); err != nil {
+		t.Fatalf("global yolo should allow ask without prompting, got %v", err)
+	}
+	if p.calls != 0 {
+		t.Fatalf("yolo should not consult prompter, got %d calls", p.calls)
+	}
+
+	s.SetSessionYolo("strict", false)
+	if err := s.CheckWithContext(RequestContext{SessionID: "strict"}, ActionShell, "", "echo hi"); err == nil {
+		t.Fatal("per-session yolo=false should restore prompt path; stub denies")
+	}
+	if p.calls != 1 {
+		t.Fatalf("strict session should have prompted once, got %d calls", p.calls)
 	}
 }

@@ -1,9 +1,12 @@
 package gogent
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"gogent/internal/config"
+	"gogent/internal/permission"
 )
 
 // intptr is a local *int helper; config.intPtr is unexported and this package
@@ -77,5 +80,89 @@ func TestCreateUserSessionDefaultConfigKeepsHistoricalBound(t *testing.T) {
 	us := g.NewSession("default-cfg")
 	if got := us.MaxSteps(); got != 25 {
 		t.Errorf("default-config session MaxSteps = %d, want 25 (historical bound)", got)
+	}
+}
+
+func TestNewGogentLoadsRulesJSONGuardrailsAtStartup(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".gogent"), 0700); err != nil {
+		t.Fatalf("create config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".gogent", "rules.json"), []byte(`{
+		"rules": [
+			{"action":"write","resource":"blocked*","effect":"deny"}
+		]
+	}`), 0600); err != nil {
+		t.Fatalf("write rules.json: %v", err)
+	}
+
+	g := NewGogentWithWorkspace(home, t.TempDir())
+	if err := g.GetPermissionService().Check(permission.ActionWrite, "blocked.txt"); err == nil {
+		t.Fatal("rules.json deny should beat gogent's default write allow rule")
+	}
+	if err := g.GetPermissionService().Check(permission.ActionWrite, "allowed.txt"); err != nil {
+		t.Fatalf("default write allow should still apply for non-guarded paths, got %v", err)
+	}
+}
+
+func TestGlobalYoloWiresUnlimitedStepsAndPermissionAutoApprove(t *testing.T) {
+	g := newMaxStepsGogent(t, intptr(7))
+	g.SetGlobalYolo(true)
+
+	us := g.NewSession("s-yolo")
+	if us == nil {
+		t.Fatal("NewSession returned nil")
+	}
+	if got := us.MaxSteps(); got != 0 {
+		t.Fatalf("global yolo session MaxSteps = %d, want 0 (unlimited)", got)
+	}
+	if err := g.GetPermissionService().CheckWithContext(permission.RequestContext{SessionID: "s-yolo"}, permission.ActionShell, "", "echo hi"); err != nil {
+		t.Fatalf("global yolo should auto-approve otherwise-ask shell permission, got %v", err)
+	}
+}
+
+func TestSetYoloModeTogglesSessionStepCapAndPermissions(t *testing.T) {
+	g := newMaxStepsGogent(t, intptr(9))
+	us := g.NewSession("s-toggle")
+	if us == nil {
+		t.Fatal("NewSession returned nil")
+	}
+	if got := us.MaxSteps(); got != 9 {
+		t.Fatalf("initial MaxSteps = %d, want 9", got)
+	}
+
+	g.SetYoloMode("s-toggle", true)
+	if !g.YoloMode("s-toggle") {
+		t.Fatal("YoloMode should report enabled after SetYoloMode(true)")
+	}
+	if got := us.MaxSteps(); got != 0 {
+		t.Fatalf("yolo-on MaxSteps = %d, want 0", got)
+	}
+	if err := g.GetPermissionService().CheckWithContext(permission.RequestContext{SessionID: "s-toggle"}, permission.ActionShell, "", "echo hi"); err != nil {
+		t.Fatalf("session yolo should auto-approve shell ask, got %v", err)
+	}
+
+	g.SetYoloMode("s-toggle", false)
+	if g.YoloMode("s-toggle") {
+		t.Fatal("YoloMode should report disabled after SetYoloMode(false)")
+	}
+	if got := us.MaxSteps(); got != 9 {
+		t.Fatalf("yolo-off MaxSteps = %d, want restored configured cap 9", got)
+	}
+	if err := g.GetPermissionService().CheckWithContext(permission.RequestContext{SessionID: "s-toggle"}, permission.ActionShell, "", "echo hi"); err == nil {
+		t.Fatal("yolo-off shell ask should return to headless denial")
+	}
+}
+
+func TestYoloSessionOverrideCreatedBeforeSessionAppliesAtCreation(t *testing.T) {
+	g := newMaxStepsGogent(t, intptr(11))
+	g.SetYoloMode("future", true)
+
+	us := g.NewSession("future")
+	if us == nil {
+		t.Fatal("NewSession returned nil")
+	}
+	if got := us.MaxSteps(); got != 0 {
+		t.Fatalf("pre-created yolo override MaxSteps = %d, want 0", got)
 	}
 }
