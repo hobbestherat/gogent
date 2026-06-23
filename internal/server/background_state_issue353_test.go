@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -128,6 +129,73 @@ func TestSendRejectsNewTurnWhileAsyncSpawnRunsInBackground(t *testing.T) {
 	second := serveOne(t, srv, loopbackReq(http.MethodPost, "/api/sessions/"+created.ID+"/messages", strings.NewReader(`{"message":"second turn while background runs"}`)))
 	if second.Code != http.StatusConflict {
 		t.Fatalf("second send while background runs status = %d, want 409; body=%s", second.Code, second.Body.String())
+	}
+}
+
+func TestStreamRejectsConcurrentTurnWhileForegroundRuns(t *testing.T) {
+	firstModelArrived := make(chan struct{})
+	releaseFirstModel := make(chan struct{})
+	var mu sync.Mutex
+	modelCalls := 0
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		modelCalls++
+		call := modelCalls
+		mu.Unlock()
+		if call == 1 {
+			close(firstModelArrived)
+			select {
+			case <-releaseFirstModel:
+			case <-r.Context().Done():
+			}
+		}
+		writeServerTestFinal(w, "root final")
+	}))
+	defer backend.Close()
+	defer close(releaseFirstModel)
+
+	t.Setenv("GOGENT_MODEL_URL", backend.URL+"/chat/completions")
+	srv := NewServer(gogent.NewGogent(t.TempDir()), Options{Password: "x"})
+	httpSrv := httptest.NewServer(srv.Handler())
+	defer httpSrv.Close()
+
+	createResp, err := http.Post(httpSrv.URL+"/api/sessions", "application/json", strings.NewReader(`{"title":"s","persisted":false}`))
+	if err != nil {
+		t.Fatalf("create session request: %v", err)
+	}
+	defer createResp.Body.Close()
+	var created sessionView
+	if err := json.NewDecoder(createResp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode created session: %v", err)
+	}
+
+	streamReq, err := http.NewRequest(http.MethodPost, httpSrv.URL+"/api/sessions/"+created.ID+"/messages/stream", strings.NewReader(`{"message":"stream turn"}`))
+	if err != nil {
+		t.Fatalf("build stream request: %v", err)
+	}
+	streamReq.Header.Set("Content-Type", "application/json")
+	streamResp, err := http.DefaultClient.Do(streamReq)
+	if err != nil {
+		t.Fatalf("start stream request: %v", err)
+	}
+	defer streamResp.Body.Close()
+	if streamResp.StatusCode != http.StatusOK {
+		t.Fatalf("stream status = %d, want 200", streamResp.StatusCode)
+	}
+	select {
+	case <-firstModelArrived:
+	case <-time.After(3 * time.Second):
+		t.Fatal("stream foreground model request did not start")
+	}
+
+	secondResp, err := http.Post(httpSrv.URL+"/api/sessions/"+created.ID+"/messages", "application/json", bytes.NewBufferString(`{"message":"second turn while stream runs"}`))
+	if err != nil {
+		t.Fatalf("second send request: %v", err)
+	}
+	defer secondResp.Body.Close()
+	body, _ := io.ReadAll(secondResp.Body)
+	if secondResp.StatusCode != http.StatusConflict {
+		t.Fatalf("second send while stream foreground runs status = %d, want 409; body=%s", secondResp.StatusCode, body)
 	}
 }
 
