@@ -30,13 +30,16 @@ func TestToolDefsFromRegistryMirrorsToolStrictFlag(t *testing.T) {
 		Description: "Delegate work to sub-agents.",
 		InputSchema: closedSchema(),
 	})
-	reg.Register(&tool.Tool{
-		Name:        "read",
-		Description: "Read a file.",
-		ReadOnly:    true,
-		Strict:      true,
-		InputSchema: closedSchema(),
-	})
+	strictIssue359Tools := []string{"read", "glob", "list", "calc", "git", "grep", "verify", "diagnostics"}
+	for _, name := range strictIssue359Tools {
+		reg.Register(&tool.Tool{
+			Name:        name,
+			Description: name + " strict tool.",
+			ReadOnly:    true,
+			Strict:      true,
+			InputSchema: closedSchema(),
+		})
+	}
 	reg.Register(&tool.Tool{
 		Name:        "legacy_read_only",
 		Description: "Read something without opting into strict mode.",
@@ -69,9 +72,11 @@ func TestToolDefsFromRegistryMirrorsToolStrictFlag(t *testing.T) {
 
 	want := map[string]bool{
 		"spawn_subagent":    false,
-		"read":              true,
 		"legacy_read_only":  false,
 		"structured_output": true,
+	}
+	for _, name := range strictIssue359Tools {
+		want[name] = true
 	}
 	for name, strict := range want {
 		if gotStrict, ok := got[name]; !ok {
