@@ -52,9 +52,32 @@ func (w *Workbench) maybeShowDeferredModal() {
 		w.armDeferredRecheck()
 		return
 	}
+	w.drainDeferredModalNow()
+}
+
+// drainDeferredModalNow presents any pending background-triggered modal at once,
+// bypassing the typing-idle check. It is the "or submits/clears their input —
+// whichever comes first" half of the issue #346 acceptance: when the user submits
+// or clears the session input, the keystroke that triggered it went to the input
+// (the dialog was deferred), so the modal can appear immediately rather than wait
+// out the idle window. Must run on the event loop.
+//
+// It declines to raise a dialog onto a desktop that is tearing down: by then
+// serializePrompt has already unblocked the agent goroutine with the safe default,
+// so the modal would be orphaned (and the deferred timer may have fired after
+// shutdown). Clearing the state first keeps a dead closure from lingering.
+func (w *Workbench) drainDeferredModalNow() {
 	show := w.deferredModal
 	w.deferredModal = nil
 	w.stopDeferredTimer()
+	if show == nil {
+		return
+	}
+	select {
+	case <-w.shutdown.Done():
+		return
+	default:
+	}
 	show()
 }
 

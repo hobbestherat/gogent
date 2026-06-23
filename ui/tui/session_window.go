@@ -374,6 +374,11 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 		if text == "" {
 			return
 		}
+		// Submitting is the "or submits their input — whichever comes first" trigger
+		// for a deferred background prompt (issue #346): the Enter went to the input,
+		// not the dialog, so any held-back permission/review modal can appear now
+		// rather than wait out the typing-idle window.
+		wb.drainDeferredModalNow()
 		// Record the prompt for Up/Down history recall (issue #203). Only user-typed
 		// submissions enter history: supervisor nudges (nudgingSend) are skipped, and
 		// the drain re-entry (draining) is skipped so a message queued while busy is
