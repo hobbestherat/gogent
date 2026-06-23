@@ -32,16 +32,20 @@ func (w *Workbench) browserDialogSpec() tv.DialogSpec {
 }
 
 // sessionsDialogSpec is the content-driven size of the Saved Sessions browser
-// (issue #322). Unlike browserDialogSpec it expresses a content footprint rather
-// than a share of the terminal: a list + small metadata detail pane needs ~90
-// cols and ~20 rows, so it grows toward — but is capped well below — the 80%/85%
-// browser balloon (120×30 cap) instead of always filling it. The 60×14 floor
-// keeps it usable on a small terminal. The spec is static (no terminal-share
-// term), so it is path-independent and the dialog uses dialog.Fit on resize.
+// (issues #322, #338). It expresses a content footprint rather than a share of
+// the terminal, but the footprint must match what the list actually draws: a full
+// formatSessionRow is ~50 cols (title sessionRowTitleWidth=26 + space + date 16 +
+// " Nt Nm" counts; ~62 with the "(archived)" suffix), and the list pane is
+// width/2-2, so the dialog needs PreferredW ≈ 2*50+4 ≈ 104 for a row to fit
+// without the Tree's "…" truncation (#338 — the prior 90 left the list at 43 cols,
+// always clipped). MaxW 160 / MaxH 40 let it use a wide terminal; PrefH 26 shows
+// ~17 rows instead of ~11. The content-driven Preferred + caps keep it off the old
+// 80%×85% balloon (#322). The 60×14 floor keeps it usable on a small terminal. The
+// spec is static (path-independent), so the dialog uses dialog.Fit on resize.
 func (w *Workbench) sessionsDialogSpec() tv.DialogSpec {
 	return tv.DialogSpec{
-		MinW: 60, MaxW: 120, PreferredW: 90,
-		MinH: 14, MaxH: 30, PrefH: 20,
+		MinW: 60, MaxW: 160, PreferredW: 104,
+		MinH: 14, MaxH: 40, PrefH: 26,
 	}
 }
 

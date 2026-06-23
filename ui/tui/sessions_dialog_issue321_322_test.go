@@ -144,9 +144,9 @@ func TestSessionsFooterFitsAtFloorWidth(t *testing.T) {
 // --- #321/#322: integration — open the real dialog and inspect its layout ----
 
 // TestSessionsDialogOpensContentSized opens the real dialog on a roomy terminal and
-// asserts it resolved to its content footprint (90×20) and is centered — the #322
-// fix end-to-end. The old shared browser spec would have produced the 80%×85%
-// balloon instead.
+// asserts it resolved to its content footprint (104×26, #338 — widened from the
+// initial #322 90×20 so a full list row fits) and is centered. The old shared
+// browser spec would have produced the 80%×85% balloon instead.
 func TestSessionsDialogOpensContentSized(t *testing.T) {
 	const termW, termH = 200, 50
 	w := wiredSessionsWorkbench(t, 3)
@@ -154,8 +154,8 @@ func TestSessionsDialogOpensContentSized(t *testing.T) {
 	w.showSessionsDialog()
 
 	b := dialogBounds(w)
-	if b.W != 90 || b.H != 20 {
-		t.Errorf("opened size = %dx%d, want the content-driven 90x20 (#322)", b.W, b.H)
+	if b.W != 104 || b.H != 26 {
+		t.Errorf("opened size = %dx%d, want the content-driven 104x26 (#338)", b.W, b.H)
 	}
 	if b.W >= 160 || b.H >= 42 {
 		t.Fatalf("dialog ballooned to %dx%d — the #322 balloon is back", b.W, b.H)
