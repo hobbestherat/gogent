@@ -433,24 +433,34 @@ func newSidebar(wb *Workbench) *sidebar {
 // sub-agent / watcher tree and the Overall band's model dropdown froze their
 // colours at construction — tv.NewTree seeds its row FG/BG/selection from the
 // active theme once, and newSelect seeds the closed control once — so after a
-// default→dark switch the tree's row region kept the old blue WindowBG while the
-// rest of the panel went black (the reported bug). Reseeding them here, from the
-// same theme slots they were built from, keeps the whole sidebar in lockstep
-// across every preset. This mirrors SessionWindow.refreshTheme's reseed of the
-// transcript view (issue #204), the same frozen-WindowBG class of bug.
-//
-// No colour SOURCE changes: the tree is reseeded to the exact slots tv.NewTree
-// uses, so the default look is unchanged and no preset is special-cased. Across
-// every gogent preset WindowBG == PanelBG, so the reseeded tree row region blends
-// with the panel fill. Runs on the UI thread, from Workbench.RefreshTheme and
-// once at construction.
+// default→dark switch the tree's row region kept its stale fill while the rest of
+// the panel recoloured (the reported "stays blue"). Reseeding them here keeps the
+// whole sidebar in lockstep, mirroring SessionWindow.refreshTheme's reseed of the
+// frozen transcript view (issue #204). Runs on the UI thread, from
+// Workbench.RefreshTheme and once at construction.
 func (s *sidebar) refreshTheme() {
 	th := tv.ActiveTheme()
 	if s.tree != nil {
-		s.tree.FG, s.tree.BG = th.WindowFG, th.WindowBG
+		// The tree's plain row fill IS sidebar body text on the sidebar background, so
+		// it follows the gogent PANEL roles — the exact package vars panel.DrawFn fills
+		// the surrounding panel and drawTodos/drawOverall paint their body rows with —
+		// NOT turbotui's WindowFG/WindowBG that tv.NewTree happens to seed (issue #379).
+		// Those coincide with Panel* only because the built-in presets keep
+		// WindowBG == PanelBG and (for dark/high-contrast) WindowFG == PanelFG; that
+		// coincidence is exactly what masked the bug, and it breaks when a custom theme
+		// repoints panel_fg/panel_bg independently of window_fg/window_bg (the theme
+		// editor exposes both). Sourcing the fill from the panel chrome makes the tree
+		// blend with the panel under every preset and every override, unifies the row
+		// text with the TODO/Overall body (which already use chromePanelFG — the tree
+		// was the lone hold-out on the brighter WindowFG), and is the pair the
+		// paletteContrast "panel-body" audit (PanelFG/PanelBG) actually certifies.
+		s.tree.FG, s.tree.BG = chromePanelFG, chromePanelBG
+		// The selection bar is a highlight, not body text, so it keeps the toolkit's
+		// selection treatment: the active bar from the theme's Selection* roles, and the
+		// unfocused bar as a bright foreground over the ANSI 8 dim grey (tv.NewTree's
+		// convention, shared by every other tree in the app) so the focused-session row
+		// stays legible on the dim bar rather than dropping to the dim PanelFG.
 		s.tree.SelFG, s.tree.SelBG = th.SelectionFG, th.SelectionBG
-		// Match tv.NewTree's dimmed unfocused bar (window foreground over the ANSI 8
-		// dark grey) so the selection reads identically to a freshly built tree.
 		s.tree.SelFGUnfocused, s.tree.SelBGUnfocused = th.WindowFG, tui.ANSIColor(8)
 	}
 	// The Overall band's model selector is a closed control seeded once from the
