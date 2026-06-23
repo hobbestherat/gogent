@@ -76,6 +76,14 @@ func issue379RenderSidebar(t *testing.T, w *Workbench) {
 		Status:  agent.StatusRunning,
 		Kind:    agent.KindInteractive,
 	})
+	w.sidebar.setWatchers(nil, map[string][]WatcherInfo{
+		"s1": {{
+			ID:            "watcher-1",
+			Name:          "Watcher 1",
+			TargetSession: "s1",
+			SessionID:     "s1",
+		}},
+	})
 	w.sidebar.applyTodo("s1", []agent.TodoItem{{Content: "first", Status: agent.TodoPending}})
 	w.sidebar.focusSession("s1")
 	w.sidebar.reposition(w.app.Width(), w.app.Height())
@@ -118,10 +126,12 @@ func TestIssue379SidebarRenderedChromeFollowsResolvedPresets(t *testing.T) {
 
 			// The tree is the frozen-widget path that caused #379. The focused
 			// session row is the tree's unfocused selection bar; child rows and empty
-			// row fill use WindowFG/WindowBG. Both paths must be reseeded.
+			// row fill are sidebar body text on PanelFG/PanelBG. Both paths must be
+			// reseeded.
 			issue379AssertCell(t, w, "session selected row text", left+2, 2, resolved.WindowFG, w.sidebar.tree.SelBGUnfocused)
 			issue379AssertCell(t, w, "session selected row fill", left+20, 2, resolved.WindowFG, w.sidebar.tree.SelBGUnfocused)
-			issue379AssertCell(t, w, "agent row text", left+4, 3, resolved.WindowFG, resolved.WindowBG)
+			issue379AssertCell(t, w, "agent row text", left+4, 3, resolved.PanelFG, resolved.PanelBG)
+			issue379AssertCell(t, w, "watcher row text", left+4, 4, resolved.PanelFG, resolved.PanelBG)
 
 			// TODO and Overall bands are drawn by the sidebar panel itself.
 			abs := w.sidebar.panel.AbsoluteBounds()
@@ -150,17 +160,17 @@ func TestIssue379WorkbenchRefreshThemeReseedsSidebarFrozenWidgets(t *testing.T) 
 	ApplyTheme(issue379ResolveTheme(themeDefault))
 	w := issue379NewWorkbench()
 
-	if w.sidebar.tree.BG != tv.ActiveTheme().WindowBG {
-		t.Fatalf("setup: sidebar tree BG = %+v, want default active WindowBG %+v", w.sidebar.tree.BG, tv.ActiveTheme().WindowBG)
+	if w.sidebar.tree.BG != chromePanelBG {
+		t.Fatalf("setup: sidebar tree BG = %+v, want default active PanelBG %+v", w.sidebar.tree.BG, chromePanelBG)
 	}
 
 	resolved := issue379ResolveTheme(themeDark)
 	ApplyTheme(resolved)
 	w.RefreshTheme()
 
-	if w.sidebar.tree.FG != tv.ActiveTheme().WindowFG || w.sidebar.tree.BG != tv.ActiveTheme().WindowBG {
+	if w.sidebar.tree.FG != chromePanelFG || w.sidebar.tree.BG != chromePanelBG {
 		t.Fatalf("sidebar tree was not reseeded by Workbench.RefreshTheme: FG/BG = %+v/%+v, want %+v/%+v",
-			w.sidebar.tree.FG, w.sidebar.tree.BG, tv.ActiveTheme().WindowFG, tv.ActiveTheme().WindowBG)
+			w.sidebar.tree.FG, w.sidebar.tree.BG, chromePanelFG, chromePanelBG)
 	}
 	if w.sidebar.tree.SelFG != tv.ActiveTheme().SelectionFG || w.sidebar.tree.SelBG != tv.ActiveTheme().SelectionBG {
 		t.Fatalf("sidebar tree selection was not reseeded by Workbench.RefreshTheme: FG/BG = %+v/%+v, want %+v/%+v",
@@ -175,7 +185,54 @@ func TestIssue379WorkbenchRefreshThemeReseedsSidebarFrozenWidgets(t *testing.T) 
 	left := w.sidebar.panel.AbsoluteBounds().X
 	issue379AssertCell(t, w, "live dark header title", left+2, 1, resolved.Title, resolved.PanelBG)
 	issue379AssertCell(t, w, "live dark selected tree row", left+20, 2, resolved.WindowFG, w.sidebar.tree.SelBGUnfocused)
+	issue379AssertCell(t, w, "live dark agent row", left+4, 3, resolved.PanelFG, resolved.PanelBG)
+	issue379AssertCell(t, w, "live dark watcher row", left+4, 4, resolved.PanelFG, resolved.PanelBG)
 	if got := w.app.ReadCell(left+20, 2).BG; got == tui.ANSIColor(4) {
 		t.Fatalf("live dark sidebar tree row stayed default ANSI-4 blue after Workbench.RefreshTheme")
+	}
+}
+
+func TestIssue379SidebarTreeUsesPanelRolesWhenWindowRolesDiffer(t *testing.T) {
+	issue379SaveTheme(t)
+	ApplyTheme(issue379ResolveTheme(themeDefault))
+	w := issue379NewWorkbench()
+
+	resolved := ResolveTheme(config.ThemeConfig{
+		Name: themeDefault,
+		Overrides: map[string]string{
+			"panel_fg":  "#00ff00",
+			"panel_bg":  "#010203",
+			"window_fg": "#ffffff",
+			"window_bg": "#445566",
+			"title":     "#ff00ff",
+			"divider":   "#abcdef",
+			"accent":    "#fedcba",
+		},
+	}, envOf(map[string]string{
+		"TERM":      "xterm",
+		"COLORTERM": "truecolor",
+	}), false)
+	if resolved.PanelBG == resolved.WindowBG || resolved.PanelFG == resolved.WindowFG {
+		t.Fatalf("setup: panel and window roles should differ, got panel %+v/%+v window %+v/%+v",
+			resolved.PanelFG, resolved.PanelBG, resolved.WindowFG, resolved.WindowBG)
+	}
+
+	ApplyTheme(resolved)
+	w.RefreshTheme()
+	if w.sidebar.tree.FG != resolved.PanelFG || w.sidebar.tree.BG != resolved.PanelBG {
+		t.Fatalf("sidebar tree reseed used wrong roles: FG/BG = %+v/%+v, want panel %+v/%+v not window %+v/%+v",
+			w.sidebar.tree.FG, w.sidebar.tree.BG,
+			resolved.PanelFG, resolved.PanelBG,
+			resolved.WindowFG, resolved.WindowBG)
+	}
+
+	issue379RenderSidebar(t, w)
+	left := w.sidebar.panel.AbsoluteBounds().X
+	issue379AssertCell(t, w, "override header title", left+2, 1, resolved.Title, resolved.PanelBG)
+	issue379AssertCell(t, w, "override agent row", left+4, 3, resolved.PanelFG, resolved.PanelBG)
+	issue379AssertCell(t, w, "override watcher row", left+4, 4, resolved.PanelFG, resolved.PanelBG)
+	issue379AssertCell(t, w, "override divider grip", left, 1, resolved.Accent, resolved.PanelBG)
+	if got := w.app.ReadCell(left+4, 3).BG; got == resolved.WindowBG {
+		t.Fatalf("override agent row used window_bg %+v instead of panel_bg %+v", resolved.WindowBG, resolved.PanelBG)
 	}
 }
