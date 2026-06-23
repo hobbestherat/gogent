@@ -419,18 +419,46 @@ type ToolCallResponse struct {
 }
 
 func (tr *ToolRegistry) ExecuteToolCall(toolCall *ToolCall, ctx ToolContext) (resp *ToolCallResponse, err error) {
-	tool := tr.tools[toolCall.Tool]
+	// Resolve the called name to a registered tool. The direct lookup wins; only
+	// on a miss do we attempt the MCP bare-name fallback (see resolveMCPBareName),
+	// which re-targets `name` to the namespaced tool. `name` — not toolCall.Tool —
+	// is used for every downstream step (enabled check, validation, counters,
+	// callback) so stats and gating attribute to the resolved tool.
+	name := toolCall.Tool
+	tool := tr.tools[name]
 	if tool == nil {
-		return &ToolCallResponse{
-			Success: false,
-			Error:   fmt.Sprintf("unknown tool: %s", toolCall.Tool),
-		}, nil
+		// Bare-name fallback is scoped to the JSON-text tool-call path (models
+		// without native tool-calling), which is exactly the path that carries no
+		// CallID — native calls always have one and are already constrained to the
+		// advertised namespaced name. Gating on CallID keeps native tool-calling
+		// semantics byte-identical: a native call with an unknown bare name still
+		// errors rather than silently routing to a same-suffix MCP tool (issue #360).
+		if toolCall.CallID == "" {
+			resolved, candidates := tr.resolveMCPBareName(name)
+			if len(candidates) > 1 {
+				return &ToolCallResponse{
+					Success: false,
+					Error: fmt.Sprintf("unknown tool: %s (ambiguous MCP bare name; candidates: %s)",
+						name, strings.Join(candidates, ", ")),
+				}, nil
+			}
+			if resolved != "" {
+				name = resolved
+				tool = tr.tools[name]
+			}
+		}
+		if tool == nil {
+			return &ToolCallResponse{
+				Success: false,
+				Error:   fmt.Sprintf("unknown tool: %s", name),
+			}, nil
+		}
 	}
 
-	if !tr.IsEnabled(toolCall.Tool) {
+	if !tr.IsEnabled(name) {
 		return &ToolCallResponse{
 			Success: false,
-			Error:   fmt.Sprintf("tool is disabled: %s", toolCall.Tool),
+			Error:   fmt.Sprintf("tool is disabled: %s", name),
 		}, nil
 	}
 
@@ -442,7 +470,7 @@ func (tr *ToolRegistry) ExecuteToolCall(toolCall *ToolCall, ctx ToolContext) (re
 	}
 
 	// Count the invocation now that it has been validated and is about to run.
-	tr.recordInvocation(toolCall.Tool)
+	tr.recordInvocation(name)
 
 	// Make the registry's permission service available to tools that gate
 	// through the context (the agent loop builds a context without it).
@@ -451,7 +479,7 @@ func (tr *ToolRegistry) ExecuteToolCall(toolCall *ToolCall, ctx ToolContext) (re
 	}
 	// Track tool call
 	if ctx.ToolCallback != nil {
-		_ = ctx.ToolCallback(toolCall.Tool, toolCall.Args)
+		_ = ctx.ToolCallback(name, toolCall.Args)
 	}
 
 	start := time.Now()
@@ -460,13 +488,13 @@ func (tr *ToolRegistry) ExecuteToolCall(toolCall *ToolCall, ctx ToolContext) (re
 	// instead of crashing the process and every concurrent session (issue #8).
 	defer func() {
 		if r := recover(); r != nil {
-			tr.recordOutcome(toolCall.Tool, false, time.Since(start).Milliseconds())
-			err = fmt.Errorf("tool %q panicked: %v", toolCall.Tool, r)
+			tr.recordOutcome(name, false, time.Since(start).Milliseconds())
+			err = fmt.Errorf("tool %q panicked: %v", name, r)
 			resp = &ToolCallResponse{Success: false, Error: err.Error()}
 		}
 	}()
 	result, err := tool.Execute(toolCall.Args, ctx)
-	tr.recordOutcome(toolCall.Tool, err == nil, time.Since(start).Milliseconds())
+	tr.recordOutcome(name, err == nil, time.Since(start).Milliseconds())
 	if err != nil {
 		return &ToolCallResponse{
 			Success: false,
@@ -478,6 +506,49 @@ func (tr *ToolRegistry) ExecuteToolCall(toolCall *ToolCall, ctx ToolContext) (re
 		Success: true,
 		Result:  result,
 	}, nil
+}
+
+// mcpToolPrefix is the namespace MCP tools are registered under
+// (mcp__<server>__<tool>). It is duplicated here from internal/gogent because the
+// tool package must not import gogent (gogent imports tool); the two must stay in
+// sync.
+const mcpToolPrefix = "mcp__"
+
+// resolveMCPBareName resolves a bare (unprefixed) tool name to a registered MCP
+// tool's namespaced name "mcp__<server>__<bare>". It is the fallback for the
+// JSON-text tool-call path: models without native tool-calling emit the bare name
+// they saw in the MCP server's own tools/list rather than the namespaced form, so
+// the direct registry lookup misses. It runs only after that miss, so exact and
+// native names always win first.
+//
+// It considers only tools registered under the mcp__ prefix and matches the final
+// "__<segment>" against the bare name (suffix "__"+bare). The double underscore
+// prevents partial-word false matches (suffix "__greet" does not match
+// "mcp__demo__do_greet"). It returns:
+//   - (resolved, nil) when exactly one MCP tool carries that bare name;
+//   - ("", candidates) when more than one does — the caller errors with the sorted
+//     candidate list rather than silently mis-routing;
+//   - ("", nil) when none does.
+func (tr *ToolRegistry) resolveMCPBareName(bare string) (resolved string, candidates []string) {
+	if bare == "" {
+		return "", nil
+	}
+	suffix := "__" + bare
+	var matches []string
+	for name := range tr.tools {
+		if strings.HasPrefix(name, mcpToolPrefix) && strings.HasSuffix(name, suffix) {
+			matches = append(matches, name)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", nil
+	case 1:
+		return matches[0], nil
+	default:
+		sort.Strings(matches)
+		return "", matches
+	}
 }
 
 // RegisterCalcTool registers the calc tool for calculations
