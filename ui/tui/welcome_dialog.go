@@ -49,10 +49,17 @@ const welcomeVChrome = 5
 //
 // The "Don't show this on startup again" checkbox mirrors the persisted
 // preference: it starts checked exactly when the startup dialog is currently
-// disabled (GetShowWelcome() == false). Closing the dialog persists the checkbox
-// state via SetShowWelcome (checked -> false), so the dialog doubles as a toggle
-// for the startup preference — a user who re-opened it from the palette can both
-// suppress and re-enable the startup dialog from here.
+// disabled (GetShowWelcome() == false). Closing the dialog persists the new state
+// via SetShowWelcome (checked -> false) ONLY when the user actually flipped the
+// checkbox, so the dialog doubles as a bidirectional toggle for the startup
+// preference — a user who re-opened it from the palette can both suppress and
+// re-enable the startup dialog from here.
+//
+// Merely viewing and dismissing the dialog without touching the checkbox persists
+// nothing: that honours issue #341's "if unchecked, do nothing / leaves
+// ShowWelcome unchanged" rule and, crucially, never rewrites an older config that
+// omitted the key from nil/unset to an explicit value just because the first-run
+// dialog was dismissed.
 //
 // It is robust to a missing handler pair: with no SetShowWelcome the checkbox is
 // inert (closing persists nothing) and with no GetShowWelcome it defaults to
@@ -68,13 +75,19 @@ func (w *Workbench) showWelcomeDialog() {
 	x, y, width, height := w.dialogRect(spec)
 
 	var layer *tv.Layer
-	// closeFn persists the checkbox state (only when the handler is wired) before
-	// removing the layer, so opting out / back in takes effect immediately. It is
-	// captured by the [x] button, Esc, and the Close button so every dismissal path
-	// behaves identically.
+	// startChecked is the checkbox's initial state, which mirrors the persisted
+	// preference (checked == startup dialog currently disabled). A nil GetShowWelcome
+	// leaves it unchecked ("shown"). closeFn compares the final state against this to
+	// persist only a real change.
+	startChecked := w.handlers.GetShowWelcome != nil && !w.handlers.GetShowWelcome()
+	// closeFn persists the new preference — but ONLY when the user actually flipped
+	// the checkbox (and the handler is wired) — before removing the layer, so opting
+	// out / back in takes effect immediately while a no-op dismissal changes nothing.
+	// It is captured by the [x] button, Esc, and the Close button so every dismissal
+	// path behaves identically.
 	var dontShow *tv.Checkbox
 	closeFn := func() {
-		if w.handlers.SetShowWelcome != nil && dontShow != nil {
+		if w.handlers.SetShowWelcome != nil && dontShow != nil && dontShow.IsChecked() != startChecked {
 			// Checked means "don't show on startup", i.e. ShowWelcome=false.
 			w.handlers.SetShowWelcome(!dontShow.IsChecked())
 		}
@@ -98,9 +111,7 @@ func (w *Workbench) showWelcomeDialog() {
 	dontShow.BG = tv.DefaultTheme.DialogBG
 	// Mirror the current persisted state: checked when the startup dialog is off, so
 	// a re-opened dialog shows the truth and lets the user flip it back.
-	if w.handlers.GetShowWelcome != nil {
-		dontShow.SetChecked(!w.handlers.GetShowWelcome())
-	}
+	dontShow.SetChecked(startChecked)
 	dialog.Window.AddContent(dontShow)
 
 	dialog.Window.AddContent(newButton("Close",
