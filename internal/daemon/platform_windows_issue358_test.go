@@ -8,7 +8,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -102,6 +104,63 @@ func TestIssue358WindowsListenLocalRefusesSecondLiveInstance(t *testing.T) {
 	}
 }
 
+func TestIssue358WindowsListenLocalConcurrentColdStartOnlyOneWins(t *testing.T) {
+	p := PathsFor(t.TempDir())
+
+	const workers = 12
+	start := make(chan struct{})
+	results := make(chan listenLocalResult, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			ln, addr, err := ListenLocal(p)
+			results <- listenLocalResult{ln: ln, addr: addr, err: err}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	var winners []listenLocalResult
+	var alreadyRunning int
+	for res := range results {
+		switch {
+		case res.err == nil:
+			winners = append(winners, res)
+		case errors.Is(res.err, ErrAlreadyRunning):
+			alreadyRunning++
+		default:
+			t.Fatalf("ListenLocal concurrent unexpected error: %v", res.err)
+		}
+	}
+	for _, winner := range winners {
+		_ = winner.ln.Close()
+	}
+	if len(winners) != 1 {
+		t.Fatalf("ListenLocal concurrent winners = %d (%v), want exactly 1; Windows single-instance must be equivalent to Unix", len(winners), addrsOf(winners))
+	}
+	if alreadyRunning != workers-1 {
+		t.Fatalf("ErrAlreadyRunning count = %d, want %d", alreadyRunning, workers-1)
+	}
+}
+
+func TestIssue358WindowsWritePidfileCreatesParentDirectory(t *testing.T) {
+	pidPath := filepath.Join(t.TempDir(), "missing", "daemon.pid")
+	if err := WritePidfile(pidPath, 1234); err != nil {
+		t.Fatalf("WritePidfile nested Windows path: %v", err)
+	}
+	got, err := ReadPidfile(pidPath)
+	if err != nil {
+		t.Fatalf("ReadPidfile nested Windows path: %v", err)
+	}
+	if got != 1234 {
+		t.Fatalf("pid = %d, want 1234", got)
+	}
+}
+
 func TestIssue358WindowsStopPrefersExitEndpointWithMissingPidfile(t *testing.T) {
 	p := PathsFor(t.TempDir())
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -149,6 +208,20 @@ func serveWindowsHealth(t *testing.T, ln net.Listener) *http.Server {
 		}
 	}()
 	return srv
+}
+
+type listenLocalResult struct {
+	ln   net.Listener
+	addr string
+	err  error
+}
+
+func addrsOf(results []listenLocalResult) []string {
+	addrs := make([]string, 0, len(results))
+	for _, res := range results {
+		addrs = append(addrs, res.addr)
+	}
+	return addrs
 }
 
 func serveWindowsHealthAndExit(t *testing.T, ln net.Listener) *http.Server {
