@@ -74,6 +74,32 @@ func TestIssue389SetModelsClampsWhenSelectedModelRemoved(t *testing.T) {
 	}
 }
 
+func TestIssue389SetModelsPreservesDuplicateDisplayLabelByStableName(t *testing.T) {
+	w := NewWorkbench([]*config.ModelConfig{
+		{Name: "alpha", DisplayName: "Shared", Model: "provider-alpha", EffortOptions: []string{"low"}, ReasoningEffort: "low"},
+		{Name: "beta", DisplayName: "Shared", Model: "provider-beta", EffortOptions: []string{"deep"}, ReasoningEffort: "deep"},
+	})
+	sw := w.NewSession()
+	sw.modelSelect.SetSelected(1)
+	sw.rebuildEffortOptions()
+	if got := sw.selectedModelName(); got != "beta" {
+		t.Fatalf("pre-refresh selectedModelName() with duplicate labels = %q, want beta", got)
+	}
+
+	w.SetModels([]*config.ModelConfig{
+		{Name: "alpha", DisplayName: "Shared", Model: "provider-alpha-v2", EffortOptions: []string{"low"}, ReasoningEffort: "low"},
+		{Name: "beta", DisplayName: "Shared", Model: "provider-beta-v2", EffortOptions: []string{"wide"}, ReasoningEffort: "wide"},
+	})
+
+	if got := sw.selectedModelName(); got != "beta" {
+		t.Fatalf("selectedModelName() after duplicate-label refresh = %q, want beta", got)
+	}
+	wantEfforts := []string{effortDefaultOption, "wide"}
+	if !reflect.DeepEqual(sw.effortSelect.Options, wantEfforts) {
+		t.Fatalf("effort options after duplicate-label refresh = %#v, want %#v", sw.effortSelect.Options, wantEfforts)
+	}
+}
+
 func TestIssue389ModelEditorSaveRefreshesWorkbenchFromAuthoritativeModels(t *testing.T) {
 	backend := []config.ModelConfig{{Name: "solo", DisplayName: "Before", Model: "provider-before"}}
 	w := NewWorkbench([]*config.ModelConfig{{Name: "solo", DisplayName: "Before", Model: "provider-before"}})
