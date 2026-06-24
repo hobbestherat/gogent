@@ -94,6 +94,7 @@ func runAttached(homeDir, addr, token string, noColorFlag bool) error {
 	// dropped stream raises the blocking modal and reconnects with backoff; "Retry
 	// now" pokes the client's backoff.
 	rc.SetReconnector(wb)
+	rc.SetHealthCheck(daemonHealthEvery)
 	wb.SetReconnectControls(hostLabel(addr), rc.RetryNow)
 	handlers := rc.Handlers()
 	installPresentationHandlers(&handlers, g, wb, noColorFlag)

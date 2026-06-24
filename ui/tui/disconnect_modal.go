@@ -119,13 +119,42 @@ func (w *Workbench) dismissDisconnectModal() {
 	w.disconnectBody = nil
 }
 
-// refreshAfterReconnect re-fetches each open live window's transcript from the
-// daemon and swaps it in (jump-to-present), discarding the frozen copy shown
-// during the outage. The fetches run on the calling (background) goroutine; each
-// result is applied on the UI thread. The SSE stream is already re-subscribed by
-// the RemoteClient, so live events resume from the present — this re-syncs the
-// transcript history without replaying missed events one by one.
+// refreshAfterReconnect performs the §7 jump-to-present: it re-fetches the
+// daemon's full live state (GET /sessions + each transcript, via the Restore
+// handler) and re-syncs the UI to it, rather than replaying the events missed
+// during the outage. An already-open window has its transcript swapped for the
+// daemon's current copy; a session that became live on the daemon during the
+// outage is reopened in a new window. Pending approvals re-surface on their own:
+// the approvals poller resumes once the connection is back. The fetch runs on the
+// calling (background) goroutine; every UI mutation is applied on the UI thread.
+//
+// Restore (GET /sessions + transcripts) is the precise §7 contract, so it is
+// preferred; GetTranscript is a fallback that at least re-syncs open windows when
+// no Restore handler is wired.
 func (w *Workbench) refreshAfterReconnect() {
+	if w.handlers.Restore != nil {
+		open := make(map[string]bool)
+		for _, id := range w.SessionIDs() {
+			open[id] = true
+		}
+		for _, rs := range w.handlers.Restore() {
+			rs := rs
+			if open[rs.ID] {
+				w.desktop.Post(func() {
+					w.mu.Lock()
+					sw := w.sessions[rs.ID]
+					w.mu.Unlock()
+					if sw != nil && !sw.readOnly {
+						sw.reload(rs.Messages)
+					}
+				})
+				continue
+			}
+			// Became live on the daemon during the outage: reopen its window.
+			w.desktop.Post(func() { w.AdoptSession(rs) })
+		}
+		return
+	}
 	if w.handlers.GetTranscript == nil {
 		return
 	}

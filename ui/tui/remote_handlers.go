@@ -90,6 +90,15 @@ type RemoteClient struct {
 	// field so tests can shorten the schedule; production uses backoffFor.
 	backoff func(attempt int) time.Duration
 
+	// healthEvery, when > 0, runs a background /health ping at that interval so a
+	// half-open/stalled SSE connection (which the stream read cannot detect) still
+	// trips the disconnect/reconnect path (issue #358 §7). 0 disables it.
+	healthEvery time.Duration
+	// streamMu guards streamCancel, the cancel for the currently-open SSE stream so
+	// the health monitor can drop a wedged stream and force a reconnect.
+	streamMu     sync.Mutex
+	streamCancel context.CancelFunc
+
 	startOnce sync.Once
 }
 
@@ -116,6 +125,12 @@ func NewRemoteClient(client *APIClient, sink EventSink, approver Approver) *Remo
 // normally the *Workbench. It must be called before Start. With none set the
 // client reconnects silently (no modal), preserving the simpler Phase-2 behaviour.
 func (rc *RemoteClient) SetReconnector(r Reconnector) { rc.reconnector = r }
+
+// SetHealthCheck enables a background /health ping at interval every (issue #358
+// §7): a failed ping drops the current SSE stream so the consumer falls into the
+// reconnect path even when the stream read itself is wedged on a half-open socket.
+// It must be called before Start; a non-positive interval leaves it disabled.
+func (rc *RemoteClient) SetHealthCheck(every time.Duration) { rc.healthEvery = every }
 
 // RetryNow collapses the current reconnect backoff so the next attempt fires
 // immediately. It backs the disconnect modal's "Retry now" button and is safe to
@@ -154,12 +169,15 @@ func (rc *RemoteClient) Start(parent context.Context) error {
 		}()
 
 		if rc.sink != nil {
-			events, err := rc.client.StreamEvents(rc.ctx)
+			events, err := rc.openStream()
 			if err != nil {
 				startErr = fmt.Errorf("subscribe to daemon events: %w", err)
 				return
 			}
 			go rc.consume(events)
+			if rc.healthEvery > 0 {
+				go rc.monitorHealth()
+			}
 		}
 		if rc.approver != nil {
 			go rc.pollApprovals()
@@ -177,7 +195,9 @@ func (rc *RemoteClient) consume(events <-chan GlobalEventDTO) {
 		for ge := range events {
 			rc.sink(ge.SessionID, eventDTOToSessionEvent(ge.Event))
 		}
-		// Stream ended. Stop if we are shutting down; otherwise reconnect.
+		// Stream ended (server closed it, or the health monitor cancelled it).
+		// Release its context, then stop if we are shutting down, else reconnect.
+		rc.dropStream()
 		if rc.ctx.Err() != nil {
 			return
 		}
@@ -186,6 +206,67 @@ func (rc *RemoteClient) consume(events <-chan GlobalEventDTO) {
 			return // context cancelled while reconnecting
 		}
 		events = next
+	}
+}
+
+// openStream opens a fresh SSE stream under a child context whose cancel is stored
+// so the health monitor can drop a wedged stream. The caller (consume) releases
+// the context via dropStream when the stream ends.
+func (rc *RemoteClient) openStream() (<-chan GlobalEventDTO, error) {
+	streamCtx, cancel := context.WithCancel(rc.ctx)
+	ch, err := rc.client.StreamEvents(streamCtx)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	rc.streamMu.Lock()
+	rc.streamCancel = cancel
+	rc.streamMu.Unlock()
+	return ch, nil
+}
+
+// dropStream cancels the current SSE stream's context, ending its read. It is
+// called by consume when a stream finishes (to release the context) and by the
+// health monitor to force a reconnect on a stalled connection. Idempotent.
+func (rc *RemoteClient) dropStream() {
+	rc.streamMu.Lock()
+	cancel := rc.streamCancel
+	rc.streamCancel = nil
+	rc.streamMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// healthFailThreshold is how many consecutive failed /health pings force a
+// reconnect. Requiring two avoids flashing the disconnect modal on a single
+// transient blip while the SSE stream is actually fine, yet still catches a
+// genuinely stalled connection within ~2 intervals.
+const healthFailThreshold = 2
+
+// monitorHealth pings the daemon's /health every rc.healthEvery and, after
+// healthFailThreshold consecutive failures, drops the current SSE stream so
+// consume falls into the reconnect path — catching a half-open/stalled connection
+// the stream read alone would not (issue #358 §7). A single recovered ping resets
+// the streak, so a momentary blip never surfaces the modal.
+func (rc *RemoteClient) monitorHealth() {
+	ticker := time.NewTicker(rc.healthEvery)
+	defer ticker.Stop()
+	fails := 0
+	for {
+		select {
+		case <-rc.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if err := rc.client.Health(); err != nil {
+			if fails++; fails >= healthFailThreshold {
+				rc.dropStream()
+				fails = 0
+			}
+			continue
+		}
+		fails = 0
 	}
 }
 
@@ -207,7 +288,7 @@ func (rc *RemoteClient) reconnect() <-chan GlobalEventDTO {
 		case <-rc.retryNow:
 		case <-time.After(rc.backoff(attempt)):
 		}
-		next, err := rc.client.StreamEvents(rc.ctx)
+		next, err := rc.openStream()
 		if err == nil {
 			rc.notifyRestored()
 			return next

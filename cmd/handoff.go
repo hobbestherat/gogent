@@ -17,6 +17,12 @@ import (
 	tuipkg "gogent/ui/tui"
 )
 
+// daemonHealthEvery is how often an attached TUI pings the daemon's /health while
+// the SSE stream looks idle, so a half-open or stalled connection that the stream
+// read cannot detect still trips the disconnect modal (issue #358 §7). The handoff
+// and attach paths set it; tests leave it at zero (off).
+const daemonHealthEvery = 10 * time.Second
+
 // daemonController owns the symmetric embedded <-> daemon handoff driven from the
 // TUI's Daemon menu (issue #358 §6). It tracks the TUI's current attachment mode
 // and the live plumbing for that mode (an embedded *gogent.Gogent, or an attached
@@ -123,41 +129,82 @@ func (dc *daemonController) Start() error {
 	g := dc.g
 	dc.mu.Unlock()
 
+	// The handoff follows §6 strictly — persist -> spawn/restore target -> switch
+	// Handlers -> shut down source — so the source's live services keep running
+	// until the target is confirmed working. Every failure before the switch
+	// returns with the embedded core fully intact (nothing of the source has been
+	// torn down yet), so a failed Start never strands the user in a half-shut-down
+	// embedded process.
+
 	// 1. Persist: cancel in-flight turns and flush the store so the daemon restores
 	//    the current state (a cancelled turn's partial transcript is already saved).
+	//    This must precede the spawn so the daemon restores from current state.
 	cancelInflightTurns(g)
 	g.SyncStore()
-	// 2. Shut the source's background services down so they do not double-run with
-	//    the daemon's (the in-process API server stays as a harmless idle listener;
-	//    the daemon serves the TUI over the socket from here on).
-	g.StopWatchers()
-	g.CloseMCPServers()
 
-	// 3. Spawn the daemon detached (unless one is somehow already up) and wait until
-	//    it binds its socket and serves /health.
+	// 2. Spawn/restore the target: spawn the daemon detached (unless one is already
+	//    up) and wait until it binds its socket and serves /health. The source is
+	//    still fully live here, so a spawn/readiness failure rolls back cleanly.
+	spawned := false
 	if st := daemon.Query(dc.paths); !st.Running {
 		if _, err := daemon.Spawn(dc.paths, []string{"daemon", "start", "--foreground"}); err != nil {
 			return fmt.Errorf("spawn daemon: %w", err)
 		}
+		spawned = true
 	}
 	if !waitRunning(dc.paths, 15*time.Second) {
+		dc.rollbackSpawn(spawned)
 		return fmt.Errorf("daemon did not become ready; see %s", dc.paths.Log)
 	}
 
-	// 4. Build the API + remote client over the local socket and confirm liveness.
+	// 3. Build the API + remote client and confirm BOTH /health and the live event
+	//    stream work before switching Handlers, so a broken target rolls back the
+	//    spawn and leaves the source untouched.
 	addr := "unix://" + dc.paths.Sock
 	client, err := tuipkg.NewAPIClient(addr, "")
 	if err != nil {
+		dc.rollbackSpawn(spawned)
 		return fmt.Errorf("build api client: %w", err)
 	}
 	if err := client.Health(); err != nil {
+		dc.rollbackSpawn(spawned)
 		return fmt.Errorf("daemon not reachable after start: %w", err)
 	}
+	rc, err := dc.switchToRemote(g, client, addr)
+	if err != nil {
+		dc.rollbackSpawn(spawned)
+		return err
+	}
+
+	// 4. Shut the source down now that the target owns the work (the in-process API
+	//    server stays as a harmless idle listener; the daemon serves the TUI over
+	//    the socket from here on).
+	g.StopWatchers()
+	g.CloseMCPServers()
+
+	// 5. Commit the new attached-local state.
+	dc.mu.Lock()
+	dc.mode = tuipkg.DaemonModeAttachedLocal
+	dc.client = client
+	dc.rc = rc
+	dc.connect = addr
+	dc.mu.Unlock()
+	return nil
+}
+
+// switchToRemote builds a RemoteClient over client, confirms its live event stream
+// opens (rc.Start is synchronous on the initial subscribe), and only then swaps the
+// Workbench Handlers to the remote implementation on the UI thread. Returning an
+// error before the swap — when the stream cannot be opened — leaves the Handlers
+// untouched, so the caller can roll back. addr labels the reconnect modal's host.
+func (dc *daemonController) switchToRemote(g *gogent.Gogent, client *tuipkg.APIClient, addr string) (*tuipkg.RemoteClient, error) {
 	rc := tuipkg.NewRemoteClient(client, dc.wb.EmitSessionEvent, dc.wb)
 	rc.SetReconnector(dc.wb)
-
-	// 5. Switch the Workbench Handlers to the remote implementation (keeping the
-	//    presentation handlers backed by the local config core) on the UI thread.
+	rc.SetHealthCheck(daemonHealthEvery)
+	if err := rc.Start(context.Background()); err != nil {
+		rc.Close()
+		return nil, fmt.Errorf("start remote event stream: %w", err)
+	}
 	handlers := rc.Handlers()
 	installPresentationHandlers(&handlers, g, dc.wb, dc.noColor)
 	dc.installMenuHandlers(&handlers)
@@ -166,20 +213,17 @@ func (dc *daemonController) Start() error {
 		dc.wb.SetReconnectControls(hostLabel(addr), rc.RetryNow)
 		dc.wb.RefreshMenu()
 	})
+	return rc, nil
+}
 
-	// 6. Start the remote event stream + approvals poller.
-	if err := rc.Start(context.Background()); err != nil {
-		return fmt.Errorf("start remote event stream: %w", err)
+// rollbackSpawn stops a daemon this Start spawned, used when a later step fails
+// before the Handlers switch. It never stops a pre-existing daemon (spawned is
+// false then), so attaching to an already-running daemon that later fails does not
+// kill someone else's instance.
+func (dc *daemonController) rollbackSpawn(spawned bool) {
+	if spawned {
+		_ = daemon.Stop(dc.paths, 5*time.Second, true)
 	}
-
-	// 7. Commit the new attached-local state.
-	dc.mu.Lock()
-	dc.mode = tuipkg.DaemonModeAttachedLocal
-	dc.client = client
-	dc.rc = rc
-	dc.connect = addr
-	dc.mu.Unlock()
-	return nil
 }
 
 // Stop performs the daemon->embedded handoff. It is invoked on a background
@@ -191,16 +235,26 @@ func (dc *daemonController) Stop() error {
 		return errors.New("Stop daemon applies only when attached to the local daemon")
 	}
 	rc := dc.rc
+	client := dc.client
+	addr := dc.connect
 	dc.mu.Unlock()
 
-	// 1. Detach the remote client (stops the SSE consumer, approvals poller and any
-	//    in-flight remote turns) so its reconnect loop does not fight the shutdown.
+	// 1. Detach the remote client first so the daemon's graceful /exit — which drops
+	//    the SSE stream — does not trip the disconnect modal mid-handoff.
 	if rc != nil {
 		rc.Close()
 	}
 	// 2. Ask the local daemon to persist and shut down gracefully (it flushes the
-	//    store on its way out, so the disk is current for the embedded restore).
+	//    store on its way out, so the disk is current for the embedded restore). If
+	//    it will not stop, the daemon is still live and owns the state, so re-attach
+	//    a fresh remote client and stay attached rather than strand the user with a
+	//    closed client and no embedded core (symmetric rollback).
 	if err := daemon.Stop(dc.paths, 15*time.Second, false); err != nil && !errors.Is(err, daemon.ErrNotRunning) {
+		if newRC, rerr := dc.switchToRemote(dc.g, client, addr); rerr == nil {
+			dc.mu.Lock()
+			dc.rc = newRC
+			dc.mu.Unlock()
+		}
 		return fmt.Errorf("stop daemon: %w", err)
 	}
 
