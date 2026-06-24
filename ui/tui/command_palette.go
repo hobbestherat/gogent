@@ -215,6 +215,8 @@ func (w *Workbench) rawActions() []action {
 			enabled: avail(h.GetNotifyConfig != nil && h.SetNotifyConfig != nil)},
 		{category: "Config", name: "Theme editor", run: w.showThemeEditor,
 			enabled: avail(h.GetTheme != nil && h.SetTheme != nil)},
+		{category: "Config", name: "Edit commands…", run: w.showCommandsDialog,
+			enabled: avail(h.ListCommands != nil)},
 
 		// Application-wide actions. The command palette and help overlay are full
 		// rebindable actions (issue #401): their run IS the registry handler for the
@@ -233,6 +235,22 @@ func (w *Workbench) rawActions() []action {
 		{category: "App", name: "Customize keybindings", run: w.showKeybindingCustomizer},
 		{category: "App", name: "Quit", run: w.confirmQuit,
 			actionID: actionAppQuit, scope: tv.ScopeGlobal, deflt: tv.Chord{Rune: 'q', Ctrl: true}},
+	}
+	// Custom slash commands (issue #403): one palette entry per user-defined
+	// command, rebuilt each call (rawActions is invoked fresh) so newly created or
+	// deleted commands appear/disappear without a restart. Each runs the exact
+	// dispatch path typing "/name" would, so a parameterless command expands and
+	// sends; a parameterized one sends with empty/default bindings (or surfaces its
+	// required-parameter error), matching handleSlashCommand.
+	if h.ListCommands != nil {
+		for _, c := range h.ListCommands() {
+			slash := "/" + c.Name
+			name := slash
+			if c.Description != "" {
+				name += " — " + c.Description
+			}
+			cmds = append(cmds, action{category: "Commands", name: name, keys: slash, run: sessionCmd(slash)})
+		}
 	}
 	return cmds
 }

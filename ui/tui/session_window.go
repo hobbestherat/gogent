@@ -1845,7 +1845,68 @@ func (sw *SessionWindow) handleSlashCommand(text string) bool {
 		sw.handleWatcherCommand(fields[1:])
 		return true
 	}
+	// Not a built-in: a custom command (issue #403) may match. The built-in switch
+	// is consulted first and returns above, so a custom command can never shadow a
+	// built-in. An unresolved name falls through to false, sending the raw text to
+	// the model unchanged (the prior behaviour).
+	if sw.dispatchCustomCommand(fields[0], fields[1:]) {
+		return true
+	}
 	return false
+}
+
+// dispatchCustomCommand resolves "/name" against the custom-command registry and,
+// when found, expands its template with the invocation args and sends the result
+// to the agent as a normal user message (issue #403). It returns true when it
+// handled the command (sent or reported an error) and false when no custom
+// command matched, so the caller can fall back to sending the raw text.
+//
+// A missing required parameter is reported as a transcript note and the command
+// is NOT sent. The command's model override is applied to the turn; agent/subtask
+// overrides are persisted with the command and reserved for a follow-up (the send
+// seam carries the model only).
+func (sw *SessionWindow) dispatchCustomCommand(slashName string, args []string) bool {
+	if sw.wb == nil || sw.wb.handlers.GetCustomCommand == nil {
+		return false
+	}
+	name := strings.TrimPrefix(slashName, "/")
+	def, err := sw.wb.handlers.GetCustomCommand(name)
+	if err != nil {
+		return false // not a custom command — let the caller send the raw text
+	}
+	expanded, err := expandTemplate(def, args)
+	if err != nil {
+		sw.echoCommand(slashName, "", err)
+		return true
+	}
+	sw.sendCommandMessage(expanded, def.Model)
+	return true
+}
+
+// sendCommandMessage sends an already-expanded custom-command prompt as a normal
+// user turn, applying a per-invocation model override (empty = the session's
+// current model). It mirrors the non-busy submit path; while a turn is running it
+// enqueues the message so it drains on idle, matching how a typed message behaves.
+func (sw *SessionWindow) sendCommandMessage(message, modelOverride string) {
+	if sw.wb == nil || strings.TrimSpace(message) == "" {
+		return
+	}
+	if sw.busy {
+		sw.enqueue(message)
+		return
+	}
+	sw.completer.hide()
+	sw.addUser(message)
+	sw.setBusy(true)
+	sw.planPending = false
+	modelName := sw.selectedModelName()
+	if strings.TrimSpace(modelOverride) != "" {
+		modelName = modelOverride
+	}
+	effort := sw.selectedEffort()
+	if sw.wb.handlers.OnSend != nil {
+		go sw.wb.handlers.OnSend(sw.id, message, modelName, effort)
+	}
 }
 
 // handleWatcherCommand implements /watcher (issue #329 Phase 4): a client-side

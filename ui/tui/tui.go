@@ -246,6 +246,29 @@ type Handlers struct {
 	// DeleteWatcher unregisters a watcher (by id or name) entirely. Backs the
 	// dialog Delete button. May be nil.
 	DeleteWatcher func(idOrName string) error
+	// --- Custom slash commands (issue #403) ---
+	// ListCommands returns every user-defined custom command. It backs the command
+	// editor list, the palette entries and the slash-completion popup. May be nil,
+	// in which case the Commands editor/menu and custom-command dispatch are absent.
+	ListCommands func() []CommandInfo
+	// GetCustomCommand resolves one command by name for runtime dispatch (the
+	// handleSlashCommand fallthrough). A non-nil error means "no such custom
+	// command" — the caller then sends the raw text to the model unchanged, so a
+	// custom command never shadows a built-in. May be nil.
+	GetCustomCommand func(name string) (CommandDef, error)
+	// CreateCommand / UpdateCommand persist a command, enforcing collision and
+	// shape validation in the backend and returning a descriptive error the editor
+	// shows inline. Create stamps version 1; Update appends a new version. May be nil.
+	CreateCommand func(def CommandDef) error
+	UpdateCommand func(def CommandDef) error
+	// DeleteCommand removes a command and its history. May be nil.
+	DeleteCommand func(name string) error
+	// GetCommandHistory returns a command's append-only version history (oldest
+	// first) for the history/diff browser. May be nil.
+	GetCommandHistory func(name string) ([]CommandVersion, error)
+	// RestoreCommandVer restores version v of a command, itself recorded as a new
+	// version. May be nil.
+	RestoreCommandVer func(name string, v int) error
 	// --- Daemon attach lifecycle (issue #358 §6) ---
 	// DaemonMode reports the TUI's current attachment mode (embedded, attached to
 	// the local daemon, or attached to a remote --connect daemon), so the Daemon
@@ -285,6 +308,50 @@ type WatcherConfig struct {
 	DailyAt         string // "HH:MM" form
 	Timezone        string // IANA tz for DailyAt; "" means UTC
 	ReportToSession *string
+}
+
+// CommandInfo is the list-row view of a custom command (issue #403): just enough
+// to render the editor list, palette entries and the slash-completion popup
+// without loading the full template/history. It is intentionally decoupled from
+// internal/config so ui/tui stays free of the backend types.
+type CommandInfo struct {
+	Name        string
+	Description string
+	Version     int
+}
+
+// CommandDef is the UI-facing full custom command, mirroring config.CommandDef
+// but kept independent of internal/config. The editor reads and writes this
+// shape; the backend maps it to/from the persisted type.
+type CommandDef struct {
+	Name        string
+	Description string
+	Parameters  []CommandParam
+	Template    string
+	Model       string
+	Agent       string
+	Subtask     bool
+	Version     int
+	Versions    []CommandVersion
+}
+
+// CommandParam is one declared parameter of a custom command (UI-facing).
+type CommandParam struct {
+	Name        string
+	Description string
+	Required    bool
+	Default     string
+}
+
+// CommandVersion is one immutable snapshot in a command's history (UI-facing).
+type CommandVersion struct {
+	Version    int
+	Template   string
+	Parameters []CommandParam
+	Model      string
+	Agent      string
+	Subtask    bool
+	SavedAt    string
 }
 
 // RestoredSession describes a session to be re-opened from persisted state.
@@ -947,6 +1014,11 @@ func (w *Workbench) settingsItems() []*tv.MenuItem {
 	// Statistics is surfaced only when the backend wires the report handler.
 	if w.handlers.GetStatistics != nil {
 		items = append(items, tv.NewMenuItem("S&tatistics…", func() { w.showStatisticsDialog() }))
+	}
+	// Custom commands editor (issue #403), gated like the other handler-backed
+	// items: shown only when the backend wired command management.
+	if w.handlers.ListCommands != nil {
+		items = append(items, tv.NewMenuItem("&Commands…", func() { w.showCommandsDialog() }))
 	}
 	items = append(items,
 		tv.NewMenuItem("----------", nil),

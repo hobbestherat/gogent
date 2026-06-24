@@ -111,6 +111,11 @@ type Gogent struct {
 	// index (SessionStore provider) and re-registered on restore (OnSessionRestored).
 	// Guarded by g.mu.
 	attachedWatchers map[string][]config.WatcherConfig
+	// commandMu serializes read-modify-write of ~/.gogent/commands.json (issue
+	// #403) so concurrent custom-command edits never lose an update or interleave a
+	// half-applied version bump. It is independent of g.mu, which guards live
+	// session/watcher state, since command persistence touches neither.
+	commandMu sync.Mutex
 	// notifier emits desktop/terminal notifications for backend-originated events
 	// — currently free-running watcher completions (issue #329). It is the
 	// fallback delivery path used in headless mode (no TUI owns the screen); when
