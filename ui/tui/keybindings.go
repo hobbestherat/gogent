@@ -207,9 +207,10 @@ func (w *Workbench) recordOverride(id tv.ActionID, chord tv.Chord) {
 // catalog run and always consumes the key (matching the old menu-accelerator contract).
 // A handler-gated action (enabled predicate false) and a cleared (unbound) action are
 // skipped. Focus actions register once per open window via registerTranscriptBindings
-// (with that window's transcript Target). The non-rebindable Ctrl+C/Ctrl+X clipboard
-// accelerators are re-registered last (see registerClipboardBindings) since the clear
-// above also drops them. This Clear+re-register is the only safe way to update the
+// (with that window's transcript Target). The non-rebindable fixed accelerators
+// (Ctrl+C/Ctrl+X clipboard, Ctrl+K/Ctrl+F palette/find) are re-registered last (see
+// registerFixedAccelerators) since the clear above also drops them. This Clear+re-register
+// is the only safe way to update the
 // per-window Focus bindings with the toolkit's API (Rebind touches one entry, and there
 // is no Unregister), and only these sites register, so the rebuild restores the registry
 // completely.
@@ -249,21 +250,38 @@ func (w *Workbench) rebuildBindings() {
 	for _, sw := range windows {
 		sw.registerTranscriptBindings()
 	}
-	w.registerClipboardBindings(reg)
+	w.registerFixedAccelerators(reg)
 }
 
-// registerClipboardBindings registers the Ctrl+C / Ctrl+X clipboard accelerators on the
-// desktop registry (issue #401). They are NOT rebindable catalog actions: their handlers
-// return the bool from CopyFocused()/CutFocused(), so the accelerator consumes the key
-// only when a copy/cut actually happened and otherwise declines, letting Ctrl+C fall
-// through to the quit-confirm tail and Ctrl+X to the focused widget — the conditional
-// behaviour a plain always-consuming binding can't express. They are Global scope (the
-// zero value) and re-registered by every rebuildBindings because Clear drops them; the
-// Edit menu renders their display hints via plain WithShortcut (display-only).
-func (w *Workbench) registerClipboardBindings(reg *tv.BindingRegistry) {
+// registerFixedAccelerators registers the non-rebindable convenience accelerators on the
+// desktop registry (issue #401), re-registered by every rebuildBindings because Clear
+// drops them.
+//
+// Ctrl+C / Ctrl+X (clipboard) are Global scope (the zero value): their handlers return
+// the bool from CopyFocused()/CutFocused(), so the accelerator consumes the key only when
+// a copy/cut actually happened and otherwise declines, letting Ctrl+C fall through to the
+// quit-confirm tail and Ctrl+X to the focused widget — the conditional behaviour a plain
+// always-consuming binding can't express. The Edit menu renders their display hints via
+// plain WithShortcut (display-only).
+//
+// Ctrl+K (command palette) and Ctrl+F (find in transcript) preserve the long-standing
+// global shortcuts the welcome dialog, About box and docs advertise, alongside the
+// rebindable catalog defaults ':' (app.commandPalette) and '/' (transcript.find) — so
+// every key that worked before #401 still works (the pre-#401 composite "Ctrl+K, :" /
+// "Ctrl+F, /" behaviour). They are registered at ScopeFallthrough, not Global: they fire
+// only when the focused widget declines the key (text inputs don't use Ctrl+K/Ctrl+F, so
+// the palette/find still open from anywhere), and staying out of the Global scope keeps
+// them off the menu-accelerator Match path. Like the catalog Fallthrough keys they consume
+// the event. They are intentionally NOT rebindable (as the menu accelerators weren't
+// pre-#401); the rebindable path is the ':' / '/' catalog actions.
+func (w *Workbench) registerFixedAccelerators(reg *tv.BindingRegistry) {
 	if w.desktop == nil {
 		return
 	}
+	reg.Register(tv.KeyBinding{Chord: tv.Chord{Key: tui.KeyRune, Rune: 'k', Ctrl: true}, Scope: tv.ScopeFallthrough},
+		func() bool { w.showCommandPalette(); return true })
+	reg.Register(tv.KeyBinding{Chord: tv.Chord{Key: tui.KeyRune, Rune: 'f', Ctrl: true}, Scope: tv.ScopeFallthrough},
+		func() bool { w.withActiveTranscript((*SessionWindow).promptFind); return true })
 	reg.Register(tv.KeyBinding{Chord: tv.Chord{Key: tui.KeyRune, Rune: 'c', Ctrl: true}},
 		func() bool { return w.desktop.CopyFocused() })
 	reg.Register(tv.KeyBinding{Chord: tv.Chord{Key: tui.KeyRune, Rune: 'x', Ctrl: true}},

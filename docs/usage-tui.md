@@ -140,14 +140,15 @@ the transcript view, the sidebar, and the message input box.
 
 ### Global / desktop
 
-All chords below are **defaults** and rebindable from the [keybinding
-customizer](#keybinding-customizer) (except Ctrl+C, which is the native
-quit-when-unconsumed tail).
+All chords below are **defaults**. The catalog chords are rebindable from the
+[keybinding customizer](#keybinding-customizer); the exceptions are Ctrl+C (the native
+quit-when-unconsumed tail) and the fixed Ctrl+K / Ctrl+F convenience accelerators.
 
 | Action                  | Shortcut        | Notes                                            |
 |-------------------------|-----------------|--------------------------------------------------|
 | Quit                    | Ctrl+Q, Ctrl+C  | Confirms via `confirmQuit`                       |
-| Command palette         | `:`             | Only when not in a text input                    |
+| Command palette         | Ctrl+K, `:`     | Ctrl+K anywhere (fixed); `:` outside a text input (rebindable) |
+| Find in transcript      | Ctrl+F, `/`     | Ctrl+F anywhere (fixed); `/` while a transcript is focused (rebindable) |
 | Keybinding help         | `?`             | Only when not in a text input                    |
 | New session             | Ctrl+N          | —                                                |
 | Next session            | Ctrl+]          | —                                                |
