@@ -39,13 +39,15 @@ type decision struct {
 // endpoint, then blocks until a client POSTs a decision (or the timeout fires,
 // in which case it denies — the safe default that matches headless behavior).
 //
-// The wait bound tracks the live connected-client count continuously
-// (issue #358 §8): connectedTimeout auto-denies a prompt only after a client has
-// been connected-but-unresponsive for that long (it resets on disconnect), while
-// unattendedTimeout is an absolute safety cap on total pending time. So a daemon
-// whose TUI blips offline keeps its long watcher turns alive, and on reconnect a
-// client picks the prompt up via GET /approvals with a fresh grace window — a
-// delivered decision always wins. See wait for the exact accrual rules.
+// The applicable bound tracks the live connected-client count continuously
+// (issue #358 §8): connectedTimeout governs while a client is connected (the
+// connected-but-unresponsive auto-deny), unattendedTimeout governs while none is
+// — each measuring only continuous time in its own state and resetting on the
+// opposite transition. So a daemon whose TUI blips offline keeps its long watcher
+// turns alive, on reconnect a client picks the prompt up via GET /approvals with
+// a fresh grace window, and the unattended bound never alters the connected case
+// (connectedTimeout == 0 still means "never"). A delivered decision always wins.
+// See wait for the exact accrual rules.
 type approvalBridge struct {
 	hub *hub
 	// connectedTimeout bounds the wait when a human client IS connected (it could
@@ -65,12 +67,13 @@ func newApprovalBridge(h *hub, connectedTimeout, unattendedTimeout time.Duration
 	if now == nil {
 		now = time.Now
 	}
-	// Invariant: the unattended safety cap is never shorter than the connected
-	// timeout. The cap bounds total pending time regardless of connection state,
-	// so a (mis)configured short unattended bound must not shorten the connected
-	// case below ApprovalTimeout — the connected-but-unresponsive behavior has to
-	// stay unchanged (issue #358 §8). A non-positive bound means disabled/forever
-	// and is left as-is.
+	// Sanity floor: the unattended bound should grant at least as much grace as
+	// the connected one (it is meant to be the *longer* safety bound — default 1h
+	// vs 5 min). Normalize a nonsensical config where unattended < connected so an
+	// unattended prompt never dies sooner than a connected one would (issue #358
+	// §8). A non-positive bound means "wait forever" for that state and is left
+	// as-is. (The connected case is independent of this regardless: wait() holds
+	// the unattended clock at zero while a client is connected.)
 	if connectedTimeout > 0 && unattendedTimeout > 0 && unattendedTimeout < connectedTimeout {
 		unattendedTimeout = connectedTimeout
 	}
@@ -146,21 +149,22 @@ func (b *approvalBridge) alloc(kind, sessionID, agentID string, perm *permission
 // wait blocks until a decision arrives or a timeout fires, applying the given
 // default on timeout/abort. It always removes the pending entry before returning.
 //
-// The timeout is evaluated continuously against the live connected-client count
-// (issue #358 §8), not snapshotted once, so a transient disconnect mid-prompt is
-// handled correctly:
+// The bound that applies is the *effective* timeout for the prompt's current
+// connection state (issue #358 §8), evaluated continuously — not snapshotted once
+// — so a transient disconnect mid-prompt is handled correctly. Each bound tracks
+// only the continuous wall-time spent in its own state and RESETS on the opposite
+// transition:
 //
-//   - connectedTimeout bounds the *continuous* wall-time a client is connected
-//     while the prompt is unanswered — the connected-but-unresponsive auto-deny
-//     (default 5 min). It accrues only while a client is connected and RESETS on
-//     disconnect, so a TUI that blips offline does not get the prompt denied, and
-//     a client that reconnects gets a fresh grace window to answer it.
-//   - unattendedTimeout is the absolute safety cap on total pending time (default
-//     1h), regardless of connection state, so a forever-unattended daemon prompt
-//     still resolves to the safe default eventually.
+//   - While a client is connected, connectedTimeout governs — the
+//     connected-but-unresponsive auto-deny (default 5 min). The unattended clock
+//     is held at zero, so the unattended cap can never shorten or alter the
+//     connected case (in particular connectedTimeout == 0 still means "never").
+//   - While no client is connected, unattendedTimeout governs (default 1h), so a
+//     daemon whose TUI blips offline keeps the prompt alive and a reconnecting
+//     client gets a fresh connected grace window to answer it.
 //
-// A non-positive bound disables that limit; with both disabled the prompt blocks
-// until a decision arrives (the historical "0 = block forever" behavior).
+// A non-positive bound disables auto-deny for that state ("0 = wait forever");
+// with both disabled the prompt blocks until a decision arrives.
 func (b *approvalBridge) wait(id, sessionID string, def decision) decision {
 	ap := b.get(id)
 	if ap == nil {
@@ -173,9 +177,8 @@ func (b *approvalBridge) wait(id, sessionID string, def decision) decision {
 		return <-ap.decided
 	}
 
-	start := time.Now()
-	lastTick := start
-	var connectedFor time.Duration // continuous connected wall-time so far
+	lastTick := time.Now()
+	var connectedFor, unattendedFor time.Duration // continuous time in each state
 
 	ticker := time.NewTicker(b.pollInterval())
 	defer ticker.Stop()
@@ -185,21 +188,23 @@ func (b *approvalBridge) wait(id, sessionID string, def decision) decision {
 		case d := <-ap.decided:
 			return d
 		case now := <-ticker.C:
-			// Absolute safety cap on total pending time.
-			if b.unattendedTimeout > 0 && now.Sub(start) >= b.unattendedTimeout {
-				return def
-			}
-			// Connected-but-unresponsive auto-deny: accrue only while a client is
-			// connected, reset to zero whenever none is.
+			delta := now.Sub(lastTick)
+			lastTick = now
 			if b.hub != nil && b.hub.clientCount() > 0 {
-				connectedFor += now.Sub(lastTick)
+				// Connected: accrue the connected clock, reset the unattended one.
+				connectedFor += delta
+				unattendedFor = 0
 				if b.connectedTimeout > 0 && connectedFor >= b.connectedTimeout {
 					return def
 				}
 			} else {
+				// Unattended: accrue the unattended clock, reset the connected one.
+				unattendedFor += delta
 				connectedFor = 0
+				if b.unattendedTimeout > 0 && unattendedFor >= b.unattendedTimeout {
+					return def
+				}
 			}
-			lastTick = now
 		}
 	}
 }
