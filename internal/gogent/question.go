@@ -2,6 +2,7 @@ package gogent
 
 import (
 	"fmt"
+	"strings"
 
 	"gogent/internal/agent"
 	"gogent/internal/tool"
@@ -78,7 +79,14 @@ func parseQuestionRequest(args map[string]interface{}) (agent.QuestionRequest, e
 		if !ok {
 			return req, fmt.Errorf("topics[%d] must be an object", ti)
 		}
-		topic := agent.QuestionTopic{Title: asString(tm["title"])}
+		// The schema declares both "title" and "items" required for a topic, so the
+		// parser enforces both consistently rather than silently accepting a blank
+		// title (the UI's "Topic N" fallback stays as defense-in-depth only).
+		title := asString(tm["title"])
+		if strings.TrimSpace(title) == "" {
+			return req, fmt.Errorf("topics[%d] requires a non-empty \"title\"", ti)
+		}
+		topic := agent.QuestionTopic{Title: title}
 		rawItems, ok := tm["items"].([]interface{})
 		if !ok || len(rawItems) == 0 {
 			return req, fmt.Errorf("topics[%d] requires a non-empty \"items\" array", ti)
