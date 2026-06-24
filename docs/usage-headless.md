@@ -207,13 +207,19 @@ The wait before that safe default depends on whether a client is connected
 (issue #358 §8):
 
 - **A client is connected but unresponsive** → denied after the approval
-  timeout (**5 minutes** by default; `0` = block forever). The clock counts
-  only continuous connected time and resets if the client disconnects.
+  timeout (**5 minutes**). The clock counts only *continuous* connected time and
+  resets if the client disconnects, so a reconnecting client gets a fresh window.
 - **No client is connected** → the prompt **waits** up to the longer
-  `unattended_approval_timeout` safety cap (**1 hour** by default; `0` = wait
-  forever), so a daemon whose TUI briefly drops does not get its long watcher
-  turns killed. A client that reconnects sees the prompt via
-  `GET /api/approvals` and can still answer it.
+  `unattended_approval_timeout` safety cap (**1 hour** by default), so a daemon
+  whose TUI briefly drops does not get its long watcher turns killed. A client
+  that reconnects sees the prompt via `GET /api/approvals` and can still answer
+  it.
+
+> `unattended_approval_timeout` is a `config.json` field expressed in
+> **nanoseconds** (a Go `time.Duration`), *not* seconds like the `timeouts.*`
+> keys — e.g. `3600000000000` is 1 hour. Omitting it, or leaving it `0`/negative,
+> uses the built-in 1-hour default; it is always clamped to be at least the
+> 5-minute connected timeout.
 
 > In TUI mode the bridge is **not** installed; the workbench modals remain
 > the prompter/reviewer. The `/approvals` endpoints still exist, however.

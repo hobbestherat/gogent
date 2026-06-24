@@ -65,6 +65,15 @@ func newApprovalBridge(h *hub, connectedTimeout, unattendedTimeout time.Duration
 	if now == nil {
 		now = time.Now
 	}
+	// Invariant: the unattended safety cap is never shorter than the connected
+	// timeout. The cap bounds total pending time regardless of connection state,
+	// so a (mis)configured short unattended bound must not shorten the connected
+	// case below ApprovalTimeout — the connected-but-unresponsive behavior has to
+	// stay unchanged (issue #358 §8). A non-positive bound means disabled/forever
+	// and is left as-is.
+	if connectedTimeout > 0 && unattendedTimeout > 0 && unattendedTimeout < connectedTimeout {
+		unattendedTimeout = connectedTimeout
+	}
 	return &approvalBridge{
 		hub:               h,
 		connectedTimeout:  connectedTimeout,
