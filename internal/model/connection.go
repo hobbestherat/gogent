@@ -1081,6 +1081,33 @@ func (c *ModelConnection) MaxTokensConfig() (configured, limit int) {
 	return configured, c.caps().MaxTokensLimit
 }
 
+// stripReasoning returns messages with the retained chain-of-thought (Reasoning)
+// cleared from every message, so it survives in the persisted transcript
+// (Message.MarshalJSON) yet is never sent back to the provider on a later request.
+// Replaying reasoning is the explicitly out-of-scope A6 follow-up (issue #402), and
+// an unknown "reasoning" field on an input message can be rejected by strict
+// OpenAI-compatible chat APIs. It copies lazily: when no message carries reasoning
+// (the overwhelmingly common case) the original slice is returned with no
+// allocation, so the hot path is unaffected.
+func stripReasoning(messages []Message) []Message {
+	first := -1
+	for i := range messages {
+		if messages[i].Reasoning != "" {
+			first = i
+			break
+		}
+	}
+	if first < 0 {
+		return messages
+	}
+	out := make([]Message, len(messages))
+	copy(out, messages)
+	for i := first; i < len(out); i++ {
+		out[i].Reasoning = ""
+	}
+	return out
+}
+
 // buildRequest assembles a CompletionRequest with the connection's configured
 // model, token limit and temperature applied. It is shared by the blocking and
 // streaming paths so both send identical parameters; the only difference is that
@@ -1122,7 +1149,12 @@ func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []
 	}
 
 	reqBody := CompletionRequest{
-		Messages: messages,
+		// Strip the retained reasoning side channel from the outbound request:
+		// Reasoning is serialized for persistence (Message.MarshalJSON) but must not
+		// be replayed to the provider — replay is the explicitly out-of-scope A6
+		// follow-up, and some OpenAI-compatible chat APIs reject an unknown
+		// "reasoning" field on input messages (issue #402).
+		Messages: stripReasoning(messages),
 		Stream:   stream,
 		Tools:    tools,
 	}
