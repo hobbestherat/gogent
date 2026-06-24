@@ -144,21 +144,42 @@ func showReviewDialog(desktop *tv.Desktop, req gogent.EditReviewRequest, request
 var reviewButtonLabels = []string{"&Accept", "Accept a&ll", "&Reject"}
 
 // reviewButtonRow lays out the three review buttons on content row btnY across a
-// dialog of the given width. Each is sized to its rendered label width
-// (tv.ButtonLabelWidth), the group is left-packed from the content left margin and
-// separated by tv.DefaultButtonGap, and every rect is clamped to [2, width-3] so no
-// button overlaps a neighbour or escapes the dialog border on a narrow terminal —
-// while the row re-flows as the dialog grows. Mirrors permissionButtonRow and
-// footerButtonRects (issue #447).
+// dialog of the given width. Each is sized to its full rendered label width
+// (tv.ButtonLabelWidth) and the group is left-packed from the content left margin.
+// Buttons are separated by tv.DefaultButtonGap on a roomy dialog; when the dialog
+// is too narrow to hold the group at that gap, the gap shrinks (toward 0) just
+// enough to keep every button at full width inside [2, width-3] — so all three
+// stay fully visible and in-bounds down to the MinW (40) floor and the row re-flows
+// as the dialog grows. clampDialogRect remains the safety net: only below the floor,
+// where even a zero gap cannot fit the group, does the trailing button clip rather
+// than escape the border. Mirrors permissionButtonRow and footerButtonRects (#447).
 func reviewButtonRow(width, btnY int) (accept, acceptAll, reject tv.Rect) {
 	leftX, rightX := 2, width-3
-	gap := tv.DefaultButtonGap
-	x := leftX
-	rects := make([]tv.Rect, len(reviewButtonLabels))
+	n := len(reviewButtonLabels)
+	widths := make([]int, n)
+	total := 0
 	for i, label := range reviewButtonLabels {
-		r := clampDialogRect(tv.Rect{X: x, Y: btnY, W: tv.ButtonLabelWidth(label), H: 1}, leftX, rightX)
-		rects[i] = r
-		x = r.X + r.W + gap
+		widths[i] = tv.ButtonLabelWidth(label)
+		total += widths[i]
+	}
+
+	// Shrink the inter-button gap from DefaultButtonGap only as far as needed to
+	// keep every button at full width within [leftX, rightX]; on a roomy dialog the
+	// gap is exactly DefaultButtonGap.
+	gap := tv.DefaultButtonGap
+	if n > 1 {
+		if slack := (rightX - leftX + 1) - total; slack < gap*(n-1) {
+			if gap = slack / (n - 1); gap < 0 {
+				gap = 0
+			}
+		}
+	}
+
+	rects := make([]tv.Rect, n)
+	x := leftX
+	for i := range widths {
+		rects[i] = clampDialogRect(tv.Rect{X: x, Y: btnY, W: widths[i], H: 1}, leftX, rightX)
+		x += widths[i] + gap
 	}
 	return rects[0], rects[1], rects[2]
 }
