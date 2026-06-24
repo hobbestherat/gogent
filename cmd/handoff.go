@@ -266,9 +266,10 @@ func (dc *daemonController) stopEmbeddedHTTP() {
 // and degrades gracefully — the embedded TUI still works without the HTTP API.
 func (dc *daemonController) startEmbeddedHTTP(g *gogent.Gogent) {
 	apiServer := server.NewServer(g, server.Options{
-		Password:        dc.http.password,
-		Token:           os.Getenv("GOGENT_HTTP_TOKEN"),
-		ApprovalTimeout: 5 * time.Minute,
+		Password:                  dc.http.password,
+		Token:                     os.Getenv("GOGENT_HTTP_TOKEN"),
+		ApprovalTimeout:           5 * time.Minute,
+		UnattendedApprovalTimeout: g.GetConfig().UnattendedApprovalTimeoutOrDefault(),
 	})
 	srv, err := serveHTTPAPI(dc.http.host, dc.http.port, g, apiServer, dc.http.password)
 	if err != nil {

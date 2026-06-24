@@ -38,25 +38,38 @@ type decision struct {
 // registers a pending approval, emits it on the event hub and an /approvals
 // endpoint, then blocks until a client POSTs a decision (or the timeout fires,
 // in which case it denies — the safe default that matches headless behavior).
+//
+// The wait bound is chosen per prompt from the live connected-client count
+// (issue #358 §8): with a client connected, a stalled prompt auto-denies after
+// connectedTimeout (the connected-but-unresponsive default); with no client
+// connected it waits up to the longer unattendedTimeout so a transient TUI
+// disconnect does not kill a daemon's long watcher turns. On reconnect a client
+// picks the prompt up via GET /approvals and a delivered decision wins.
 type approvalBridge struct {
-	hub     *hub
-	timeout time.Duration // max wait before denying; 0 means never (block forever)
-	now     func() time.Time
+	hub *hub
+	// connectedTimeout bounds the wait when a human client IS connected (it could
+	// answer but is unresponsive); 0 means never (block forever).
+	connectedTimeout time.Duration
+	// unattendedTimeout bounds the wait when NO client is connected; 0 means
+	// never (block forever). It is normally much longer than connectedTimeout.
+	unattendedTimeout time.Duration
+	now               func() time.Time
 
 	mu      sync.Mutex
 	pending map[string]*pendingApproval
 	nextSeq int64
 }
 
-func newApprovalBridge(h *hub, timeout time.Duration, now func() time.Time) *approvalBridge {
+func newApprovalBridge(h *hub, connectedTimeout, unattendedTimeout time.Duration, now func() time.Time) *approvalBridge {
 	if now == nil {
 		now = time.Now
 	}
 	return &approvalBridge{
-		hub:     h,
-		timeout: timeout,
-		now:     now,
-		pending: make(map[string]*pendingApproval),
+		hub:               h,
+		connectedTimeout:  connectedTimeout,
+		unattendedTimeout: unattendedTimeout,
+		now:               now,
+		pending:           make(map[string]*pendingApproval),
 	}
 }
 
@@ -130,8 +143,8 @@ func (b *approvalBridge) wait(id, sessionID string, def decision) decision {
 	defer b.remove(id)
 
 	var timerCh <-chan time.Time
-	if b.timeout > 0 {
-		t := time.NewTimer(b.timeout)
+	if timeout := b.effectiveTimeout(); timeout > 0 {
+		t := time.NewTimer(timeout)
 		defer t.Stop()
 		timerCh = t.C
 	}
@@ -140,9 +153,27 @@ func (b *approvalBridge) wait(id, sessionID string, def decision) decision {
 	case d := <-ap.decided:
 		return d
 	case <-timerCh:
-		// Timed out with no connected client: deny (safe default).
+		// Timed out: apply the safe default (deny/reject). Which bound elapsed
+		// depends on whether a client was connected when the wait began.
 		return def
 	}
+}
+
+// effectiveTimeout picks the wait bound for a pending approval from the live
+// connected-client count (issue #358 §8). With a client connected (an SSE
+// subscriber is present on the hub) the prompt could be answered, so a stalled
+// one is auto-denied after connectedTimeout — the existing 5-min safety default
+// for an unresponsive human. With no client connected it waits up to
+// unattendedTimeout (default 1h) so a transient disconnect does not kill a long
+// watcher turn; a client that reconnects meanwhile still answers it via
+// GET /approvals. The choice is made once, at wait() entry: a prompt that starts
+// unattended keeps the longer bound even if a client connects later (it stays
+// answerable up to that bound). A non-positive bound means "never time out".
+func (b *approvalBridge) effectiveTimeout() time.Duration {
+	if b.hub != nil && b.hub.clientCount() > 0 {
+		return b.connectedTimeout
+	}
+	return b.unattendedTimeout
 }
 
 func (b *approvalBridge) get(id string) *pendingApproval {

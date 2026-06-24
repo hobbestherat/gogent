@@ -237,6 +237,14 @@ const (
 	defaultSubAgentTimeoutSec = 300
 )
 
+// DefaultUnattendedApprovalTimeout bounds how long a pending interactive
+// approval (permission/edit-review) waits when NO client is connected to answer
+// it, before the approval bridge applies its safe default (deny/reject). It is
+// deliberately much longer than the connected-but-unresponsive ApprovalTimeout
+// (5 min) so a daemon's long watcher turns survive a transient TUI disconnect
+// rather than being auto-denied (issue #358 §8). Confirmed v1 default: 1h.
+const DefaultUnattendedApprovalTimeout = time.Hour
+
 // ModelSecondsOrDefault, ToolSecondsOrDefault and SubAgentSecondsOrDefault
 // return the configured timeout or the built-in default when unset.
 func (t TimeoutConfig) ModelSecondsOrDefault() int {
@@ -258,6 +266,16 @@ func (t TimeoutConfig) SubAgentSecondsOrDefault() int {
 		return defaultSubAgentTimeoutSec
 	}
 	return t.SubAgentSeconds
+}
+
+// UnattendedApprovalTimeoutOrDefault returns the configured unattended approval
+// timeout, or the built-in default (DefaultUnattendedApprovalTimeout, 1h) when
+// it is left unset (<=0). See the Config field for what it bounds (issue #358).
+func (c *Config) UnattendedApprovalTimeoutOrDefault() time.Duration {
+	if c == nil || c.UnattendedApprovalTimeout <= 0 {
+		return DefaultUnattendedApprovalTimeout
+	}
+	return c.UnattendedApprovalTimeout
 }
 
 // DefaultTimeoutConfig returns the built-in timeout defaults.
@@ -492,7 +510,16 @@ type Config struct {
 	ModelConfigs []*ModelConfig    `json:"models"`
 	SubAgents    SubAgentConfig    `json:"sub_agents"`
 	Timeouts     TimeoutConfig     `json:"timeouts"`
-	Window       WindowConfig      `json:"window"`
+	// UnattendedApprovalTimeout bounds how long a pending interactive approval
+	// (permission/edit-review) waits when NO client is connected to answer it,
+	// before the approval bridge denies/rejects it as a safe default. It applies
+	// only to the unattended case: when a client IS connected, the shorter
+	// connected-but-unresponsive ApprovalTimeout governs instead (issue #358 §8).
+	// Zero (the default for an older config.json without the key) means "use the
+	// built-in default" — DefaultUnattendedApprovalTimeout (1h) — via
+	// UnattendedApprovalTimeoutOrDefault.
+	UnattendedApprovalTimeout time.Duration `json:"unattended_approval_timeout,omitempty"`
+	Window                    WindowConfig  `json:"window"`
 	// Budget holds the per-session token-budget settings that drive the
 	// status-bar budget alert (issue #63). A zero value disables alerting, so an
 	// older config.json without a "budget" key simply leaves the feature off.

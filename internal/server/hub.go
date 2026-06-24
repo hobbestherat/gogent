@@ -94,6 +94,24 @@ func (h *hub) cloneSubs(m map[chan taggedEvent]struct{}) []chan taggedEvent {
 	return out
 }
 
+// clientCount returns the number of currently-connected SSE subscribers across
+// the global (/events) stream and every per-session (/sessions/:id/events)
+// stream. Each open stream is one connected client that could answer interactive
+// prompts. The approval bridge reads this to decide its wait bound: with
+// subscribers present a stalled prompt auto-denies after the normal
+// ApprovalTimeout (connected-but-unresponsive); with zero it waits up to the
+// longer UnattendedApprovalTimeout so a transiently-disconnected daemon does not
+// kill long watcher turns (issue #358 §8).
+func (h *hub) clientCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := len(h.global)
+	for _, subs := range h.session {
+		n += len(subs)
+	}
+	return n
+}
+
 // subscribeSession adds a buffered channel as a per-session subscriber and
 // returns it along with an unsubscribe func. The caller drains it from its SSE
 // producer loop and calls unsubscribe when the client disconnects.
