@@ -131,7 +131,7 @@ The **Auth** column denotes the minimum scope: `human` (requires `requireHuman`)
 
 **`approvalDecisionRequest`**: `{decision}`.
 
-> **Note:** The approval bridge (`InstallApprovalGates`) is installed **only in headless mode**. In TUI mode the workbench modals handle prompts, but these endpoints still exist. The safe default on a 5-minute timeout is to **deny** permission requests and **reject** edit reviews.
+> **Note:** The approval bridge (`InstallApprovalGates`) is installed **only in headless mode**. In TUI mode the workbench modals handle prompts, but these endpoints still exist. Unanswered prompts fall back to the safe default — **deny** permission requests, **reject** edit reviews. The wait depends on connectivity (issue #358 §8): with a client connected but unresponsive the prompt is denied after the **5-minute** approval timeout (counting only continuous connected time); with **no** client connected it waits up to the longer `unattended_approval_timeout` cap (**1 hour** by default) so a transiently-disconnected daemon's long turns survive, and a reconnecting client can still answer via `GET /api/approvals`.
 
 ### Auth
 

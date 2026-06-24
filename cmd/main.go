@@ -165,9 +165,10 @@ func main() {
 
 	// Start HTTP server (always): the new /api surface + the legacy handlers.
 	apiServer := server.NewServer(g, server.Options{
-		Password:        httpPassword,
-		Token:           os.Getenv("GOGENT_HTTP_TOKEN"),
-		ApprovalTimeout: 5 * time.Minute,
+		Password:                  httpPassword,
+		Token:                     os.Getenv("GOGENT_HTTP_TOKEN"),
+		ApprovalTimeout:           5 * time.Minute,
+		UnattendedApprovalTimeout: g.GetConfig().UnattendedApprovalTimeoutOrDefault(),
 	})
 	if *disableTUI {
 		// Headless: the API bridge is the only prompter/reviewer, so a remote

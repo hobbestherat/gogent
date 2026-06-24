@@ -282,9 +282,10 @@ func runDaemonForeground(p daemon.Paths, opts daemonStartOpts) error {
 	// The daemon is headless, so the API bridge is the only prompter/reviewer: a
 	// remote client (or curl) answers interactive prompts over /approvals.
 	apiServer := server.NewServer(g, server.Options{
-		Password:        resolveHTTPPassword(opts.password),
-		Token:           os.Getenv("GOGENT_HTTP_TOKEN"),
-		ApprovalTimeout: 5 * time.Minute,
+		Password:                  resolveHTTPPassword(opts.password),
+		Token:                     os.Getenv("GOGENT_HTTP_TOKEN"),
+		ApprovalTimeout:           5 * time.Minute,
+		UnattendedApprovalTimeout: g.GetConfig().UnattendedApprovalTimeoutOrDefault(),
 	})
 	apiServer.InstallApprovalGates()
 	root := buildRootHandler(g, apiServer)

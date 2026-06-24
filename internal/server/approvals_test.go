@@ -14,7 +14,7 @@ import (
 // adapts the blocking permission.Prompter to the async request/response model.
 func TestApprovalBridgePermissionRoundTrip(t *testing.T) {
 	h := newHub()
-	bridge := newApprovalBridge(h, time.Minute, time.Now)
+	bridge := newApprovalBridge(h, time.Minute, time.Minute, time.Now)
 
 	prompted := make(chan struct{})
 	var got approvalView
@@ -73,7 +73,7 @@ func TestApprovalBridgePermissionRoundTrip(t *testing.T) {
 // proving a ReviewEdit call blocks and is resolved with approve.
 func TestApprovalBridgeEditReviewRoundTrip(t *testing.T) {
 	h := newHub()
-	bridge := newApprovalBridge(h, time.Minute, time.Now)
+	bridge := newApprovalBridge(h, time.Minute, time.Minute, time.Now)
 
 	resolved := make(chan gogent.EditReviewDecision, 1)
 	go func() {
@@ -117,7 +117,7 @@ func TestApprovalBridgeEditReviewRoundTrip(t *testing.T) {
 // resolves a prompt within the timeout, it denies (matching headless behavior).
 func TestApprovalBridgeTimeoutDenies(t *testing.T) {
 	h := newHub()
-	bridge := newApprovalBridge(h, 20*time.Millisecond, time.Now)
+	bridge := newApprovalBridge(h, 20*time.Millisecond, 20*time.Millisecond, time.Now)
 
 	dec := bridge.AskPermission(permission.Request{Action: permission.ActionShell})
 	if dec != permission.DecisionDeny {
@@ -129,7 +129,7 @@ func TestApprovalBridgeTimeoutDenies(t *testing.T) {
 // rejects (the safe default — a rejected edit is not written).
 func TestApprovalBridgeTimedOutEditRejects(t *testing.T) {
 	h := newHub()
-	bridge := newApprovalBridge(h, 20*time.Millisecond, time.Now)
+	bridge := newApprovalBridge(h, 20*time.Millisecond, 20*time.Millisecond, time.Now)
 
 	dec := bridge.ReviewEdit(gogent.EditReviewRequest{Path: "a.go"})
 	if dec != gogent.EditReject {

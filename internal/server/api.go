@@ -11,6 +11,7 @@ import (
 
 	"github.com/hobbestherat/webapi"
 	"gogent/internal/agent"
+	"gogent/internal/config"
 	"gogent/internal/gogent"
 )
 
@@ -64,11 +65,18 @@ type Server struct {
 // is a bearer token (GOGENT_HTTP_TOKEN) granting the given scope (human or peer).
 // PeerBaseURL, when set, identifies this server to a peer; it is informational.
 type Options struct {
-	Password        string
-	Token           string
-	TokenScope      authScope // human (default) or peer
+	Password   string
+	Token      string
+	TokenScope authScope // human (default) or peer
+	// ApprovalTimeout bounds a pending approval when a human client IS connected
+	// (connected-but-unresponsive auto-deny). Zero means never.
 	ApprovalTimeout time.Duration
-	now             func() time.Time // injectable clock (tests)
+	// UnattendedApprovalTimeout bounds a pending approval when NO client is
+	// connected, so a transiently-disconnected daemon's long watcher turns are not
+	// auto-denied (issue #358 §8). Zero is replaced by the built-in default
+	// (config.DefaultUnattendedApprovalTimeout, 1h) in NewServer.
+	UnattendedApprovalTimeout time.Duration
+	now                       func() time.Time // injectable clock (tests)
 }
 
 // NewServer builds the server: it wires the event hub as the session observer,
@@ -77,6 +85,9 @@ type Options struct {
 func NewServer(g *gogent.Gogent, opts Options) *Server {
 	if opts.now == nil {
 		opts.now = time.Now
+	}
+	if opts.UnattendedApprovalTimeout <= 0 {
+		opts.UnattendedApprovalTimeout = config.DefaultUnattendedApprovalTimeout
 	}
 	h := newHub()
 	provider := &composingProvider{
@@ -91,7 +102,7 @@ func NewServer(g *gogent.Gogent, opts Options) *Server {
 		g:         g,
 		hub:       h,
 		provider:  provider,
-		approvals: newApprovalBridge(h, opts.ApprovalTimeout, opts.now),
+		approvals: newApprovalBridge(h, opts.ApprovalTimeout, opts.UnattendedApprovalTimeout, opts.now),
 		busy:      make(map[string]struct{}),
 		startedAt: opts.now(),
 	}
