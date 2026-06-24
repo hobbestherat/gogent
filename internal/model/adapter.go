@@ -90,6 +90,16 @@ func (openAIAdapter) parseResponse(body []byte) (*CompletionResponse, error) {
 		resp.Role = resp.Choices[0].Message.Role
 		resp.FinishReason = resp.Choices[0].FinishReason
 		resp.ToolCalls = resp.Choices[0].Message.ToolCalls
+		// Synthesize a stable id for any tool call the backend returned without one,
+		// mirroring parseOpenAIStream: some OpenAI-compatible backends (e.g. vLLM)
+		// omit tool_calls.id, and every downstream consumer correlates a tool result
+		// to its call by id — so an empty id would leave the assistant tool_calls
+		// unanswerable and the transcript invalid (issue #390).
+		for i := range resp.ToolCalls {
+			if resp.ToolCalls[i].ID == "" {
+				resp.ToolCalls[i].ID = fmt.Sprintf("call_%d", i)
+			}
+		}
 	}
 	return &resp, nil
 }
@@ -665,6 +675,13 @@ func (anthropicAdapter) parseStream(body io.Reader, streamCh chan<- StreamRespon
 		}
 	}
 
+	// A turn cut off by max_tokens (stop_reason "max_tokens" → "length") may have
+	// left a tool_use block's input_json_delta fragments incomplete; flag any call
+	// whose assembled args no longer parse so the agent layer can salvage or
+	// complete it deterministically (issue #390). The empty→"{}" default below is
+	// applied first, so a call that streamed no input is treated as complete, not
+	// truncated.
+	truncatedTurn := finishReason != nil && *finishReason == "length"
 	var toolCalls []ToolCall
 	for _, idx := range order {
 		acc := toolsByBlock[idx]
@@ -673,9 +690,10 @@ func (anthropicAdapter) parseStream(body io.Reader, streamCh chan<- StreamRespon
 			args = "{}"
 		}
 		toolCalls = append(toolCalls, ToolCall{
-			ID:       acc.id,
-			Type:     "function",
-			Function: FunctionCall{Name: acc.name, Arguments: args},
+			ID:        acc.id,
+			Type:      "function",
+			Function:  FunctionCall{Name: acc.name, Arguments: args},
+			Truncated: truncatedTurn && argsTruncated(args),
 		})
 	}
 

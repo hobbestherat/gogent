@@ -42,6 +42,27 @@ type ToolCall struct {
 	ID       string       `json:"id,omitempty"`
 	Type     string       `json:"type,omitempty"` // always "function"
 	Function FunctionCall `json:"function"`
+	// Truncated marks a tool call whose streamed Arguments were cut off mid-JSON
+	// because the response hit max_tokens (finish_reason "length"), so the
+	// assembled Arguments is non-empty but not valid JSON. It is set by the
+	// streaming parsers (parseOpenAIStream, Anthropic parseStream) and lets the
+	// agent layer distinguish "model emitted malformed JSON" from "the stream was
+	// cut off" — driving the truncated-final salvage and the continuation
+	// round-trip deterministically rather than re-sniffing the bytes (issue #390).
+	// Kept off the wire (json:"-"): it is an internal assembly signal.
+	Truncated bool `json:"-"`
+}
+
+// argsTruncated reports whether an assembled tool-call Arguments string looks
+// cut off mid-JSON: non-empty (a no-argument call legitimately streams nothing)
+// but not parseable as JSON. Callers gate this on finish_reason "length" so a
+// model that simply emitted malformed JSON without hitting the token cap is not
+// misread as truncated (issue #390).
+func argsTruncated(args string) bool {
+	if strings.TrimSpace(args) == "" {
+		return false
+	}
+	return !json.Valid([]byte(args))
 }
 
 type Message struct {
@@ -1364,6 +1385,12 @@ func parseOpenAIStream(body io.Reader, streamCh chan<- StreamResponse) (string, 
 	}
 
 	// Assemble accumulated tool calls in first-seen order.
+	//
+	// When the turn was cut off by max_tokens (finish_reason "length"), a call
+	// whose accumulated Arguments is non-empty but no longer parses as JSON was
+	// truncated mid-stream; flag it so the agent layer can salvage or complete it
+	// deterministically rather than feed the partial JSON to validateArgs (#390).
+	truncatedTurn := finishReason != nil && *finishReason == "length"
 	var toolCalls []ToolCall
 	for _, idx := range order {
 		acc := toolsByIndex[idx]
@@ -1377,10 +1404,12 @@ func parseOpenAIStream(body io.Reader, streamCh chan<- StreamResponse) (string, 
 		if typ == "" {
 			typ = "function"
 		}
+		args := acc.args.String()
 		toolCalls = append(toolCalls, ToolCall{
-			ID:       id,
-			Type:     typ,
-			Function: FunctionCall{Name: acc.name, Arguments: acc.args.String()},
+			ID:        id,
+			Type:      typ,
+			Function:  FunctionCall{Name: acc.name, Arguments: args},
+			Truncated: truncatedTurn && argsTruncated(args),
 		})
 	}
 

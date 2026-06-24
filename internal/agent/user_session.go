@@ -344,6 +344,23 @@ const (
 	// user-visible chat.
 	continuationNudgeNote = "[Continue: call the tools you described, or state that you are done.]"
 
+	// truncatedToolCallNote is the user-role note spliced in when a tool-call turn
+	// was cut off by max_tokens (finish_reason "length") and left a call with
+	// malformed (truncated) arguments (issue #390). It asks the model to resume
+	// and re-emit the interrupted call in full rather than have the partial JSON
+	// fed to validateArgs as a failed call. Like the preamble nudge it is
+	// deliver-only and bounded by maxContinuationNudges so a model that never
+	// completes the call cannot loop.
+	truncatedToolCallNote = "[Your previous tool call was cut off before its arguments finished. Re-issue that tool call in full, with complete JSON arguments.]"
+
+	// finalToolCallResultNote is the synthetic tool result recorded for a terminal
+	// tool call that ends the loop without a real result — a folded (or salvaged,
+	// truncated) structured_output{final} (issue #390). It exists only to keep the
+	// persisted transcript balanced (every assistant tool_calls answered one-to-one)
+	// so a reused session's next user turn is a valid request; the model only ever
+	// sees it if the conversation continues past the final answer.
+	finalToolCallResultNote = "[Final answer recorded and delivered to the user.]"
+
 	// maxPreambleLen caps how long a tool-free turn may be and still be treated as
 	// a preamble. A genuine final answer — a summary, an explanation, a code block
 	// — runs long; a preamble is a sentence or two. Anything longer is final.
@@ -1150,6 +1167,53 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 		}
 
 		calls, explicitFinal := s.collectToolCalls(resp)
+
+		// Part B (issue #390): the turn was cut off by max_tokens
+		// (finish_reason "length") and left at least one tool call with truncated
+		// (malformed-JSON) arguments. Executing it would feed validateArgs a call
+		// the model never finished emitting and surface the validation error as the
+		// tool result. Instead give the model one round-trip to resume and re-issue
+		// the interrupted call(s) in full. This is the general counterpart to the
+		// targeted structured_output salvage in collectToolCalls (Part A): it
+		// recovers truncated args for ANY tool. A salvageable terminal
+		// structured_output was already folded by collectToolCalls (explicitFinal),
+		// so this only fires for unfinished, non-final calls.
+		//
+		// The truncated assistant turn was already appended to the transcript with
+		// its tool_calls (see ModelSession.sendCtx), so the tool-call protocol
+		// requires a tool result for every tool_call_id before the next assistant
+		// turn — OpenAI and Anthropic both reject an assistant tool_calls message
+		// that is not answered one-to-one. So the re-issue instruction is delivered
+		// as a tool result per call (not a dangling user note, which would leave the
+		// tool_calls unanswered and 400 on a real backend). makeToolResultMessage
+		// emits no SessionEvent, so the synthetic results stay out of the visible
+		// transcript like the other deliver-only splices.
+		//
+		// containsTerminalFinal excludes the mixed-batch case where the truncated
+		// call was a structured_output that collectToolCalls already salvaged into a
+		// terminal final (Part A): that turn is terminal, not unfinished, so it must
+		// fold via the serial runner rather than be nudged to continue.
+		//
+		// It shares the per-stretch continuationNudges budget with the #307
+		// preamble nudge and bails before the real-tool-call reset below, so a model
+		// that keeps truncating cannot loop: once maxContinuationNudges is hit the
+		// loop proceeds to execute the (malformed) call on the normal path. The
+		// budget resets the moment a complete tool call lands.
+		if !explicitFinal && resp.FinishReason == "length" && hasTruncatedToolCall(resp) &&
+			!containsTerminalFinal(calls) && continuationNudges < maxContinuationNudges {
+			continuationNudges++
+			results := make([]model.Message, 0, len(resp.ToolCalls))
+			for _, tc := range resp.ToolCalls {
+				results = append(results, makeToolResultMessage(
+					tool.ToolCall{Tool: tc.Function.Name, CallID: tc.ID}, truncatedToolCallNote))
+			}
+			sess.AppendToolResults(results)
+			if err := advance(nil, step+1); err != nil {
+				return responses, err
+			}
+			continue
+		}
+
 		if len(calls) == 0 {
 			// No tool calls. Normally this is the assistant's final answer and the
 			// loop ends. But a reasoning model sometimes emits a bare *preamble* — an
@@ -1190,6 +1254,10 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 				continue
 			}
 			// Not a (further) preamble nudge -> the assistant produced its final answer.
+			// A salvaged terminal structured_output (explicitFinal) leaves its native
+			// tool_calls unanswered in the persisted transcript; balance them so a
+			// reused session's next user turn is a valid transcript (issue #390).
+			s.finalizeTranscriptToolCalls(sess, resp, nil)
 			break
 		}
 		// A real tool call this turn: reset the continuation-nudge budget so the bound
@@ -1229,6 +1297,11 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 			toolMsgs, finished = s.runToolCallsSerial(ctx, agent, agentID, calls, step, emit, resp)
 		}
 		if finished {
+			// A folded structured_output{final} ends the loop without the normal
+			// tool-result append below, leaving this turn's tool_calls (the executed
+			// siblings and the terminal call) unanswered in the persisted transcript.
+			// Balance them so a reused session's next user turn stays valid (#390).
+			s.finalizeTranscriptToolCalls(sess, resp, toolMsgs)
 			break
 		}
 
@@ -1463,8 +1536,16 @@ func (s *UserSession) runToolCallsSerial(ctx context.Context, agent *Agent, agen
 // "no calls because the model deliberately ended" from "no calls because the
 // model only narrated": the former must terminate immediately and must NOT be
 // given a preamble continuation nudge, even when its response text happens to
-// open like a preamble (issue #307 constraint #2). The native structured_output
-// path needs no such signal — it returns a real call the serial runner finalizes.
+// open like a preamble (issue #307 constraint #2).
+//
+// The native structured_output path normally needs no such signal — it returns a
+// real call the serial runner finalizes. The one exception is a terminal
+// structured_output whose args were truncated by max_tokens and is the sole call
+// this turn (issue #390): there is no well-formed call to hand the serial runner,
+// so it is salvaged here — the recovered text folded into resp.Content and
+// explicitFinal set — exactly like the JSON-text path above. A truncated terminal
+// final alongside earlier calls is instead returned as a real (recovered) call so
+// the serial runner runs the earlier calls first and then folds it.
 func (s *UserSession) collectToolCalls(resp *model.CompletionResponse) (calls []tool.ToolCall, explicitFinal bool) {
 	if resp == nil {
 		return nil, false
@@ -1475,9 +1556,47 @@ func (s *UserSession) collectToolCalls(resp *model.CompletionResponse) (calls []
 		calls := make([]tool.ToolCall, 0, len(resp.ToolCalls))
 		for _, tc := range resp.ToolCalls {
 			args := map[string]interface{}{}
+			var parseErr error
 			if tc.Function.Arguments != "" {
-				_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
+				parseErr = json.Unmarshal([]byte(tc.Function.Arguments), &args)
 			}
+
+			// Part A salvage (issue #390): a terminal structured_output call whose
+			// streamed args were cut off by max_tokens (finish_reason "length")
+			// arrives with incomplete JSON — it either fails to parse or parses to
+			// an object missing the required "response". Left alone it falls through
+			// to validateArgs and the user sees
+			// `invalid args: missing required property "response"` in place of the
+			// answer the sub-agent actually produced. When the partial args still
+			// carry a "final": true marker, recover whatever partial "response" text
+			// was emitted (an empty recovery defers to the loop's lastAssistant
+			// fallback, #171) and treat the call as a best-effort terminal final.
+			if tc.Function.Name == "structured_output" && resp.FinishReason == "length" {
+				respText, _ := args["response"].(string)
+				if parseErr != nil || respText == "" {
+					if recovered, isFinal := recoverTruncatedFinal(tc.Function.Arguments); isFinal {
+						// Sole call: nothing else to run this turn, so fold the
+						// recovered final straight into resp.Content and end the turn
+						// via explicitFinal — mirroring the text-embedded salvage below.
+						if len(resp.ToolCalls) == 1 {
+							if recovered != "" {
+								resp.Content = recovered
+							}
+							return nil, true
+						}
+						// Mixed batch: rebuild the terminal call's args from the
+						// recovery and return it alongside the earlier calls, so the
+						// serial runner executes those first and then folds the final —
+						// mirroring the well-formed structured_output{final} path rather
+						// than short-circuiting and dropping the preceding calls.
+						args["final"] = true
+						if recovered != "" {
+							args["response"] = recovered
+						}
+					}
+				}
+			}
+
 			calls = append(calls, tool.ToolCall{
 				Tool:   tc.Function.Name,
 				Args:   args,
@@ -1510,6 +1629,152 @@ func (s *UserSession) collectToolCalls(resp *model.CompletionResponse) (calls []
 		}
 	}
 	return calls, false
+}
+
+// hasTruncatedToolCall reports whether any of a turn's native tool calls were cut
+// off mid-arguments by max_tokens (issue #390). It prefers the deterministic
+// Truncated flag the streaming parsers set, falling back to a direct JSON-validity
+// check so the signal still holds for any backend that does not set the flag. A
+// no-argument call (empty Arguments) is complete, not truncated.
+func hasTruncatedToolCall(resp *model.CompletionResponse) bool {
+	if resp == nil {
+		return false
+	}
+	for _, tc := range resp.ToolCalls {
+		if tc.Truncated {
+			return true
+		}
+		args := strings.TrimSpace(tc.Function.Arguments)
+		if args != "" && !json.Valid([]byte(args)) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsTerminalFinal reports whether a turn's calls include a terminal
+// structured_output{final:true} — a deliberate (or salvaged, issue #390) final
+// answer that the serial runner folds to end the loop. The truncated-tool
+// continuation (Part B) uses it to leave such a turn alone: it is terminal, not an
+// unfinished call to be re-issued.
+func containsTerminalFinal(calls []tool.ToolCall) bool {
+	for _, c := range calls {
+		if c.Tool == "structured_output" {
+			if final, _ := c.Args["final"].(bool); final {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// finalizeTranscriptToolCalls keeps the persisted transcript valid when the loop
+// ends on a turn that carried native tool calls. The terminal assistant turn was
+// already appended with its tool_calls (ModelSession.sendCtx), and a folded
+// structured_output{final} — whether well-formed or salvaged from truncated args
+// (issue #390) — ends the loop without the normal tool-result append, leaving
+// those tool_calls unanswered. OpenAI and Anthropic both reject an assistant
+// tool_calls message that is not answered one-to-one on the next request, so any
+// reused session would fail on its next user turn. This appends the results that
+// were already produced (executed siblings) plus a synthetic result for every
+// still-unanswered call id, so the transcript stays a balanced
+// assistant-tool_calls -> tool-results sequence. makeToolResultMessage emits no
+// SessionEvent, so the synthetic results stay out of the visible transcript.
+func (s *UserSession) finalizeTranscriptToolCalls(sess *model.ModelSession, resp *model.CompletionResponse, executed []model.Message) {
+	if sess == nil || resp == nil || len(resp.ToolCalls) == 0 {
+		return
+	}
+	answered := make(map[string]bool, len(executed))
+	for _, m := range executed {
+		if m.ToolCallID != "" {
+			answered[m.ToolCallID] = true
+		}
+	}
+	results := append([]model.Message(nil), executed...)
+	for _, tc := range resp.ToolCalls {
+		if tc.ID == "" || answered[tc.ID] {
+			continue
+		}
+		results = append(results, makeToolResultMessage(
+			tool.ToolCall{Tool: tc.Function.Name, CallID: tc.ID}, finalToolCallResultNote))
+		answered[tc.ID] = true
+	}
+	if len(results) > 0 {
+		sess.AppendToolResults(results)
+	}
+}
+
+// recoverTruncatedFinal performs a best-effort, dependency-free lenient parse of
+// a truncated structured_output arguments string (cut off mid-JSON by
+// max_tokens, issue #390). It reports whether the partial JSON still carries a
+// "final": true marker and returns whatever partial "response" string value was
+// emitted before the cut (empty when truncation landed before the value began,
+// in which case the caller falls back to the assistant's preceding text, #171).
+func recoverTruncatedFinal(raw string) (response string, isFinal bool) {
+	return partialStringValue(raw, "response"), hasFinalTrue(raw)
+}
+
+// hasFinalTrue reports whether the partial args carry a `"final": true` marker,
+// tolerating arbitrary whitespace between the key, colon and value. It only has
+// to recognise the marker the model already emitted before truncation, so a
+// plain scan (no JSON parse, which the truncated bytes would fail) suffices.
+func hasFinalTrue(raw string) bool {
+	idx := strings.Index(raw, `"final"`)
+	if idx < 0 {
+		return false
+	}
+	rest := strings.TrimSpace(raw[idx+len(`"final"`):])
+	rest = strings.TrimPrefix(rest, ":")
+	rest = strings.TrimSpace(rest)
+	return strings.HasPrefix(rest, "true")
+}
+
+// partialStringValue extracts the (possibly truncated) string value of a JSON
+// key from an incomplete object. It locates `"key"`, steps past the colon to the
+// opening quote, then reads to the matching unescaped closing quote — or, when
+// the stream was cut before that quote arrived, takes the remainder as the
+// partial value. The captured span (re-closed if needed) is decoded with the
+// standard JSON unescaper so escapes the model emitted survive; an undecodable
+// fragment (e.g. a dangling \u escape) yields "" so the caller falls back to the
+// preceding assistant text rather than surfacing mojibake (issue #390).
+func partialStringValue(raw, key string) string {
+	marker := `"` + key + `"`
+	idx := strings.Index(raw, marker)
+	if idx < 0 {
+		return ""
+	}
+	rest := strings.TrimSpace(raw[idx+len(marker):])
+	rest = strings.TrimPrefix(rest, ":")
+	rest = strings.TrimSpace(rest)
+	if !strings.HasPrefix(rest, `"`) {
+		return ""
+	}
+	// Find the closing quote, skipping escaped characters. end < 0 means the
+	// value was truncated before its closing quote arrived.
+	end := -1
+	for i := 1; i < len(rest); i++ {
+		if rest[i] == '\\' {
+			i++ // skip the escaped char
+			continue
+		}
+		if rest[i] == '"' {
+			end = i
+			break
+		}
+	}
+	var quoted string
+	if end >= 0 {
+		quoted = rest[:end+1]
+	} else {
+		// Truncated mid-value: drop a dangling backslash (an incomplete escape)
+		// then synthesize the closing quote so the span is a parseable JSON string.
+		quoted = strings.TrimRight(rest, `\`) + `"`
+	}
+	var out string
+	if err := json.Unmarshal([]byte(quoted), &out); err != nil {
+		return ""
+	}
+	return out
 }
 
 // shouldNudgeContinuation reports whether a tool-free turn should be given one
