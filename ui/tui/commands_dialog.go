@@ -353,7 +353,7 @@ func (w *Workbench) showCommandsDialog() {
 		// existing custom command, is rejected inline. The backend re-enforces both as
 		// defence in depth, but blocking here gives the immediate, specific error the
 		// issue asks the editor to surface.
-		if reservedBuiltinCommands[def.Name] {
+		if w.reservedBuiltins()[def.Name] {
 			setStatus(fmt.Sprintf("Cannot save: %q is a built-in command name.", def.Name))
 			return
 		}

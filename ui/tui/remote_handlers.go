@@ -778,6 +778,14 @@ func (rc *RemoteClient) Handlers() Handlers {
 		// autocomplete and runtime dispatch all work while attached, exactly as
 		// embedded. Read failures degrade to empty results; write failures surface as
 		// errors the editor shows inline.
+		// ReservedCommandNames uses the TUI-local mirror while attached (the built-in
+		// set is static and identical to the daemon's command.ReservedNames). Note:
+		// OnSendCommand is intentionally left nil here — the daemon /messages endpoint
+		// does not yet carry the agent/subtask overrides, so an attached custom command
+		// applies its model override (via OnSend) and degrades agent/subtask to a normal
+		// turn until that endpoint slice lands. The editor, history, palette, autocomplete
+		// and dispatch all work attached.
+		ReservedCommandNames: func() map[string]bool { return reservedBuiltinCommands },
 		ListCommands: func() []CommandInfo {
 			defs, err := c.ListCommands()
 			if err != nil {

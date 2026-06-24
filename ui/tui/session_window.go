@@ -1899,9 +1899,9 @@ func (sw *SessionWindow) handleSlashCommand(text string) bool {
 // command matched, so the caller can fall back to sending the raw text.
 //
 // A missing required parameter is reported as a transcript note and the command
-// is NOT sent. The command's model override is applied to the turn; agent/subtask
-// overrides are persisted with the command and reserved for a follow-up (the send
-// seam carries the model only).
+// is NOT sent. The command's overrides are applied per invocation: model selects
+// the turn's model, and a non-empty agent or subtask routes the prompt through a
+// spawned sub-agent (via the OnSendCommand seam).
 func (sw *SessionWindow) dispatchCustomCommand(slashName string, args []string) bool {
 	if sw.wb == nil || sw.wb.handlers.GetCustomCommand == nil {
 		return false
@@ -1913,8 +1913,9 @@ func (sw *SessionWindow) dispatchCustomCommand(slashName string, args []string) 
 	// never reach here; this additionally protects the backend/ file-tool built-ins
 	// (calc/echo/help, read/write/edit), which have no client-side handler. A
 	// reserved name is treated as "not a custom command" so the raw text is sent
-	// unchanged, exactly as before this feature existed.
-	if reservedBuiltinCommands[name] {
+	// unchanged, exactly as before this feature existed. The reserved set comes from
+	// the backend's single source of truth (with a local fallback).
+	if sw.wb.reservedBuiltins()[name] {
 		return false
 	}
 	def, err := sw.wb.handlers.GetCustomCommand(name)
@@ -1931,11 +1932,10 @@ func (sw *SessionWindow) dispatchCustomCommand(slashName string, args []string) 
 }
 
 // pendingCommand records the per-invocation overrides of a custom command so they
-// survive being queued while the agent is busy (issue #403). Only model is applied
-// at send time today; agent and subtask are carried (and persisted with the
-// command) for the follow-up that wires their backend application, per the issue's
-// staged-rollout guidance — they are kept here so a queued invocation never loses
-// them either.
+// survive being queued while the agent is busy (issue #403): model selects the
+// turn's model, and agent/subtask route it through a spawned sub-agent. Carrying
+// them with the queued text means a command invoked mid-turn re-applies every
+// override when it drains, not just the model.
 type pendingCommand struct {
 	model   string
 	agent   string
@@ -1971,6 +1971,12 @@ func (sw *SessionWindow) sendCommandNow(message string, ov pendingCommand) {
 		modelName = ov.model
 	}
 	effort := sw.selectedEffort()
+	// Prefer the override-aware seam so model/agent/subtask are all applied; fall
+	// back to plain OnSend (model only) when the backend hasn't wired it.
+	if sw.wb.handlers.OnSendCommand != nil {
+		go sw.wb.handlers.OnSendCommand(sw.id, message, modelName, ov.agent, ov.subtask, effort)
+		return
+	}
 	if sw.wb.handlers.OnSend != nil {
 		go sw.wb.handlers.OnSend(sw.id, message, modelName, effort)
 	}

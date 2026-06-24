@@ -191,6 +191,11 @@ type commandView struct {
 	Subtask     bool                 `json:"subtask,omitempty"`
 	Version     int                  `json:"version"`
 	Versions    []commandVersionView `json:"versions,omitempty"`
+	// Warnings carries the save-time template warnings (placeholders with no
+	// matching parameter, which expand literally) on a create/update response, so a
+	// non-TUI API client gets the same feedback the editor shows at save time. It is
+	// empty on list/get and omitted from JSON when there are none.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // commandBody is the request body of POST /commands (create) and PUT

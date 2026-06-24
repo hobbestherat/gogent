@@ -1,6 +1,7 @@
 package gogent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -178,6 +179,31 @@ func (g *Gogent) ReservedCommandNames() map[string]bool {
 		reserved[c.Name] = true
 	}
 	return reserved
+}
+
+// RunCommandSubtask runs message as a one-shot sub-agent of the session's root
+// agent and returns the sub-agent's final result (issue #403). It applies a custom
+// command's `subtask`/`agent` overrides: the expanded prompt is handled by a
+// spawned sub-agent whose run streams into the session's sub-agent monolog, and the
+// final result is returned so the caller can surface it in the primary transcript.
+// name is the sub-agent's display label — the command's `agent` override, or
+// "subtask" when empty. The model override does not apply here: a sub-agent runs on
+// its own configured model.
+func (g *Gogent) RunCommandSubtask(ctx context.Context, sessionID, name, message string) (string, error) {
+	g.mu.RLock()
+	us, ok := g.userSessions[sessionID]
+	g.mu.RUnlock()
+	if !ok {
+		return "", &SessionNotFoundError{ID: sessionID}
+	}
+	if strings.TrimSpace(name) == "" {
+		name = "subtask"
+	}
+	result, err := us.SpawnSubAgent(ctx, "root", name, message, true)
+	if err != nil {
+		return "", fmt.Errorf("run subtask: %w", err)
+	}
+	return result, nil
 }
 
 // --- helpers ----------------------------------------------------------------

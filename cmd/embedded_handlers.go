@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"gogent/internal/agent"
+	"gogent/internal/command"
 	"gogent/internal/config"
 	"gogent/internal/fileops"
 	"gogent/internal/gogent"
@@ -411,6 +412,34 @@ func embeddedHandlersFor(g *gogent.Gogent, wb *tuipkg.Workbench, noColor bool) t
 				out = append(out, tuipkg.CommandInfo{Name: d.Name, Description: d.Description, Version: d.Version})
 			}
 			return out
+		},
+		ReservedCommandNames: func() map[string]bool { return command.ReservedNames() },
+		OnSendCommand: func(sessionID, message, modelName, agentName string, subtask bool, effort string) {
+			// Background goroutine: contain a panic so one command's crash surfaces as
+			// an error in its window rather than taking down the TUI (mirrors OnSend).
+			defer func() {
+				if r := recover(); r != nil {
+					wb.EmitSessionEvent(sessionID, agent.SessionEvent{
+						Type: agent.SessionEventError,
+						Err:  fmt.Errorf("custom command panicked: %v", r),
+					})
+				}
+			}()
+			// agent/subtask route the prompt through a one-shot sub-agent; its result
+			// is surfaced as the turn's final answer. Otherwise it is an ordinary turn
+			// with the model override applied.
+			if subtask || agentName != "" {
+				result, err := g.RunCommandSubtask(context.Background(), sessionID, agentName, message)
+				if err != nil {
+					wb.EmitSessionEvent(sessionID, agent.SessionEvent{Type: agent.SessionEventError, Err: err})
+					return
+				}
+				wb.EmitSessionEvent(sessionID, agent.SessionEvent{Type: agent.SessionEventFinal, Text: result})
+				return
+			}
+			if _, err := g.SendMessageToSessionWithModelAndEffort(context.Background(), sessionID, "root", message, modelName, effort); err != nil {
+				wb.EmitSessionEvent(sessionID, agent.SessionEvent{Type: agent.SessionEventError, Err: err})
+			}
 		},
 		GetCustomCommand: func(name string) (tuipkg.CommandDef, error) {
 			def, err := g.GetCommand(name)

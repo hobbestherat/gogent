@@ -251,6 +251,20 @@ type Handlers struct {
 	// editor list, the palette entries and the slash-completion popup. May be nil,
 	// in which case the Commands editor/menu and custom-command dispatch are absent.
 	ListCommands func() []CommandInfo
+	// OnSendCommand sends an expanded custom-command prompt applying its
+	// per-invocation overrides (issue #403): model selects the turn's model; a
+	// non-empty agent or subtask=true routes the prompt through a spawned sub-agent
+	// (the agent value names it) whose result is surfaced in the transcript. It is
+	// the override-aware counterpart of OnSend; when nil the dispatch path falls back
+	// to OnSend (model applied, agent/subtask ignored), so a backend that has not
+	// wired it degrades gracefully. Called on a background goroutine.
+	OnSendCommand func(sessionID, message, model, agent string, subtask bool, effort string)
+	// ReservedCommandNames returns the built-in command names a custom command may
+	// not shadow — the backend's single source of truth (command.ReservedNames). The
+	// editor's collision check and the dispatch guard consult it so the reserved set
+	// is not hard-coded in two places. May be nil, in which case the UI falls back to
+	// its local mirror.
+	ReservedCommandNames func() map[string]bool
 	// GetCustomCommand resolves one command by name for runtime dispatch (the
 	// handleSlashCommand fallthrough). A non-nil error means "no such custom
 	// command" — the caller then sends the raw text to the model unchanged, so a

@@ -604,6 +604,9 @@ type CommandDTO struct {
 	Subtask     bool                `json:"subtask,omitempty"`
 	Version     int                 `json:"version"`
 	Versions    []CommandVersionDTO `json:"versions,omitempty"`
+	// Warnings carries save-time template warnings on a create/update response
+	// (mirrors the server's commandView.Warnings); empty on list/get.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // ListCommands returns the daemon's custom commands.

@@ -39,6 +39,21 @@ var reservedBuiltinCommands = map[string]bool{
 	"read": true, "write": true, "edit": true,
 }
 
+// reservedBuiltins returns the set of built-in command names a custom command may
+// not shadow. It prefers the backend's authoritative set (command.ReservedNames,
+// via the ReservedCommandNames handler) so the editor and dispatch share one
+// source of truth, falling back to the local mirror only when the handler is
+// unwired (e.g. a bare test harness). The dispatch guard and the editor's
+// collision check both go through here.
+func (w *Workbench) reservedBuiltins() map[string]bool {
+	if w != nil && w.handlers.ReservedCommandNames != nil {
+		if set := w.handlers.ReservedCommandNames(); set != nil {
+			return set
+		}
+	}
+	return reservedBuiltinCommands
+}
+
 // expandTemplate binds args to def's parameters (positional fills in declaration
 // order, then name=value overrides) and substitutes $name / ${name} placeholders.
 // A missing required parameter is an error (the command must not be sent); a

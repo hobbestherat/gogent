@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/hobbestherat/webapi"
+	"gogent/internal/command"
 	"gogent/internal/config"
 	"gogent/internal/gogent"
 )
@@ -53,7 +54,7 @@ func (svc commandsSvc) Create(r *http.Request, req commandBody) (interface{}, er
 	if err != nil {
 		return nil, commandHTTPError(err)
 	}
-	return commandToView(def), nil
+	return commandViewWithWarnings(def), nil
 }
 
 // Update handles PUT /commands/:name — record a new version of an existing
@@ -68,7 +69,7 @@ func (svc commandsSvc) Update(r *http.Request, req commandBody, name string) (in
 	if err != nil {
 		return nil, commandHTTPError(err)
 	}
-	return commandToView(def), nil
+	return commandViewWithWarnings(def), nil
 }
 
 // Delete handles DELETE /commands/:name — remove a command and its history.
@@ -112,6 +113,16 @@ func (svc commandsSvc) Restore(r *http.Request, req restoreCommandBody, name str
 }
 
 // --- helpers ----------------------------------------------------------------
+
+// commandViewWithWarnings is commandToView plus the save-time template warnings,
+// so a non-TUI API client creating/updating a command sees the same unknown-
+// placeholder feedback the editor surfaces. The warnings never block the save —
+// an unknown $name expands literally at runtime by design (issue #403).
+func commandViewWithWarnings(d config.CommandDef) commandView {
+	v := commandToView(d)
+	v.Warnings = command.ValidateTemplate(d.Template, d.Parameters)
+	return v
+}
 
 // commandToView maps a backend command into its wire view.
 func commandToView(d config.CommandDef) commandView {
