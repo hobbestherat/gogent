@@ -128,6 +128,30 @@ func (s *ModelSession) AppendMessages(messages ...Message) {
 	s.Transcript = append(s.Transcript, messages...)
 }
 
+// FoldLastAssistantContent overwrites the Content of the most recent assistant
+// message in the transcript (and the matching History response), so the agent
+// loop can fold a terminal notice onto a turn it is finalizing. sendCtx appends
+// every assistant response to the transcript before the loop decides whether to
+// accept, retry or fold it, so a turn truncated by max_tokens lands as an empty
+// assistant message; when the bounded retries are exhausted the loop folds an
+// actionable notice here rather than leaving that empty message as the persisted
+// terminal record (issue #402, B5). It is a no-op when the transcript holds no
+// assistant message.
+func (s *ModelSession) FoldLastAssistantContent(content string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := len(s.Transcript) - 1; i >= 0; i-- {
+		if s.Transcript[i].Role != RoleAssistant {
+			continue
+		}
+		s.Transcript[i].Content = content
+		if n := len(s.History); n > 0 {
+			s.History[n-1].Response = content
+		}
+		return
+	}
+}
+
 // ReplaceTranscript replaces the conversation transcript (used by compression).
 func (s *ModelSession) ReplaceTranscript(messages []Message) {
 	s.mu.Lock()

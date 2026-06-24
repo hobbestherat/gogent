@@ -1076,10 +1076,12 @@ func raiseTruncationBudget(sess *model.ModelSession, current int) (int, bool) {
 }
 
 // stopForTruncation folds a visible, actionable truncation notice into the agent's
-// last response after the bounded truncation retries were exhausted, so a turn cut
-// off by max_tokens is never persisted (or surfaced) as a silent empty message
-// (issue #402). It mirrors stopForBudget: any partial output the model did produce
-// is preserved beneath the notice.
+// last response after the bounded truncation retries were exhausted, so the turn
+// is surfaced (SessionEventFinal) with an actionable message rather than as a
+// silent empty answer (issue #402). It mirrors stopForBudget: any partial output
+// the model did produce is preserved beneath the notice. The caller additionally
+// folds the same notice onto the PERSISTED terminal message via
+// ModelSession.FoldLastAssistantContent so the transcript is not left empty.
 func stopForTruncation(resp *model.CompletionResponse) *model.CompletionResponse {
 	if resp == nil {
 		resp = &model.CompletionResponse{}
@@ -1398,6 +1400,11 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 				emit(SessionEvent{Type: SessionEventError, Err: fmt.Errorf(
 					"output truncated by max_tokens: the model exhausted its output budget without completing the answer; raise the model's max_tokens config or lower its reasoning_effort")})
 				resp = stopForTruncation(resp)
+				// Fold the notice onto the PERSISTED terminal message too, not just the
+				// local resp/final event: sendCtx already appended the empty truncated
+				// turn, so without this the transcript would still end on a silent empty
+				// assistant message on reopen (issue #402, B5).
+				sess.FoldLastAssistantContent(resp.Content)
 				break
 			}
 
