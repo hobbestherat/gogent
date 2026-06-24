@@ -5,6 +5,14 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"gogent/internal/agent"
+	"gogent/internal/notify"
+)
+
+const (
+	notificationTitleIssue358 = "Watcher finished"
+	notificationBodyIssue358  = "nightly check passed"
 )
 
 func TestNotificationSinkIssue358ConnectedClientGetsSSEAndNoLocalFallback(t *testing.T) {
@@ -19,14 +27,14 @@ func TestNotificationSinkIssue358ConnectedClientGetsSSEAndNoLocalFallback(t *tes
 		localCalls++
 	})
 
-	sink("watcher", "Watcher finished", "nightly check passed")
+	sink("watcher", notificationTitleIssue358, notificationBodyIssue358)
 
 	te := recvNotificationIssue358(t, sub)
-	if te.notif.Title != "Watcher finished" {
-		t.Fatalf("title = %q, want Watcher finished", te.notif.Title)
+	if te.notif.Title != notificationTitleIssue358 {
+		t.Fatalf("title = %q, want %q", te.notif.Title, notificationTitleIssue358)
 	}
-	if te.notif.Body != "nightly check passed" {
-		t.Fatalf("body = %q, want nightly check passed", te.notif.Body)
+	if te.notif.Body != notificationBodyIssue358 {
+		t.Fatalf("body = %q, want %q", te.notif.Body, notificationBodyIssue358)
 	}
 	if te.notif.Reason != "watcher" {
 		t.Fatalf("reason = %q, want watcher", te.notif.Reason)
@@ -36,6 +44,43 @@ func TestNotificationSinkIssue358ConnectedClientGetsSSEAndNoLocalFallback(t *tes
 	}
 	if localCalls != 0 {
 		t.Fatalf("local fallback calls = %d, want 0 while global client is subscribed", localCalls)
+	}
+}
+
+func TestNotificationSinkIssue358FullConnectedSubscriberFallsBackAndReplays(t *testing.T) {
+	srv := testNotificationServerIssue358()
+	sub, unsub := srv.hub.subscribeGlobal()
+	defer unsub()
+
+	for i := 0; i < cap(sub); i++ {
+		srv.hub.deliver("busy-session", agent.SessionEvent{Type: agent.SessionEventThinking, Step: i})
+	}
+
+	var mu sync.Mutex
+	var local []string
+	sink := srv.NotificationSink(func(reason string) bool {
+		return reason == string(notify.ReasonWatcher)
+	}, func(title, body string) {
+		mu.Lock()
+		defer mu.Unlock()
+		local = append(local, title+": "+body)
+	})
+
+	sink(string(notify.ReasonWatcher), notificationTitleIssue358, notificationBodyIssue358)
+
+	mu.Lock()
+	if len(local) != 1 || local[0] != notificationTitleIssue358+": "+notificationBodyIssue358 {
+		t.Fatalf("local fallback calls = %#v, want fallback when every connected subscriber buffer is full", local)
+	}
+	mu.Unlock()
+
+	unsub()
+	replay, replayUnsub := srv.hub.subscribeGlobal()
+	defer replayUnsub()
+
+	te := recvNotificationIssue358(t, replay)
+	if te.notif.Title != notificationTitleIssue358 || te.notif.Body != notificationBodyIssue358 {
+		t.Fatalf("replayed full-buffer notification = %+v, want original notification", *te.notif)
 	}
 }
 
@@ -139,6 +184,27 @@ func TestNotificationSinkIssue358GateSuppressesEveryDeliveryPath(t *testing.T) {
 	case te := <-replay:
 		t.Fatalf("disabled notification was buffered for replay: %+v", te)
 	case <-time.After(25 * time.Millisecond):
+	}
+}
+
+func TestAgentCompletionIssue358EmitsNotificationForReplay(t *testing.T) {
+	srv := testNotificationServerIssue358()
+	obs := srv.hub.sessionObserver("sess-1")
+
+	obs(agent.SessionEvent{Type: agent.SessionEventFinal, Text: "done"})
+
+	sub, unsub := srv.hub.subscribeGlobal()
+	defer unsub()
+
+	te := recvNotificationIssue358(t, sub)
+	if te.notif.Reason != string(notify.ReasonComplete) {
+		t.Fatalf("notification reason = %q, want %q", te.notif.Reason, notify.ReasonComplete)
+	}
+	if te.notif.SessionID != "sess-1" {
+		t.Fatalf("notification session_id = %q, want sess-1", te.notif.SessionID)
+	}
+	if te.notif.Title == "" || te.notif.Body == "" {
+		t.Fatalf("notification should include a user-visible title and body, got %+v", *te.notif)
 	}
 }
 
