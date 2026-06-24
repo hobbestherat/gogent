@@ -51,6 +51,11 @@ type Server struct {
 	busyMu sync.Mutex
 	busy   map[string]struct{}
 
+	// startedAt is when this server (and so the daemon process owning it) came up,
+	// used to report uptime on GET /daemon/status (issue #358). It is set from the
+	// injectable clock at construction.
+	startedAt time.Time
+
 	api *webapi.API
 }
 
@@ -88,6 +93,7 @@ func NewServer(g *gogent.Gogent, opts Options) *Server {
 		provider:  provider,
 		approvals: newApprovalBridge(h, opts.ApprovalTimeout, opts.now),
 		busy:      make(map[string]struct{}),
+		startedAt: opts.now(),
 	}
 
 	// Re-wire every already-live session's observer through the hub (sessions
@@ -218,6 +224,7 @@ func (s *Server) buildAPI() *webapi.API {
 			{Path: "/health", Method: http.MethodGet, Handler: sys.Health, AuthLevel: pub},
 			{Path: "/workspace", Method: http.MethodGet, Handler: sys.Workspace, AuthLevel: req},
 			{Path: "/stats", Method: http.MethodGet, Handler: sys.Stats, AuthLevel: req},
+			{Path: "/daemon/status", Method: http.MethodGet, Handler: sys.DaemonStatus, AuthLevel: req},
 		},
 		SessionProvider:   s.provider,
 		PermissionChecker: scopePermissionChecker{provider: s.provider},

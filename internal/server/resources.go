@@ -2,6 +2,9 @@ package server
 
 import (
 	"net/http"
+	"os"
+	"strings"
+	"time"
 
 	"github.com/hobbestherat/webapi"
 	"gogent/internal/config"
@@ -258,6 +261,39 @@ func (svc systemSvc) Stats(r *http.Request) (interface{}, error) {
 		return nil, err
 	}
 	return svc.s.g.Statistics(), nil
+}
+
+// daemonSessionPrefix is the id prefix of the backend-only session a free-running
+// watcher fires into ("watcher:<name>"); such sessions are excluded from the
+// user-facing live-session count the daemon status reports.
+const daemonSessionPrefix = "watcher:"
+
+// DaemonStatus handles GET /daemon/status — the one-call summary the TUI's
+// "Daemon status" menu renders (issue #358 §6): pid, uptime and the live
+// session/watcher/MCP figures. It composes process state with the live core so a
+// remote client needs a single round-trip. Requires the human scope, like the
+// other inspection endpoints.
+func (svc systemSvc) DaemonStatus(r *http.Request) (interface{}, error) {
+	if err := requireHuman(r, svc.s.provider); err != nil {
+		return nil, err
+	}
+	g := svc.s.g
+	live := 0
+	for _, id := range g.SessionIDs() {
+		if id == "default" || strings.HasPrefix(id, daemonSessionPrefix) {
+			continue
+		}
+		live++
+	}
+	started := svc.s.startedAt
+	return daemonStatusView{
+		PID:           os.Getpid(),
+		StartedAt:     started.Format(time.RFC3339),
+		UptimeSeconds: int64(time.Since(started).Seconds()),
+		LiveSessions:  live,
+		Watchers:      len(g.ListWatchers("")),
+		MCPServers:    g.MCPServerNames(),
+	}, nil
 }
 
 // branchLine extracts the branch header from a `git status --short --branch`

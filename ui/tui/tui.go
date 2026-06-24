@@ -246,6 +246,31 @@ type Handlers struct {
 	// DeleteWatcher unregisters a watcher (by id or name) entirely. Backs the
 	// dialog Delete button. May be nil.
 	DeleteWatcher func(idOrName string) error
+	// --- Daemon attach lifecycle (issue #358 §6) ---
+	// DaemonMode reports the TUI's current attachment mode (embedded, attached to
+	// the local daemon, or attached to a remote --connect daemon), so the Daemon
+	// menu can offer the right actions. May be nil, in which case the whole Daemon
+	// menu is hidden (the build has no daemon wiring, or the user is in a context
+	// where the handoff does not apply).
+	DaemonMode func() DaemonMode
+	// StartDaemon performs the embedded->daemon handoff: persist live state, spawn
+	// the local daemon, switch the Workbench Handlers to the remote (HTTP/SSE)
+	// implementation and shut the embedded core down. It blocks until the handoff
+	// is complete (or fails) and is called on a background goroutine. It is only
+	// invoked when DaemonMode reports embedded. May be nil (the menu item is then
+	// disabled).
+	StartDaemon func() error
+	// StopDaemon performs the daemon->embedded handoff: ask the local daemon to
+	// persist and shut down, build an embedded core, RestoreSessions and switch the
+	// Handlers back to the in-process implementation. It blocks until complete and
+	// is called on a background goroutine. It operates on the LOCAL daemon only and
+	// is only invoked when DaemonMode reports attached-local. May be nil.
+	StopDaemon func() error
+	// DaemonStatusInfo returns a snapshot for the "Daemon status" dialog (running,
+	// pid, uptime, address, transport, live session/watcher counts, MCP servers).
+	// It may perform a blocking round-trip to the daemon and is called on a
+	// background goroutine. May be nil, in which case the status item is hidden.
+	DaemonStatusInfo func() (DaemonStatusReport, error)
 }
 
 // WatcherConfig is the UI-facing description of a watcher to create (issue #329
@@ -483,6 +508,19 @@ type Workbench struct {
 	// is the lifecycle regression that could let a final answer vanish with no trace
 	// (issue #227). Guarded by w.mu.
 	undelivered int
+	// --- daemon disconnect modal (issue #358 §7) ---
+	// reconnectHost labels the disconnect modal ("Connection to <host> lost");
+	// reconnectRetry pokes the remote client's backoff for the "Retry now" button.
+	// Both are set by SetReconnectControls when the TUI is attached to a daemon and
+	// are read only on the UI thread.
+	reconnectHost  string
+	reconnectRetry func()
+	// disconnectLayer is the live BLOCKING modal while the daemon connection is
+	// down, nil when connected; disconnectBody is its message TextView, updated as
+	// the reconnect attempt count climbs. Touched only on the UI thread (the
+	// Reconnector callbacks marshal through Post), so they need no lock.
+	disconnectLayer *tv.Layer
+	disconnectBody  *tv.TextView
 }
 
 // NewWorkbench creates the workbench and its desktop chrome.
@@ -641,6 +679,32 @@ func (w *Workbench) SetHandlers(h Handlers) {
 	w.handlers = h
 }
 
+// Post marshals fn onto the UI (event-loop) thread, so background goroutines —
+// notably the daemon-handoff controller swapping Handlers, and the remote
+// client's reconnect callbacks — mutate Workbench/desktop state without racing
+// the render loop. It is a thin, exported wrapper over the desktop's own queue.
+func (w *Workbench) Post(fn func()) { w.desktop.Post(fn) }
+
+// RefreshMenu rebuilds the menu bar from the current Handlers and state. The
+// daemon-handoff controller calls it (on the UI thread) after swapping Handlers
+// so the Daemon menu reflects the new attachment mode immediately.
+func (w *Workbench) RefreshMenu() { w.rebuildMenu() }
+
+// SessionIDs returns the ids of the open, live (non-read-only) session windows.
+// The handoff controller uses it to rewire each window's backend observer after a
+// daemon->embedded switch, so live sessions keep streaming into their windows.
+func (w *Workbench) SessionIDs() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	ids := make([]string, 0, len(w.order))
+	for _, id := range w.order {
+		if sw := w.sessions[id]; sw != nil && !sw.readOnly {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
 // SetNotifyConfig updates the live notification configuration (and so what the
 // next emitted notification respects). The persisted copy is the backend's
 // responsibility (the SetNotifyConfig handler); this only updates the in-process
@@ -751,7 +815,7 @@ func (w *Workbench) rebuildMenu() {
 			sessionItems = append(sessionItems, tv.NewMenuItem(label, func() { w.Focus(id) }))
 		}
 	}
-	bar := tv.NewMenuBar(tv.Rect{X: 0, Y: 0, W: w.app.Width(), H: 1},
+	subMenus := []*tv.MenuItem{
 		tv.NewSubMenu("&File",
 			tv.NewMenuItem("E&xit", func() {
 				w.confirmQuit()
@@ -760,6 +824,13 @@ func (w *Workbench) rebuildMenu() {
 		tv.NewSubMenu("&Session", sessionItems...),
 		tv.NewSubMenu("&View", w.viewItems()...),
 		tv.NewSubMenu("&Config", w.settingsItems()...),
+	}
+	// The Daemon menu (issue #358 §6) appears only when the build wired the daemon
+	// handoff handlers; embedded users who never opt in never see it.
+	if w.handlers.DaemonMode != nil {
+		subMenus = append(subMenus, tv.NewSubMenu("&Daemon", w.daemonItems()...))
+	}
+	subMenus = append(subMenus,
 		tv.NewSubMenu("&Help",
 			tv.NewMenuItem("Command &Palette…", func() { w.showCommandPalette() }).
 				WithShortcut("Ctrl+K", tui.KeyRune, 'k', true),
@@ -772,6 +843,7 @@ func (w *Workbench) rebuildMenu() {
 			}),
 		),
 	)
+	bar := tv.NewMenuBar(tv.Rect{X: 0, Y: 0, W: w.app.Width(), H: 1}, subMenus...)
 	applyMenuBarShadow(bar) // honour the NoShadow theme setting (issue #215)
 	w.desktop.SetMenuBar(bar)
 	w.desktop.Redraw()

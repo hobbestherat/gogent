@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -89,8 +90,18 @@ func runAttached(homeDir, addr, token string, noColorFlag bool) error {
 	// The RemoteClient feeds the daemon's global SSE stream into the workbench and
 	// drives its permission/edit-review modals for remote approvals.
 	rc := tuipkg.NewRemoteClient(client, wb.EmitSessionEvent, wb)
+	// Install the disconnect/reconnect observer + controls (issue #358 §7): a
+	// dropped stream raises the blocking modal and reconnects with backoff; "Retry
+	// now" pokes the client's backoff.
+	rc.SetReconnector(wb)
+	wb.SetReconnectControls(hostLabel(addr), rc.RetryNow)
 	handlers := rc.Handlers()
 	installPresentationHandlers(&handlers, g, wb, noColorFlag)
+	// Daemon menu (issue #358 §6): a controller tracks the attachment mode so the
+	// menu offers "Stop daemon" (local) or just "Daemon status" (remote --connect).
+	local := strings.HasPrefix(addr, "unix://")
+	dc := newAttachedController(wb, homeDir, noColorFlag, g, client, rc, addr, local)
+	dc.installMenuHandlers(&handlers)
 	wb.SetHandlers(handlers)
 
 	// Seed the live notifier, budget gauge and keybindings, mirroring the embedded

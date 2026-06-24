@@ -84,6 +84,20 @@ func (g *Gogent) CloseMCPServers() {
 	}
 }
 
+// MCPServerNames returns the names of every currently connected MCP server, in
+// connection order. It is a read-only snapshot used by the daemon-status summary
+// (issue #358) to report which MCP stdio subprocesses the daemon owns; it is safe
+// for concurrent use and returns an empty slice when none are connected.
+func (g *Gogent) MCPServerNames() []string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	names := make([]string, 0, len(g.mcpClients))
+	for _, c := range g.mcpClients {
+		names = append(names, c.Name())
+	}
+	return names
+}
+
 // refreshSessionRegistries re-clones the global registry into every existing
 // session's root agent so tools registered after a session was created (the MCP
 // tools) become visible to it. It mirrors the propagation SetSubAgentSettings

@@ -298,6 +298,25 @@ type workspaceView struct {
 	Git  *gitInfo `json:"git,omitempty"`
 }
 
+// daemonStatusView is the wire representation of GET /api/daemon/status: the
+// one-call summary the TUI's "Daemon status" menu renders (issue #358 §6). It is
+// composed from process state plus the live core so an attached client gets pid,
+// uptime, the live session/watcher counts and the connected MCP servers without
+// stitching together /health + /sessions + /watchers. LiveSessions counts the
+// user-facing live sessions only — the shared "default" HTTP session and the
+// backend-only "watcher:" sessions are excluded so the figure matches what the
+// user sees in their windows. Watchers counts the free-running watchers (the
+// ones that keep firing while the terminal is away, which is what the daemon is
+// for); attached watchers belong to their session.
+type daemonStatusView struct {
+	PID           int      `json:"pid"`
+	StartedAt     string   `json:"started_at"`
+	UptimeSeconds int64    `json:"uptime_seconds"`
+	LiveSessions  int      `json:"live_sessions"`
+	Watchers      int      `json:"watchers"`
+	MCPServers    []string `json:"mcp_servers"`
+}
+
 type gitInfo struct {
 	Branch string `json:"branch,omitempty"`
 	Dirty  bool   `json:"dirty"`

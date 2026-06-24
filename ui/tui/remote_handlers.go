@@ -30,6 +30,21 @@ type Approver interface {
 	ReviewEdit(gogent.EditReviewRequest) gogent.EditReviewDecision
 }
 
+// Reconnector is notified when the daemon connection drops and is re-established
+// (issue #358 §7), so the attached TUI can present the BLOCKING disconnect modal
+// and perform the jump-to-present refresh on reconnect. The *Workbench satisfies
+// it. Either method may run from the RemoteClient's background goroutine, so an
+// implementation marshals UI work onto the event-loop thread itself.
+type Reconnector interface {
+	// OnConnectionLost is called when the event stream drops and before each
+	// backoff wait, with the 1-based reconnect attempt number, so the modal can
+	// show "Reconnecting… (attempt N)".
+	OnConnectionLost(attempt int)
+	// OnConnectionRestored is called once the stream re-opens: the implementation
+	// dismisses the modal and re-fetches state (a jump-to-present, not a replay).
+	OnConnectionRestored()
+}
+
 // approvalPollInterval is how often the attached TUI polls GET /api/approvals for
 // pending interactive gates. The current server announces approvals only via that
 // list (no SSE push), so a short poll keeps remote prompts responsive without a
@@ -64,6 +79,17 @@ type RemoteClient struct {
 
 	pollEvery time.Duration
 
+	// reconnector, when set, is notified on disconnect/reconnect so the TUI shows
+	// the blocking modal and re-fetches state (issue #358 §7). nil keeps the old
+	// silent best-effort reconnect (used by narrow tests).
+	reconnector Reconnector
+	// retryNow collapses the current backoff wait when the user clicks "Retry now".
+	// Buffered (cap 1) so a poke is never lost and RetryNow never blocks.
+	retryNow chan struct{}
+	// backoff returns the wait before the Nth (1-based) reconnect attempt. It is a
+	// field so tests can shorten the schedule; production uses backoffFor.
+	backoff func(attempt int) time.Duration
+
 	startOnce sync.Once
 }
 
@@ -81,6 +107,23 @@ func NewRemoteClient(client *APIClient, sink EventSink, approver Approver) *Remo
 		ctx:       ctx,
 		cancel:    cancel,
 		pollEvery: approvalPollInterval,
+		retryNow:  make(chan struct{}, 1),
+		backoff:   backoffFor,
+	}
+}
+
+// SetReconnector installs the disconnect/reconnect observer (issue #358 §7),
+// normally the *Workbench. It must be called before Start. With none set the
+// client reconnects silently (no modal), preserving the simpler Phase-2 behaviour.
+func (rc *RemoteClient) SetReconnector(r Reconnector) { rc.reconnector = r }
+
+// RetryNow collapses the current reconnect backoff so the next attempt fires
+// immediately. It backs the disconnect modal's "Retry now" button and is safe to
+// call from any goroutine; a poke while not waiting is simply coalesced.
+func (rc *RemoteClient) RetryNow() {
+	select {
+	case rc.retryNow <- struct{}{}:
+	default:
 	}
 }
 
@@ -125,32 +168,84 @@ func (rc *RemoteClient) Start(parent context.Context) error {
 	return startErr
 }
 
-// consume forwards the first (already-open) event stream into the sink, then
-// reconnects on stream end until the context is cancelled. Reconnect is a plain
-// best-effort retry (the disconnect modal + jump-to-present reconnect is a later
-// slice); a transient blip simply re-subscribes and live events resume.
+// consume forwards the first (already-open) event stream into the sink, then on
+// stream end drives the blocking disconnect/reconnect cycle until the context is
+// cancelled. A deliberate shutdown (Close cancels the context) ends the loop
+// without surfacing the modal.
 func (rc *RemoteClient) consume(events <-chan GlobalEventDTO) {
 	for {
 		for ge := range events {
 			rc.sink(ge.SessionID, eventDTOToSessionEvent(ge.Event))
 		}
-		// Stream ended. Stop if we are shutting down; otherwise re-subscribe.
+		// Stream ended. Stop if we are shutting down; otherwise reconnect.
 		if rc.ctx.Err() != nil {
 			return
 		}
-		select {
-		case <-rc.ctx.Done():
-			return
-		case <-time.After(time.Second):
-		}
-		next, err := rc.client.StreamEvents(rc.ctx)
-		if err != nil {
-			if rc.ctx.Err() != nil {
-				return
-			}
-			continue // keep trying until the context is cancelled
+		next := rc.reconnect()
+		if next == nil {
+			return // context cancelled while reconnecting
 		}
 		events = next
+	}
+}
+
+// reconnect drives the disconnect/reconnect cycle (issue #358 §7). It tells the
+// Reconnector the connection dropped — which raises the BLOCKING modal — then
+// re-opens the SSE stream with exponential backoff (0.5s → 1s → 2s → 5s, capped
+// ~10s) until it succeeds or the context is cancelled, collapsing the current
+// wait when the user clicks "Retry now". On success it tells the Reconnector the
+// connection is restored (the modal dismisses and the TUI re-fetches state) and
+// returns the fresh stream; on cancellation it returns nil. Returning a brand-new
+// StreamEvents — never a buffered backlog — is what makes the resume a
+// jump-to-present rather than a replay.
+func (rc *RemoteClient) reconnect() <-chan GlobalEventDTO {
+	for attempt := 1; ; attempt++ {
+		rc.notifyLost(attempt)
+		select {
+		case <-rc.ctx.Done():
+			return nil
+		case <-rc.retryNow:
+		case <-time.After(rc.backoff(attempt)):
+		}
+		next, err := rc.client.StreamEvents(rc.ctx)
+		if err == nil {
+			rc.notifyRestored()
+			return next
+		}
+		if rc.ctx.Err() != nil {
+			return nil
+		}
+		// Still down: loop, showing the next attempt and backing off further.
+	}
+}
+
+// notifyLost / notifyRestored forward to the Reconnector when one is installed.
+func (rc *RemoteClient) notifyLost(attempt int) {
+	if rc.reconnector != nil {
+		rc.reconnector.OnConnectionLost(attempt)
+	}
+}
+
+func (rc *RemoteClient) notifyRestored() {
+	if rc.reconnector != nil {
+		rc.reconnector.OnConnectionRestored()
+	}
+}
+
+// backoffFor is the production reconnect schedule: 0.5s, 1s, 2s, 5s, then a 10s
+// cap (issue #358 §7). attempt is 1-based.
+func backoffFor(attempt int) time.Duration {
+	switch {
+	case attempt <= 1:
+		return 500 * time.Millisecond
+	case attempt == 2:
+		return time.Second
+	case attempt == 3:
+		return 2 * time.Second
+	case attempt == 4:
+		return 5 * time.Second
+	default:
+		return 10 * time.Second
 	}
 }
 

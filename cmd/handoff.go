@@ -1,0 +1,368 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/url"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"gogent/internal/agent"
+	"gogent/internal/daemon"
+	"gogent/internal/gogent"
+	"gogent/internal/server"
+	tuipkg "gogent/ui/tui"
+)
+
+// daemonController owns the symmetric embedded <-> daemon handoff driven from the
+// TUI's Daemon menu (issue #358 §6). It tracks the TUI's current attachment mode
+// and the live plumbing for that mode (an embedded *gogent.Gogent, or an attached
+// APIClient + RemoteClient), and swaps the Workbench Handlers between the
+// in-process closures and the remote (HTTP/SSE) implementation as the user starts
+// or stops the local daemon.
+//
+// The handoff is always: persist -> spawn/restore the target -> switch Handlers ->
+// shut the source down, built entirely on the existing on-disk persistence (which
+// is already restart-safe). A turn in flight at handoff time is cancelled; its
+// partial output is already in the persisted transcript and reappears after
+// reattach, and the user re-sends to continue — there is no live migration of an
+// in-flight model stream (the issue's stated, deliberate limitation).
+type daemonController struct {
+	wb      *tuipkg.Workbench
+	homeDir string
+	noColor bool
+	paths   daemon.Paths
+
+	// embeddedHandlers rebuilds the exact in-process Handlers for a given core. It
+	// is the same closure main() installs at startup, so a daemon->embedded handoff
+	// restores byte-for-byte identical embedded behaviour.
+	embeddedHandlers func(*gogent.Gogent) tuipkg.Handlers
+
+	mu        sync.Mutex
+	mode      tuipkg.DaemonMode
+	connect   string               // connect address when attached, else ""
+	g         *gogent.Gogent       // embedded/presentation core (never nil)
+	apiServer *server.Server       // embedded in-process server (embedded mode only)
+	client    *tuipkg.APIClient    // daemon API client (attached modes)
+	rc        *tuipkg.RemoteClient // daemon remote client (attached modes)
+}
+
+// newEmbeddedController builds the controller for a process that started embedded
+// (the default `gogent` with no live daemon). g/apiServer are the in-process core
+// and server; embeddedHandlers rebuilds the in-process Handlers for a core.
+func newEmbeddedController(wb *tuipkg.Workbench, homeDir string, noColor bool, g *gogent.Gogent, apiServer *server.Server, embeddedHandlers func(*gogent.Gogent) tuipkg.Handlers) *daemonController {
+	return &daemonController{
+		wb:               wb,
+		homeDir:          homeDir,
+		noColor:          noColor,
+		paths:            daemon.PathsFor(daemonDir(homeDir)),
+		embeddedHandlers: embeddedHandlers,
+		mode:             tuipkg.DaemonModeEmbedded,
+		g:                g,
+		apiServer:        apiServer,
+	}
+}
+
+// newAttachedController builds the controller for a process that started already
+// attached to a daemon (cmd/attach.go). g is the presentation-only core (theme,
+// layout, keybindings) the attach path builds; client/rc drive the daemon. local
+// selects attached-local (the Unix socket, "Stop daemon" applies) vs attached-
+// remote (a --connect address, where Start/Stop are inapplicable).
+func newAttachedController(wb *tuipkg.Workbench, homeDir string, noColor bool, g *gogent.Gogent, client *tuipkg.APIClient, rc *tuipkg.RemoteClient, addr string, local bool) *daemonController {
+	mode := tuipkg.DaemonModeAttachedRemote
+	if local {
+		mode = tuipkg.DaemonModeAttachedLocal
+	}
+	return &daemonController{
+		wb:      wb,
+		homeDir: homeDir,
+		noColor: noColor,
+		paths:   daemon.PathsFor(daemonDir(homeDir)),
+		// A process that started attached still needs the embedded Handlers builder
+		// so "Stop daemon" can migrate back in-process; it is the same package-level
+		// source main() uses, so the rebuilt embedded behaviour is identical.
+		embeddedHandlers: func(core *gogent.Gogent) tuipkg.Handlers {
+			return embeddedHandlersFor(core, wb, noColor)
+		},
+		mode:    mode,
+		connect: addr,
+		g:       g,
+		client:  client,
+		rc:      rc,
+	}
+}
+
+// installMenuHandlers wires the controller's four daemon-menu callbacks onto a
+// Handlers set. The menu itself decides which are offered per mode (DaemonMode),
+// so all four are always wired; an inapplicable one is simply never invoked.
+func (dc *daemonController) installMenuHandlers(h *tuipkg.Handlers) {
+	h.DaemonMode = dc.Mode
+	h.StartDaemon = dc.Start
+	h.StopDaemon = dc.Stop
+	h.DaemonStatusInfo = dc.Status
+}
+
+// Mode reports the current attachment mode.
+func (dc *daemonController) Mode() tuipkg.DaemonMode {
+	dc.mu.Lock()
+	defer dc.mu.Unlock()
+	return dc.mode
+}
+
+// Start performs the embedded->daemon handoff. It is invoked on a background
+// goroutine by the menu. Only valid in embedded mode.
+func (dc *daemonController) Start() error {
+	dc.mu.Lock()
+	if dc.mode != tuipkg.DaemonModeEmbedded {
+		dc.mu.Unlock()
+		return errors.New("a daemon is already attached")
+	}
+	g := dc.g
+	dc.mu.Unlock()
+
+	// 1. Persist: cancel in-flight turns and flush the store so the daemon restores
+	//    the current state (a cancelled turn's partial transcript is already saved).
+	cancelInflightTurns(g)
+	g.SyncStore()
+	// 2. Shut the source's background services down so they do not double-run with
+	//    the daemon's (the in-process API server stays as a harmless idle listener;
+	//    the daemon serves the TUI over the socket from here on).
+	g.StopWatchers()
+	g.CloseMCPServers()
+
+	// 3. Spawn the daemon detached (unless one is somehow already up) and wait until
+	//    it binds its socket and serves /health.
+	if st := daemon.Query(dc.paths); !st.Running {
+		if _, err := daemon.Spawn(dc.paths, []string{"daemon", "start", "--foreground"}); err != nil {
+			return fmt.Errorf("spawn daemon: %w", err)
+		}
+	}
+	if !waitRunning(dc.paths, 15*time.Second) {
+		return fmt.Errorf("daemon did not become ready; see %s", dc.paths.Log)
+	}
+
+	// 4. Build the API + remote client over the local socket and confirm liveness.
+	addr := "unix://" + dc.paths.Sock
+	client, err := tuipkg.NewAPIClient(addr, "")
+	if err != nil {
+		return fmt.Errorf("build api client: %w", err)
+	}
+	if err := client.Health(); err != nil {
+		return fmt.Errorf("daemon not reachable after start: %w", err)
+	}
+	rc := tuipkg.NewRemoteClient(client, dc.wb.EmitSessionEvent, dc.wb)
+	rc.SetReconnector(dc.wb)
+
+	// 5. Switch the Workbench Handlers to the remote implementation (keeping the
+	//    presentation handlers backed by the local config core) on the UI thread.
+	handlers := rc.Handlers()
+	installPresentationHandlers(&handlers, g, dc.wb, dc.noColor)
+	dc.installMenuHandlers(&handlers)
+	dc.applyOnUI(func() {
+		dc.wb.SetHandlers(handlers)
+		dc.wb.SetReconnectControls(hostLabel(addr), rc.RetryNow)
+		dc.wb.RefreshMenu()
+	})
+
+	// 6. Start the remote event stream + approvals poller.
+	if err := rc.Start(context.Background()); err != nil {
+		return fmt.Errorf("start remote event stream: %w", err)
+	}
+
+	// 7. Commit the new attached-local state.
+	dc.mu.Lock()
+	dc.mode = tuipkg.DaemonModeAttachedLocal
+	dc.client = client
+	dc.rc = rc
+	dc.connect = addr
+	dc.mu.Unlock()
+	return nil
+}
+
+// Stop performs the daemon->embedded handoff. It is invoked on a background
+// goroutine by the menu. Only valid when attached to the LOCAL daemon.
+func (dc *daemonController) Stop() error {
+	dc.mu.Lock()
+	if dc.mode != tuipkg.DaemonModeAttachedLocal {
+		dc.mu.Unlock()
+		return errors.New("Stop daemon applies only when attached to the local daemon")
+	}
+	rc := dc.rc
+	dc.mu.Unlock()
+
+	// 1. Detach the remote client (stops the SSE consumer, approvals poller and any
+	//    in-flight remote turns) so its reconnect loop does not fight the shutdown.
+	if rc != nil {
+		rc.Close()
+	}
+	// 2. Ask the local daemon to persist and shut down gracefully (it flushes the
+	//    store on its way out, so the disk is current for the embedded restore).
+	if err := daemon.Stop(dc.paths, 15*time.Second, false); err != nil && !errors.Is(err, daemon.ErrNotRunning) {
+		return fmt.Errorf("stop daemon: %w", err)
+	}
+
+	// 3. Build a fresh embedded core and restore sessions from disk.
+	g := buildDaemonCore(dc.homeDir, daemonStartOpts{})
+	// 4. Rewire each open window's backend observer to the new core so live sessions
+	//    keep streaming into their windows exactly as the embedded OnCreate does.
+	for _, id := range dc.wb.SessionIDs() {
+		bindWindowSession(g, dc.wb, id)
+	}
+	// 5. Restart MCP + watchers in-process (mirrors the embedded startup order).
+	g.GetPermissionService().SetPrompter(dc.wb)
+	g.SetReviewer(dc.wb)
+	g.StartMCPServers()
+	g.StartWatchers()
+
+	// 6. Switch the Handlers back to the in-process implementation on the UI thread,
+	//    re-seeding the live notifier/budget/keybindings as the embedded startup does.
+	handlers := dc.embeddedHandlers(g)
+	dc.installMenuHandlers(&handlers)
+	dc.applyOnUI(func() {
+		dc.wb.SetHandlers(handlers)
+		dc.wb.SetReconnectControls("", nil)
+		dc.wb.SetNotifyConfig(g.Notifications())
+		g.SetNotifySink(dc.wb.NotifyFromBackend)
+		dc.wb.SetBudgetConfig(g.Budget())
+		dc.wb.LoadKeybindings(g.Keybindings())
+		dc.wb.RefreshMenu()
+	})
+
+	// 7. Commit the new embedded state.
+	dc.mu.Lock()
+	dc.mode = tuipkg.DaemonModeEmbedded
+	dc.g = g
+	dc.rc = nil
+	dc.client = nil
+	dc.connect = ""
+	dc.mu.Unlock()
+	return nil
+}
+
+// Status assembles the snapshot the "Daemon status" dialog renders. In embedded
+// mode it reports the in-process core directly; when attached it does a single
+// GET /api/daemon/status round-trip and tags it with the local lifecycle address.
+func (dc *daemonController) Status() (tuipkg.DaemonStatusReport, error) {
+	dc.mu.Lock()
+	mode := dc.mode
+	client := dc.client
+	connect := dc.connect
+	g := dc.g
+	dc.mu.Unlock()
+
+	if mode == tuipkg.DaemonModeEmbedded {
+		return tuipkg.DaemonStatusReport{
+			Mode:         tuipkg.DaemonModeEmbedded,
+			Running:      false,
+			Transport:    "embedded (in-process)",
+			LiveSessions: liveUserSessionCount(g),
+			Watchers:     len(g.ListWatchers("")),
+			MCPServers:   g.MCPServerNames(),
+			Note:         "No daemon: the core runs in this process. Use \"Start daemon\" to migrate it out.",
+		}, nil
+	}
+
+	report := tuipkg.DaemonStatusReport{Mode: mode}
+	if mode == tuipkg.DaemonModeAttachedLocal {
+		report.Transport = "unix socket"
+		report.Address = dc.paths.Sock
+	} else {
+		report.Transport = "tcp"
+		report.Address = connect
+	}
+	if client == nil {
+		return report, errors.New("not attached")
+	}
+	st, err := client.DaemonStatus()
+	if err != nil {
+		return report, fmt.Errorf("daemon status: %w", err)
+	}
+	report.Running = true
+	report.PID = st.PID
+	report.Uptime = formatUptime(st.UptimeSeconds)
+	report.LiveSessions = st.LiveSessions
+	report.Watchers = st.Watchers
+	report.MCPServers = st.MCPServers
+	return report, nil
+}
+
+// applyOnUI runs fn on the Workbench's UI thread and blocks until it completes, so
+// a handoff's Handlers swap is fully applied before the caller reports success.
+func (dc *daemonController) applyOnUI(fn func()) {
+	done := make(chan struct{})
+	dc.wb.Post(func() {
+		fn()
+		close(done)
+	})
+	<-done
+}
+
+// cancelInflightTurns stops the root agent of every live session, so a turn in
+// flight at handoff time is cancelled (its partial transcript is already persisted
+// per turn). It is the "persist" step's cancellation half.
+func cancelInflightTurns(g *gogent.Gogent) {
+	for _, id := range g.SessionIDs() {
+		if s := g.GetUserSession(id); s != nil {
+			_ = s.StopAgent("root")
+		}
+	}
+}
+
+// bindWindowSession ensures a live backend session exists for an open window id on
+// the embedded core and wires its observer to the window, mirroring the embedded
+// OnCreate. RestoreSessions has already rebuilt persisted sessions; this adopts
+// each open window (creating a session for one not on disk yet) and announces its
+// yolo state once the observer is installed.
+func bindWindowSession(g *gogent.Gogent, wb *tuipkg.Workbench, id string) {
+	s := g.GetUserSession(id)
+	if s == nil {
+		s = g.NewSession(id)
+	}
+	s.SetObserver(func(ev agent.SessionEvent) { wb.EmitSessionEvent(id, ev) })
+	g.EmitYoloState(id)
+}
+
+// liveUserSessionCount counts the user-facing live sessions on g — the shared
+// "default" HTTP session and the backend-only "watcher:" sessions are excluded so
+// the figure matches the daemon-status endpoint's live_sessions.
+func liveUserSessionCount(g *gogent.Gogent) int {
+	n := 0
+	for _, id := range g.SessionIDs() {
+		if id == "default" || strings.HasPrefix(id, "watcher:") {
+			continue
+		}
+		n++
+	}
+	return n
+}
+
+// hostLabel derives a human host label for the disconnect modal from a connect
+// address: the local socket reads as "the local daemon", a TCP endpoint as its
+// host:port.
+func hostLabel(addr string) string {
+	u, err := url.Parse(addr)
+	if err != nil || u.Scheme == "unix" || u.Scheme == "" {
+		return "the local daemon"
+	}
+	if u.Host != "" {
+		return u.Host
+	}
+	return addr
+}
+
+// formatUptime renders a whole-second uptime as a compact "1h2m3s" style string.
+func formatUptime(seconds int64) string {
+	if seconds <= 0 {
+		return "0s"
+	}
+	return (time.Duration(seconds) * time.Second).String()
+}
+
+// daemonDir resolves the daemon lifecycle directory under a home dir (~/.gogent),
+// matching daemon.DefaultDir without re-resolving the home.
+func daemonDir(homeDir string) string {
+	return filepath.Join(homeDir, ".gogent")
+}
