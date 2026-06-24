@@ -1,25 +1,42 @@
 package ui
 
 import (
+	"strings"
+
 	tui "github.com/hobbestherat/turbotui"
 	tv "github.com/hobbestherat/turbotui/turbotv"
 )
 
-// mentionCompleter drives the @-file mention popup attached to a session window's
-// input (issue #46). When the cursor sits inside an "@<partial>" token it floats
-// a small list of matching workspace files above the input; ↑/↓ move the
-// selection, Enter or Tab accepts the highlighted path, Esc dismisses, and typing
-// re-filters. The input keeps keyboard focus throughout — the popup is a purely
-// visual layer the completer drives by hand (the same keep-focus, forward-keys
-// pattern the command palette uses), so accepting a completion never steals the
-// caret from the message being typed.
+// mentionCompleter drives the inline completion popup attached to a session
+// window's input. It serves two token kinds: "@<partial>" workspace-file mentions
+// (issue #46) and, on the first line, "/<partial>" custom slash commands (issue
+// #403). ↑/↓ move the selection, Enter or Tab accepts the highlighted item, Esc
+// dismisses, and typing re-filters. The input keeps keyboard focus throughout —
+// the popup is a purely visual layer the completer drives by hand (the same
+// keep-focus, forward-keys pattern the command palette uses), so accepting a
+// completion never steals the caret from the message being typed.
 type mentionCompleter struct {
 	sw        *SessionWindow
 	layer     *tv.Layer
 	container *tv.VisualComponent
 	list      *tv.Tree
-	files     []string // workspace file cache, refreshed each time the popup opens
-	start     int      // rune index of '@' on the cursor line for the active token
+	files     []string      // workspace file cache, refreshed each time the popup opens
+	commands  []CommandInfo // custom-command cache, refreshed each time the popup opens
+	// values holds the insertion text for each currently-rendered row, parallel to
+	// the list's nodes; accept() inserts values[selected]. Labels (what is shown) and
+	// values (what is inserted) differ for slash commands ("/name — desc" vs "/name ").
+	values []string
+	// spanStart/spanEnd are the rune-index bounds [start,end) of the active token on
+	// the cursor line that accept() rewrites with the chosen row's value.
+	spanStart int
+	spanEnd   int
+}
+
+// completionItem is one popup row: label is shown, value is inserted (replacing
+// the active token span) when the row is accepted.
+type completionItem struct {
+	label string
+	value string
 }
 
 const (
@@ -59,6 +76,13 @@ func (mc *mentionCompleter) update() {
 		return
 	}
 	line := []rune(in.Lines[in.CursorY])
+	// Slash-command completion takes priority on the first line when it begins with
+	// '/' and the cursor is within the command word (issue #403).
+	if items, end, ok := mc.slashMatches(line, in.CursorX, in.CursorY); ok {
+		mc.spanStart, mc.spanEnd = 0, end
+		mc.renderItems(items)
+		return
+	}
 	start, query, ok := mentionToken(line, in.CursorX)
 	if !ok {
 		mc.hide()
@@ -72,8 +96,67 @@ func (mc *mentionCompleter) update() {
 		mc.hide()
 		return
 	}
-	mc.start = start
-	mc.render(matches)
+	mc.spanStart, mc.spanEnd = start, in.CursorX
+	items := make([]completionItem, len(matches))
+	for i, p := range matches {
+		items[i] = completionItem{label: p, value: "@" + p + " "}
+	}
+	mc.renderItems(items)
+}
+
+// renderItems records each row's insertion value and renders the labels. It is the
+// single funnel both token kinds use so accept() can map the selected row to its
+// value via the parallel values slice.
+func (mc *mentionCompleter) renderItems(items []completionItem) {
+	labels := make([]string, len(items))
+	mc.values = make([]string, len(items))
+	for i, it := range items {
+		labels[i] = it.label
+		mc.values[i] = it.value
+	}
+	mc.render(labels)
+}
+
+// slashMatches returns the custom-command completions for a "/<partial>" token on
+// the first line. ok is false unless the line starts with '/', the cursor is
+// within the command word (not in the arguments) and at least one command matches.
+// end is the rune index just past the command word, so accept() replaces the whole
+// word (preserving any already-typed arguments after it).
+func (mc *mentionCompleter) slashMatches(line []rune, cursorX, cursorY int) (items []completionItem, end int, ok bool) {
+	if cursorY != 0 || len(line) == 0 || line[0] != '/' {
+		return nil, 0, false
+	}
+	if mc.sw.wb == nil || mc.sw.wb.handlers.ListCommands == nil {
+		return nil, 0, false
+	}
+	end = 1
+	for end < len(line) && line[end] != ' ' {
+		end++
+	}
+	if cursorX < 1 || cursorX > end {
+		return nil, 0, false // cursor is in the arguments, not the command word
+	}
+	if !mc.active() {
+		mc.commands = mc.sw.wb.handlers.ListCommands()
+	}
+	query := strings.ToLower(string(line[1:end]))
+	for _, c := range mc.commands {
+		if query != "" && !strings.Contains(strings.ToLower(c.Name), query) {
+			continue
+		}
+		label := "/" + c.Name
+		if c.Description != "" {
+			label += " — " + c.Description
+		}
+		items = append(items, completionItem{label: label, value: "/" + c.Name + " "})
+		if len(items) >= maxMentionMatches {
+			break
+		}
+	}
+	if len(items) == 0 {
+		return nil, 0, false
+	}
+	return items, end, true
 }
 
 // render (re)builds the popup layer for the given matches, anchored above the
@@ -171,11 +254,12 @@ func (mc *mentionCompleter) handleKey(event tui.TypeEvent) bool {
 	return false
 }
 
-// accept replaces the active "@<partial>" token with the selected "@<path> " and
-// places the caret after it, then closes the popup. The trailing space lets the
-// user keep typing (and ends the mention so the completer does not immediately
-// reopen). It is a no-op-then-close when there is no selection or the stored token
-// bounds no longer fit the line (e.g. after an intervening edit).
+// accept replaces the active token span with the selected item's value (an
+// "@<path> " mention or a "/<name> " slash command) and places the caret after it,
+// then closes the popup. The trailing space lets the user keep typing (and ends
+// the token so the completer does not immediately reopen). It is a no-op-then-close
+// when there is no selection or the stored span no longer fits the line (e.g. after
+// an intervening edit).
 func (mc *mentionCompleter) accept() {
 	if mc.list == nil {
 		mc.hide()
@@ -184,16 +268,26 @@ func (mc *mentionCompleter) accept() {
 	node := mc.list.Selected()
 	in := mc.sw.input
 	line := []rune(in.Lines[in.CursorY])
-	if node == nil || mc.start < 0 || mc.start > in.CursorX || in.CursorX > len(line) {
+	if node == nil || mc.spanStart < 0 || mc.spanStart > mc.spanEnd || mc.spanEnd > len(line) {
 		mc.hide()
 		return
 	}
-	replacement := []rune("@" + node.Label + " ")
-	newLine := append([]rune{}, line[:mc.start]...)
+	// Map the selected node to its insertion value via the parallel values slice
+	// (label ≠ inserted text for slash commands). Fall back to the label when the
+	// row index can't be resolved, which keeps mention completion correct.
+	value := node.Label
+	for i, n := range mc.list.Roots {
+		if n == node && i < len(mc.values) {
+			value = mc.values[i]
+			break
+		}
+	}
+	replacement := []rune(value)
+	newLine := append([]rune{}, line[:mc.spanStart]...)
 	newLine = append(newLine, replacement...)
-	newLine = append(newLine, line[in.CursorX:]...)
+	newLine = append(newLine, line[mc.spanEnd:]...)
 	in.Lines[in.CursorY] = string(newLine)
-	in.CursorX = mc.start + len(replacement)
+	in.CursorX = mc.spanStart + len(replacement)
 	mc.hide()
 	mc.sw.wb.desktop.Redraw()
 }

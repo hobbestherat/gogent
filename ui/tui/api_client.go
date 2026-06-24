@@ -572,6 +572,89 @@ func (c *APIClient) SetSkillActive(name string, active bool) error {
 		map[string]bool{"enabled": active}, nil)
 }
 
+// --- Custom commands (issue #403) -------------------------------------------
+
+// CommandParamDTO mirrors the server's commandParamView.
+type CommandParamDTO struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+	Default     string `json:"default,omitempty"`
+}
+
+// CommandVersionDTO mirrors the server's commandVersionView.
+type CommandVersionDTO struct {
+	Version    int               `json:"version"`
+	Template   string            `json:"template"`
+	Parameters []CommandParamDTO `json:"parameters,omitempty"`
+	Model      string            `json:"model,omitempty"`
+	Agent      string            `json:"agent,omitempty"`
+	Subtask    bool              `json:"subtask,omitempty"`
+	SavedAt    string            `json:"saved_at"`
+}
+
+// CommandDTO mirrors the server's commandView for the /commands endpoints.
+type CommandDTO struct {
+	Name        string              `json:"name"`
+	Description string              `json:"description,omitempty"`
+	Parameters  []CommandParamDTO   `json:"parameters,omitempty"`
+	Template    string              `json:"template"`
+	Model       string              `json:"model,omitempty"`
+	Agent       string              `json:"agent,omitempty"`
+	Subtask     bool                `json:"subtask,omitempty"`
+	Version     int                 `json:"version"`
+	Versions    []CommandVersionDTO `json:"versions,omitempty"`
+}
+
+// ListCommands returns the daemon's custom commands.
+func (c *APIClient) ListCommands() ([]CommandDTO, error) {
+	var out []CommandDTO
+	if err := c.do(http.MethodGet, "/commands", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// GetCommand fetches one custom command by name.
+func (c *APIClient) GetCommand(name string) (CommandDTO, error) {
+	var out CommandDTO
+	if err := c.do(http.MethodGet, "/commands/"+url.PathEscape(name), nil, &out); err != nil {
+		return CommandDTO{}, err
+	}
+	return out, nil
+}
+
+// CreateCommand creates a custom command on the daemon (version 1).
+func (c *APIClient) CreateCommand(def CommandDTO) error {
+	return c.do(http.MethodPost, "/commands", def, nil)
+}
+
+// UpdateCommand records a new version of an existing command on the daemon.
+func (c *APIClient) UpdateCommand(def CommandDTO) error {
+	return c.do(http.MethodPut, "/commands/"+url.PathEscape(def.Name), def, nil)
+}
+
+// DeleteCommand removes a custom command (and its history) from the daemon.
+func (c *APIClient) DeleteCommand(name string) error {
+	return c.do(http.MethodDelete, "/commands/"+url.PathEscape(name), nil, nil)
+}
+
+// GetCommandHistory returns a command's append-only version history.
+func (c *APIClient) GetCommandHistory(name string) ([]CommandVersionDTO, error) {
+	var out []CommandVersionDTO
+	if err := c.do(http.MethodGet, "/commands/"+url.PathEscape(name)+"/history", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// RestoreCommandVersion restores version v of a command on the daemon (recorded
+// as a new version).
+func (c *APIClient) RestoreCommandVersion(name string, v int) error {
+	return c.do(http.MethodPost, "/commands/"+url.PathEscape(name)+"/restore",
+		map[string]int{"version": v}, nil)
+}
+
 // GetStatistics returns the daemon's aggregate statistics report.
 func (c *APIClient) GetStatistics() (stats.Report, error) {
 	var out stats.Report

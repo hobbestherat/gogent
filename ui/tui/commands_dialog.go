@@ -126,9 +126,10 @@ func (w *Workbench) showCommandsDialog() {
 	dialog.Window.AddContent(delBtn)
 	row++
 
-	// Live preview: sample args + the expanded prompt. TextBox has no change
-	// callback, so the preview refreshes on the Preview button, on load and after
-	// any parameter edit — enough to verify a binding without per-keystroke churn.
+	// Live preview: sample args + the expanded prompt. TextBox exposes no change
+	// callback, so the template/args boxes' OnTypeFn is wrapped below (after
+	// refreshPreview exists) to re-expand on every keystroke; the Preview button and
+	// parameter edits refresh it too.
 	dialog.Window.AddContent(dialogLabel("Args:", tv.Rect{X: detailX, Y: row, W: labelW, H: 1}))
 	argsBox := tv.NewTextBox("", tv.Rect{X: boxX, Y: row, W: boxW - 10, H: 1})
 	dialog.Window.AddContent(argsBox)
@@ -174,6 +175,24 @@ func (w *Workbench) showCommandsDialog() {
 		preview.ScrollToTop()
 		w.desktop.Redraw()
 	}
+
+	// Make the preview genuinely live: wrap the template and args boxes so the
+	// expansion re-runs after each keystroke the box handles. TextBox installs its
+	// own OnTypeFn to edit the buffer; we call it first, then refresh, so editing is
+	// preserved and the preview reflects the just-typed character.
+	wrapLive := func(box *tv.TextBox) {
+		base := box.Component.OnTypeFn
+		box.Component.OnTypeFn = func(c *tv.VisualComponent, ev tui.TypeEvent) bool {
+			handled := false
+			if base != nil {
+				handled = base(c, ev)
+			}
+			refreshPreview()
+			return handled
+		}
+	}
+	wrapLive(tmplBox)
+	wrapLive(argsBox)
 
 	// originalName is "" for a brand-new command and the loaded command's name
 	// otherwise; it decides create vs update at save time.
@@ -329,6 +348,19 @@ func (w *Workbench) showCommandsDialog() {
 	}
 	saveAction := func() {
 		def := currentDef()
+		// Hard-block collisions in the editor itself (issue #403), before the backend
+		// save: a name that is a built-in command, or that duplicates a different
+		// existing custom command, is rejected inline. The backend re-enforces both as
+		// defence in depth, but blocking here gives the immediate, specific error the
+		// issue asks the editor to surface.
+		if reservedBuiltinCommands[def.Name] {
+			setStatus(fmt.Sprintf("Cannot save: %q is a built-in command name.", def.Name))
+			return
+		}
+		if def.Name != originalName && commandNameExists(commands, def.Name) {
+			setStatus(fmt.Sprintf("Cannot save: a command named %q already exists.", def.Name))
+			return
+		}
 		// Warn (do not block) about placeholders with no matching parameter.
 		if warns := templateWarnings(def.Template, def.Parameters); len(warns) > 0 {
 			setStatus("Warning: " + strings.Join(warns, "; "))

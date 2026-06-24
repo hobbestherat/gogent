@@ -773,12 +773,117 @@ func (rc *RemoteClient) Handlers() Handlers {
 			return r
 		},
 
+		// --- custom commands (issue #403) ---
+		// Mapped to the /api/commands endpoints so the editor, palette, slash
+		// autocomplete and runtime dispatch all work while attached, exactly as
+		// embedded. Read failures degrade to empty results; write failures surface as
+		// errors the editor shows inline.
+		ListCommands: func() []CommandInfo {
+			defs, err := c.ListCommands()
+			if err != nil {
+				return nil
+			}
+			out := make([]CommandInfo, 0, len(defs))
+			for _, d := range defs {
+				out = append(out, CommandInfo{Name: d.Name, Description: d.Description, Version: d.Version})
+			}
+			return out
+		},
+		GetCustomCommand: func(name string) (CommandDef, error) {
+			d, err := c.GetCommand(name)
+			if err != nil {
+				return CommandDef{}, err
+			}
+			return commandDTOToDef(d), nil
+		},
+		CreateCommand: func(def CommandDef) error { return c.CreateCommand(commandDefToDTO(def)) },
+		UpdateCommand: func(def CommandDef) error { return c.UpdateCommand(commandDefToDTO(def)) },
+		DeleteCommand: func(name string) error { return c.DeleteCommand(name) },
+		GetCommandHistory: func(name string) ([]CommandVersion, error) {
+			vers, err := c.GetCommandHistory(name)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]CommandVersion, 0, len(vers))
+			for _, v := range vers {
+				out = append(out, commandVersionDTOToVersion(v))
+			}
+			return out, nil
+		},
+		RestoreCommandVer: func(name string, v int) error { return c.RestoreCommandVersion(name, v) },
+
 		// NOTE: the watcher handlers (ListWatchers/CreateWatcher/…) are deliberately
 		// left nil. Watcher management over the wire is an explicitly deferred
 		// Phase-3 API-gap item, out of scope for this bounded remote-client slice; an
 		// attached TUI simply hides the watcher dialog/sidebar nodes until that slice
 		// lands.
 	}
+}
+
+// commandDTOToDef / commandDefToDTO map between the api_client wire DTO and the
+// ui/tui-facing command type (issue #403). Versions are server-owned, so the
+// editor never sends them back; commandDefToDTO omits them.
+func commandDTOToDef(d CommandDTO) CommandDef {
+	def := CommandDef{
+		Name:        d.Name,
+		Description: d.Description,
+		Parameters:  commandParamsDTOToParams(d.Parameters),
+		Template:    d.Template,
+		Model:       d.Model,
+		Agent:       d.Agent,
+		Subtask:     d.Subtask,
+		Version:     d.Version,
+	}
+	for _, v := range d.Versions {
+		def.Versions = append(def.Versions, commandVersionDTOToVersion(v))
+	}
+	return def
+}
+
+func commandDefToDTO(def CommandDef) CommandDTO {
+	return CommandDTO{
+		Name:        def.Name,
+		Description: def.Description,
+		Parameters:  commandParamsToDTO(def.Parameters),
+		Template:    def.Template,
+		Model:       def.Model,
+		Agent:       def.Agent,
+		Subtask:     def.Subtask,
+	}
+}
+
+func commandVersionDTOToVersion(v CommandVersionDTO) CommandVersion {
+	return CommandVersion{
+		Version:    v.Version,
+		Template:   v.Template,
+		Parameters: commandParamsDTOToParams(v.Parameters),
+		Model:      v.Model,
+		Agent:      v.Agent,
+		Subtask:    v.Subtask,
+		SavedAt:    v.SavedAt,
+	}
+}
+
+func commandParamsDTOToParams(params []CommandParamDTO) []CommandParam {
+	if params == nil {
+		return nil
+	}
+	out := make([]CommandParam, len(params))
+	for i, p := range params {
+		out[i] = CommandParam(p) // identical fields; tags are ignored in conversion
+	}
+	return out
+}
+
+func commandParamsToDTO(params []CommandParam) []CommandParamDTO {
+	if params == nil {
+		return nil
+	}
+	out := make([]CommandParamDTO, len(params))
+	for i, p := range params {
+		out[i] = CommandParamDTO(p) // identical fields; tags are ignored in conversion
+	}
+	return out
 }
 
 // emitErr surfaces a background-call failure as an error event in the session's

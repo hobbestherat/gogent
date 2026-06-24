@@ -18,6 +18,27 @@ var (
 	cmdNamedArgRe = regexp.MustCompile(`^([a-zA-Z_][a-zA-Z0-9_]*)=(.*)$`)
 )
 
+// reservedBuiltinCommands is the runtime guard that custom-command dispatch
+// consults so a custom command can never shadow a built-in (issue #403), even if
+// one slipped into commands.json by hand-editing past the backend's create-time
+// collision check. It mirrors internal/command.ReservedNames exactly — the
+// client-side slash commands (handled by handleSlashCommand's switch), the
+// backend CommandRegistry built-ins (calc/echo/help) and the file tools
+// registered as commands (read/write/edit) — kept here so ui/tui stays free of
+// the internal package. The client-side names are handled by the switch before
+// dispatch is reached; the rest (which have no client-side handler) are protected
+// only here, which is the gap the runtime guard closes.
+var reservedBuiltinCommands = map[string]bool{
+	// Client-side slash commands (handleSlashCommand switch).
+	"undo": true, "rewind": true, "fork": true, "plan": true, "yolo": true,
+	"act": true, "stop": true, "clearqueue": true, "goal": true,
+	"markdown": true, "thinking": true, "watcher": true,
+	// Backend CommandRegistry built-ins.
+	"calc": true, "echo": true, "help": true,
+	// File tools registered as commands.
+	"read": true, "write": true, "edit": true,
+}
+
 // expandTemplate binds args to def's parameters (positional fills in declaration
 // order, then name=value overrides) and substitutes $name / ${name} placeholders.
 // A missing required parameter is an error (the command must not be sent); a

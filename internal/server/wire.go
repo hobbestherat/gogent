@@ -158,6 +158,59 @@ type updateWatcherRequest struct {
 	Model    string                `json:"model,omitempty"`
 }
 
+// --- Custom commands (issue #403) -------------------------------------------
+
+// commandParamView is the wire form of config.CommandParam.
+type commandParamView struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+	Default     string `json:"default,omitempty"`
+}
+
+// commandVersionView is the wire form of one immutable history snapshot.
+type commandVersionView struct {
+	Version    int                `json:"version"`
+	Template   string             `json:"template"`
+	Parameters []commandParamView `json:"parameters,omitempty"`
+	Model      string             `json:"model,omitempty"`
+	Agent      string             `json:"agent,omitempty"`
+	Subtask    bool               `json:"subtask,omitempty"`
+	SavedAt    string             `json:"saved_at"`
+}
+
+// commandView is the wire representation of a custom command (issue #403): the
+// latest content plus the append-only version history.
+type commandView struct {
+	Name        string               `json:"name"`
+	Description string               `json:"description,omitempty"`
+	Parameters  []commandParamView   `json:"parameters,omitempty"`
+	Template    string               `json:"template"`
+	Model       string               `json:"model,omitempty"`
+	Agent       string               `json:"agent,omitempty"`
+	Subtask     bool                 `json:"subtask,omitempty"`
+	Version     int                  `json:"version"`
+	Versions    []commandVersionView `json:"versions,omitempty"`
+}
+
+// commandBody is the request body of POST /commands (create) and PUT
+// /commands/:name (update). Versions are server-owned (append-only) and ignored
+// if sent.
+type commandBody struct {
+	Name        string             `json:"name"`
+	Description string             `json:"description,omitempty"`
+	Parameters  []commandParamView `json:"parameters,omitempty"`
+	Template    string             `json:"template"`
+	Model       string             `json:"model,omitempty"`
+	Agent       string             `json:"agent,omitempty"`
+	Subtask     bool               `json:"subtask,omitempty"`
+}
+
+// restoreCommandBody is the request body of POST /commands/:name/restore.
+type restoreCommandBody struct {
+	Version int `json:"version"`
+}
+
 // --- Events -----------------------------------------------------------------
 
 // eventView is the SSE wire representation of an agent.SessionEvent. The event
