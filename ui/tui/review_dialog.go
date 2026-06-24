@@ -152,7 +152,8 @@ var reviewButtonLabels = []string{"&Accept", "Accept a&ll", "&Reject"}
 // stay fully visible and in-bounds down to the MinW (40) floor and the row re-flows
 // as the dialog grows. clampDialogRect remains the safety net: only below the floor,
 // where even a zero gap cannot fit the group, is the trailing button clipped — its
-// width collapses (to 0 in the degenerate case) so it is never drawn past the
+// width collapses (to 0 in the degenerate case) and its origin is held at the content
+// edge, so every returned rect stays within [2, width-3] and is never drawn past the
 // border. Mirrors permissionButtonRow and footerButtonRects (#447).
 func reviewButtonRow(width, btnY int) (accept, acceptAll, reject tv.Rect) {
 	leftX, rightX := 2, width-3
@@ -179,6 +180,13 @@ func reviewButtonRow(width, btnY int) (accept, acceptAll, reject tv.Rect) {
 	rects := make([]tv.Rect, n)
 	x := leftX
 	for i := range widths {
+		// clampDialogRect zeroes a button that overhangs rightX but cannot pull an
+		// escaped origin back inside the content area, so cap the cursor at rightX+1:
+		// the resulting zero-width rect is never drawn yet still satisfies
+		// X+W-1 <= rightX, keeping every rect inside [leftX, rightX] below the floor.
+		if x > rightX+1 {
+			x = rightX + 1
+		}
 		rects[i] = clampDialogRect(tv.Rect{X: x, Y: btnY, W: widths[i], H: 1}, leftX, rightX)
 		x += widths[i] + gap
 	}
