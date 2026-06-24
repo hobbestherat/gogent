@@ -100,32 +100,37 @@ func (h *hub) deliver(sessionID string, ev agent.SessionEvent) {
 }
 
 // deliverNotification routes a backend notification onto the global SSE stream
-// when at least one client is connected, or buffers it in the bounded missed-
-// notification ring when none is (issue #358 §9). The connected check and the
-// send/buffer happen together under the hub lock, so a notification racing a
+// when it reaches at least one connected client, or buffers it in the bounded
+// missed-notification ring otherwise (issue #358 §9). The send and the
+// buffer-decision happen together under the hub lock, so a notification racing a
 // (dis)connect is atomically either broadcast or buffered — never both, never
-// lost. It returns true when broadcast live (>=1 connected client), false when
-// buffered for replay. Sends are non-blocking: a notification is best-effort live
-// (a full subscriber buffer drops it), matching the hub's non-terminal policy.
+// lost. It returns true when the notification was delivered live to >=1
+// subscriber, false when it was buffered for replay (so the caller knows to use
+// the local fallback). Sends are non-blocking, but unlike a streaming event a
+// notification is not silently dropped on a full buffer: if NO subscriber accepts
+// it (none connected, or every subscriber's buffer is full) it falls through to
+// the ring, so a stalled connected client never loses one with no fallback.
 func (h *hub) deliverNotification(nev NotificationEvent) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if len(h.global) == 0 {
-		h.ring = append(h.ring, nev)
-		if len(h.ring) > notificationRingSize {
-			h.ring = h.ring[len(h.ring)-notificationRingSize:]
-		}
-		return false
-	}
 	n := nev
 	te := taggedEvent{notif: &n}
+	delivered := false
 	for ch := range h.global {
 		select {
 		case ch <- te:
+			delivered = true
 		default:
 		}
 	}
-	return true
+	if delivered {
+		return true
+	}
+	h.ring = append(h.ring, nev)
+	if len(h.ring) > notificationRingSize {
+		h.ring = h.ring[len(h.ring)-notificationRingSize:]
+	}
+	return false
 }
 
 // cloneSubs returns a snapshot of a subscriber map's channels under the lock so
