@@ -1536,8 +1536,16 @@ func (s *UserSession) runToolCallsSerial(ctx context.Context, agent *Agent, agen
 // "no calls because the model deliberately ended" from "no calls because the
 // model only narrated": the former must terminate immediately and must NOT be
 // given a preamble continuation nudge, even when its response text happens to
-// open like a preamble (issue #307 constraint #2). The native structured_output
-// path needs no such signal — it returns a real call the serial runner finalizes.
+// open like a preamble (issue #307 constraint #2).
+//
+// The native structured_output path normally needs no such signal — it returns a
+// real call the serial runner finalizes. The one exception is a terminal
+// structured_output whose args were truncated by max_tokens and is the sole call
+// this turn (issue #390): there is no well-formed call to hand the serial runner,
+// so it is salvaged here — the recovered text folded into resp.Content and
+// explicitFinal set — exactly like the JSON-text path above. A truncated terminal
+// final alongside earlier calls is instead returned as a real (recovered) call so
+// the serial runner runs the earlier calls first and then folds it.
 func (s *UserSession) collectToolCalls(resp *model.CompletionResponse) (calls []tool.ToolCall, explicitFinal bool) {
 	if resp == nil {
 		return nil, false
