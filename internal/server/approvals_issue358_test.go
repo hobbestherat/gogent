@@ -99,6 +99,97 @@ func TestApprovalBridgeIssue358ConnectedClientKeepsShortAutoDeny(t *testing.T) {
 	}
 }
 
+func TestApprovalBridgeIssue358DisconnectWhilePendingSwitchesToUnattendedWait(t *testing.T) {
+	h := newHub()
+	_, unsubscribe := h.subscribeGlobal()
+	if got := h.clientCount(); got != 1 {
+		t.Fatalf("clientCount = %d, want 1", got)
+	}
+	bridge := newApprovalBridge(h, 80*time.Millisecond, 400*time.Millisecond, time.Now)
+
+	done := make(chan permission.Decision, 1)
+	go func() {
+		done <- bridge.AskPermission(permission.Request{
+			Action:  permission.ActionShell,
+			Context: permission.RequestContext{SessionID: "s1", Agent: "root"},
+		})
+	}()
+	pending := waitForPendingIssue358(t, bridge, "permission")
+
+	time.Sleep(35 * time.Millisecond)
+	unsubscribe()
+	if got := h.clientCount(); got != 0 {
+		t.Fatalf("clientCount after disconnect = %d, want 0", got)
+	}
+
+	select {
+	case dec := <-done:
+		t.Fatalf("approval resolved after disconnect with %v; want pending until unattended timeout or decision", dec)
+	case <-time.After(130 * time.Millisecond):
+	}
+	if got := findPendingIssue358(bridge, pending.ID); got == nil {
+		t.Fatalf("approval %q was removed after disconnect before unattended timeout", pending.ID)
+	}
+
+	if !bridge.resolve(pending.ID, decision{perm: permission.DecisionAllow}) {
+		t.Fatalf("resolve returned false for disconnected pending approval %q", pending.ID)
+	}
+	select {
+	case dec := <-done:
+		if dec != permission.DecisionAllow {
+			t.Fatalf("decision after disconnected wait = %v, want allow", dec)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("approval did not unblock after decision")
+	}
+}
+
+func TestApprovalBridgeIssue358ReconnectGetsFreshConnectedTimeout(t *testing.T) {
+	h := newHub()
+	_, disconnect := h.subscribeGlobal()
+	bridge := newApprovalBridge(h, 120*time.Millisecond, 600*time.Millisecond, time.Now)
+
+	done := make(chan permission.Decision, 1)
+	go func() {
+		done <- bridge.AskPermission(permission.Request{
+			Action:  permission.ActionShell,
+			Context: permission.RequestContext{SessionID: "s1", Agent: "root"},
+		})
+	}()
+	pending := waitForPendingIssue358(t, bridge, "permission")
+
+	time.Sleep(85 * time.Millisecond)
+	disconnect()
+	time.Sleep(85 * time.Millisecond)
+	_, disconnectAgain := h.subscribeGlobal()
+	defer disconnectAgain()
+
+	select {
+	case dec := <-done:
+		t.Fatalf("approval resolved before reconnect grace window with %v; want pending", dec)
+	default:
+	}
+
+	time.Sleep(85 * time.Millisecond)
+	select {
+	case dec := <-done:
+		t.Fatalf("approval reused pre-disconnect connected time and resolved with %v; want fresh connected timeout", dec)
+	default:
+	}
+
+	if !bridge.resolve(pending.ID, decision{perm: permission.DecisionAllow}) {
+		t.Fatalf("resolve returned false for reconnected pending approval %q", pending.ID)
+	}
+	select {
+	case dec := <-done:
+		if dec != permission.DecisionAllow {
+			t.Fatalf("decision after reconnect grace = %v, want allow", dec)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("approval did not unblock after reconnect decision")
+	}
+}
+
 func TestApprovalBridgeIssue358UnattendedPromptCanBeAnsweredAfterReconnect(t *testing.T) {
 	h := newHub()
 	bridge := newApprovalBridge(h, 20*time.Millisecond, 300*time.Millisecond, time.Now)
