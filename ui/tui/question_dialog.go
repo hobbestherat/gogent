@@ -145,6 +145,12 @@ func showQuestionDialog(desktop *tv.Desktop, req agent.QuestionRequest, onResult
 	errLabel.BG = tv.DefaultTheme.DialogBG
 	dialog.Window.AddContent(errLabel)
 
+	// Clear a stale "X is required" once the user navigates to another tab, so the
+	// error does not linger after they move past it. The validation path below sets
+	// the error *after* switching tabs, so the auto-switch onto the offending tab
+	// never wipes the message it just set.
+	tabs.OnTabChange = func(int) { errLabel.SetText("") }
+
 	var layer *tv.Layer
 	done := false
 	finish := func(resp agent.QuestionResponse) {
@@ -164,8 +170,10 @@ func showQuestionDialog(desktop *tv.Desktop, req agent.QuestionRequest, onResult
 				continue
 			}
 			if _, ok := f.answer(); !ok {
-				errLabel.SetText(fmt.Sprintf("✗ %s is required", f.item.Label))
+				// Switch first (its OnTabChange clears any prior error), then set the
+				// message so it survives the auto-switch onto the offending tab.
 				tabs.SetActive(f.tabIndex)
+				errLabel.SetText(fmt.Sprintf("✗ %s is required", f.item.Label))
 				desktop.Redraw()
 				return
 			}
@@ -186,15 +194,18 @@ func showQuestionDialog(desktop *tv.Desktop, req agent.QuestionRequest, onResult
 	cancelBtn := newButton("&Cancel", tv.Rect{X: bx, Y: btnY, W: tv.ButtonLabelWidth("Cancel"), H: 1}, cancel)
 	dialog.Window.AddContent(cancelBtn)
 	bx += cancelBtn.Root().Bounds.W + 2
-	if len(req.Topics) > 1 {
+	if n := len(req.Topics); n > 1 {
+		// Prev/Next wrap around the ends, matching the Alt+Left/Alt+Right keyboard
+		// nav (tv.Tabs switches with wraparound), so neither button is ever a
+		// dead-end no-op at the first/last tab.
 		prevBtn := newButton("&Prev", tv.Rect{X: bx, Y: btnY, W: tv.ButtonLabelWidth("Prev"), H: 1}, func() {
-			tabs.SetActive(tabs.Active() - 1)
+			tabs.SetActive((tabs.Active() - 1 + n) % n)
 			desktop.Redraw()
 		})
 		dialog.Window.AddContent(prevBtn)
 		bx += prevBtn.Root().Bounds.W + 2
 		nextBtn := newButton("&Next", tv.Rect{X: bx, Y: btnY, W: tv.ButtonLabelWidth("Next"), H: 1}, func() {
-			tabs.SetActive(tabs.Active() + 1)
+			tabs.SetActive((tabs.Active() + 1) % n)
 			desktop.Redraw()
 		})
 		dialog.Window.AddContent(nextBtn)
@@ -324,6 +335,15 @@ func buildTopicPanel(topic agent.QuestionTopic, tabIndex, width, _ int) (tv.Widg
 			}
 		}
 
+		// turbotui's TextBox/MultiLineInput have no ghost-placeholder API, so a
+		// text/textarea placeholder is surfaced as a dim "e.g. …" hint line beneath
+		// the field rather than dropped (issue #406).
+		if item.Placeholder != "" && (item.Type == agent.QuestionText || item.Type == agent.QuestionTextarea) {
+			hint := dialogLabel("e.g. "+item.Placeholder, tv.Rect{X: margin, Y: y, W: itemW, H: 1})
+			hint.FG = colorDialogDetail
+			panel.AddChild(hint)
+			y++
+		}
 		if item.Help != "" {
 			help := dialogLabel(item.Help, tv.Rect{X: margin, Y: y, W: itemW, H: 1})
 			help.FG = colorDialogDetail
