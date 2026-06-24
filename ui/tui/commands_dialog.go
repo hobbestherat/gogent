@@ -27,10 +27,7 @@ func (w *Workbench) showCommandsDialog() {
 		return
 	}
 
-	spec := tv.DialogSpec{MinW: 84, MinH: 26, PreferredW: 96}
-	if need := footerRowMinWidth(commandsFooterLabels, tv.DefaultButtonGap); spec.MinW < need {
-		spec.MinW = need
-	}
+	spec := w.commandsDialogSpec()
 	x, y, width, height := w.dialogRect(spec)
 
 	var layer *tv.Layer
