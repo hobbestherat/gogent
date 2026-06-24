@@ -383,18 +383,31 @@ func TestPermissionPromptAlwaysLabelIsConcise(t *testing.T) {
 // middle button fits without elision at the permission dialog floor and on roomy
 // terminals. This is the visible acceptance condition for issue #447.
 func TestPermissionButtonRowShowsShortAlwaysLabelUnelided(t *testing.T) {
-	const label = "Always allow"
+	requests := []permission.Request{
+		{Action: permission.ActionShell, Detail: "echo ok"},
+		{Action: permission.ActionExternal, Resource: "/tmp/outside-workspace"},
+		{Action: permission.ActionSubagent},
+		{Action: permission.ActionNetwork, Resource: "https://example.invalid"},
+		{Action: permission.ActionNetwork},
+		{Action: permission.ActionDiagnostics},
+		{Action: permission.Action("future-action"), Resource: "resource"},
+	}
 	for _, width := range []int{permissionMinWidth, 120} {
 		t.Run("", func(t *testing.T) {
-			allow, always, deny, alwaysText := permissionButtonRow(width, 9, label)
-			if alwaysText != label {
-				t.Fatalf("width=%d: alwaysText = %q, want unelided %q", width, alwaysText, label)
-			}
-			if always.W != tv.ButtonLabelWidth(label) {
-				t.Errorf("width=%d: always width = %d, want %d", width, always.W, tv.ButtonLabelWidth(label))
-			}
-			if allow.X+allow.W-1 >= always.X || always.X+always.W-1 >= deny.X {
-				t.Errorf("width=%d: buttons overlap: %+v %+v %+v", width, allow, always, deny)
+			for _, req := range requests {
+				t.Run(string(req.Action), func(t *testing.T) {
+					_, _, label := permissionPrompt(req)
+					allow, always, deny, alwaysText := permissionButtonRow(width, 9, label)
+					if alwaysText != "Always allow" {
+						t.Fatalf("width=%d: alwaysText = %q, want unelided %q", width, alwaysText, "Always allow")
+					}
+					if always.W != tv.ButtonLabelWidth("Always allow") {
+						t.Errorf("width=%d: always width = %d, want %d", width, always.W, tv.ButtonLabelWidth("Always allow"))
+					}
+					if allow.X+allow.W-1 >= always.X || always.X+always.W-1 >= deny.X {
+						t.Errorf("width=%d: buttons overlap: %+v %+v %+v", width, allow, always, deny)
+					}
+				})
 			}
 		})
 	}
