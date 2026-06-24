@@ -312,3 +312,45 @@ TUI on A is a thin client over the API.
 > and tunnel the API automatically — no manual `ssh -L`, SSH-key auth, host-key
 > verification. That is not part of this release; the manual port-forward above
 > is the supported remote path today.
+
+## Platform support
+
+### Unix (Linux / macOS / BSD)
+
+The daemon detaches with a double-fork + `setsid` (no controlling terminal),
+listens on a **Unix-domain socket** (`~/.gogent/daemon.sock`, perms `0600`)
+as the primary local transport, enforces single-instance with a `flock`'d
+`daemon.lock`, and shuts down on `SIGTERM`/`SIGINT` (graceful) or `SIGKILL`
+(`--force`). This is the default, fully-supported path.
+
+### Windows (detached process over TCP — no true daemonization)
+
+Windows has no Unix-domain sockets and no `setsid`-style daemonization, so
+`gogent daemon` uses a different but equivalent mechanism:
+
+- **Transport:** loopback **TCP** (`127.0.0.1`, an ephemeral port) instead of a
+  Unix socket. The chosen `http://127.0.0.1:<port>` address is written to
+  `~/.gogent/daemon.addr` for discovery; `daemon.pid` works the same. (The Unix
+  `daemon.sock` file is not used.) Remote access still requires a token or
+  password exactly as on Unix — bind the extra `--tcp` listener for that.
+- **Detachment:** the daemon is spawned as a **background process** with the
+  `DETACHED_PROCESS` + `CREATE_NEW_PROCESS_GROUP` creation flags, so it has no
+  inherited console and survives the launching console window closing.
+- **Single-instance:** enforced by an **OS-exclusive handle on `daemon.lock`**
+  (`CREATE_FILE` with a zero share mode — the Windows analog of `flock`), taken
+  before binding, so a second `gogent daemon start` is refused race-free and
+  reports the running instance. The TCP `/health` check is used for status
+  reporting and stale detection.
+- **Stop:** the graceful path is the daemon's own authorized **`/exit`** over
+  TCP; `--force` falls back to `TerminateProcess` (no `SIGTERM`/`SIGKILL`).
+
+The CLI subcommands (`start` / `stop` / `status` / `restart`) and the
+pidfile/addr discovery behave identically to Unix.
+
+> **This is not true service-style daemonization.** The detached process is an
+> ordinary user process: it survives the console closing, but **not** logout or
+> reboot. For true survival, run the daemon under a service supervisor — e.g.
+> [NSSM](https://nssm.cc/) or a Windows Service wrapper — or run
+> `gogent daemon start --foreground` under **Task Scheduler** (triggered at
+> logon/boot). A native Windows Service integration is out of scope for this
+> release.

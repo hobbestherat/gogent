@@ -72,8 +72,10 @@ func main() {
 	// or --no-tui (headless) always take the embedded/headless path.
 	if !*disableTUI {
 		dpaths := daemon.PathsFor(filepath.Join(homeDir, ".gogent"))
-		attach, addr := resolveMode(*forceEmbedded, *connectAddr, "unix://"+dpaths.Sock,
-			func() bool { return daemon.Probe(dpaths.Sock) })
+		// The local discovery address and liveness probe are OS-specific (Unix
+		// socket vs Windows loopback TCP); ListenLocal's counterparts resolve them.
+		attach, addr := resolveMode(*forceEmbedded, *connectAddr, daemon.LocalDiscoveryAddr(dpaths),
+			func() bool { return daemon.ProbeLocal(dpaths) })
 		if attach {
 			if err := runAttached(homeDir, addr, resolveConnectToken(*connectToken), *noColor); err != nil {
 				log.Fatalf("attach to daemon at %s: %v", addr, err)

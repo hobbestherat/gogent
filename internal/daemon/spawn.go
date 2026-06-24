@@ -4,15 +4,17 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"syscall"
 )
 
 // Spawn re-executes the current binary as a detached background process and
-// returns the child's pid. The child is given its own session via setsid so it
-// has no controlling terminal and survives the parent terminal disconnecting
-// (the whole point of the daemon). stdin is wired to /dev/null and stdout/stderr
-// are redirected to the daemon log, so the detached process never writes to the
-// (now absent) terminal.
+// returns the child's pid. The child is detached from the launching terminal so
+// it survives that terminal disconnecting (the whole point of the daemon): on
+// Unix via a new session (setsid); on Windows via the DETACHED_PROCESS /
+// CREATE_NEW_PROCESS_GROUP creation flags (a background process that outlives the
+// console — not a true Windows service; see detachSysProcAttr). The detach
+// attributes are supplied by the per-platform detachSysProcAttr. stdin is wired
+// to the null device and stdout/stderr are redirected to the daemon log, so the
+// detached process never writes to the (now absent) terminal.
 //
 // args is the full argument vector passed after the program name — the cmd layer
 // supplies e.g. ["daemon", "start", "--foreground", ...] so the child runs the
@@ -43,9 +45,10 @@ func Spawn(p Paths, args []string) (int, error) {
 	cmd.Stdin = devNull
 	cmd.Stdout = logf
 	cmd.Stderr = logf
-	// Detach: a new session with no controlling terminal so the daemon outlives
-	// the terminal that launched it.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// Detach from the launching terminal/console so the daemon outlives it. The
+	// concrete attributes are OS-specific (setsid on Unix, creation flags on
+	// Windows); see detachSysProcAttr.
+	cmd.SysProcAttr = detachSysProcAttr()
 
 	if err := cmd.Start(); err != nil {
 		return 0, fmt.Errorf("spawn daemon: %w", err)
