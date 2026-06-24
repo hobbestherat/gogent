@@ -147,6 +147,25 @@ func TestIssue358WindowsListenLocalConcurrentColdStartOnlyOneWins(t *testing.T) 
 	}
 }
 
+func TestIssue358WindowsListenLocalReleasesLockOnClose(t *testing.T) {
+	p := PathsFor(t.TempDir())
+	ln, _, err := ListenLocal(p)
+	if err != nil {
+		t.Fatalf("ListenLocal first: %v", err)
+	}
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close first listener: %v", err)
+	}
+
+	ln2, _, err := ListenLocal(p)
+	if err != nil {
+		t.Fatalf("ListenLocal after close: %v", err)
+	}
+	if err := ln2.Close(); err != nil {
+		t.Fatalf("close second listener: %v", err)
+	}
+}
+
 func TestIssue358WindowsWritePidfileCreatesParentDirectory(t *testing.T) {
 	pidPath := filepath.Join(t.TempDir(), "missing", "daemon.pid")
 	if err := WritePidfile(pidPath, 1234); err != nil {

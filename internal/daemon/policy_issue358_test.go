@@ -1,6 +1,35 @@
 package daemon
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
+
+func TestIssue358PidfileCreatesNestedParentAndOverwrites(t *testing.T) {
+	pidPath := filepath.Join(t.TempDir(), "nested", "daemon.pid")
+
+	if err := WritePidfile(pidPath, 1234); err != nil {
+		t.Fatalf("WritePidfile nested path: %v", err)
+	}
+	got, err := ReadPidfile(pidPath)
+	if err != nil {
+		t.Fatalf("ReadPidfile nested path: %v", err)
+	}
+	if got != 1234 {
+		t.Fatalf("pid = %d, want 1234", got)
+	}
+
+	if err := WritePidfile(pidPath, 5678); err != nil {
+		t.Fatalf("WritePidfile overwrite: %v", err)
+	}
+	got, err = ReadPidfile(pidPath)
+	if err != nil {
+		t.Fatalf("ReadPidfile after overwrite: %v", err)
+	}
+	if got != 5678 {
+		t.Fatalf("pid after overwrite = %d, want 5678", got)
+	}
+}
 
 func TestIssue358ClassifyStatusMatrix(t *testing.T) {
 	tests := []struct {
