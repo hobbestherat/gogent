@@ -124,6 +124,27 @@ func TestFormatSessionDetail(t *testing.T) {
 	}
 }
 
+func TestIssue389FormatSessionDetailUsesFrozenModelLabel(t *testing.T) {
+	got := formatSessionDetail(SessionMeta{
+		ID: "s", Title: "Saved", CreatedAt: "2026-06-19T12:04:05Z",
+		Model: "stable-key", ModelLabel: "Frozen Display Label", ModelID: "provider-id",
+	})
+	if !strings.Contains(got, "Model: Frozen Display Label") {
+		t.Fatalf("formatSessionDetail did not render frozen label:\n%s", got)
+	}
+	if strings.Contains(got, "Model: stable-key") {
+		t.Fatalf("formatSessionDetail rendered stable key despite frozen label:\n%s", got)
+	}
+
+	legacy := formatSessionDetail(SessionMeta{
+		ID: "legacy", Title: "Legacy", CreatedAt: "2026-06-19T12:04:05Z",
+		Model: "stable-key",
+	})
+	if !strings.Contains(legacy, "Model: stable-key") {
+		t.Fatalf("formatSessionDetail did not fall back to model key for legacy metadata:\n%s", legacy)
+	}
+}
+
 // TestFormatSessionDate covers RFC3339 parsing, the empty case and the
 // unparseable fallback.
 func TestFormatSessionDate(t *testing.T) {
