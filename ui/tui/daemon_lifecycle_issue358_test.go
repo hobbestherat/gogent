@@ -317,6 +317,158 @@ func TestIssue358DisconnectModalIsBlockingAndHostAware(t *testing.T) {
 	}
 }
 
+func TestIssue358ReconnectRefreshesFullSessionStateBeforeTranscripts(t *testing.T) {
+	w := NewWorkbench([]*config.ModelConfig{{Name: "m", Model: "m"}})
+	w.openWindow("s1", "Session 1")
+
+	var restored int
+	w.SetHandlers(Handlers{
+		Restore: func() []RestoredSession {
+			restored++
+			return []RestoredSession{
+				{ID: "s1", Title: "Session 1", Messages: []ChatMessage{{Role: "assistant", Content: "present"}}},
+				{ID: "s2", Title: "New daemon-side session", Messages: []ChatMessage{{Role: "assistant", Content: "new"}}},
+			}
+		},
+	})
+
+	w.refreshAfterReconnect()
+
+	if restored == 0 {
+		t.Fatalf("reconnect did not re-fetch full session state via Restore/GET /sessions before transcripts")
+	}
+}
+
+func TestIssue358ReconnectRefreshesPendingApprovalsImmediately(t *testing.T) {
+	type stream struct {
+		ch chan GlobalEventDTO
+	}
+
+	var mu sync.Mutex
+	streams := make([]stream, 0, 2)
+	approvalGets := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/events":
+			mu.Lock()
+			ch := make(chan GlobalEventDTO)
+			streams = append(streams, stream{ch: ch})
+			mu.Unlock()
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher := w.(http.Flusher)
+			flusher.Flush()
+			for {
+				select {
+				case _, ok := <-ch:
+					if !ok {
+						return
+					}
+				case <-r.Context().Done():
+					return
+				}
+			}
+		case "/api/approvals":
+			mu.Lock()
+			approvalGets++
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode([]ApprovalDTO(nil))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client, err := NewAPIClient(srv.URL, "")
+	if err != nil {
+		t.Fatalf("NewAPIClient: %v", err)
+	}
+	rc := NewRemoteClient(client, func(string, agent.SessionEvent) {}, &recordingApprover{})
+	rc.pollEvery = time.Hour
+	rc.backoff = func(int) time.Duration { return time.Millisecond }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := rc.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer rc.Close()
+
+	waitForIssue358(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(streams) == 1
+	}, "initial SSE subscription")
+
+	mu.Lock()
+	first := streams[0].ch
+	mu.Unlock()
+	close(first)
+
+	waitForIssue358(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(streams) == 2
+	}, "replacement SSE subscription")
+
+	waitForIssue358(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return approvalGets > 0
+	}, "approval refresh after reconnect")
+}
+
+func TestIssue358HealthPingFailureDropsStalledStreamAndReconnects(t *testing.T) {
+	var mu sync.Mutex
+	streams := 0
+	healthCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/events":
+			mu.Lock()
+			streams++
+			mu.Unlock()
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher := w.(http.Flusher)
+			flusher.Flush()
+			<-r.Context().Done()
+		case "/api/health":
+			mu.Lock()
+			healthCalls++
+			call := healthCalls
+			mu.Unlock()
+			if call <= healthFailThreshold {
+				http.Error(w, "down", http.StatusServiceUnavailable)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client, err := NewAPIClient(srv.URL, "")
+	if err != nil {
+		t.Fatalf("NewAPIClient: %v", err)
+	}
+	rc := NewRemoteClient(client, func(string, agent.SessionEvent) {}, nil)
+	rc.SetHealthCheck(5 * time.Millisecond)
+	rc.backoff = func(int) time.Duration { return time.Millisecond }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := rc.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer rc.Close()
+
+	waitForIssue358(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return streams >= 2
+	}, "health failure to force SSE reconnect")
+}
+
 type issue358Reconnector struct {
 	mu       sync.Mutex
 	lost     []int

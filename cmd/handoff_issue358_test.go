@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	"gogent/internal/gogent"
@@ -51,5 +53,42 @@ func TestIssue358LiveUserSessionCountExcludesBackendOnlySessions(t *testing.T) {
 
 	if got := liveUserSessionCount(g); got != 2 {
 		t.Fatalf("liveUserSessionCount = %d, want 2 user-facing sessions", got)
+	}
+}
+
+func TestIssue358StartHandoffDoesNotShutSourceBeforeRemoteReady(t *testing.T) {
+	src, err := os.ReadFile("handoff.go")
+	if err != nil {
+		t.Fatalf("read handoff.go: %v", err)
+	}
+	body := string(src)
+	remoteReadyIdx := strings.Index(body, "dc.switchToRemote(g, client, addr)")
+	stopIdx := strings.Index(body, "g.StopWatchers()")
+	if remoteReadyIdx < 0 || stopIdx < 0 {
+		t.Fatalf("could not locate Start handoff switch/shutdown markers")
+	}
+	if stopIdx < remoteReadyIdx {
+		t.Fatalf("Start handoff stops embedded source before remote stream is ready; want persist -> spawn/restore target -> switch handlers -> shut down source")
+	}
+}
+
+func TestIssue358StartHandoffDoesNotSwitchHandlersBeforeRemoteReady(t *testing.T) {
+	src, err := os.ReadFile("handoff.go")
+	if err != nil {
+		t.Fatalf("read handoff.go: %v", err)
+	}
+	body := string(src)
+	helperIdx := strings.Index(body, "func (dc *daemonController) switchToRemote")
+	if helperIdx < 0 {
+		t.Fatalf("could not locate switchToRemote helper")
+	}
+	helper := body[helperIdx:]
+	switchIdx := strings.Index(helper, "dc.wb.SetHandlers(handlers)")
+	startStreamIdx := strings.Index(helper, "rc.Start(context.Background())")
+	if switchIdx < 0 || startStreamIdx < 0 {
+		t.Fatalf("could not locate Start handoff handler-switch/remote-ready markers")
+	}
+	if switchIdx < startStreamIdx {
+		t.Fatalf("Start handoff switches Workbench handlers before remote stream is ready; a subscribe failure leaves the TUI on remote handlers with embedded mode state")
 	}
 }
