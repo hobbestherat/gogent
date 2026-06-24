@@ -508,6 +508,62 @@ func TestBudgetStopDoesNotShowStepLimitNoticeIssue449(t *testing.T) {
 	}
 }
 
+// TestBudgetStopBalancesOrphanedToolCallsIssue449 pins the round-3 fix for the
+// budget-path counterpart of #449. The budget check runs at the top of the loop,
+// BEFORE this turn's calls are collected/executed, so the just-advanced resp may
+// carry native tool_calls that sendCtx already persisted but the loop never ran.
+// Those calls must be balanced with synthetic results so the transcript stays valid
+// for resume — otherwise the next user turn 400s on the dangling tool_call_id. Before
+// the fix the cap-exit was balanced but the budget break (one branch away) was not.
+func TestBudgetStopBalancesOrphanedToolCallsIssue449(t *testing.T) {
+	// The server always returns a tool call, so the round-trip the budget stops on is
+	// guaranteed to carry an unexecuted native call.
+	fs := &fakeServer{responses: []map[string]interface{}{
+		toolCallResponse("call_x", "calc", `{"expression":"1+1"}`),
+	}}
+	server := httptest.NewServer(http.HandlerFunc(fs.handler))
+	defer server.Close()
+
+	us, ag := newLoopSession(t, server.URL)
+	us.SetMaxSteps(100)   // generous: the budget, not the cap, must stop this loop
+	ag.SetTokenBudget(40) // trips after a few round-trips while resp carries a tool call
+
+	var finalText string
+	us.SetObserver(func(ev SessionEvent) {
+		if ev.Type == SessionEventFinal {
+			finalText = ev.Text
+		}
+	})
+
+	if _, err := us.ExecuteTaskLoop(context.Background(), "root", "go"); err != nil {
+		t.Fatalf("loop error: %v", err)
+	}
+	// It really was a budget stop, and the cap notice must not fire.
+	if !strings.Contains(finalText, budgetExceededMarker) {
+		t.Errorf("final event = %q, want %q (the budget stop)", finalText, budgetExceededMarker)
+	}
+	if strings.Contains(finalText, stepLimitReachedMarker) {
+		t.Errorf("final event = %q; a budget stop must not surface the step-cap notice", finalText)
+	}
+	// The headline B2 assertion: the budget-stop turn's tool calls are balanced — no
+	// dangling tool_call_id in the persisted transcript.
+	transcript := us.RootAgent.ThoughtTrain.GetTranscript()
+	assertTranscriptToolCallsBalanced(t, transcript)
+
+	// Resume validity: the first request of a follow-up turn carries the prior
+	// transcript and must have no unmatched assistant tool_calls. (The agent budget is
+	// cumulative, so the resumed turn may stop immediately — that's fine; its first
+	// request still carries the prior transcript we care about.)
+	resumeStart := fs.calls
+	if _, err := us.ExecuteTaskLoop(context.Background(), "root", "continue"); err != nil {
+		t.Fatalf("resumed turn error: %v", err)
+	}
+	if len(fs.requests) <= resumeStart {
+		t.Fatal("resumed turn made no model requests")
+	}
+	assertNoUnmatchedToolCalls(t, fs.requests[resumeStart])
+}
+
 // --- sub-agent coverage (runLoop is shared) ---------------------------------
 
 // TestSubAgentStepCapExitSurfacesNoticeIssue449 confirms the shared runLoop surfaces
