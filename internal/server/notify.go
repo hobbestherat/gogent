@@ -112,23 +112,18 @@ func (s *Server) NotificationSink(gate NotifyGateFunc, local NotifyLocalFunc) fu
 	}
 }
 
-// EnableAgentNotificationFallback wires the daemon-local fallback for agent-
-// completion notifications that the hub buffers while no client is connected
-// (issue #358 §9). When such a notification is buffered for replay, it is also
-// delivered via local on the daemon's own host, gated by gate (the live notify
-// config) so a disabled reason fires nothing. Only the daemon calls this;
-// embedded mode leaves it unset so the in-process TUI's notifier surfaces
+// EnableAgentNotificationFallback configures the daemon's agent-completion
+// notification path (issue #358 §9), the mirror of NotificationSink(gate, local)
+// for the watcher path. gate (the live notify config) decides whether a reason
+// notifies at all — it gates the SSE frame, the replay buffer AND the local
+// fallback together, so a disabled reason emits nothing. local is the daemon-host
+// fallback delivered when no client is connected. Only the daemon calls this;
+// embedded mode leaves both unset so the in-process TUI's notifier surfaces
 // completions and no background terminal escapes hit os.Stdout. gate/local are
 // normally gogent.Gogent.ShouldNotifyReason / NotifyLocalFallback.
 func (s *Server) EnableAgentNotificationFallback(gate NotifyGateFunc, local NotifyLocalFunc) {
 	s.hub.mu.Lock()
-	s.hub.onAgentBuffered = func(nev NotificationEvent) {
-		if gate != nil && !gate(nev.Reason) {
-			return
-		}
-		if local != nil {
-			local(nev.Title, nev.Body)
-		}
-	}
+	s.hub.agentGate = gate
+	s.hub.agentLocal = local
 	s.hub.mu.Unlock()
 }

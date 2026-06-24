@@ -47,13 +47,17 @@ type hub struct {
 	// now stamps notification timestamps. Defaults to time.Now (newHub) and is
 	// replaced with the server's injectable clock in NewServer.
 	now func() time.Time
-	// onAgentBuffered, when set, is the daemon-local fallback for an agent-
-	// completion notification buffered while no client was connected (issue #358
-	// §9). Only the daemon wires it (via Server.EnableAgentNotificationFallback);
-	// embedded mode leaves it nil so the in-process TUI's own notifier surfaces
+	// agentGate / agentLocal configure the agent-completion notification path
+	// (issue #358 §9), the mirror of NotificationSink's (gate, local) for the
+	// watcher path: agentGate decides whether a reason is notified at all (gating
+	// the SSE frame, the replay buffer AND the local fallback together), and
+	// agentLocal is the daemon-local fallback used when no client is connected.
+	// Both are wired only by the daemon (Server.EnableAgentNotificationFallback);
+	// embedded mode leaves them nil so the in-process TUI's own notifier surfaces
 	// completions and no background terminal escapes are written to os.Stdout.
 	// Guarded by mu.
-	onAgentBuffered func(NotificationEvent)
+	agentGate  NotifyGateFunc
+	agentLocal NotifyLocalFunc
 }
 
 func newHub() *hub {
@@ -111,39 +115,39 @@ func (h *hub) deliver(sessionID string, ev agent.SessionEvent) {
 	}
 
 	// Backend notification (issue #358 §9): a completion/attention event (final,
-	// error, sub-agent CLARIFY) also raises a NotificationEvent. While a client is
-	// connected the live event above already reaches it — and the connected TUI's
-	// own notifier surfaces the completion — so emitting a notification frame too
-	// would double up; bufferAgentNotification therefore only buffers it for replay
-	// (and triggers the daemon-local fallback) when NO client is connected. Watcher-
-	// session completions are excluded: the watcher manager raises its own "watcher"
-	// notification for those.
+	// error, sub-agent CLARIFY) also raises a NotificationEvent on the global stream
+	// so a connected TUI surfaces it on its own machine and a reconnecting one
+	// replays what it missed. Watcher-session completions are excluded: the watcher
+	// manager raises its own "watcher" notification for those, so emitting here too
+	// would double up.
 	if !strings.HasPrefix(sessionID, watcherSessionIDPrefix) {
 		if nev, ok := notificationForEvent(sessionID, ev, h.now); ok {
-			if cb, buffered := h.bufferAgentNotification(nev); buffered && cb != nil {
-				cb(nev)
-			}
+			h.emitAgentNotification(nev)
 		}
 	}
 }
 
-// bufferAgentNotification buffers an agent-completion notification in the missed-
-// notification ring for replay, but only while no client is connected (issue #358
-// §9): when a client IS connected the live session event already reaches it, so a
-// notification frame would double up and is skipped. It returns the daemon-local
-// fallback callback (to invoke outside the lock) and true when it buffered; nil,
-// false when a client was connected and nothing was done.
-func (h *hub) bufferAgentNotification(nev NotificationEvent) (func(NotificationEvent), bool) {
+// emitAgentNotification routes an agent-completion notification through the same
+// gate → broadcast-or-buffer → local-fallback pipeline the watcher path uses
+// (NotificationSink), so the same notify.Reason config governs both (issue #358
+// §9). agentGate (when set) decides whether the reason notifies at all: a disabled
+// reason emits nothing — no SSE frame, no replay buffer, no local fallback. An
+// allowed notification is delivered live to connected clients, or buffered for
+// replay and delivered to the daemon-local fallback when none is connected.
+func (h *hub) emitAgentNotification(nev NotificationEvent) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	if len(h.global) > 0 {
-		return nil, false
+	gate := h.agentGate
+	local := h.agentLocal
+	h.mu.Unlock()
+	if gate != nil && !gate(nev.Reason) {
+		return
 	}
-	h.ring = append(h.ring, nev)
-	if len(h.ring) > notificationRingSize {
-		h.ring = h.ring[len(h.ring)-notificationRingSize:]
+	if h.deliverNotification(nev) {
+		return // delivered live to >=1 connected client
 	}
-	return h.onAgentBuffered, true
+	if local != nil {
+		local(nev.Title, nev.Body) // no client connected: notify on the daemon's host
+	}
 }
 
 // deliverNotification routes a backend notification onto the global SSE stream

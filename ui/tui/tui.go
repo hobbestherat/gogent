@@ -480,6 +480,12 @@ type Workbench struct {
 	// output (os.Stdout); SetNotifyConfig keeps its config in sync with the
 	// persisted setting.
 	notify *notify.Notifier
+	// suppressEventNotify turns off maybeNotify's per-session-event notifications
+	// when the TUI is attached to a daemon (issue #358 §9): the daemon delivers
+	// completion/attention notifications over the wire as "notification" SSE frames
+	// (surfaced via NotifyFromWire), so also notifying off the normal final/error
+	// session events would double up. Embedded mode leaves it false. Guarded by mu.
+	suppressEventNotify bool
 	// clipboard copies yanked text to the system clipboard (OSC 52 plus a native
 	// fallback), writing the OSC sequence to os.Stdout like the notifier (issue
 	// #62).
@@ -2294,6 +2300,15 @@ func (w *Workbench) maybeNotify(id string, ev agent.SessionEvent) {
 	if w.notify == nil {
 		return
 	}
+	// When attached to a daemon, completion notifications arrive over the wire as
+	// "notification" SSE frames (NotifyFromWire); notifying off the session event
+	// too would double up, so suppress this path (issue #358 §9).
+	w.mu.Lock()
+	suppressed := w.suppressEventNotify
+	w.mu.Unlock()
+	if suppressed {
+		return
+	}
 	reason, title, body, ok := eventNotification(ev)
 	if !ok {
 		return
@@ -2318,6 +2333,37 @@ func (w *Workbench) NotifyFromBackend(reason, title, body string) {
 			return
 		}
 		if w.notify.ShouldNotify(notify.Reason(reason), false) {
+			w.notify.Notify(title, body)
+		}
+	})
+}
+
+// SetEventNotificationsSuppressed toggles maybeNotify's per-session-event
+// notifications (issue #358 §9). The attach path sets it true so completion
+// notifications come solely from the daemon's over-the-wire "notification" frames
+// (NotifyFromWire) and are not also raised off the normal final/error session
+// events — which would double up. Embedded mode leaves it false.
+func (w *Workbench) SetEventNotificationsSuppressed(suppress bool) {
+	w.mu.Lock()
+	w.suppressEventNotify = suppress
+	w.mu.Unlock()
+}
+
+// NotifyFromWire surfaces a daemon-emitted notification (issue #358 §9) on this
+// (the TUI's) machine: a watcher/agent completion the daemon delivered as a
+// "notification" SSE frame. It is gated by the local notify config and, when the
+// notification carries an originating session id, by focus suppression — a
+// completion for the active window is suppressed exactly as the in-process path
+// would (sessionID "" means a windowless backend event, e.g. a free-running
+// watcher, which is never focus-suppressed). Posted on the UI thread so the focus
+// check is accurate and terminal writes stay coordinated with the render loop.
+func (w *Workbench) NotifyFromWire(reason, title, body, sessionID string) {
+	w.desktop.Post(func() {
+		if w.notify == nil {
+			return
+		}
+		focused := sessionID != "" && w.ActiveID() == sessionID
+		if w.notify.ShouldNotify(notify.Reason(reason), focused) {
 			w.notify.Notify(title, body)
 		}
 	})
