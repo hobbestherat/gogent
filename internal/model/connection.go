@@ -88,12 +88,20 @@ type Message struct {
 	// Reasoning carries the assistant turn's chain-of-thought side channel
 	// (reasoning_content / reasoning / thinking-summary) so a reasoning-only turn
 	// (empty Content) is recoverable and the thinking survives a session reopen.
-	// It is NOT the visible answer. Unlike Thinking/ThinkingSignature (opaque
-	// replay cargo, kept off the wire) it is serialized: emitted on the wire as
-	// "reasoning" (see MarshalJSON) and round-tripped through the transcript so a
-	// restored reasoning-only turn is not empty. Empty for non-reasoning
-	// providers/turns; a backward-compatible addition (old transcripts decode with
-	// an empty Reasoning). See CompletionResponse.Reasoning (issue #402).
+	// It is NOT the visible answer.
+	//
+	// Contract (Message is both the persistence shape and the provider wire shape,
+	// so the two uses diverge here): MarshalJSON serializes Reasoning as "reasoning"
+	// for PERSISTENCE — that is what round-trips it through the transcript so a
+	// restored reasoning-only turn is not empty. It is deliberately NOT sent back to
+	// the provider: the send path (buildRequest -> stripReasoning) clears it from
+	// every outbound request, because replaying reasoning is the out-of-scope A6
+	// follow-up and a stray "reasoning" input field can be rejected by strict
+	// OpenAI-compatible APIs. Any new code that builds a provider request from
+	// transcript messages MUST go through buildRequest (the single send choke point)
+	// so this strip is applied. Empty for non-reasoning providers/turns; a
+	// backward-compatible addition (old transcripts decode with an empty Reasoning).
+	// See CompletionResponse.Reasoning (issue #402).
 	Reasoning string `json:"reasoning,omitempty"`
 }
 
