@@ -52,17 +52,6 @@ func issue401FindMenuLabel(items []*tv.MenuItem, label string) *tv.MenuItem {
 	return nil
 }
 
-func issue401Event(c tv.Chord) tui.TypeEvent {
-	ev := tui.TypeEvent{Ctrl: c.Ctrl, Shift: c.Shift, Alt: c.Alt}
-	if c.Rune != 0 {
-		ev.Key = tui.KeyRune
-		ev.Rune = c.Rune
-		return ev
-	}
-	ev.Key = c.Key
-	return ev
-}
-
 func TestIssue401SourceOnlyDefinesUnifiedCatalog(t *testing.T) {
 	for _, path := range []string{"ui/tui/command_palette.go", "ui/tui/keybindings.go"} {
 		b, err := os.ReadFile(filepath.Join("..", "..", path))

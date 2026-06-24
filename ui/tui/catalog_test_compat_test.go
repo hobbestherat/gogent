@@ -8,7 +8,3 @@ type command = action
 func (w *Workbench) commands() []command {
 	return w.actions()
 }
-
-func keybindActions() []action {
-	return (&Workbench{}).rebindable()
-}
