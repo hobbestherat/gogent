@@ -272,34 +272,39 @@ func serializePrompt[T any](w *Workbench, onShutdown T, present func(resolve fun
 }
 
 // permissionPrompt renders the human-readable question and the "always" label
-// for a request.
+// for a request. The middle-button caption is the fixed, concise "Always allow"
+// for every action: the specific resource/path/scope is already shown in full in
+// the dialog body (the question embeds it for external & network actions and the
+// shell command is shown verbatim), so a longer label would only duplicate that
+// text and force permissionButtonRow to elide it (issue #447).
 func permissionPrompt(req permission.Request) (title, question, alwaysLabel string) {
+	const alwaysAllow = "Always allow"
 	switch req.Action {
 	case permission.ActionShell:
 		return "Run shell command?",
 			"The agent wants to run shell commands in this session.",
-			"Always (this session's workspace)"
+			alwaysAllow
 	case permission.ActionExternal:
 		return "Access outside workspace?",
 			fmt.Sprintf("The agent wants to access a location outside the workspace:\n%s", req.Resource),
-			fmt.Sprintf("Always allow %s", req.Resource)
+			alwaysAllow
 	case permission.ActionSubagent:
-		return "Spawn sub-agent?", "The agent wants to spawn a sub-agent.", "Always"
+		return "Spawn sub-agent?", "The agent wants to spawn a sub-agent.", alwaysAllow
 	case permission.ActionNetwork:
 		if req.Resource != "" {
 			return "Network access?",
 				fmt.Sprintf("The agent wants to fetch from the network:\n%s", req.Resource),
-				fmt.Sprintf("Always allow %s", req.Resource)
+				alwaysAllow
 		}
-		return "Network access?", "The agent wants to access the network.", "Always"
+		return "Network access?", "The agent wants to access the network.", alwaysAllow
 	case permission.ActionDiagnostics:
 		return "Run diagnostics?",
 			"The agent wants to run the project's compiler/linter to check for errors.",
-			"Always (this session)"
+			alwaysAllow
 	default:
 		return "Permission required",
 			fmt.Sprintf("The agent requests %s on %s.", req.Action, req.Resource),
-			"Always"
+			alwaysAllow
 	}
 }
 
@@ -361,9 +366,10 @@ func showPermissionDialog(desktop *tv.Desktop, req permission.Request, requester
 		onResult(d)
 	}
 
-	// "Allow once" is left-anchored, "Deny" right-anchored, and "Always …" fills
-	// the space between (elided when the resource is long), so the row stays clean
-	// and in-bounds at any dialog width.
+	// "Allow once" is left-anchored, "Deny" right-anchored, and the fixed "Always
+	// allow" caption fills the space between — comfortably un-elided at every width
+	// down to the permissionMinWidth floor, with permissionButtonRow/fitButtonLabel
+	// remaining the safety net that elides only on a sub-floor terminal (issue #447).
 	allowRect, alwaysRect, denyRect, alwaysText := permissionButtonRow(width, btnY, alwaysLabel)
 	allowOnce := newButton("Allow once", allowRect, func() {
 		finish(permission.DecisionAllow)
