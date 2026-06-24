@@ -2553,6 +2553,18 @@ func (sw *SessionWindow) copyLastCode() {
 // restore replays a saved transcript into the model so a re-opened session is
 // searchable and filterable like a live one. It mirrors renderTranscript's
 // role-to-entry mapping.
+// reload replaces the window's transcript with msgs, discarding the current
+// records first. It backs the jump-to-present refresh after a daemon reconnect
+// (issue #358 §7): the frozen last-known transcript is swapped for the daemon's
+// current state in one shot, rather than replaying missed events. It must run on
+// the UI thread.
+func (sw *SessionWindow) reload(msgs []ChatMessage) {
+	sw.transcript.records = nil
+	sw.transcript.render()
+	sw.restore(msgs)
+	sw.transcript.render()
+}
+
 func (sw *SessionWindow) restore(msgs []ChatMessage) {
 	for _, m := range msgs {
 		switch strings.ToLower(m.Role) {

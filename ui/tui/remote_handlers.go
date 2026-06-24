@@ -30,6 +30,21 @@ type Approver interface {
 	ReviewEdit(gogent.EditReviewRequest) gogent.EditReviewDecision
 }
 
+// Reconnector is notified when the daemon connection drops and is re-established
+// (issue #358 §7), so the attached TUI can present the BLOCKING disconnect modal
+// and perform the jump-to-present refresh on reconnect. The *Workbench satisfies
+// it. Either method may run from the RemoteClient's background goroutine, so an
+// implementation marshals UI work onto the event-loop thread itself.
+type Reconnector interface {
+	// OnConnectionLost is called when the event stream drops and before each
+	// backoff wait, with the 1-based reconnect attempt number, so the modal can
+	// show "Reconnecting… (attempt N)".
+	OnConnectionLost(attempt int)
+	// OnConnectionRestored is called once the stream re-opens: the implementation
+	// dismisses the modal and re-fetches state (a jump-to-present, not a replay).
+	OnConnectionRestored()
+}
+
 // approvalPollInterval is how often the attached TUI polls GET /api/approvals for
 // pending interactive gates. The current server announces approvals only via that
 // list (no SSE push), so a short poll keeps remote prompts responsive without a
@@ -64,6 +79,31 @@ type RemoteClient struct {
 
 	pollEvery time.Duration
 
+	// reconnector, when set, is notified on disconnect/reconnect so the TUI shows
+	// the blocking modal and re-fetches state (issue #358 §7). nil keeps the old
+	// silent best-effort reconnect (used by narrow tests).
+	reconnector Reconnector
+	// retryNow collapses the current backoff wait when the user clicks "Retry now".
+	// Buffered (cap 1) so a poke is never lost and RetryNow never blocks.
+	retryNow chan struct{}
+	// approvalKick forces an immediate /approvals re-fetch out of band of the poll
+	// ticker. Reconnect signals it so pending approvals are re-fetched as part of
+	// the jump-to-present (issue #358 §7) instead of waiting for the next tick.
+	// Buffered (cap 1) so a kick is coalesced and never blocks.
+	approvalKick chan struct{}
+	// backoff returns the wait before the Nth (1-based) reconnect attempt. It is a
+	// field so tests can shorten the schedule; production uses backoffFor.
+	backoff func(attempt int) time.Duration
+
+	// healthEvery, when > 0, runs a background /health ping at that interval so a
+	// half-open/stalled SSE connection (which the stream read cannot detect) still
+	// trips the disconnect/reconnect path (issue #358 §7). 0 disables it.
+	healthEvery time.Duration
+	// streamMu guards streamCancel, the cancel for the currently-open SSE stream so
+	// the health monitor can drop a wedged stream and force a reconnect.
+	streamMu     sync.Mutex
+	streamCancel context.CancelFunc
+
 	startOnce sync.Once
 }
 
@@ -75,12 +115,36 @@ type RemoteClient struct {
 func NewRemoteClient(client *APIClient, sink EventSink, approver Approver) *RemoteClient {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &RemoteClient{
-		client:    client,
-		sink:      sink,
-		approver:  approver,
-		ctx:       ctx,
-		cancel:    cancel,
-		pollEvery: approvalPollInterval,
+		client:       client,
+		sink:         sink,
+		approver:     approver,
+		ctx:          ctx,
+		cancel:       cancel,
+		pollEvery:    approvalPollInterval,
+		retryNow:     make(chan struct{}, 1),
+		approvalKick: make(chan struct{}, 1),
+		backoff:      backoffFor,
+	}
+}
+
+// SetReconnector installs the disconnect/reconnect observer (issue #358 §7),
+// normally the *Workbench. It must be called before Start. With none set the
+// client reconnects silently (no modal), preserving the simpler Phase-2 behaviour.
+func (rc *RemoteClient) SetReconnector(r Reconnector) { rc.reconnector = r }
+
+// SetHealthCheck enables a background /health ping at interval every (issue #358
+// §7): a failed ping drops the current SSE stream so the consumer falls into the
+// reconnect path even when the stream read itself is wedged on a half-open socket.
+// It must be called before Start; a non-positive interval leaves it disabled.
+func (rc *RemoteClient) SetHealthCheck(every time.Duration) { rc.healthEvery = every }
+
+// RetryNow collapses the current reconnect backoff so the next attempt fires
+// immediately. It backs the disconnect modal's "Retry now" button and is safe to
+// call from any goroutine; a poke while not waiting is simply coalesced.
+func (rc *RemoteClient) RetryNow() {
+	select {
+	case rc.retryNow <- struct{}{}:
+	default:
 	}
 }
 
@@ -111,12 +175,15 @@ func (rc *RemoteClient) Start(parent context.Context) error {
 		}()
 
 		if rc.sink != nil {
-			events, err := rc.client.StreamEvents(rc.ctx)
+			events, err := rc.openStream()
 			if err != nil {
 				startErr = fmt.Errorf("subscribe to daemon events: %w", err)
 				return
 			}
 			go rc.consume(events)
+			if rc.healthEvery > 0 {
+				go rc.monitorHealth()
+			}
 		}
 		if rc.approver != nil {
 			go rc.pollApprovals()
@@ -125,32 +192,151 @@ func (rc *RemoteClient) Start(parent context.Context) error {
 	return startErr
 }
 
-// consume forwards the first (already-open) event stream into the sink, then
-// reconnects on stream end until the context is cancelled. Reconnect is a plain
-// best-effort retry (the disconnect modal + jump-to-present reconnect is a later
-// slice); a transient blip simply re-subscribes and live events resume.
+// consume forwards the first (already-open) event stream into the sink, then on
+// stream end drives the blocking disconnect/reconnect cycle until the context is
+// cancelled. A deliberate shutdown (Close cancels the context) ends the loop
+// without surfacing the modal.
 func (rc *RemoteClient) consume(events <-chan GlobalEventDTO) {
 	for {
 		for ge := range events {
 			rc.sink(ge.SessionID, eventDTOToSessionEvent(ge.Event))
 		}
-		// Stream ended. Stop if we are shutting down; otherwise re-subscribe.
+		// Stream ended (server closed it, or the health monitor cancelled it).
+		// Release its context, then stop if we are shutting down, else reconnect.
+		rc.dropStream()
 		if rc.ctx.Err() != nil {
 			return
 		}
+		next := rc.reconnect()
+		if next == nil {
+			return // context cancelled while reconnecting
+		}
+		events = next
+	}
+}
+
+// openStream opens a fresh SSE stream under a child context whose cancel is stored
+// so the health monitor can drop a wedged stream. The caller (consume) releases
+// the context via dropStream when the stream ends.
+func (rc *RemoteClient) openStream() (<-chan GlobalEventDTO, error) {
+	streamCtx, cancel := context.WithCancel(rc.ctx)
+	ch, err := rc.client.StreamEvents(streamCtx)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	rc.streamMu.Lock()
+	rc.streamCancel = cancel
+	rc.streamMu.Unlock()
+	return ch, nil
+}
+
+// dropStream cancels the current SSE stream's context, ending its read. It is
+// called by consume when a stream finishes (to release the context) and by the
+// health monitor to force a reconnect on a stalled connection. Idempotent.
+func (rc *RemoteClient) dropStream() {
+	rc.streamMu.Lock()
+	cancel := rc.streamCancel
+	rc.streamCancel = nil
+	rc.streamMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// healthFailThreshold is how many consecutive failed /health pings force a
+// reconnect. Requiring two avoids flashing the disconnect modal on a single
+// transient blip while the SSE stream is actually fine, yet still catches a
+// genuinely stalled connection within ~2 intervals.
+const healthFailThreshold = 2
+
+// monitorHealth pings the daemon's /health every rc.healthEvery and, after
+// healthFailThreshold consecutive failures, drops the current SSE stream so
+// consume falls into the reconnect path — catching a half-open/stalled connection
+// the stream read alone would not (issue #358 §7). A single recovered ping resets
+// the streak, so a momentary blip never surfaces the modal.
+func (rc *RemoteClient) monitorHealth() {
+	ticker := time.NewTicker(rc.healthEvery)
+	defer ticker.Stop()
+	fails := 0
+	for {
 		select {
 		case <-rc.ctx.Done():
 			return
-		case <-time.After(time.Second):
+		case <-ticker.C:
 		}
-		next, err := rc.client.StreamEvents(rc.ctx)
-		if err != nil {
-			if rc.ctx.Err() != nil {
-				return
+		if err := rc.client.Health(); err != nil {
+			if fails++; fails >= healthFailThreshold {
+				rc.dropStream()
+				fails = 0
 			}
-			continue // keep trying until the context is cancelled
+			continue
 		}
-		events = next
+		fails = 0
+	}
+}
+
+// reconnect drives the disconnect/reconnect cycle (issue #358 §7). It tells the
+// Reconnector the connection dropped — which raises the BLOCKING modal — then
+// re-opens the SSE stream with exponential backoff (0.5s → 1s → 2s → 5s, capped
+// ~10s) until it succeeds or the context is cancelled, collapsing the current
+// wait when the user clicks "Retry now". On success it tells the Reconnector the
+// connection is restored (the modal dismisses and the TUI re-fetches state) and
+// returns the fresh stream; on cancellation it returns nil. Returning a brand-new
+// StreamEvents — never a buffered backlog — is what makes the resume a
+// jump-to-present rather than a replay.
+func (rc *RemoteClient) reconnect() <-chan GlobalEventDTO {
+	for attempt := 1; ; attempt++ {
+		rc.notifyLost(attempt)
+		select {
+		case <-rc.ctx.Done():
+			return nil
+		case <-rc.retryNow:
+		case <-time.After(rc.backoff(attempt)):
+		}
+		next, err := rc.openStream()
+		if err == nil {
+			// Jump-to-present: re-fetch full state. notifyRestored drives the
+			// Workbench's /sessions + transcript refresh; kickApprovals re-fetches
+			// /approvals now rather than on the next poll tick (issue #358 §7).
+			rc.notifyRestored()
+			rc.kickApprovals()
+			return next
+		}
+		if rc.ctx.Err() != nil {
+			return nil
+		}
+		// Still down: loop, showing the next attempt and backing off further.
+	}
+}
+
+// notifyLost / notifyRestored forward to the Reconnector when one is installed.
+func (rc *RemoteClient) notifyLost(attempt int) {
+	if rc.reconnector != nil {
+		rc.reconnector.OnConnectionLost(attempt)
+	}
+}
+
+func (rc *RemoteClient) notifyRestored() {
+	if rc.reconnector != nil {
+		rc.reconnector.OnConnectionRestored()
+	}
+}
+
+// backoffFor is the production reconnect schedule: 0.5s, 1s, 2s, 5s, then a 10s
+// cap (issue #358 §7). attempt is 1-based.
+func backoffFor(attempt int) time.Duration {
+	switch {
+	case attempt <= 1:
+		return 500 * time.Millisecond
+	case attempt == 2:
+		return time.Second
+	case attempt == 3:
+		return 2 * time.Second
+	case attempt == 4:
+		return 5 * time.Second
+	default:
+		return 10 * time.Second
 	}
 }
 
@@ -209,27 +395,49 @@ func (rc *RemoteClient) pollApprovals() {
 		case <-rc.ctx.Done():
 			return
 		case <-ticker.C:
+		case <-rc.approvalKick:
+			// Forced re-fetch (reconnect jump-to-present): scan now rather than
+			// waiting for the next tick.
 		}
-		pending, err := rc.client.ListApprovals()
-		if err != nil {
-			continue // transient; try again next tick
+		rc.scanApprovals(seen)
+	}
+}
+
+// scanApprovals fetches the daemon's pending gates once and presents any not yet
+// seen, pruning resolved/timed-out ids from seen. It is the body shared by the
+// poll ticker and the reconnect kick; the poller goroutine is the sole owner of
+// seen, so this is only ever called from that one goroutine (no shared-state race).
+func (rc *RemoteClient) scanApprovals(seen map[string]bool) {
+	pending, err := rc.client.ListApprovals()
+	if err != nil {
+		return // transient; try again next tick/kick
+	}
+	present := make(map[string]bool, len(pending))
+	for _, ap := range pending {
+		present[ap.ID] = true
+		if seen[ap.ID] {
+			continue
 		}
-		present := make(map[string]bool, len(pending))
-		for _, ap := range pending {
-			present[ap.ID] = true
-			if seen[ap.ID] {
-				continue
-			}
-			seen[ap.ID] = true
-			go rc.handleApproval(ap)
+		seen[ap.ID] = true
+		go rc.handleApproval(ap)
+	}
+	// Forget approvals that are gone (resolved or timed out) so a future approval
+	// that happens to reuse an id is still presented.
+	for id := range seen {
+		if !present[id] {
+			delete(seen, id)
 		}
-		// Forget approvals that are gone (resolved or timed out) so a future
-		// approval that happens to reuse an id is still presented.
-		for id := range seen {
-			if !present[id] {
-				delete(seen, id)
-			}
-		}
+	}
+}
+
+// kickApprovals forces an immediate /approvals re-fetch by the poller. Reconnect
+// calls it so pending approvals re-surface as part of the jump-to-present (issue
+// #358 §7) instead of waiting for the poll ticker. Non-blocking and coalesced; a
+// kick when no poller is running (no approver) is simply buffered and ignored.
+func (rc *RemoteClient) kickApprovals() {
+	select {
+	case rc.approvalKick <- struct{}{}:
+	default:
 	}
 }
 

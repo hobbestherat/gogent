@@ -539,6 +539,28 @@ func (c *APIClient) GetStatistics() (stats.Report, error) {
 	return out, nil
 }
 
+// DaemonStatusDTO mirrors the server's daemonStatusView (GET /api/daemon/status):
+// the one-call summary the "Daemon status" menu renders (issue #358 §6).
+type DaemonStatusDTO struct {
+	PID           int      `json:"pid"`
+	StartedAt     string   `json:"started_at"`
+	UptimeSeconds int64    `json:"uptime_seconds"`
+	LiveSessions  int      `json:"live_sessions"`
+	Watchers      int      `json:"watchers"`
+	MCPServers    []string `json:"mcp_servers"`
+}
+
+// DaemonStatus fetches the daemon's live summary (pid, uptime, session/watcher/MCP
+// counts) for the status dialog. It is a single round-trip the TUI uses instead of
+// stitching together /health + /sessions + /watchers.
+func (c *APIClient) DaemonStatus() (DaemonStatusDTO, error) {
+	var out DaemonStatusDTO
+	if err := c.do(http.MethodGet, "/daemon/status", nil, &out); err != nil {
+		return DaemonStatusDTO{}, err
+	}
+	return out, nil
+}
+
 // NOTE: watcher management over the wire (GET/POST/PUT/DELETE /api/watchers*) is
 // intentionally not exposed by this client. It is an explicitly deferred Phase-3
 // API-gap item, out of scope for this bounded remote-client slice.
