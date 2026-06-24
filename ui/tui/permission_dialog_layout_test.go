@@ -357,20 +357,81 @@ func TestPermissionButtonRow(t *testing.T) {
 	}
 }
 
-// TestPermissionButtonRowElidesLongResource checks a long resource is elided in
-// the button caption (the full text stays in the scrollable body) and the button
-// still fits its slot without colliding.
-func TestPermissionButtonRowElidesLongResource(t *testing.T) {
+// TestPermissionPromptAlwaysLabelIsConcise locks issue #447's core permission
+// fix: every action uses the same short middle-button caption. The action-specific
+// resource/scope text belongs in the dialog body, not in the button label.
+func TestPermissionPromptAlwaysLabelIsConcise(t *testing.T) {
+	for _, req := range []permission.Request{
+		{Action: permission.ActionShell, Detail: "echo ok"},
+		{Action: permission.ActionExternal, Resource: "/tmp/outside-workspace"},
+		{Action: permission.ActionSubagent},
+		{Action: permission.ActionNetwork, Resource: "https://example.invalid"},
+		{Action: permission.ActionNetwork},
+		{Action: permission.ActionDiagnostics},
+		{Action: permission.Action("future-action"), Resource: "resource"},
+	} {
+		t.Run(string(req.Action), func(t *testing.T) {
+			_, _, alwaysLabel := permissionPrompt(req)
+			if alwaysLabel != "Always allow" {
+				t.Fatalf("always label = %q, want %q", alwaysLabel, "Always allow")
+			}
+		})
+	}
+}
+
+// TestPermissionButtonRowShowsShortAlwaysLabelUnelided verifies the concise
+// middle button fits without elision at the permission dialog floor and on roomy
+// terminals. This is the visible acceptance condition for issue #447.
+func TestPermissionButtonRowShowsShortAlwaysLabelUnelided(t *testing.T) {
+	requests := []permission.Request{
+		{Action: permission.ActionShell, Detail: "echo ok"},
+		{Action: permission.ActionExternal, Resource: "/tmp/outside-workspace"},
+		{Action: permission.ActionSubagent},
+		{Action: permission.ActionNetwork, Resource: "https://example.invalid"},
+		{Action: permission.ActionNetwork},
+		{Action: permission.ActionDiagnostics},
+		{Action: permission.Action("future-action"), Resource: "resource"},
+	}
+	for _, width := range []int{permissionMinWidth, 120} {
+		t.Run("", func(t *testing.T) {
+			for _, req := range requests {
+				t.Run(string(req.Action), func(t *testing.T) {
+					_, _, label := permissionPrompt(req)
+					allow, always, deny, alwaysText := permissionButtonRow(width, 9, label)
+					if alwaysText != "Always allow" {
+						t.Fatalf("width=%d: alwaysText = %q, want unelided %q", width, alwaysText, "Always allow")
+					}
+					if always.W != tv.ButtonLabelWidth("Always allow") {
+						t.Errorf("width=%d: always width = %d, want %d", width, always.W, tv.ButtonLabelWidth("Always allow"))
+					}
+					if allow.X+allow.W-1 >= always.X || always.X+always.W-1 >= deny.X {
+						t.Errorf("width=%d: buttons overlap: %+v %+v %+v", width, allow, always, deny)
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestPermissionButtonRowElidesLongResourceBelowFloor keeps the elision safety net
+// covered for impossible sub-floor layouts. The production prompt now passes the
+// short fixed caption, but permissionButtonRow must still degrade gracefully if a
+// long label is ever supplied on a too-narrow dialog.
+func TestPermissionButtonRowElidesLongResourceBelowFloor(t *testing.T) {
+	const belowFloorWidth = 40
 	long := "Always allow " + strings.Repeat("/deeply/nested", 20)
-	allow, always, deny, alwaysText := permissionButtonRow(permissionMinWidth, 9, long)
+	allow, always, deny, alwaysText := permissionButtonRow(belowFloorWidth, 9, long)
 	if alwaysText == long {
-		t.Errorf("long resource was not elided: %q", alwaysText)
+		t.Errorf("long resource was not elided below the floor: %q", alwaysText)
 	}
 	if !strings.HasSuffix(alwaysText, "...") {
 		t.Errorf("elided label = %q, want trailing ...", alwaysText)
 	}
 	if allow.X+allow.W-1 >= always.X || always.X+always.W-1 >= deny.X {
 		t.Errorf("buttons collide after elision: %+v %+v %+v", allow, always, deny)
+	}
+	if rightX := belowFloorWidth - 3; always.X < 2 || always.X+always.W-1 > rightX {
+		t.Errorf("always rect %+v out of [2,%d]", always, rightX)
 	}
 }
 

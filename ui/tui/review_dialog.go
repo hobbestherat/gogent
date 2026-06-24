@@ -105,15 +105,18 @@ func showReviewDialog(desktop *tv.Desktop, req gogent.EditReviewRequest, request
 		onResult(d)
 	}
 
-	// Left-packed so the three buttons never overlap on a narrow terminal.
+	// Size each button to its rendered label width and clamp the row to the content
+	// margins so the group never overlaps or escapes the border on a narrow terminal
+	// and re-flows as the dialog grows (issue #447).
 	btnY := height - 3
-	accept := newButton("&Accept", tv.Rect{X: 2, Y: btnY, W: 10, H: 1}, func() {
+	acceptRect, acceptAllRect, rejectRect := reviewButtonRow(width, btnY)
+	accept := newButton("&Accept", acceptRect, func() {
 		finish(gogent.EditApprove)
 	})
-	acceptAll := newButton("Accept a&ll", tv.Rect{X: 13, Y: btnY, W: 15, H: 1}, func() {
+	acceptAll := newButton("Accept a&ll", acceptAllRect, func() {
 		finish(gogent.EditApproveAll)
 	})
-	reject := newButton("&Reject", tv.Rect{X: 29, Y: btnY, W: 10, H: 1}, func() {
+	reject := newButton("&Reject", rejectRect, func() {
 		finish(gogent.EditReject)
 	})
 	dialog.Window.AddContent(accept)
@@ -133,6 +136,61 @@ func showReviewDialog(desktop *tv.Desktop, req gogent.EditReviewRequest, request
 	desktop.AddLayer(layer)
 	dialog.Fit(spec) // re-resolve the rect when the terminal is resized (issue #299)
 	desktop.SetFocus(reject)
+}
+
+// reviewButtonLabels are the review dialog's action buttons in display order
+// (left to right). They are a package var so a test can reference the same labels
+// reviewButtonRow sizes against without re-declaring them.
+var reviewButtonLabels = []string{"&Accept", "Accept a&ll", "&Reject"}
+
+// reviewButtonRow lays out the three review buttons on content row btnY across a
+// dialog of the given width. Each is sized to its full rendered label width
+// (tv.ButtonLabelWidth) and the group is left-packed from the content left margin.
+// Buttons are separated by tv.DefaultButtonGap on a roomy dialog; when the dialog
+// is too narrow to hold the group at that gap, the gap shrinks (toward 0) just
+// enough to keep every button at full width inside [2, width-3] — so all three
+// stay fully visible and in-bounds down to the MinW (40) floor and the row re-flows
+// as the dialog grows. clampDialogRect remains the safety net: only below the floor,
+// where even a zero gap cannot fit the group, is the trailing button clipped — its
+// width collapses (to 0 in the degenerate case) and its origin is held at the content
+// edge, so every returned rect stays within [2, width-3] and is never drawn past the
+// border. Mirrors permissionButtonRow and footerButtonRects (#447).
+func reviewButtonRow(width, btnY int) (accept, acceptAll, reject tv.Rect) {
+	leftX, rightX := 2, width-3
+	n := len(reviewButtonLabels)
+	widths := make([]int, n)
+	total := 0
+	for i, label := range reviewButtonLabels {
+		widths[i] = tv.ButtonLabelWidth(label)
+		total += widths[i]
+	}
+
+	// Shrink the inter-button gap from DefaultButtonGap only as far as needed to
+	// keep every button at full width within [leftX, rightX]; on a roomy dialog the
+	// gap is exactly DefaultButtonGap.
+	gap := tv.DefaultButtonGap
+	if n > 1 {
+		if slack := (rightX - leftX + 1) - total; slack < gap*(n-1) {
+			if gap = slack / (n - 1); gap < 0 {
+				gap = 0
+			}
+		}
+	}
+
+	rects := make([]tv.Rect, n)
+	x := leftX
+	for i := range widths {
+		// clampDialogRect zeroes a button that overhangs rightX but cannot pull an
+		// escaped origin back inside the content area, so cap the cursor at rightX+1:
+		// the resulting zero-width rect is never drawn yet still satisfies
+		// X+W-1 <= rightX, keeping every rect inside [leftX, rightX] below the floor.
+		if x > rightX+1 {
+			x = rightX + 1
+		}
+		rects[i] = clampDialogRect(tv.Rect{X: x, Y: btnY, W: widths[i], H: 1}, leftX, rightX)
+		x += widths[i] + gap
+	}
+	return rects[0], rects[1], rects[2]
 }
 
 // renderDiff fills a TextView with the unified diff, colouring added lines green,
