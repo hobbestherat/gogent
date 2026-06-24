@@ -871,6 +871,7 @@ func (w *Workbench) rebuildMenu() {
 				w.confirmQuit()
 			}).WithShortcut("Ctrl+Q", tui.KeyRune, 'q', true),
 		),
+		tv.NewSubMenu("&Edit", w.editItems()...),
 		tv.NewSubMenu("&Session", sessionItems...),
 		tv.NewSubMenu("&View", w.viewItems()...),
 		tv.NewSubMenu("&Config", w.settingsItems()...),
@@ -996,14 +997,49 @@ func (w *Workbench) RefreshTheme() {
 // session's transcript — plus the sidebar pin toggle. The transcript operations
 // are also available from the keyboard while the transcript is focused ('/',
 // a/t/r/e, f/u, y, Esc); the menu makes them discoverable.
+// editItems builds the &Edit submenu (issue #393): the clipboard operations
+// (Copy/Cut/Paste) and transcript search (Find), giving them a discoverable home
+// in the menu bar. The accelerators mirror the real key bindings — Ctrl+C/Ctrl+X
+// are handled by the desktop's copy/cut key path, Ctrl+V by its paste path, and
+// Ctrl+F (and `/`) open the in-transcript search. Copy/Cut/Paste are routed to
+// the focused widget by the desktop and are graceful no-ops when nothing is
+// focused or selectable.
+func (w *Workbench) editItems() []*tv.MenuItem {
+	return []*tv.MenuItem{
+		tv.NewMenuItem("&Copy", func() { w.copySelection() }).
+			WithShortcut("Ctrl+C", tui.KeyRune, 'c', true),
+		tv.NewMenuItem("Cu&t", func() { w.cutSelection() }).
+			WithShortcut("Ctrl+X", tui.KeyRune, 'x', true),
+		tv.NewMenuItem("&Paste", func() { w.pasteClipboard() }).
+			WithShortcut("Ctrl+V", tui.KeyRune, 'v', true),
+		tv.NewMenuItem("----------", nil),
+		tv.NewMenuItem("&Find…", func() { w.withActiveTranscript((*SessionWindow).promptFind) }).
+			WithShortcut("Ctrl+F", tui.KeyRune, 'f', true),
+	}
+}
+
+// copySelection copies the focused widget's selection (or all of its content when
+// nothing is selected) to the clipboard, mirroring the Ctrl+C path. It is a
+// graceful no-op when nothing is focused or selectable.
+func (w *Workbench) copySelection() { w.desktop.CopyFocused() }
+
+// cutSelection cuts the focused widget's selection to the clipboard, mirroring
+// the Ctrl+X path. It is a graceful no-op when nothing is focused or selectable.
+func (w *Workbench) cutSelection() { w.desktop.CutFocused() }
+
+// pasteClipboard pastes the clipboard into the focused editable widget, mirroring
+// the Ctrl+V / bracketed-paste path. It is a graceful no-op when nothing is
+// focused or the clipboard cannot be read.
+func (w *Workbench) pasteClipboard() { w.desktop.Paste() }
+
 func (w *Workbench) viewItems() []*tv.MenuItem {
 	pinLabel := "Pin &Sidebar"
 	if w.IsSidebarPinned() {
 		pinLabel = "Unpin &Sidebar"
 	}
 	return []*tv.MenuItem{
-		tv.NewMenuItem("&Find…", func() { w.withActiveTranscript((*SessionWindow).promptFind) }).
-			WithShortcut("Ctrl+F", tui.KeyRune, 'f', true),
+		// Find now lives in the &Edit menu (issue #393); View keeps the
+		// transcript filtering/toggling actions.
 		tv.NewMenuItem("Show &All", func() { w.transcriptDo(func(m *transcriptModel) { m.showAll() }) }),
 		tv.NewMenuItem("----------", nil),
 		tv.NewMenuItem("Toggle &Messages", func() { w.transcriptDo(func(m *transcriptModel) { m.toggleKind(kindAssistant) }) }),
