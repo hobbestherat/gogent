@@ -167,9 +167,27 @@ gogent tracks cache usage so you can see how much of your prompt was served from
 
 `UnmarshalJSON` normalizes two wire shapes: the OpenAI-compatible `usage.prompt_tokens_details.cached_tokens`, **or** the DeepSeek-style top-level `prompt_cache_hit_tokens`. It also lifts `completion_tokens_details.reasoning_tokens` into `ReasoningTokens`.
 
-For Anthropic, the adapter sums `InputTokens + CacheReadInputTokens + CacheCreationInputTokens` into `PromptTokens`, and routes `CacheReadInputTokens` into `CachedTokens`.
+For Anthropic, the adapter sums `InputTokens + CacheReadInputTokens + CacheCreationInputTokens` into `PromptTokens`, and routes `CacheReadInputTokens` into `CachedTokens` — on both the direct `anthropic` and `vertex-anthropic` paths.
 
-Stats accumulate `TotalTokensIn`, `TotalCachedTokensIn`, and `TotalTokensOut` across the session. OpenAI-compatible backends cache the stable prefix (tools + system prompt + history) automatically — no request markers are needed; gogent sends messages in stable-to-volatile order so the cacheable prefix stays intact.
+Stats accumulate `TotalTokensIn`, `TotalCachedTokensIn`, and `TotalTokensOut` across the session.
+
+### Stable-to-volatile ordering (issue #404)
+
+gogent keeps the prompt's cacheable prefix stable across turns by splitting the per-turn context into a **stable** bucket and a **volatile** bucket:
+
+- **Stable** — the base agent prompt, AGENTS.md instructions, the repo map and the available-skills index. These do not change across turns, so they ride on the system prompt (`messages[0]`).
+- **Volatile** — the live git status and the todo checklist. These change whenever a file is edited or a todo is updated, so they are appended as a **trailing per-request `user` message after the transcript**, never persisted to the transcript (recomputed each turn, mirroring how the system prompt is kept out of the transcript).
+
+So the wire order is `[stable system][transcript…][small volatile tail]`. Editing a file (which changes git status) no longer invalidates the cached transcript — only the small tail after the last cache breakpoint is re-sent. This is what lets the implicit prefix cache used by `openai`/`zai`/`openrouter`/`vertex-native` (Gemini) keep hitting on an active editing session. The trailing `user` message merges cleanly into the preceding user turn — including when the last transcript message is a tool/function result (the Anthropic and Gemini adapters both map tool results to a `user` turn and merge consecutive same-role messages).
+
+### Explicit caching on the Anthropic Messages adapter
+
+The Anthropic adapter (`anthropic` and `vertex-anthropic`) emits `cache_control{type:ephemeral}` breakpoints on two blocks:
+
+- the **system prompt**, sent as a one-element block array so the breakpoint can ride on it (Anthropic accepts `cache_control` only on a content block; the direct Messages API accepts the block-array `system` form the same as Vertex), and
+- the **end of the cacheable prefix** — the last content block of the last *non-volatile* message, i.e. the last transcript message, *not* the volatile tail.
+
+Both breakpoints are emitted on the direct `anthropic` provider as well as `vertex-anthropic`, so direct-Anthropic users get the same growing-transcript-from-cache benefit (issue #404). `cache_read_input_tokens` reported by the API flows back into `TokenUsage.CachedTokens`.
 
 ## Streaming
 

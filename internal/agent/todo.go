@@ -75,12 +75,13 @@ func TodoSummary(items []TodoItem) string {
 }
 
 // RenderTodos produces a compact markdown block describing the live checklist,
-// suitable for injection into the recurring system prompt (issue #263). Each row
-// is a status glyph + content (+ note in parentheses); a final line carries the
-// counts. It returns "" for an empty list so callers can omit the section
-// entirely. Because the system prompt is rebuilt every loop and kept out of the
-// compaction-able transcript, this keeps the checklist in front of the model
-// even after a context compaction.
+// suitable for re-injection into the model's context every loop (issue #263).
+// Each row is a status glyph + content (+ note in parentheses); a final line
+// carries the counts. It returns "" for an empty list so callers can omit the
+// section entirely. The caller injects it as the trailing volatile per-request
+// message — after the transcript, out of the cacheable prefix (issue #404) — and
+// because it is rebuilt every loop and kept out of the compaction-able transcript,
+// the checklist stays in front of the model even after a context compaction.
 func RenderTodos(items []TodoItem) string {
 	if len(items) == 0 {
 		return ""

@@ -123,7 +123,7 @@ func TestRenderRepoMapTruncates(t *testing.T) {
 
 func TestBuildSystemContextIncludesRepoMap(t *testing.T) {
 	g := &Gogent{repoMap: "## Repo map\n### a.go\n- func Foo()"}
-	ctx := g.buildSystemContext("")
+	ctx, _ := g.buildSystemContext("")
 	if !strings.Contains(ctx, "## Repo map") || !strings.Contains(ctx, "func Foo()") {
 		t.Fatalf("system context missing repo map: %q", ctx)
 	}

@@ -80,7 +80,7 @@ func TestBuildSystemContextIncludesSkillsAndAgents(t *testing.T) {
 	}
 
 	g := &Gogent{skills: reg, agentsContext: "## Project instructions (AGENTS.md)\nbe nice"}
-	ctx := g.buildSystemContext("")
+	ctx, _ := g.buildSystemContext("")
 
 	if !strings.Contains(ctx, "be nice") {
 		t.Fatalf("missing AGENTS context: %q", ctx)
@@ -91,7 +91,7 @@ func TestBuildSystemContextIncludesSkillsAndAgents(t *testing.T) {
 
 	// Deactivating the skill drops it from the index.
 	reg.DeactivateSkill("calc")
-	if strings.Contains(g.buildSystemContext(""), "calc: Do math") {
+	if stable, _ := g.buildSystemContext(""); strings.Contains(stable, "calc: Do math") {
 		t.Fatalf("deactivated skill still listed")
 	}
 }

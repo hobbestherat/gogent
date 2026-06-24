@@ -68,14 +68,30 @@ func discoverAgentsDocs(workspaceRoot, configDir string) []agentsDoc {
 	return docs
 }
 
-// buildSystemContext assembles the extra system-prompt context for a session:
-// project AGENTS.md instructions, the repo map, a live git status, the index of
-// available skills and the session's live todo checklist. It is installed as a
-// session's SystemContextProvider, so it is re-evaluated each loop and reflects
-// runtime skill (de)activation and todo updates. The checklist is injected here
-// (rather than left in the transcript) so it survives context compaction, which
-// the system prompt is deliberately excluded from (issue #263).
-func (g *Gogent) buildSystemContext(sessionID string) string {
+// buildSystemContext assembles the extra per-session context, split into a STABLE
+// bucket and a VOLATILE bucket so prompt caching is not defeated (issue #404).
+//
+//   - stable: project AGENTS.md instructions, the repo map and the index of
+//     available skills. These do not change across turns, so the caller installs
+//     them on the (cacheable) system prompt.
+//   - volatile: the live git status and the session's live todo checklist. These
+//     change whenever files are edited or todos are updated, so the caller threads
+//     them through as a trailing per-request message AFTER the transcript, keeping
+//     the [system + transcript] prefix an unbroken cacheable prefix.
+//
+// It is installed as a session's SystemContextProvider, so it is re-evaluated each
+// loop and reflects runtime skill (de)activation and todo updates. The volatile
+// content is injected here (rather than left in the transcript) so it survives
+// context compaction, which the system prompt and the volatile tail are both
+// deliberately excluded from (issue #263).
+func (g *Gogent) buildSystemContext(sessionID string) (stable, volatile string) {
+	return g.buildStableContext(), g.buildVolatileContext(sessionID)
+}
+
+// buildStableContext assembles the cache-stable context: AGENTS.md instructions,
+// the repo map and the available-skills index. None of these change across turns
+// within a session, so they belong in the cacheable system prompt (issue #404).
+func (g *Gogent) buildStableContext() string {
 	var b strings.Builder
 
 	if g.agentsContext != "" {
@@ -89,21 +105,6 @@ func (g *Gogent) buildSystemContext(sessionID string) string {
 		b.WriteString(g.repoMap)
 	}
 
-	// Inject a live git status so the agent always sees the current working-tree
-	// state (branch, staged/unstaged/untracked files) without having to ask. This
-	// is re-evaluated each loop, so it reflects edits and commits made mid-session.
-	if g.gitRepo {
-		if status := vcs.StatusSummary(g.workspaceRoot); status != "" {
-			if b.Len() > 0 {
-				b.WriteString("\n\n")
-			}
-			b.WriteString("## Git status\n")
-			b.WriteString("Current state of the workspace repository. Use the `git` tool to inspect or change it.\n```\n")
-			b.WriteString(status)
-			b.WriteString("\n```")
-		}
-	}
-
 	if g.skills != nil {
 		active := g.skills.ListActiveSkills()
 		if len(active) > 0 {
@@ -115,6 +116,28 @@ func (g *Gogent) buildSystemContext(sessionID string) string {
 			for _, sk := range active {
 				fmt.Fprintf(&b, "- %s: %s\n", sk.Name, sk.Description)
 			}
+		}
+	}
+
+	return strings.TrimSpace(b.String())
+}
+
+// buildVolatileContext assembles the live, fast-changing context: the current git
+// status and the session's todo checklist. Both change mid-session (file edits,
+// todo updates), so the caller appends this as a trailing per-request message
+// after the transcript rather than in the cacheable prefix (issue #404).
+func (g *Gogent) buildVolatileContext(sessionID string) string {
+	var b strings.Builder
+
+	// Inject a live git status so the agent always sees the current working-tree
+	// state (branch, staged/unstaged/untracked files) without having to ask. This
+	// is re-evaluated each loop, so it reflects edits and commits made mid-session.
+	if g.gitRepo {
+		if status := vcs.StatusSummary(g.workspaceRoot); status != "" {
+			b.WriteString("## Git status\n")
+			b.WriteString("Current state of the workspace repository. Use the `git` tool to inspect or change it.\n```\n")
+			b.WriteString(status)
+			b.WriteString("\n```")
 		}
 	}
 

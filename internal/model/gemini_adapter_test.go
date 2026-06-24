@@ -284,6 +284,48 @@ func TestGeminiAdapterBuildBodyFunctionResponseObjectHandling(t *testing.T) {
 	}
 }
 
+func TestGeminiAdapterVolatileTailMergesAfterToolResultIssue404(t *testing.T) {
+	raw, err := buildBodyBytes(geminiAdapter{}, CompletionRequest{
+		Messages: []Message{
+			{Role: RoleSystem, Content: "stable system"},
+			{Role: RoleUser, Content: "question"},
+			{
+				Role: RoleAssistant,
+				ToolCalls: []ToolCall{{
+					ID:       "call_lookup",
+					Type:     "function",
+					Function: FunctionCall{Name: "lookup", Arguments: `{"q":"x"}`},
+				}},
+			},
+			{Role: RoleTool, Name: "lookup", ToolCallID: "call_lookup", Content: `{"answer":"42"}`},
+			{Role: RoleUser, Content: "## Task checklist\n☐ verify", Volatile: true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+
+	var got map[string]interface{}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal body: %v\n%s", err, raw)
+	}
+	contents := got["contents"].([]interface{})
+	last := contents[len(contents)-1].(map[string]interface{})
+	if last["role"] != "user" {
+		t.Fatalf("last content role = %v, want merged user turn", last["role"])
+	}
+	parts := last["parts"].([]interface{})
+	if len(parts) != 2 {
+		t.Fatalf("last user parts = %v, want functionResponse + volatile text", parts)
+	}
+	if _, ok := parts[0].(map[string]interface{})["functionResponse"].(map[string]interface{}); !ok {
+		t.Fatalf("first merged part = %v, want functionResponse", parts[0])
+	}
+	if text := parts[1].(map[string]interface{})["text"]; text != "## Task checklist\n☐ verify" {
+		t.Fatalf("second merged part text = %v, want volatile context", text)
+	}
+}
+
 func TestGeminiAdapterBuildBodyToolChoiceModesAndParallelOverride(t *testing.T) {
 	baseReq := func(choice ToolChoice, parallel *bool) CompletionRequest {
 		return CompletionRequest{

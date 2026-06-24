@@ -126,9 +126,9 @@ const anthropicVersion = "2023-06-01"
 // vertex flag selects the Vertex body shape — the model name is omitted (it
 // rides in the URL path), the API version is sent as the anthropic_version body
 // field instead of a header, sampling params are dropped (modern Claude rejects
-// temperature/top_p), the system prompt and last turn carry cache_control
-// breakpoints (prompt caching), and extended thinking is emitted as adaptive
-// thinking. See buildBody.
+// temperature/top_p), and extended thinking is emitted as adaptive thinking.
+// Prompt-cache breakpoints (cache_control on the system block + the end of the
+// cacheable prefix) are emitted on BOTH paths (issue #404). See buildBody.
 type anthropicAdapter struct{ vertex bool }
 
 // anthropicThinking is the Messages-API thinking control. For Claude on Vertex,
@@ -142,18 +142,20 @@ type anthropicThinking struct {
 	Display string `json:"display,omitempty"`
 }
 
-// anthropicCacheControl marks a content block as a prompt-cache breakpoint.
-// Vertex AI supports manual (cache_control) prompt caching; gogent places a
-// 5-minute ephemeral breakpoint on the system prompt and on the last turn so a
-// growing agent transcript is largely served from cache across turns.
+// anthropicCacheControl marks a content block as a prompt-cache breakpoint. Both
+// the direct Anthropic Messages API and Vertex AI support manual (cache_control)
+// prompt caching; gogent places a 5-minute ephemeral breakpoint on the system
+// prompt and at the end of the cacheable prefix so a growing agent transcript is
+// largely served from cache across turns (issue #404).
 type anthropicCacheControl struct {
 	Type string `json:"type"`
 }
 
-// anthropicSystemBlock is one system-prompt text block. The Vertex body sends
-// the system prompt as a block array (rather than a bare string) so a
-// cache_control breakpoint can ride on it; the direct Anthropic body keeps the
-// scalar string form.
+// anthropicSystemBlock is one system-prompt text block. Both the direct Anthropic
+// and Vertex bodies send the system prompt as a block array (rather than a bare
+// string) so a cache_control breakpoint can ride on it — Anthropic accepts
+// cache_control only on a content block, and the direct Messages API accepts the
+// block-array system form (issue #404).
 type anthropicSystemBlock struct {
 	Type         string                 `json:"type"`
 	Text         string                 `json:"text"`
@@ -172,9 +174,10 @@ type anthropicRequest struct {
 	// via the anthropic-version header instead, leaving this empty.
 	AnthropicVersion string `json:"anthropic_version,omitempty"`
 	MaxTokens        int    `json:"max_tokens"`
-	// System is either a scalar string (direct API) or a []anthropicSystemBlock
-	// (Vertex, so a cache_control breakpoint can ride on it). interface{} keeps
-	// both shapes; nil is omitted.
+	// System carries the system prompt. It is a []anthropicSystemBlock on both the
+	// direct API and Vertex so a cache_control breakpoint can ride on it (issue
+	// #404); interface{} is retained for the omitempty nil case (no system message)
+	// and back-compat with any caller that still assigns a scalar string.
 	System      interface{}        `json:"system,omitempty"`
 	Messages    []anthropicMessage `json:"messages"`
 	Tools       []anthropicTool    `json:"tools,omitempty"`
@@ -208,7 +211,7 @@ type anthropicContent struct {
 	Content   string `json:"content,omitempty"`
 	// image
 	Source *anthropicImageSource `json:"source,omitempty"`
-	// prompt-cache breakpoint (Vertex; placed on the last block of the last turn)
+	// prompt-cache breakpoint (placed on the last block of the cacheable prefix)
 	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
 }
 
@@ -273,7 +276,15 @@ func (a anthropicAdapter) buildBody(req CompletionRequest, buf *bytes.Buffer) er
 	// top-level system string; everything else maps to content blocks, merging
 	// consecutive same-role messages (Anthropic wants one turn per role, and
 	// requires tool results to ride in a user turn).
+	//
+	// cacheBreakMsg/cacheBreakBlock track the end of the cacheable prefix: the last
+	// content block of the last NON-volatile message. The trailing volatile message
+	// (live git status + todos, issue #404) carries fast-changing content that must
+	// sit AFTER the prompt-cache breakpoint, or it would invalidate the cached
+	// transcript every turn. When there is no volatile tail this is simply the last
+	// block of the last message (the prior behavior).
 	var systemParts []string
+	cacheBreakMsg, cacheBreakBlock := -1, -1
 	for _, m := range req.Messages {
 		if m.Role == RoleSystem {
 			if m.Content != "" {
@@ -304,32 +315,38 @@ func (a anthropicAdapter) buildBody(req CompletionRequest, buf *bytes.Buffer) er
 		} else {
 			out.Messages = append(out.Messages, anthropicMessage{Role: role, Content: blocks})
 		}
+		// Advance the cache breakpoint to the end of this message only when it is
+		// NOT the volatile tail. A volatile RoleUser message merges into the prior
+		// user turn (e.g. after a tool result), but the breakpoint stays pinned to
+		// the last block contributed by a non-volatile message — the genuine end of
+		// the cacheable prefix.
+		if !m.Volatile {
+			cacheBreakMsg = len(out.Messages) - 1
+			cacheBreakBlock = len(out.Messages[cacheBreakMsg].Content) - 1
+		}
 	}
 
-	// System prompt. On Vertex it is sent as a text-block array carrying a
-	// cache_control breakpoint (prompt caching); on the direct API it stays a bare
-	// string. Assigning interface{} only when non-empty keeps the direct body
-	// byte-identical (an empty string would otherwise marshal as "system":"").
+	// System prompt. It is sent as a text-block array carrying a cache_control
+	// breakpoint (prompt caching) on both the direct Anthropic API and Vertex —
+	// Anthropic accepts cache_control only on a system content block, not on the
+	// scalar string form, and the direct Messages API accepts the block-array
+	// system shape the same as Vertex (issue #404). Assigning the field only when
+	// non-empty keeps an empty system omitted rather than marshaling "system":[].
 	if system := strings.Join(systemParts, "\n\n"); system != "" {
-		if a.vertex {
-			out.System = []anthropicSystemBlock{{
-				Type:         "text",
-				Text:         system,
-				CacheControl: &anthropicCacheControl{Type: "ephemeral"},
-			}}
-		} else {
-			out.System = system
-		}
+		out.System = []anthropicSystemBlock{{
+			Type:         "text",
+			Text:         system,
+			CacheControl: &anthropicCacheControl{Type: "ephemeral"},
+		}}
 	}
 
-	// Prompt-cache breakpoint on the last turn: on a multi-turn agent loop this
-	// lets the whole prior transcript be served from cache on the next request.
-	// Placed on the last content block of the last message (Vertex only).
-	if a.vertex && len(out.Messages) > 0 {
-		last := &out.Messages[len(out.Messages)-1]
-		if n := len(last.Content); n > 0 {
-			last.Content[n-1].CacheControl = &anthropicCacheControl{Type: "ephemeral"}
-		}
+	// Prompt-cache breakpoint at the end of the cacheable prefix: on a multi-turn
+	// agent loop this lets the whole prior transcript be served from cache on the
+	// next request. Placed on the last content block of the last NON-volatile
+	// message so it lands at the end of the stable prefix, never on the volatile
+	// tail (issue #404). Emitted for both the direct Anthropic API and Vertex.
+	if cacheBreakMsg >= 0 {
+		out.Messages[cacheBreakMsg].Content[cacheBreakBlock].CacheControl = &anthropicCacheControl{Type: "ephemeral"}
 	}
 
 	for _, t := range req.Tools {

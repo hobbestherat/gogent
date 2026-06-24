@@ -151,7 +151,7 @@ func TestParallelResearchSkill_LoadsAndInjects(t *testing.T) {
 		t.Fatal("parallel-research is loaded but not active (won't be injected)")
 	}
 
-	ctx := g.buildSystemContext("")
+	ctx, _ := g.buildSystemContext("")
 	if !strings.Contains(ctx, "## Available skills") {
 		t.Fatal("buildSystemContext produced no \"## Available skills\" section")
 	}

@@ -75,8 +75,16 @@ func TestAnthropicBuildBody(t *testing.T) {
 	if got.MaxTokens != 1024 {
 		t.Errorf("max_tokens = %d, want 1024", got.MaxTokens)
 	}
-	if got.System != "You are helpful.\n\nBe terse." {
-		t.Errorf("system = %q", got.System)
+	sys, ok := got.System.([]interface{})
+	if !ok || len(sys) != 1 {
+		t.Fatalf("system = %#v, want one text block with cache_control", got.System)
+	}
+	sysBlock := sys[0].(map[string]interface{})
+	if sysBlock["text"] != "You are helpful.\n\nBe terse." {
+		t.Errorf("system text = %q", sysBlock["text"])
+	}
+	if cc, ok := sysBlock["cache_control"].(map[string]interface{}); !ok || cc["type"] != "ephemeral" {
+		t.Errorf("system cache_control = %v, want ephemeral", sysBlock["cache_control"])
 	}
 	if got.Temperature == nil || *got.Temperature != 0.5 {
 		t.Errorf("temperature = %v, want 0.5", got.Temperature)
@@ -111,6 +119,9 @@ func TestAnthropicBuildBody(t *testing.T) {
 	}
 	if results.Content[1].ToolUseID != "toolu_2" || results.Content[1].Content != "warm" {
 		t.Errorf("tool_result block 1 = %+v", results.Content[1])
+	}
+	if results.Content[1].CacheControl == nil || results.Content[1].CacheControl.Type != "ephemeral" {
+		t.Errorf("last transcript block cache_control = %+v, want ephemeral", results.Content[1].CacheControl)
 	}
 
 	// Tools map to name + input_schema; a tool with no parameters still gets an
@@ -186,6 +197,27 @@ func TestAnthropicParseResponse(t *testing.T) {
 	if resp.Usage.PromptTokens != 15 || resp.Usage.CompletionTokens != 7 ||
 		resp.Usage.CachedTokens != 3 || resp.Usage.TotalTokens != 22 {
 		t.Errorf("usage = %+v", resp.Usage)
+	}
+}
+
+func TestAnthropicUsageCacheReadInputTokensFlowToCachedTokensIssue404(t *testing.T) {
+	got := (anthropicUsage{
+		InputTokens:              11,
+		CacheReadInputTokens:     7,
+		CacheCreationInputTokens: 5,
+		OutputTokens:             3,
+	}).toTokenUsage(0)
+	if got == nil {
+		t.Fatal("toTokenUsage returned nil")
+	}
+	if got.PromptTokens != 23 {
+		t.Errorf("PromptTokens = %d, want input + cache_read + cache_creation = 23", got.PromptTokens)
+	}
+	if got.CachedTokens != 7 {
+		t.Errorf("CachedTokens = %d, want cache_read_input_tokens = 7", got.CachedTokens)
+	}
+	if got.TotalTokens != 26 {
+		t.Errorf("TotalTokens = %d, want prompt + completion = 26", got.TotalTokens)
 	}
 }
 
