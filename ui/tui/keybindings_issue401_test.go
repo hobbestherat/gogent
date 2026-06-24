@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -74,6 +75,119 @@ func TestIssue401SourceOnlyDefinesUnifiedCatalog(t *testing.T) {
 				t.Fatalf("%s still defines %q; #401 requires actions() as the single catalog", path, forbidden)
 			}
 		}
+	}
+}
+
+func TestIssue401DocsAndSampleDocumentKeybindings(t *testing.T) {
+	files := map[string][]string{
+		"docs/configuration.md": {
+			"KeybindingsConfig",
+			"keybindings",
+			"overrides",
+			"session.new",
+			"transcript.find",
+			"app.commandPalette",
+			"window.tileVertical",
+			"none",
+		},
+		"docs/usage-tui.md": {
+			"Config → Keybindings",
+			"Customize keybindings",
+			"keybindings.overrides",
+		},
+		"config.sample.json": {
+			"\"keybindings\"",
+			"\"overrides\"",
+			"\"session.new\"",
+			"\"transcript.find\"",
+		},
+	}
+	for path, wants := range files {
+		b, err := os.ReadFile(filepath.Join("..", "..", path))
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		text := string(b)
+		for _, want := range wants {
+			if !strings.Contains(text, want) {
+				t.Fatalf("%s missing %q", path, want)
+			}
+		}
+	}
+
+	sample, err := os.ReadFile(filepath.Join("..", "..", "config.sample.json"))
+	if err != nil {
+		t.Fatalf("read config.sample.json: %v", err)
+	}
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(sample, &decoded); err != nil {
+		t.Fatalf("config.sample.json is not valid JSON: %v", err)
+	}
+	if _, ok := decoded["keybindings"].(map[string]interface{}); !ok {
+		t.Fatalf("config.sample.json keybindings section = %#v, want object", decoded["keybindings"])
+	}
+}
+
+func TestIssue401NoScopeSpecificBranchesInUnifiedKeybindingPaths(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "ui/tui/keybindings.go"))
+	if err != nil {
+		t.Fatalf("read keybindings.go: %v", err)
+	}
+	src := string(b)
+	for _, fn := range []string{
+		"func (w *Workbench) conflictHolder",
+		"func (w *Workbench) applyBinding",
+		"func (w *Workbench) clearBinding",
+		"func (w *Workbench) resetAllBindings",
+		"func (w *Workbench) LoadKeybindings",
+	} {
+		body := issue401FunctionBody(t, src, fn)
+		for _, forbidden := range []string{"scope == tv.ScopeGlobal", "scope==tv.ScopeGlobal", "ScopeGlobal"} {
+			if strings.Contains(body, forbidden) {
+				t.Fatalf("%s contains %q; #401 requires one non-branching path", fn, forbidden)
+			}
+		}
+	}
+}
+
+func issue401FunctionBody(t *testing.T, src, sig string) string {
+	t.Helper()
+	start := strings.Index(src, sig)
+	if start < 0 {
+		t.Fatalf("missing %s", sig)
+	}
+	brace := strings.Index(src[start:], "{")
+	if brace < 0 {
+		t.Fatalf("missing opening brace for %s", sig)
+	}
+	i := start + brace
+	depth := 0
+	for ; i < len(src); i++ {
+		switch src[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return src[start : i+1]
+			}
+		}
+	}
+	t.Fatalf("missing closing brace for %s", sig)
+	return ""
+}
+
+func TestIssue401GoModHasRequestedTurbotuiAndNoReplace(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "go.mod"))
+	if err != nil {
+		t.Fatalf("read go.mod: %v", err)
+	}
+	text := string(b)
+	if !strings.Contains(text, "github.com/hobbestherat/turbotui v0.3.1-0.20260624090004-fb43116c789f") {
+		t.Fatalf("go.mod does not pin turbotui fb43116 pseudo-version:\n%s", text)
+	}
+	if strings.Contains(text, "\nreplace ") || strings.Contains(text, "\nreplace(") {
+		t.Fatalf("go.mod contains a replace directive:\n%s", text)
 	}
 }
 
@@ -227,6 +341,26 @@ func TestIssue401ConfigMenuKeybindingsVisibilityGate(t *testing.T) {
 	item.OnSelect()
 	if top := w.desktop.TopLayer(); top == nil || top.Name != "keybinding-customizer" {
 		t.Fatalf("top layer after Config -> Keybindings = %v, want keybinding-customizer", top)
+	}
+}
+
+func TestIssue401ConfigMenuKeybindingsVisibleWithoutSettingsHandlers(t *testing.T) {
+	w := newTestWorkbench(t)
+	w.handlers.GetSettings = nil
+	w.handlers.SetSettings = nil
+	w.handlers.GetKeybindings = func() config.KeybindingsConfig { return config.KeybindingsConfig{} }
+	w.handlers.SetKeybindings = func(config.KeybindingsConfig) {}
+
+	w.rebuildMenu()
+	item := issue401FindMenuLabel(issue401MenuBar(t, w).Menus, "Keybindings…")
+	if item == nil {
+		t.Fatal("Config -> Keybindings menu item missing when settings handlers are absent")
+	}
+	if item.OnSelect == nil {
+		t.Fatal("Config -> Keybindings menu item has no OnSelect")
+	}
+	if subagents := issue401FindMenuItem(issue401MenuBar(t, w).Menus, actionConfigSubagents); subagents == nil {
+		t.Fatal("Config menu lost tagged Sub-agents item when settings handlers are absent")
 	}
 }
 
