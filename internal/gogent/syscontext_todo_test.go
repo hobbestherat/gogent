@@ -23,7 +23,7 @@ func TestBuildSystemContextInjectsTodos(t *testing.T) {
 		{Content: "Add a test", Status: agent.TodoPending},
 	})
 
-	ctx := g.buildSystemContext(id)
+	_, ctx := g.buildSystemContext(id)
 
 	if !strings.Contains(ctx, "## Task checklist") {
 		t.Fatalf("checklist not injected into system context:\n%s", ctx)
@@ -47,7 +47,7 @@ func TestBuildSystemContextNoTodosOmitsSection(t *testing.T) {
 	id := "ctx-empty"
 	g := newTodoGogent(t, id)
 
-	ctx := g.buildSystemContext(id)
+	_, ctx := g.buildSystemContext(id)
 	if strings.Contains(ctx, "Task checklist") {
 		t.Errorf("checklist header present for an empty checklist:\n%s", ctx)
 	}
@@ -63,14 +63,14 @@ func TestBuildSystemContextReflectsUpdates(t *testing.T) {
 	us := g.GetUserSession(id)
 
 	us.SetTodos([]agent.TodoItem{{Content: "do work", Status: agent.TodoInProgress}})
-	before := g.buildSystemContext(id)
+	_, before := g.buildSystemContext(id)
 	if !strings.Contains(before, "◐ do work") {
 		t.Fatalf("expected in-progress glyph before update:\n%s", before)
 	}
 
 	// The model marks it done on the next turn.
 	us.SetTodos([]agent.TodoItem{{Content: "do work", Status: agent.TodoCompleted}})
-	after := g.buildSystemContext(id)
+	_, after := g.buildSystemContext(id)
 	if !strings.Contains(after, "✔ do work") {
 		t.Errorf("completed status not reflected in re-built context:\n%s", after)
 	}
@@ -95,7 +95,7 @@ func TestBuildSystemContextSessionScoped(t *testing.T) {
 	g.GetUserSession("a").SetTodos([]agent.TodoItem{{Content: "alpha-task", Status: agent.TodoPending}})
 	g.GetUserSession("b").SetTodos([]agent.TodoItem{{Content: "beta-task", Status: agent.TodoPending}})
 
-	ctxA := g.buildSystemContext("a")
+	_, ctxA := g.buildSystemContext("a")
 	if !strings.Contains(ctxA, "alpha-task") {
 		t.Errorf("session a context missing its own task:\n%s", ctxA)
 	}
@@ -103,13 +103,13 @@ func TestBuildSystemContextSessionScoped(t *testing.T) {
 		t.Errorf("session b's task leaked into session a's context:\n%s", ctxA)
 	}
 
-	ctxB := g.buildSystemContext("b")
+	_, ctxB := g.buildSystemContext("b")
 	if !strings.Contains(ctxB, "beta-task") || strings.Contains(ctxB, "alpha-task") {
 		t.Errorf("session b context wrong:\n%s", ctxB)
 	}
 
 	// An unknown / empty session id injects no checklist (and must not panic).
-	if got := g.buildSystemContext("does-not-exist"); strings.Contains(got, "Task checklist") {
+	if _, got := g.buildSystemContext("does-not-exist"); strings.Contains(got, "Task checklist") {
 		t.Errorf("unknown session id injected a checklist:\n%s", got)
 	}
 }
@@ -128,7 +128,7 @@ func TestBuildSystemContextTodoWiredThroughTool(t *testing.T) {
 		},
 	})
 
-	ctx := g.buildSystemContext(id)
+	_, ctx := g.buildSystemContext(id)
 	if !strings.Contains(ctx, "◐ ship it (almost)") {
 		t.Errorf("tool-written todo (with note) not injected into system context:\n%s", ctx)
 	}

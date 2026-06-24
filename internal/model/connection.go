@@ -103,6 +103,15 @@ type Message struct {
 	// backward-compatible addition (old transcripts decode with an empty Reasoning).
 	// See CompletionResponse.Reasoning (issue #402).
 	Reasoning string `json:"reasoning,omitempty"`
+	// Volatile marks a per-request trailing message that carries live, fast-changing
+	// context (the git status + todo checklist) appended AFTER the transcript so the
+	// stable [system + transcript] prefix stays cacheable across turns (issue #404).
+	// It is an internal, send-time-only flag: it is never persisted to the transcript
+	// and never serialized (json:"-"), and is read only by the Anthropic adapter so
+	// the prompt-cache breakpoint lands at the end of the cacheable prefix (the last
+	// non-volatile message) rather than on this tail. Empty/false for every persisted
+	// message and every other provider.
+	Volatile bool `json:"-"`
 }
 
 // ImageURL is a single image attachment, matching OpenAI's image_url content

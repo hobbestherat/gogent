@@ -177,13 +177,15 @@ type UserSession struct {
 	// Nil means unthrottled.
 	rateLimiter *RateLimiter
 
-	// systemContextFn, when set, returns extra system-prompt context (project
-	// AGENTS.md instructions, the available-skills index and the live todo
-	// checklist) appended to every agent loop's system prompt. It takes the
-	// session id so per-session state (the checklist) can be threaded in.
-	// Evaluated per loop so runtime changes (skill activation, todo updates) are
-	// reflected.
-	systemContextFn func(sessionID string) string
+	// systemContextFn, when set, returns extra per-session context split into a
+	// stable part (project AGENTS.md instructions, repo map, available-skills index)
+	// and a volatile part (live git status + todo checklist). It takes the session
+	// id so per-session state (the checklist) can be threaded in, and is evaluated
+	// per loop so runtime changes (skill activation, todo updates) are reflected.
+	// runLoop installs the stable part on the cacheable system prompt and threads
+	// the volatile part through as a trailing per-request message, keeping the
+	// cacheable prefix intact (issue #404).
+	systemContextFn func(sessionID string) (stable, volatile string)
 
 	// Interactive (experimental) sub-agent bookkeeping.
 	interactive map[string]*InteractiveAgent
@@ -544,23 +546,26 @@ func (s *UserSession) UsesFastCompression() bool {
 	return s.compressionCompleter != nil
 }
 
-// SetSystemContextProvider registers a function returning extra system-prompt
-// context (project AGENTS.md instructions, the available-skills index and the
-// live todo checklist). It receives the session id so per-session state can be
-// threaded in, and is evaluated at the start of each agent loop.
-func (s *UserSession) SetSystemContextProvider(fn func(sessionID string) string) {
+// SetSystemContextProvider registers a function returning extra per-session
+// context split into a stable part (AGENTS.md instructions, repo map,
+// available-skills index) and a volatile part (live git status + todo checklist).
+// It receives the session id so per-session state can be threaded in, and is
+// evaluated before each model round-trip. The split keeps the volatile content out
+// of the cacheable prefix (issue #404).
+func (s *UserSession) SetSystemContextProvider(fn func(sessionID string) (stable, volatile string)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.systemContextFn = fn
 }
 
-// systemContext returns the current extra system context, or "" if none.
-func (s *UserSession) systemContext() string {
+// systemContext returns the current stable and volatile extra context, each "" if
+// none is set.
+func (s *UserSession) systemContext() (stable, volatile string) {
 	s.mu.RLock()
 	fn := s.systemContextFn
 	s.mu.RUnlock()
 	if fn == nil {
-		return ""
+		return "", ""
 	}
 	return fn(s.ID)
 }
@@ -1116,21 +1121,30 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 	sess := agent.ThoughtTrain
 	tools := toolDefsFromRegistry(agent.ToolRegistry)
 
-	// Rebuild the system prompt before every model round-trip (not just once at
-	// loop start) so the extra system context — the skills index, the live git
-	// status and the todo checklist — reflects the latest session state. This is
-	// essential after an intra-turn compaction: compaction summarizes the
-	// originating todo tool calls out of the transcript, and re-injecting here is
-	// what keeps the checklist in front of the model on the very next round-trip
-	// within the same turn (issue #263). The base prompt is captured once so the
-	// per-loop context is re-appended fresh rather than accumulated.
+	// Rebuild the per-turn context before every model round-trip (not just once at
+	// loop start) so the extra context — the skills index, the live git status and
+	// the todo checklist — reflects the latest session state. This is essential
+	// after an intra-turn compaction: compaction summarizes the originating todo
+	// tool calls out of the transcript, and re-injecting here is what keeps the
+	// checklist in front of the model on the very next round-trip within the same
+	// turn (issue #263). The base prompt is captured once so the per-loop context is
+	// re-applied fresh rather than accumulated.
+	//
+	// The context is split (issue #404): the STABLE part (AGENTS.md, repo map,
+	// skills index) rides on the system prompt — message[0], the cacheable prefix —
+	// while the VOLATILE part (git status + todos) is threaded through as a trailing
+	// per-request message after the transcript via SetVolatileContext, so editing a
+	// file (which changes git status) no longer invalidates the whole cached
+	// transcript.
 	baseSystemPrompt := systemPrompt
 	refreshSystemPrompt := func() {
+		stable, volatile := s.systemContext()
 		full := baseSystemPrompt
-		if sc := s.systemContext(); sc != "" {
-			full += "\n\n" + sc
+		if stable != "" {
+			full += "\n\n" + stable
 		}
 		sess.SetSystemPrompt(full)
+		sess.SetVolatileContext(volatile)
 	}
 
 	// Only the top-level (root) agent streams its thinking/tool events into the

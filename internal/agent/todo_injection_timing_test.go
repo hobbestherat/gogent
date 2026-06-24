@@ -36,7 +36,7 @@ func TestSystemContextChecklistInjectedAtTurnStart(t *testing.T) {
 	defer server.Close()
 
 	us, _ := newLoopSession(t, server.URL)
-	us.SetSystemContextProvider(func(string) string { return RenderTodos(us.Todos()) })
+	us.SetSystemContextProvider(func(string) (string, string) { return "", RenderTodos(us.Todos()) })
 	us.SetTodos([]TodoItem{{Content: "PREEXISTING-TASK", Status: TodoInProgress}})
 
 	if _, err := us.ExecuteTaskLoop(context.Background(), "root", "go"); err != nil {
@@ -97,7 +97,7 @@ func TestSystemContextChecklistRefreshedWithinTurn(t *testing.T) {
 	defer server.Close()
 
 	us, _ = newLoopSession(t, server.URL)
-	us.SetSystemContextProvider(func(string) string { return RenderTodos(us.Todos()) })
+	us.SetSystemContextProvider(func(string) (string, string) { return "", RenderTodos(us.Todos()) })
 
 	if _, err := us.ExecuteTaskLoop(context.Background(), "root", "go"); err != nil {
 		t.Fatalf("loop error: %v", err)

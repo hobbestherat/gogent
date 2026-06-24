@@ -32,6 +32,13 @@ type ModelSession struct {
 
 	// SystemPrompt is prepended (as a system message) to every request.
 	SystemPrompt string
+	// VolatileContext is live, fast-changing context (git status + todo checklist)
+	// appended as a TRAILING per-request message AFTER the transcript, so the stable
+	// [system + transcript] prefix stays an unbroken cacheable prefix across turns
+	// (issue #404). Like SystemPrompt it is owned separately and is intentionally
+	// never part of the persisted Transcript — it is recomputed each turn and only
+	// spliced into the outbound request in sendCtx.
+	VolatileContext string
 	// Transcript is the canonical running conversation: user/assistant/tool
 	// messages in order. Unlike History it is what actually gets re-sent to the
 	// model, so the model always sees its own prior outputs and tool results.
@@ -91,6 +98,16 @@ func (s *ModelSession) SetSystemPrompt(prompt string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.SystemPrompt = prompt
+}
+
+// SetVolatileContext sets the live per-turn context (git status + todos) appended
+// as a trailing message after the transcript on each request (issue #404). It is
+// the volatile sibling of SetSystemPrompt: kept out of the persisted transcript so
+// the stable [system + transcript] prefix stays cacheable across turns.
+func (s *ModelSession) SetVolatileContext(ctx string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.VolatileContext = ctx
 }
 
 // GetTranscript returns a copy of the canonical conversation transcript.
@@ -486,11 +503,26 @@ func (s *ModelSession) sendCtx(ctx context.Context, messages []Message, tools []
 	// combined []Message; that is a larger change tracked as a follow-up to
 	// issue #20. The expensive part — re-marshaling the body — is already
 	// addressed by marshaling once per send into a pooled buffer (connection.go).
-	fullMessages := make([]Message, 0, len(s.Transcript)+1)
+	fullMessages := make([]Message, 0, len(s.Transcript)+2)
 	if s.SystemPrompt != "" {
 		fullMessages = append(fullMessages, Message{Role: RoleSystem, Content: s.SystemPrompt})
 	}
 	fullMessages = append(fullMessages, s.Transcript...)
+
+	// Append the live, fast-changing context (git status + todos) as a TRAILING
+	// per-request message AFTER the transcript, so the wire order is
+	// [stable system][transcript...][small volatile tail] and the cacheable prefix
+	// stays intact across turns (issue #404). It is a RoleUser message so the
+	// Anthropic/Gemini adapters fold it into the trailing user turn — merging
+	// cleanly even when the last transcript message is a tool result (which both
+	// adapters also map to a user turn). It is deliberately NOT appended to
+	// s.Transcript: like the system prompt it is recomputed each turn and owned
+	// separately, so it never becomes a persisted message. Volatile marks it so the
+	// Anthropic adapter keeps its cache breakpoint at the end of the cacheable
+	// prefix (the last transcript message) rather than on this tail.
+	if s.VolatileContext != "" {
+		fullMessages = append(fullMessages, Message{Role: RoleUser, Content: s.VolatileContext, Volatile: true})
+	}
 
 	// Record a history turn for stats/back-compat.
 	s.History = append(s.History, Turn{Request: messages})
