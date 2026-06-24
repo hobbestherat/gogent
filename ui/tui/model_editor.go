@@ -259,19 +259,24 @@ func (w *Workbench) showModelEditor() {
 				failed = err.Error()
 			}
 		}
-		// Re-fetch the authoritative model list from the backend and push it into the
-		// workbench so the sidebar AND every open session window pick up the edits
-		// immediately (issue #389). Without this, Workbench.models / modelNames stay
-		// frozen at construction: dropdowns show stale labels and a DisplayName edit
-		// makes selectedModelName() resolve to "" (silent fallback to the default
-		// model on the next send). GetModels returns values; SetModels takes
-		// pointers — index into the refreshed slice so we don't alias the loop var.
-		if refreshed := w.handlers.GetModels(); len(refreshed) > 0 {
-			ptrs := make([]*config.ModelConfig, len(refreshed))
-			for i := range refreshed {
-				ptrs[i] = &refreshed[i]
+		// Only after the whole loop SUCCEEDS, re-fetch the authoritative model list
+		// from the backend and push it into the workbench so the sidebar AND every
+		// open session window pick up the edits immediately (issue #389). Without
+		// this, Workbench.models / modelNames stay frozen at construction: dropdowns
+		// show stale labels and a DisplayName edit makes selectedModelName() resolve
+		// to "" (silent fallback to the default model on the next send). Gating on
+		// success keeps a partially-failed save from leaking half-applied state into
+		// live dropdowns (the user gets the error dialog below instead). GetModels
+		// returns values; SetModels takes pointers — index into the refreshed slice
+		// so we don't alias the loop var.
+		if failed == "" {
+			if refreshed := w.handlers.GetModels(); len(refreshed) > 0 {
+				ptrs := make([]*config.ModelConfig, len(refreshed))
+				for i := range refreshed {
+					ptrs[i] = &refreshed[i]
+				}
+				w.SetModels(ptrs)
 			}
-			w.SetModels(ptrs)
 		}
 		w.desktop.RemoveLayer(layer)
 		w.rebuildMenu()
