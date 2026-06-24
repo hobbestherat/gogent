@@ -189,6 +189,64 @@ func TestIssue403QueuedCustomCommandPreservesExpandedTextAndModelOverride(t *tes
 	}
 }
 
+func TestIssue403HandleSlashCommandUsesOverrideAwareSend(t *testing.T) {
+	w := newTestWorkbench(t)
+	sw := w.openWindow("sess-403", "S")
+	type commandOverrideSend struct {
+		sessionID string
+		message   string
+		model     string
+		agent     string
+		subtask   bool
+		effort    string
+	}
+	sent := make(chan commandOverrideSend, 1)
+	w.handlers.OnSend = func(_, _, _, _ string) {
+		t.Error("custom command with OnSendCommand wired must not fall back to plain OnSend")
+	}
+	w.handlers.OnSendCommand = func(sessionID, message, model, agent string, subtask bool, effort string) {
+		sent <- commandOverrideSend{
+			sessionID: sessionID,
+			message:   message,
+			model:     model,
+			agent:     agent,
+			subtask:   subtask,
+			effort:    effort,
+		}
+	}
+	w.handlers.GetCustomCommand = func(name string) (CommandDef, error) {
+		return CommandDef{
+			Name:       name,
+			Template:   "Review $target",
+			Parameters: []CommandParam{{Name: "target", Required: true}},
+			Model:      "model-command",
+			Agent:      "reviewer",
+			Subtask:    true,
+		}, nil
+	}
+
+	if !sw.handleSlashCommand("/review file.go") {
+		t.Fatal("custom slash command should be handled")
+	}
+	select {
+	case got := <-sent:
+		if got.sessionID != "sess-403" || got.message != "Review file.go" ||
+			got.model != "model-command" || got.agent != "reviewer" || !got.subtask {
+			t.Fatalf("OnSendCommand got %#v, want expanded prompt with all overrides", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for OnSendCommand")
+	}
+}
+
+func TestIssue403RemoteHandlersWireOverrideAwareCustomCommandSend(t *testing.T) {
+	rc := NewRemoteClient(&APIClient{}, nil, nil)
+	h := rc.Handlers()
+	if h.OnSendCommand == nil {
+		t.Fatal("remote handlers must wire OnSendCommand so attached custom commands apply agent/subtask overrides")
+	}
+}
+
 func TestIssue403SlashCompleterListsAndAcceptsCustomCommands(t *testing.T) {
 	w := newTestWorkbench(t)
 	sw := w.openWindow("sess-403", "S")
