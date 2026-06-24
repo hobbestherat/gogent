@@ -129,6 +129,7 @@ func TestIssue393EditMenuAcceleratorsAreRegisteredByRebuildMenu(t *testing.T) {
 
 func TestIssue393CopyCutAcceleratorsDoNotSwallowUnconsumedCtrlCOrCtrlX(t *testing.T) {
 	w := newTestWorkbench(t)
+	w.openWindow("s", "Session")
 	w.rebuildMenu()
 	w.desktop.SetFocus(nil)
 
