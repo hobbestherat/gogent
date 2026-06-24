@@ -47,10 +47,11 @@ func extractFencedCode(s string) string {
 
 // exportedMessage is one message in a structured (JSON) transcript export.
 type exportedMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content,omitempty"`
-	Tool    string `json:"tool,omitempty"`
-	Args    string `json:"args,omitempty"`
+	Role      string `json:"role"`
+	Content   string `json:"content,omitempty"`
+	Tool      string `json:"tool,omitempty"`
+	Args      string `json:"args,omitempty"`
+	Reasoning string `json:"reasoning,omitempty"`
 }
 
 // exportedTranscript is the structured shape of a JSON session export.

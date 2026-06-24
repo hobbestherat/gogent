@@ -365,6 +365,33 @@ const (
 	// a preamble. A genuine final answer — a summary, an explanation, a code block
 	// — runs long; a preamble is a sentence or two. Anything longer is final.
 	maxPreambleLen = 400
+
+	// maxTruncationRetries bounds how many times an uninterrupted stretch of
+	// tool-free turns truncated by max_tokens (finish_reason "length") may be
+	// retried before the loop folds a visible truncation notice and stops (issue
+	// #402). Like continuationNudges the budget is per stretch and reset the moment
+	// a real tool call lands, so a long task still earns fresh retries after each
+	// productive turn while a model that keeps truncating cannot loop forever.
+	maxTruncationRetries = 3
+
+	// truncationBudgetMultiplier is the factor by which an empty (reasoning-only)
+	// truncated turn's output-token budget is raised on each retry. The budget
+	// escalates geometrically (2×, 4×, …) until the provider ceiling is reached, at
+	// which point the loop surfaces an actionable error rather than retrying in vain.
+	truncationBudgetMultiplier = 2
+
+	// truncationContinueNote is the user-role note spliced in to recover a turn cut
+	// off by max_tokens (issue #402): it asks the model to finish the answer it ran
+	// out of room for. Paired with a raised output budget on the empty
+	// reasoning-only case. Like the other nudges it is deliver-only (never emitted
+	// as a visible assistant step).
+	truncationContinueNote = "[Your previous response was cut off because it reached the output token limit. Continue from where you left off and finish your answer concisely.]"
+
+	// truncationNoticeMarker prefixes a final response folded by stopForTruncation
+	// after the bounded retries were exhausted, so the turn is never silently empty
+	// and the user gets an actionable next step (issue #402). It mirrors
+	// budgetExceededMarker's role for the token-budget stop.
+	truncationNoticeMarker = "OUTPUT_TRUNCATED"
 )
 
 // preamblePrefixes are the case-insensitive opening phrases that mark a turn as
@@ -903,9 +930,17 @@ func (s *UserSession) waitRateLimit(ctx context.Context) error {
 //
 // onReasoning, when non-nil, receives the model's chain-of-thought deltas as
 // they stream (issue #217); nil selects the blocking model path unchanged.
-func (s *UserSession) modelRoundTrip(ctx context.Context, sess *model.ModelSession, agent *Agent, messages []model.Message, tools []model.ToolDef, onReasoning model.ReasoningSink) (*model.CompletionResponse, error) {
+//
+// maxTokensOverride, when positive, raises this one request's output-token cap
+// (clamped to the provider ceiling in the model layer); it backs the truncation
+// retry that gives a budget-exhausted reasoning turn room to surface an answer
+// (issue #402). Zero leaves the connection's configured cap in force.
+func (s *UserSession) modelRoundTrip(ctx context.Context, sess *model.ModelSession, agent *Agent, messages []model.Message, tools []model.ToolDef, onReasoning model.ReasoningSink, maxTokensOverride int) (*model.CompletionResponse, error) {
 	if err := s.waitRateLimit(ctx); err != nil {
 		return nil, err
+	}
+	if maxTokensOverride > 0 {
+		ctx = model.WithMaxTokensOverride(ctx, maxTokensOverride)
 	}
 	// A non-nil sink routes the request through the streaming backend so reasoning
 	// deltas surface live; nil keeps the byte-identical blocking path (issue #217).
@@ -984,6 +1019,78 @@ func stopForBudget(agent *Agent, resp *model.CompletionResponse) *model.Completi
 		budgetExceededMarker, agent.GetTokensUsed(), agent.TokenBudget)
 	if partial := strings.TrimSpace(resp.Content); partial != "" {
 		note += "\n\nPartial progress before stopping:\n" + partial
+	}
+	resp.Content = note
+	return resp
+}
+
+// isTruncated reports whether a turn was cut off by the output-token budget rather
+// than ending naturally. Per OpenAI/OpenRouter/Anthropic, "length" / "max_tokens" /
+// "model_context_window_exceeded" all mean the model's total generated-token
+// budget (reasoning + visible) was exhausted, so the response is incomplete and
+// must not be accepted as a final answer (issue #402). Anthropic and Gemini stop
+// reasons are already normalized to "length" by the adapters.
+func isTruncated(finishReason string) bool {
+	switch finishReason {
+	case "length", "max_tokens", "model_context_window_exceeded":
+		return true
+	default:
+		return false
+	}
+}
+
+// raiseTruncationBudget computes the next, larger per-request output-token cap for
+// retrying a turn that exhausted its budget on reasoning with no visible output
+// (issue #402). current is the override already in force this stretch (0 before the
+// first raise). The budget escalates by truncationBudgetMultiplier from the larger
+// of current and the connector's configured cap (DefaultMaxTokens when unset) and
+// is clamped to the provider ceiling. ok is false when there is no room left to
+// raise — the base is already at the ceiling — so the caller surfaces an actionable
+// error instead of retrying in vain. A connector that does not report its limits
+// (a test fake) escalates from DefaultMaxTokens with no ceiling.
+func raiseTruncationBudget(sess *model.ModelSession, current int) (int, bool) {
+	var configured, limit int
+	if sess != nil && sess.Model != nil {
+		if r, ok := sess.Model.(model.MaxTokensReporter); ok {
+			configured, limit = r.MaxTokensConfig()
+		}
+	}
+	base := current
+	if base <= 0 {
+		base = configured
+	}
+	if base <= 0 {
+		base = model.DefaultMaxTokens
+	}
+	if limit > 0 && base >= limit {
+		return 0, false // already at the provider ceiling; no room to raise
+	}
+	raised := base * truncationBudgetMultiplier
+	if limit > 0 && raised > limit {
+		raised = limit
+	}
+	if raised <= base {
+		return 0, false
+	}
+	return raised, true
+}
+
+// stopForTruncation folds a visible, actionable truncation notice into the agent's
+// last response after the bounded truncation retries were exhausted, so the turn
+// is surfaced (SessionEventFinal) with an actionable message rather than as a
+// silent empty answer (issue #402). It mirrors stopForBudget: any partial output
+// the model did produce is preserved beneath the notice. The caller additionally
+// folds the same notice onto the PERSISTED terminal message via
+// ModelSession.FoldLastAssistantContent so the transcript is not left empty.
+func stopForTruncation(resp *model.CompletionResponse) *model.CompletionResponse {
+	if resp == nil {
+		resp = &model.CompletionResponse{}
+	}
+	note := truncationNoticeMarker + ": the model's output was cut off by its max_tokens" +
+		" budget and could not be completed after retrying. Raise the model's max_tokens" +
+		" or lower its reasoning_effort, then try again."
+	if partial := strings.TrimSpace(resp.Content); partial != "" {
+		note += "\n\nPartial output before truncation:\n" + partial
 	}
 	resp.Content = note
 	return resp
@@ -1090,6 +1197,7 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 		firstMessages,
 		tools,
 		reasoningSink(0),
+		0,
 	)
 	thinkingDone(0)
 	if err != nil {
@@ -1116,12 +1224,14 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 	// preamble continuation nudge (issue #307) so both paths keep byte-identical
 	// loop semantics — including SessionEventThinking/ThinkingDone/Usage emission
 	// order. stepIdx is the step number the round-trip is announced under.
-	advance := func(nextMessages []model.Message, stepIdx int) error {
+	// maxTokensOverride raises this round-trip's output budget for a truncation
+	// retry (issue #402); 0 keeps the configured cap.
+	advance := func(nextMessages []model.Message, stepIdx int, maxTokensOverride int) error {
 		emit(SessionEvent{Type: SessionEventThinking, Step: stepIdx})
 		s.compactIfNeeded(sess, emit)
 		refreshSystemPrompt()
 		var rtErr error
-		resp, rtErr = s.modelRoundTrip(ctx, sess, agent, nextMessages, tools, reasoningSink(stepIdx))
+		resp, rtErr = s.modelRoundTrip(ctx, sess, agent, nextMessages, tools, reasoningSink(stepIdx), maxTokensOverride)
 		thinkingDone(stepIdx)
 		if rtErr != nil {
 			emit(SessionEvent{Type: SessionEventError, Err: rtErr})
@@ -1149,6 +1259,14 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 	//     against the MaxSteps cap exactly like any other round-trip — intended, so
 	//     the per-task bound still governs total cost.
 	continuationNudges := 0
+	// truncationRetries / raisedBudget track the per-stretch recovery from turns cut
+	// off by max_tokens (issue #402): truncationRetries is bounded by
+	// maxTruncationRetries and raisedBudget carries the escalating output-token
+	// override across an empty (reasoning-only) truncation's retries. Both reset on
+	// a real tool call alongside continuationNudges, so the budget is per
+	// uninterrupted stretch of tool-free turns.
+	truncationRetries := 0
+	raisedBudget := 0
 	for step := 0; maxSteps <= 0 || step < maxSteps; step++ {
 		// Bail out promptly if the loop was stopped or the session closed; the
 		// in-flight request (if any) has already been cancelled via ctx.
@@ -1208,7 +1326,7 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 					tool.ToolCall{Tool: tc.Function.Name, CallID: tc.ID}, truncatedToolCallNote))
 			}
 			sess.AppendToolResults(results)
-			if err := advance(nil, step+1); err != nil {
+			if err := advance(nil, step+1, 0); err != nil {
 				return responses, err
 			}
 			continue
@@ -1226,6 +1344,70 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 			// deliver-only — like a queued user note it is not emitted as an assistant
 			// step, so it stays out of the visible transcript.
 			//
+			// Part B (issue #402): a tool-free turn that ended on finish_reason
+			// "length" was cut off by the output-token budget (reasoning + visible),
+			// NOT a final answer — the loop must never accept it as one. This is the
+			// structural fix the symptom-patches (#171/#307/#390) circled: the empty
+			// "length" turn fell straight through shouldNudgeContinuation (which
+			// returns false for empty text) to a break, persisting a dangling empty
+			// assistant message. explicitFinal short-circuits it — a deliberate
+			// structured-output final is terminal even if truncated.
+			//
+			// Recovery follows the Anthropic/OpenAI continuation guidance:
+			//   - recoverable output (visible Content OR retained Reasoning) → ask the
+			//     model to continue from where it left off, on the next round-trip;
+			//   - empty turn (the session-15 case: budget eaten by reasoning that
+			//     produced nothing) → retry under a RAISED output budget so the model
+			//     has room to surface an answer.
+			// Both are bounded by maxTruncationRetries (reset on a real tool call). On
+			// exhaustion — or when the budget is already at the provider ceiling and
+			// cannot be raised — the loop folds a visible, actionable notice and emits
+			// a SessionEventError rather than silently accepting an empty turn.
+			if !explicitFinal && isTruncated(resp.FinishReason) {
+				if t := strings.TrimSpace(resp.Content); t != "" {
+					lastAssistant = t
+				}
+				recoverable := strings.TrimSpace(resp.Content) != "" || strings.TrimSpace(resp.Reasoning) != ""
+				if truncationRetries < maxTruncationRetries {
+					if recoverable {
+						truncationRetries++
+						// Surface the truncation so the UI shows a retry rather than a
+						// silent re-think (reusing the assistant-step channel, which the
+						// TUI already renders as a foldable note).
+						emit(SessionEvent{Type: SessionEventAssistantStep, Step: step,
+							Text: "[output truncated by max_tokens; continuing from where the model left off]"})
+						note := []model.Message{{Role: model.RoleUser, Content: truncationContinueNote}}
+						if err := advance(note, step+1, 0); err != nil {
+							return responses, err
+						}
+						continue
+					}
+					if next, ok := raiseTruncationBudget(sess, raisedBudget); ok {
+						truncationRetries++
+						raisedBudget = next
+						emit(SessionEvent{Type: SessionEventAssistantStep, Step: step,
+							Text: fmt.Sprintf("[output truncated by max_tokens with no visible answer; retrying with a larger output budget (%d tokens)]", raisedBudget)})
+						note := []model.Message{{Role: model.RoleUser, Content: truncationContinueNote}}
+						if err := advance(note, step+1, raisedBudget); err != nil {
+							return responses, err
+						}
+						continue
+					}
+					// Empty turn and no room to raise the budget (already at the
+					// provider ceiling): fall through to the error/fold below.
+				}
+				// Retries exhausted, or an empty turn that cannot be given more room.
+				emit(SessionEvent{Type: SessionEventError, Err: fmt.Errorf(
+					"output truncated by max_tokens: the model exhausted its output budget without completing the answer; raise the model's max_tokens config or lower its reasoning_effort")})
+				resp = stopForTruncation(resp)
+				// Fold the notice onto the PERSISTED terminal message too, not just the
+				// local resp/final event: sendCtx already appended the empty truncated
+				// turn, so without this the transcript would still end on a silent empty
+				// assistant message on reopen (issue #402, B5).
+				sess.FoldLastAssistantContent(resp.Content)
+				break
+			}
+
 			// explicitFinal short-circuits this: a deliberate structured-output final
 			// is the strongest terminal signal there is and must end the turn even if
 			// its text happens to open like a preamble (issue #307 constraint #2).
@@ -1248,7 +1430,7 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 				// points separate avoids stacking the synthetic nudge and a real user
 				// note into the same request.
 				note := []model.Message{{Role: model.RoleUser, Content: continuationNudgeNote}}
-				if err := advance(note, step+1); err != nil {
+				if err := advance(note, step+1, 0); err != nil {
 					return responses, err
 				}
 				continue
@@ -1262,7 +1444,12 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 		}
 		// A real tool call this turn: reset the continuation-nudge budget so the bound
 		// is per uninterrupted stretch of tool-free turns, not per task (issue #307).
+		// The truncation-retry budget is reset on the same boundary (issue #402): a
+		// turn that produced a real tool call made progress, so a later truncation
+		// earns a fresh set of retries.
 		continuationNudges = 0
+		truncationRetries = 0
+		raisedBudget = 0
 
 		// Surface any intermediate reasoning the model emitted alongside its
 		// tool calls so the UI can show (foldable) thoughts.
@@ -1336,7 +1523,7 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 			nextMessages = append(nextMessages, s.takeBackgroundResults()...)
 		}
 
-		if err := advance(nextMessages, step+1); err != nil {
+		if err := advance(nextMessages, step+1, 0); err != nil {
 			return responses, err
 		}
 	}

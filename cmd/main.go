@@ -337,7 +337,7 @@ func toWatcherInfo(info watcher.WatcherInfo) tuipkg.WatcherInfo {
 func toChatMessages(msgs []model.Message) []tuipkg.ChatMessage {
 	out := make([]tuipkg.ChatMessage, 0, len(msgs))
 	for _, m := range msgs {
-		cm := tuipkg.ChatMessage{Role: string(m.Role), Content: m.Content, Tool: m.Name}
+		cm := tuipkg.ChatMessage{Role: string(m.Role), Content: m.Content, Tool: m.Name, Reasoning: m.Reasoning}
 		if len(m.ToolCalls) > 0 {
 			tc := m.ToolCalls[0]
 			cm.Tool = tc.Function.Name

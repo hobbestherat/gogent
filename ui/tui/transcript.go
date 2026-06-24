@@ -16,6 +16,12 @@ type ChatMessage struct {
 	Content string
 	Tool    string // tool name (for tool results, or an assistant tool call)
 	Args    string // pretty-printed args for an assistant tool call
+	// Reasoning is the assistant turn's retained chain-of-thought (reasoning models
+	// only); it is rendered as a collapsed "thought" entry ahead of the visible
+	// answer, mirroring the live appendThinkingDelta/foldLiveThought path so a
+	// reasoning-only turn is not blank on reopen. Empty for ordinary turns (issue
+	// #402).
+	Reasoning string
 }
 
 // renderTranscript renders a list of chat messages into a foldable TextView,
@@ -28,6 +34,11 @@ func renderTranscript(history *tv.TextView, msgs []ChatMessage) {
 		case "user":
 			renderRole(history, "You:", m.Content, colorUser, false)
 		case "assistant":
+			// Retained reasoning renders first as a collapsed "thought", matching the
+			// live order (thinking, then answer) and the foldable live entry (#402).
+			if strings.TrimSpace(m.Reasoning) != "" {
+				renderRole(history, "thought", m.Reasoning, colorNote, true)
+			}
 			if strings.TrimSpace(m.Content) != "" {
 				renderRole(history, "Gogent:", m.Content, colorAgent, false)
 			}
