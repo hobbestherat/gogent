@@ -79,10 +79,13 @@ const (
 // questionField binds one rendered form item to its answer extractor. answer
 // returns the item's current value and whether it counts as answered: a blank
 // text/textarea, an unselected choice, or an empty multiselect are all unanswered,
-// so they are omitted from the result and fail required-validation.
+// so they are omitted from the result and fail required-validation. focus is the
+// item's primary input component, used to land focus on the field when
+// required-validation flags it as missing.
 type questionField struct {
 	item     agent.QuestionItem
 	tabIndex int
+	focus    *tv.VisualComponent
 	answer   func() (value interface{}, answered bool)
 }
 
@@ -130,7 +133,7 @@ func showQuestionDialog(desktop *tv.Desktop, req agent.QuestionRequest, onResult
 	var fields []questionField
 	var firstFocus *tv.VisualComponent
 	for ti, topic := range req.Topics {
-		panel, tFields, first := buildTopicPanel(topic, ti, width-2, tabsH-1)
+		panel, tFields, first := buildTopicPanel(desktop, topic, ti, width-2, tabsH-1)
 		tabs.AddTab(topicTabTitle(topic, ti), panel)
 		fields = append(fields, tFields...)
 		if firstFocus == nil {
@@ -170,9 +173,14 @@ func showQuestionDialog(desktop *tv.Desktop, req agent.QuestionRequest, onResult
 				continue
 			}
 			if _, ok := f.answer(); !ok {
-				// Switch first (its OnTabChange clears any prior error), then set the
-				// message so it survives the auto-switch onto the offending tab.
+				// Switch first (its OnTabChange clears any prior error), then land
+				// focus on the offending field and set the message — so it survives
+				// the auto-switch and the user is placed on the field to fix, whether
+				// or not it was already the active tab.
 				tabs.SetActive(f.tabIndex)
+				if f.focus != nil {
+					desktop.SetFocus(f.focus)
+				}
 				errLabel.SetText(fmt.Sprintf("✗ %s is required", f.item.Label))
 				desktop.Redraw()
 				return
@@ -253,7 +261,8 @@ func topicTabTitle(topic agent.QuestionTopic, index int) string {
 // line, the item's widget(s), then an optional dim help line. tabIndex is the
 // owning tab so required-validation can jump back to it. width/height are the tab
 // content area; children are placed at fixed offsets relative to the panel origin.
-func buildTopicPanel(topic agent.QuestionTopic, tabIndex, width, _ int) (tv.Widget, []questionField, *tv.VisualComponent) {
+// desktop is used to advance focus when Enter is pressed in a single-line field.
+func buildTopicPanel(desktop *tv.Desktop, topic agent.QuestionTopic, tabIndex, width, _ int) (tv.Widget, []questionField, *tv.VisualComponent) {
 	panel := tv.NewComponent(tv.Rect{X: 0, Y: 0, W: width, H: 1})
 	const margin = 2
 	itemW := width - 2*margin
@@ -262,12 +271,15 @@ func buildTopicPanel(topic agent.QuestionTopic, tabIndex, width, _ int) (tv.Widg
 	}
 
 	var fields []questionField
-	var firstFocus *tv.VisualComponent
-	noteFocus := func(c *tv.VisualComponent) {
-		if firstFocus == nil {
-			firstFocus = c
-		}
+	// focusables is the panel's focusable widgets in tab order; it backs the
+	// Enter-advances-focus wiring below (the index captured per text box stays valid
+	// because the slice is only appended to).
+	var focusables []*tv.VisualComponent
+	var textBoxes []struct {
+		box *tv.TextBox
+		idx int
 	}
+	addFocusable := func(c *tv.VisualComponent) { focusables = append(focusables, c) }
 
 	y := 0
 	for _, item := range topic.Items {
@@ -276,6 +288,7 @@ func buildTopicPanel(topic agent.QuestionTopic, tabIndex, width, _ int) (tv.Widg
 		y++
 
 		var answer func() (interface{}, bool)
+		var itemFocus *tv.VisualComponent
 		switch item.Type {
 		case agent.QuestionMultiSelect:
 			ms := tv.NewMultiSelect()
@@ -283,7 +296,10 @@ func buildTopicPanel(topic agent.QuestionTopic, tabIndex, width, _ int) (tv.Widg
 				cb := styleQuestionCheck(tv.NewCheckbox(opt, tv.Rect{X: margin, Y: y, W: itemW, H: 1}, nil))
 				panel.AddChild(cb)
 				ms.Add(cb)
-				noteFocus(cb.Root())
+				addFocusable(cb.Root())
+				if itemFocus == nil {
+					itemFocus = cb.Root()
+				}
 				y++
 			}
 			answer = func() (interface{}, bool) {
@@ -300,7 +316,10 @@ func buildTopicPanel(topic agent.QuestionTopic, tabIndex, width, _ int) (tv.Widg
 				cb := styleQuestionCheck(tv.NewCheckbox(opt, tv.Rect{X: margin, Y: y, W: itemW, H: 1}, nil))
 				panel.AddChild(cb)
 				rg.Add(cb)
-				noteFocus(cb.Root())
+				addFocusable(cb.Root())
+				if itemFocus == nil {
+					itemFocus = cb.Root()
+				}
 				y++
 			}
 			answer = func() (interface{}, bool) {
@@ -313,7 +332,8 @@ func buildTopicPanel(topic agent.QuestionTopic, tabIndex, width, _ int) (tv.Widg
 		case agent.QuestionTextarea:
 			ml := tv.NewMultiLineInput("", tv.Rect{X: margin, Y: y, W: itemW, H: 3})
 			panel.AddChild(ml)
-			noteFocus(ml.Root())
+			addFocusable(ml.Root())
+			itemFocus = ml.Root()
 			y += 3
 			answer = func() (interface{}, bool) {
 				if strings.TrimSpace(ml.GetText()) == "" {
@@ -325,7 +345,12 @@ func buildTopicPanel(topic agent.QuestionTopic, tabIndex, width, _ int) (tv.Widg
 		default: // QuestionText (and any unforeseen type degrades to a text field)
 			tb := tv.NewTextBox("", tv.Rect{X: margin, Y: y, W: itemW, H: 1})
 			panel.AddChild(tb)
-			noteFocus(tb.Root())
+			textBoxes = append(textBoxes, struct {
+				box *tv.TextBox
+				idx int
+			}{box: tb, idx: len(focusables)})
+			addFocusable(tb.Root())
+			itemFocus = tb.Root()
 			y++
 			answer = func() (interface{}, bool) {
 				if strings.TrimSpace(tb.GetText()) == "" {
@@ -352,9 +377,28 @@ func buildTopicPanel(topic agent.QuestionTopic, tabIndex, width, _ int) (tv.Widg
 		}
 		y++ // blank spacer between items
 
-		fields = append(fields, questionField{item: item, tabIndex: tabIndex, answer: answer})
+		fields = append(fields, questionField{item: item, tabIndex: tabIndex, focus: itemFocus, answer: answer})
 	}
 
+	// Enter in a single-line field advances focus to the next focusable in the tab
+	// (wrapping), matching the issue's interaction model. A textarea keeps Enter for
+	// newlines (its OnSubmit is left nil). Wired after the loop so the captured index
+	// resolves against the panel's complete focus order.
+	for _, tb := range textBoxes {
+		tb := tb
+		tb.box.OnSubmit = func() {
+			if desktop == nil || len(focusables) == 0 {
+				return
+			}
+			desktop.SetFocus(focusables[(tb.idx+1)%len(focusables)])
+			desktop.Redraw()
+		}
+	}
+
+	var firstFocus *tv.VisualComponent
+	if len(focusables) > 0 {
+		firstFocus = focusables[0]
+	}
 	panel.Bounds.H = y
 	return panel, fields, firstFocus
 }
