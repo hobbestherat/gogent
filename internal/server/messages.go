@@ -1,10 +1,12 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 
 	"github.com/hobbestherat/webapi"
+	"gogent/internal/agent"
 )
 
 // messagesSvc groups the message handlers (blocking send + SSE stream).
@@ -34,11 +36,36 @@ func (svc messagesSvc) Send(r *http.Request, req sendMessageRequest, id string) 
 		defer svc.s.g.SetPlanMode(id, false)
 	}
 
+	// A custom command's agent/subtask override routes the prompt through a
+	// daemon-side sub-agent instead of the normal root turn (issue #403).
+	if req.Subtask || req.Agent != "" {
+		result, err := svc.runCommandOverride(r.Context(), id, req.Agent, req.Message)
+		if err != nil {
+			return nil, webapi.NewHTTPError(http.StatusInternalServerError, err.Error())
+		}
+		return messageView{Role: "assistant", Content: result}, nil
+	}
+
 	resp, err := svc.s.g.SendMessageToSessionWithModelAndEffort(r.Context(), id, "root", req.Message, req.Model, req.Effort)
 	if err != nil {
 		return nil, webapi.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	return messageView{Role: "assistant", Content: resp.Content}, nil
+}
+
+// runCommandOverride runs an agent/subtask custom-command invocation on the
+// daemon: it spawns the one-shot sub-agent (its run streams to the session's SSE
+// subscribers via the installed observer) and then surfaces the result as the
+// session's final answer event, so a streamed or globally-subscribed remote
+// window renders the answer and idles — matching the embedded path's
+// SessionEventFinal. It returns the result for the blocking response body.
+func (svc messagesSvc) runCommandOverride(ctx context.Context, id, agentName, message string) (string, error) {
+	result, err := svc.s.g.RunCommandSubtask(ctx, id, agentName, message)
+	if err != nil {
+		return "", fmt.Errorf("run command subtask: %w", err)
+	}
+	svc.s.hub.deliver(id, agent.SessionEvent{Type: agent.SessionEventFinal, Text: result})
+	return result, nil
 }
 
 // Stream handles POST /sessions/:id/messages/stream — returns immediately with
@@ -70,6 +97,8 @@ func (svc messagesSvc) Stream(r *http.Request, req sendMessageRequest, id string
 	modelName := req.Model
 	effort := req.Effort
 	message := req.Message
+	agentName := req.Agent
+	subtask := req.Subtask
 
 	return &webapi.EventStreamResponse{
 		Producer: func(stream webapi.EventStream) error {
@@ -96,6 +125,12 @@ func (svc messagesSvc) Stream(r *http.Request, req sendMessageRequest, id string
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
+				if subtask || agentName != "" {
+					// agent/subtask: spawn the sub-agent and emit its final answer (its
+					// run + the final event both reach this stream's subscriber).
+					_, _ = svc.runCommandOverride(stream.Context(), id, agentName, message)
+					return
+				}
 				_, _ = svc.s.g.SendMessageToSessionWithModelAndEffort(
 					stream.Context(), id, "root", message, modelName, effort)
 			}()

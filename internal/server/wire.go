@@ -70,6 +70,12 @@ type sendMessageRequest struct {
 	Model   string `json:"model,omitempty"`
 	Effort  string `json:"effort,omitempty"`
 	Mode    string `json:"mode,omitempty"` // "normal" (default) | "plan"
+	// Agent/Subtask carry a custom command's per-invocation overrides (issue #403):
+	// a non-empty Agent or Subtask=true routes the prompt through a daemon-side
+	// one-shot sub-agent (Agent names it) whose result is surfaced as the turn's
+	// final answer, so an attached TUI applies the overrides exactly as embedded.
+	Agent   string `json:"agent,omitempty"`
+	Subtask bool   `json:"subtask,omitempty"`
 }
 
 // messageView is the response from the blocking message endpoint.

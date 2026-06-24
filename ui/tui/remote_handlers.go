@@ -779,13 +779,20 @@ func (rc *RemoteClient) Handlers() Handlers {
 		// embedded. Read failures degrade to empty results; write failures surface as
 		// errors the editor shows inline.
 		// ReservedCommandNames uses the TUI-local mirror while attached (the built-in
-		// set is static and identical to the daemon's command.ReservedNames). Note:
-		// OnSendCommand is intentionally left nil here — the daemon /messages endpoint
-		// does not yet carry the agent/subtask overrides, so an attached custom command
-		// applies its model override (via OnSend) and degrades agent/subtask to a normal
-		// turn until that endpoint slice lands. The editor, history, palette, autocomplete
-		// and dispatch all work attached.
+		// set is static and identical to the daemon's command.ReservedNames).
 		ReservedCommandNames: func() map[string]bool { return reservedBuiltinCommands },
+		// OnSendCommand applies a custom command's overrides while attached, at full
+		// parity with embedded: the daemon /messages endpoint carries agent/subtask, so
+		// a subtask/agent invocation spawns a daemon-side sub-agent whose result streams
+		// back over SSE. model rides the same call. Background context so detaching the
+		// TUI does not cancel the daemon-side turn (cancellation is POST /stop).
+		OnSendCommand: func(sessionID, message, modelName, agentName string, subtask bool, effort string) {
+			go func() {
+				if _, err := c.SendMessageWithOverrides(context.Background(), sessionID, message, modelName, agentName, subtask, effort); err != nil {
+					rc.emitErr(sessionID, err)
+				}
+			}()
+		},
 		ListCommands: func() []CommandInfo {
 			defs, err := c.ListCommands()
 			if err != nil {

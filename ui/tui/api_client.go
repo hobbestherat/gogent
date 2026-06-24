@@ -413,7 +413,16 @@ func (c *APIClient) GetTranscript(id, agentID string) ([]MessageDTO, error) {
 // outright failure. ctx (a background context) is NOT bounded by quickTimeout —
 // a turn may legitimately run for minutes.
 func (c *APIClient) SendMessage(ctx context.Context, id, message, modelName, effort string) (MessageDTO, error) {
-	body := sendMessageBody{Message: message, Model: modelName, Effort: effort}
+	return c.SendMessageWithOverrides(ctx, id, message, modelName, "", false, effort)
+}
+
+// SendMessageWithOverrides sends a turn carrying a custom command's per-invocation
+// agent/subtask overrides (issue #403). A non-empty agent or subtask=true makes the
+// daemon route the prompt through a one-shot sub-agent (the embedded path's
+// equivalent of OnSendCommand), so an attached TUI applies the overrides exactly as
+// embedded. SendMessage delegates here with no overrides.
+func (c *APIClient) SendMessageWithOverrides(ctx context.Context, id, message, modelName, agentName string, subtask bool, effort string) (MessageDTO, error) {
+	body := sendMessageBody{Message: message, Model: modelName, Effort: effort, Agent: agentName, Subtask: subtask}
 	req, err := c.newRequest(ctx, http.MethodPost, "/sessions/"+url.PathEscape(id)+"/messages", body)
 	if err != nil {
 		return MessageDTO{}, err
@@ -440,6 +449,8 @@ type sendMessageBody struct {
 	Model   string `json:"model,omitempty"`
 	Effort  string `json:"effort,omitempty"`
 	Mode    string `json:"mode,omitempty"`
+	Agent   string `json:"agent,omitempty"`
+	Subtask bool   `json:"subtask,omitempty"`
 }
 
 // StopSession cancels a session's in-flight turn.
