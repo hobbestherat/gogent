@@ -90,6 +90,10 @@ func (openAIAdapter) parseResponse(body []byte) (*CompletionResponse, error) {
 		resp.Role = resp.Choices[0].Message.Role
 		resp.FinishReason = resp.Choices[0].FinishReason
 		resp.ToolCalls = resp.Choices[0].Message.ToolCalls
+		// Retain the turn's chain-of-thought side channel: Message.UnmarshalJSON has
+		// already folded reasoning_content (GLM/DeepSeek) and reasoning (OpenRouter)
+		// into Reasoning, so a reasoning-only blocking turn is recoverable (issue #402).
+		resp.Reasoning = resp.Choices[0].Message.Reasoning
 		// Synthesize a stable id for any tool call the backend returned without one,
 		// mirroring parseOpenAIStream: some OpenAI-compatible backends (e.g. vLLM)
 		// omit tool_calls.id, and every downstream consumer correlates a tool result
@@ -497,7 +501,7 @@ func (anthropicAdapter) parseResponse(body []byte) (*CompletionResponse, error) 
 		return nil, fmt.Errorf("unmarshal response: %w", err)
 	}
 	resp := &CompletionResponse{Role: RoleAssistant}
-	var text strings.Builder
+	var text, reasoning strings.Builder
 	for _, b := range ar.Content {
 		switch b.Type {
 		case "text":
@@ -510,6 +514,10 @@ func (anthropicAdapter) parseResponse(body []byte) (*CompletionResponse, error) 
 				resp.Thinking = b.Thinking
 				resp.ThinkingSignature = b.Signature
 			}
+			// Also retain the human-readable thinking-summary text in Reasoning so a
+			// thinking-only turn is recoverable, mirroring the OpenAI-compatible
+			// reasoning side channel (issue #402). All thinking blocks contribute.
+			reasoning.WriteString(b.Thinking)
 		case "tool_use":
 			args := string(b.Input)
 			if strings.TrimSpace(args) == "" {
@@ -523,6 +531,7 @@ func (anthropicAdapter) parseResponse(body []byte) (*CompletionResponse, error) 
 		}
 	}
 	resp.Content = text.String()
+	resp.Reasoning = reasoning.String()
 	resp.FinishReason = anthropicStopReason(ar.StopReason)
 	resp.Usage = ar.Usage.toTokenUsage(0)
 	return resp, nil
@@ -1153,7 +1162,7 @@ func (geminiAdapter) parseResponse(body []byte) (*CompletionResponse, error) {
 		return nil, fmt.Errorf("gemini response has no candidates")
 	}
 	resp := &CompletionResponse{Role: RoleAssistant}
-	var text strings.Builder
+	var text, reasoning strings.Builder
 	cand := gr.Candidates[0]
 	for _, p := range cand.Content.Parts {
 		switch {
@@ -1166,11 +1175,14 @@ func (geminiAdapter) parseResponse(body []byte) (*CompletionResponse, error) {
 		case p.Thought:
 			// Reasoning summary — not part of the visible answer; its token cost
 			// is reported via usageMetadata.thoughtsTokenCount (ReasoningTokens).
+			// Retain its text so a thinking-only turn is recoverable (issue #402).
+			reasoning.WriteString(p.Text)
 		default:
 			text.WriteString(p.Text)
 		}
 	}
 	resp.Content = text.String()
+	resp.Reasoning = reasoning.String()
 	resp.FinishReason = geminiFinishReason(cand.FinishReason, len(resp.ToolCalls) > 0)
 	resp.Usage = gr.UsageMetadata.toTokenUsage()
 	return resp, nil

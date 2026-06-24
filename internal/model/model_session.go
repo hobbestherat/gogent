@@ -498,6 +498,10 @@ func (s *ModelSession) sendCtx(ctx context.Context, messages []Message, tools []
 		ToolCalls:         resp.ToolCalls,
 		Thinking:          resp.Thinking,
 		ThinkingSignature: resp.ThinkingSignature,
+		// Retain the turn's chain-of-thought so a reasoning-only turn (empty Content)
+		// is not an unrecoverable empty message, and so it survives a session reopen
+		// (Reasoning is serialized; see Message.MarshalJSON). Issue #402.
+		Reasoning: resp.Reasoning,
 	})
 	s.History[len(s.History)-1].Response = resp.Content
 	s.History[len(s.History)-1].Usage = resp.Usage

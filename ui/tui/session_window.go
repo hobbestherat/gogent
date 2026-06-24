@@ -2584,6 +2584,13 @@ func (sw *SessionWindow) restore(msgs []ChatMessage) {
 				sw.addUser(m.Content)
 			}
 		case "assistant":
+			// A restored reasoning-only or partial turn renders its retained
+			// chain-of-thought as the same collapsed "thought" entry the live
+			// appendThinkingDelta/foldLiveThought path produces, ahead of the answer
+			// (issue #402).
+			if strings.TrimSpace(m.Reasoning) != "" {
+				sw.addThought(m.Reasoning)
+			}
 			sw.addAssistant(m.Content)
 			if m.Tool != "" {
 				lines := make([]styledLine, 0)

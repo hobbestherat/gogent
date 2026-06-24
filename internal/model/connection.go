@@ -85,6 +85,16 @@ type Message struct {
 	// blocks. Empty for every other provider and for the common text-only turn.
 	Thinking          string `json:"-"`
 	ThinkingSignature string `json:"-"`
+	// Reasoning carries the assistant turn's chain-of-thought side channel
+	// (reasoning_content / reasoning / thinking-summary) so a reasoning-only turn
+	// (empty Content) is recoverable and the thinking survives a session reopen.
+	// It is NOT the visible answer. Unlike Thinking/ThinkingSignature (opaque
+	// replay cargo, kept off the wire) it is serialized: emitted on the wire as
+	// "reasoning" (see MarshalJSON) and round-tripped through the transcript so a
+	// restored reasoning-only turn is not empty. Empty for non-reasoning
+	// providers/turns; a backward-compatible addition (old transcripts decode with
+	// an empty Reasoning). See CompletionResponse.Reasoning (issue #402).
+	Reasoning string `json:"reasoning,omitempty"`
 }
 
 // ImageURL is a single image attachment, matching OpenAI's image_url content
@@ -117,7 +127,10 @@ func (m Message) MarshalJSON() ([]byte, error) {
 		Name       string      `json:"name,omitempty"`
 		ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
 		ToolCallID string      `json:"tool_call_id,omitempty"`
-	}{Role: m.Role, Name: m.Name, ToolCalls: m.ToolCalls, ToolCallID: m.ToolCallID}
+		// Reasoning is serialized (omitempty) so a reasoning-only assistant turn
+		// survives a transcript round-trip; see Message.Reasoning (issue #402).
+		Reasoning string `json:"reasoning,omitempty"`
+	}{Role: m.Role, Name: m.Name, ToolCalls: m.ToolCalls, ToolCallID: m.ToolCallID, Reasoning: m.Reasoning}
 
 	if len(m.Images) == 0 {
 		wire.Content = m.Content
@@ -151,11 +164,22 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 		Name       string          `json:"name,omitempty"`
 		ToolCalls  []ToolCall      `json:"tool_calls,omitempty"`
 		ToolCallID string          `json:"tool_call_id,omitempty"`
+		// Reasoning is the persisted/OpenRouter field name; ReasoningContent is the
+		// Z.AI/GLM and DeepSeek name for the same chain-of-thought side channel. Both
+		// are read so the blocking response message (parseResponse flattens
+		// Choices[0].Message) and a reopened transcript both populate Reasoning
+		// (issue #402).
+		Reasoning        string `json:"reasoning,omitempty"`
+		ReasoningContent string `json:"reasoning_content,omitempty"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return fmt.Errorf("unmarshal message: %w", err)
 	}
-	*m = Message{Role: raw.Role, Name: raw.Name, ToolCalls: raw.ToolCalls, ToolCallID: raw.ToolCallID}
+	reasoning := raw.Reasoning
+	if reasoning == "" {
+		reasoning = raw.ReasoningContent
+	}
+	*m = Message{Role: raw.Role, Name: raw.Name, ToolCalls: raw.ToolCalls, ToolCallID: raw.ToolCallID, Reasoning: reasoning}
 
 	trimmed := bytes.TrimSpace(raw.Content)
 	if len(trimmed) == 0 || string(trimmed) == "null" {
@@ -379,6 +403,16 @@ type CompletionResponse struct {
 	// Anthropic requires for tool use with thinking enabled. Empty otherwise.
 	Thinking          string `json:"-"`
 	ThinkingSignature string `json:"-"`
+	// Reasoning carries the assistant turn's accumulated chain-of-thought text from
+	// a reasoning model's side channel (reasoning_content / reasoning /
+	// thinking-summary). It is NOT part of the visible answer; it is retained so a
+	// reasoning-only turn (empty Content) is recoverable — the agent loop reads it
+	// to tell a partial/reasoning-only truncation apart from a budget exhausted on
+	// unretained thinking (issue #402) — and so it can be persisted onto the
+	// transcript Message (see ModelSession.sendCtx). Kept off the wire here
+	// (json:"-"): it is assembled from the response, not sent back. Empty for
+	// non-reasoning providers/turns.
+	Reasoning string `json:"-"`
 }
 
 type Choice struct {
@@ -935,11 +969,18 @@ func (c *ModelConnection) CompleteWithToolsStreamCtx(ctx context.Context, messag
 		}
 	}()
 
-	var content strings.Builder
+	var content, reasoning strings.Builder
 	resp := &CompletionResponse{Role: RoleAssistant}
 	for ev := range streamCh {
-		if ev.Reasoning != "" && onReasoning != nil {
-			onReasoning(ev.Reasoning)
+		if ev.Reasoning != "" {
+			// Accumulate the reasoning so the assembled response retains it (issue
+			// #402) in ADDITION to forwarding the delta for live rendering. Without
+			// this a reasoning-only turn would collapse to an unrecoverable empty
+			// string once the fire-and-forget sink returned.
+			reasoning.WriteString(ev.Reasoning)
+			if onReasoning != nil {
+				onReasoning(ev.Reasoning)
+			}
 		}
 		if ev.Content != "" {
 			content.WriteString(ev.Content)
@@ -961,6 +1002,7 @@ func (c *ModelConnection) CompleteWithToolsStreamCtx(ctx context.Context, messag
 		return nil, err
 	}
 	resp.Content = content.String()
+	resp.Reasoning = reasoning.String()
 	return resp, nil
 }
 
@@ -981,13 +1023,77 @@ func (c *ModelConnection) CompleteWithStats(messages []Message) (*CompletionResp
 	return resp, usage, nil
 }
 
+// DefaultMaxTokens is the fallback per-request output-token cap used when a
+// connection has no configured MaxTokens. Exported so the agent layer can base a
+// raised truncation-retry budget on the same default the request path uses when
+// the connector reports no configured cap (issue #402).
+const DefaultMaxTokens = 4096
+
+// maxTokensOverrideKey is the context key carrying a per-request output-token cap
+// that supersedes the connection's configured MaxTokens for one request. The
+// unexported key type avoids collisions with other packages' context values.
+type maxTokensOverrideKey struct{}
+
+// WithMaxTokensOverride returns a context that makes the next model request issued
+// under it use maxTokens as its output-token cap instead of the connection's
+// configured MaxTokens. The agent loop uses it to retry a turn that exhausted its
+// budget on reasoning with no visible output (finish_reason "length") under a
+// raised cap (issue #402). A non-positive maxTokens is ignored (the context is
+// returned unchanged). The override is still clamped to the provider's
+// MaxTokensLimit in buildRequest, so it can never exceed what the backend accepts.
+func WithMaxTokensOverride(ctx context.Context, maxTokens int) context.Context {
+	if ctx == nil || maxTokens <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, maxTokensOverrideKey{}, maxTokens)
+}
+
+// MaxTokensOverrideFrom returns the per-request output-token override carried by
+// ctx (see WithMaxTokensOverride) and whether one was set. ok is false (and n 0)
+// when no override is present.
+func MaxTokensOverrideFrom(ctx context.Context) (n int, ok bool) {
+	if ctx == nil {
+		return 0, false
+	}
+	v, ok := ctx.Value(maxTokensOverrideKey{}).(int)
+	return v, ok
+}
+
+// MaxTokensReporter is an optional connector capability: it reports the connector's
+// configured per-request output cap and the provider's hard ceiling, so the agent
+// loop can compute a raised retry budget for a turn truncated by max_tokens
+// (issue #402). A connector that does not implement it (e.g. a test fake) leaves
+// the loop to fall back to DefaultMaxTokens with no known ceiling.
+type MaxTokensReporter interface {
+	// MaxTokensConfig returns the configured per-request output cap (0 when unset,
+	// i.e. the DefaultMaxTokens default applies) and the provider's hard ceiling
+	// (0 when there is no known limit).
+	MaxTokensConfig() (configured, limit int)
+}
+
+// MaxTokensConfig reports the connection's configured output cap and the provider
+// ceiling so callers can compute a raised retry budget (issue #402). It satisfies
+// MaxTokensReporter.
+func (c *ModelConnection) MaxTokensConfig() (configured, limit int) {
+	if c.Config != nil {
+		configured = c.Config.MaxTokens
+	}
+	return configured, c.caps().MaxTokensLimit
+}
+
 // buildRequest assembles a CompletionRequest with the connection's configured
 // model, token limit and temperature applied. It is shared by the blocking and
 // streaming paths so both send identical parameters; the only difference is that
 // streaming additionally requests a final usage chunk via stream_options.
-func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []ToolDef, format *ResponseFormat) CompletionRequest {
+//
+// maxTokensOverride is an optional per-request output-token cap (the first
+// positive value wins): when set it replaces the configured/default MaxTokens
+// before the MaxTokensLimit clamp, which is how a truncation retry raises the
+// budget (issue #402). It is variadic so existing call sites pass no override and
+// keep their exact behavior.
+func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []ToolDef, format *ResponseFormat, maxTokensOverride ...int) CompletionRequest {
 	caps := c.caps()
-	maxTokens := 4096
+	maxTokens := DefaultMaxTokens
 	var temperature, topP float32
 	var reasoningEffort string
 	var thinking *bool
@@ -999,6 +1105,15 @@ func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []
 		topP = c.Config.TopP
 		reasoningEffort = c.Config.ReasoningEffort
 		thinking = c.Config.Thinking
+	}
+	// A per-request override (truncation retry, issue #402) supersedes the
+	// configured/default cap before the ceiling clamp below, so a raised budget is
+	// still bounded by what the backend accepts.
+	for _, ov := range maxTokensOverride {
+		if ov > 0 {
+			maxTokens = ov
+			break
+		}
 	}
 	// Clamp to the provider's max_tokens ceiling; some backends (e.g. Z.AI) 400
 	// on out-of-range values instead of capping them.
@@ -1113,7 +1228,8 @@ func (c *ModelConnection) complete(ctx context.Context, messages []Message, stre
 	if c.configErr != nil {
 		return nil, c.configErr
 	}
-	reqBody := c.buildRequest(messages, stream, tools, format)
+	ov, _ := MaxTokensOverrideFrom(ctx)
+	reqBody := c.buildRequest(messages, stream, tools, format, ov)
 
 	// Marshal the request body ONCE, before the retry loop. Only the socket send
 	// needs retrying, so re-marshaling the (potentially large) transcript on every
@@ -1230,7 +1346,8 @@ func (c *ModelConnection) completeStream(ctx context.Context, messages []Message
 	if c.configErr != nil {
 		return "", c.configErr
 	}
-	reqBody := c.buildRequest(messages, true, tools, nil)
+	ov, _ := MaxTokensOverrideFrom(ctx)
+	reqBody := c.buildRequest(messages, true, tools, nil, ov)
 
 	// Marshal into a pooled buffer (issue #20): the bytes stay live through the
 	// single request send and the buffer is returned to the pool on return.
