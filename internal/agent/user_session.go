@@ -1164,13 +1164,22 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 		// (finish_reason "length") and left at least one tool call with truncated
 		// (malformed-JSON) arguments. Executing it would feed validateArgs a call
 		// the model never finished emitting and surface the validation error as the
-		// tool result. Instead splice ONE continuation note (reusing the advance /
-		// note-injection path) asking the model to resume and re-issue the call in
-		// full, then give it another round-trip. This is the general counterpart to
-		// the targeted structured_output salvage in collectToolCalls (Part A): it
+		// tool result. Instead give the model one round-trip to resume and re-issue
+		// the interrupted call(s) in full. This is the general counterpart to the
+		// targeted structured_output salvage in collectToolCalls (Part A): it
 		// recovers truncated args for ANY tool. A salvageable terminal
 		// structured_output was already folded by collectToolCalls (explicitFinal),
 		// so this only fires for unfinished, non-final calls.
+		//
+		// The truncated assistant turn was already appended to the transcript with
+		// its tool_calls (see ModelSession.sendCtx), so the tool-call protocol
+		// requires a tool result for every tool_call_id before the next assistant
+		// turn — OpenAI and Anthropic both reject an assistant tool_calls message
+		// that is not answered one-to-one. So the re-issue instruction is delivered
+		// as a tool result per call (not a dangling user note, which would leave the
+		// tool_calls unanswered and 400 on a real backend). makeToolResultMessage
+		// emits no SessionEvent, so the synthetic results stay out of the visible
+		// transcript like the other deliver-only splices.
 		//
 		// It shares the per-stretch continuationNudges budget with the #307
 		// preamble nudge and bails before the real-tool-call reset below, so a model
@@ -1180,8 +1189,13 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 		if !explicitFinal && resp.FinishReason == "length" && hasTruncatedToolCall(resp) &&
 			continuationNudges < maxContinuationNudges {
 			continuationNudges++
-			note := []model.Message{{Role: model.RoleUser, Content: truncatedToolCallNote}}
-			if err := advance(note, step+1); err != nil {
+			results := make([]model.Message, 0, len(resp.ToolCalls))
+			for _, tc := range resp.ToolCalls {
+				results = append(results, makeToolResultMessage(
+					tool.ToolCall{Tool: tc.Function.Name, CallID: tc.ID}, truncatedToolCallNote))
+			}
+			sess.AppendToolResults(results)
+			if err := advance(nil, step+1); err != nil {
 				return responses, err
 			}
 			continue
