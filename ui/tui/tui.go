@@ -310,8 +310,15 @@ type SessionMeta struct {
 	Messages  int
 	TokensIn  int
 	TokensOut int
-	Model     string
-	File      string
+	Model     string // stable config Name (lookup key)
+	// ModelLabel/ModelID are the frozen display label + provider id captured when
+	// the session was last saved (issue #389), so the Saved Sessions detail pane
+	// shows the model the session actually ran on, unaffected by later config
+	// edits. Empty for older index files predating the fields; formatSessionDetail
+	// then falls back to the bare Model key.
+	ModelLabel string
+	ModelID    string
+	File       string
 	// Archived is true when the session's window was closed (its on-disk base is
 	// "_session_archived"). The browser lists archived sessions too and marks them
 	// so the user can tell a closed session from an open one (issue #325).
@@ -629,7 +636,30 @@ func (w *Workbench) registerFallthroughBindings() {
 }
 
 // SetModels updates the list of available models offered in each session window.
+// Besides repointing the workbench cache and the sidebar's Overall selector, it
+// propagates the refreshed options into every open session window's header
+// dropdown so a model edit (Models… dialog → Save) takes effect live, without an
+// app restart (issue #389). Each window snapshotted modelNames at creation and
+// never repointed them; without this an edit leaves stale labels — and a
+// DisplayName edit would make selectedModelName() resolve to "" (a silent
+// fallback to the default model on the next send).
 func (w *Workbench) SetModels(models []*config.ModelConfig) {
+	// Capture each open window's currently-selected model by its STABLE config
+	// Name before swapping the cache, resolving the live dropdown label against
+	// the OLD model set (w.models is still the previous list here). Re-selecting
+	// by Name (not label) below preserves the user's model across a DisplayName
+	// edit, where the label itself changed.
+	w.mu.Lock()
+	windows := make([]*SessionWindow, 0, len(w.sessions))
+	for _, sw := range w.sessions {
+		windows = append(windows, sw)
+	}
+	w.mu.Unlock()
+	selectedNames := make([]string, len(windows))
+	for i, sw := range windows {
+		selectedNames[i] = sw.selectedModelName()
+	}
+
 	w.models = models
 	w.modelNames = make([]string, len(models))
 	for i, m := range models {
@@ -644,6 +674,27 @@ func (w *Workbench) SetModels(models []*config.ModelConfig) {
 	// constructor runs first).
 	if w.sidebar != nil {
 		w.sidebar.rebuildModelOptions()
+	}
+
+	// Repopulate each open window's header dropdown from the refreshed names and
+	// re-select the previously-chosen model by its stable Name (issue #389).
+	for i, sw := range windows {
+		if sw.modelSelect == nil {
+			continue
+		}
+		// SetOptions preserves selection by old *label* and clamps to 0 when it is
+		// gone; we override that immediately with a Name-based re-selection so a
+		// changed DisplayName can't drop the user's model. SetOptions/SetSelected
+		// don't fire OnChange, so rebuildEffortOptions is called explicitly (exactly
+		// what the OnChange handler would have done) to refresh the effort choices.
+		sw.modelSelect.SetOptions(w.modelNames)
+		if idx := w.modelIndexByName(selectedNames[i]); idx >= 0 {
+			sw.modelSelect.SetSelected(idx)
+		}
+		sw.rebuildEffortOptions()
+	}
+	if len(windows) > 0 {
+		w.desktop.Redraw()
 	}
 }
 

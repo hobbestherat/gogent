@@ -206,6 +206,10 @@ func NewGogentWithWorkspace(homeDir, workspaceRoot string) *Gogent {
 		// Persist each session's attached (session-scoped) watcher configs into its
 		// index so they are restored with the session (issue #329 Phase 3).
 		store.SetAttachedWatchersProvider(g.attachedWatchersFor)
+		// Freeze each saved session's primary-model display label + provider id from
+		// the live config, so the Saved Sessions dialog shows the model the session
+		// actually ran on rather than a bare key that drifts after edits (issue #389).
+		store.SetModelSnapshotProvider(g.modelSnapshotFor)
 	} else {
 		log.Warnf("session persistence disabled: %v", err)
 	}
@@ -3168,6 +3172,31 @@ func (g *Gogent) UpdateModel(updated config.ModelConfig) error {
 		g.warnf("Failed to persist config: %v", err)
 	}
 	return nil
+}
+
+// modelSnapshotFor resolves a model's stable config Name to its current display
+// label (DisplayName, falling back to Name) and provider model id, for the
+// SessionStore to freeze into a session's index at save time (issue #389). ok is
+// false when the name matches no configured model; the store then leaves the
+// snapshot empty and the Saved Sessions dialog falls back to the bare Name. It is
+// invoked while the store lock is held, so it only reads g.config under g.mu and
+// never re-enters the store. Mirrors the s.mu→g.mu lock order of
+// attachedWatchersFor.
+func (g *Gogent) modelSnapshotFor(name string) (label, id string, ok bool) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if g.config == nil {
+		return "", "", false
+	}
+	m := g.config.GetModelConfig(name)
+	if m == nil {
+		return "", "", false
+	}
+	label = m.DisplayName
+	if label == "" {
+		label = m.Name
+	}
+	return label, m.Model, true
 }
 
 // SetDefaultModel marks the named model as the default for new sessions and

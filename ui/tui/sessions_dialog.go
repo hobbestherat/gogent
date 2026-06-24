@@ -271,7 +271,13 @@ func formatSessionDetail(m SessionMeta) string {
 	fmt.Fprintf(&b, "Turns: %d\n", m.Turns)
 	fmt.Fprintf(&b, "Messages: %d\n", m.Messages)
 	fmt.Fprintf(&b, "Tokens: %s / %s\n", formatTokens(m.TokensIn), formatTokens(m.TokensOut))
-	if m.Model != "" {
+	// Prefer the frozen display label captured at save time so the pane shows the
+	// model the session actually ran on — faithful history, not a live-resolved
+	// current label (issue #389). Fall back to the bare config key (Model) for
+	// older index files that predate ModelLabel (they decode it empty).
+	if label := m.ModelLabel; label != "" {
+		fmt.Fprintf(&b, "Model: %s\n", label)
+	} else if m.Model != "" {
 		fmt.Fprintf(&b, "Model: %s\n", m.Model)
 	}
 	if m.Archived {

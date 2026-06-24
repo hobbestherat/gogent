@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"gogent/internal/config"
 	"gogent/internal/model"
 
 	tui "github.com/hobbestherat/turbotui"
@@ -257,6 +258,20 @@ func (w *Workbench) showModelEditor() {
 			if err := w.handlers.UpdateModel(m); err != nil {
 				failed = err.Error()
 			}
+		}
+		// Re-fetch the authoritative model list from the backend and push it into the
+		// workbench so the sidebar AND every open session window pick up the edits
+		// immediately (issue #389). Without this, Workbench.models / modelNames stay
+		// frozen at construction: dropdowns show stale labels and a DisplayName edit
+		// makes selectedModelName() resolve to "" (silent fallback to the default
+		// model on the next send). GetModels returns values; SetModels takes
+		// pointers — index into the refreshed slice so we don't alias the loop var.
+		if refreshed := w.handlers.GetModels(); len(refreshed) > 0 {
+			ptrs := make([]*config.ModelConfig, len(refreshed))
+			for i := range refreshed {
+				ptrs[i] = &refreshed[i]
+			}
+			w.SetModels(ptrs)
 		}
 		w.desktop.RemoveLayer(layer)
 		w.rebuildMenu()

@@ -79,14 +79,22 @@ type jsonlRecord struct {
 // session snapshot. Older index files predating them decode with zero values,
 // which list cleanly; the next save backfills them.
 type sessionIndex struct {
-	SessionID string      `json:"session_id"`
-	Title     string      `json:"title,omitempty"`
-	CreatedAt string      `json:"created_at,omitempty"`
-	Turns     int         `json:"turns,omitempty"`
-	TokensIn  int         `json:"tokens_in,omitempty"`
-	TokensOut int         `json:"tokens_out,omitempty"`
-	Model     string      `json:"model,omitempty"`
-	Shards    []shardMeta `json:"shards"`
+	SessionID string `json:"session_id"`
+	Title     string `json:"title,omitempty"`
+	CreatedAt string `json:"created_at,omitempty"`
+	Turns     int    `json:"turns,omitempty"`
+	TokensIn  int    `json:"tokens_in,omitempty"`
+	TokensOut int    `json:"tokens_out,omitempty"`
+	Model     string `json:"model,omitempty"`
+	// ModelLabel and ModelID freeze the primary model's display label
+	// (DisplayName) and provider model id (Model) as they were at save time, so
+	// the Saved Sessions dialog can show the model the session actually ran on —
+	// faithful history, independent of later config edits (issue #389). Older
+	// index files predating these fields decode them as empty; the dialog then
+	// falls back to the bare Model key. They are deliberately NOT live-resolved.
+	ModelLabel string      `json:"model_label,omitempty"`
+	ModelID    string      `json:"model_id,omitempty"`
+	Shards     []shardMeta `json:"shards"`
 	// Watchers holds the session's attached (session-scoped) watcher definitions so
 	// they are restored with the session via OnSessionRestored (issue #329 Phase 3).
 	// Free-running watchers live in ~/.gogent/watchers.json, never here. Older index
@@ -101,7 +109,12 @@ type sessionSummary struct {
 	turns     int
 	tokensIn  int
 	tokensOut int
-	model     string
+	model     string // primary model's stable config Name (lookup key)
+	// modelLabel/modelID freeze the primary model's DisplayName and provider model
+	// id at save time for the Saved Sessions dialog (issue #389). Empty when the
+	// config can't be resolved — the dialog falls back to the bare model key.
+	modelLabel string
+	modelID    string
 }
 
 // shardMeta is one entry in the index's shard table.
@@ -136,6 +149,27 @@ type SessionStore struct {
 	// SetAttachedWatchersProvider; nil persists no watchers. It is read under the
 	// store lock during Save, so it must not call back into the store.
 	attachedWatchersFn func(sessionID string) []config.WatcherConfig
+
+	// modelSnapshotFn, when set, resolves a model's stable config Name to its
+	// current DisplayName (label) and provider model id, captured at save time to
+	// freeze a faithful display record in the session index (issue #389). The host
+	// (gogent) installs it via SetModelSnapshotProvider; nil leaves the snapshot
+	// empty (the dialog falls back to the bare model key). ok is false when the
+	// name resolves to no config. Invoked under the store lock during Save, so it
+	// must not re-enter the store.
+	modelSnapshotFn func(name string) (label, id string, ok bool)
+}
+
+// SetModelSnapshotProvider installs the callback Save consults to freeze the
+// primary model's display label and provider id in the session index, so the
+// Saved Sessions dialog shows the model the session actually ran on rather than a
+// bare config key that drifts after edits (issue #389). A nil fn leaves the
+// snapshot empty. The provider is invoked while the store lock is held and must
+// not re-enter the store.
+func (s *SessionStore) SetModelSnapshotProvider(fn func(name string) (label, id string, ok bool)) {
+	s.mu.Lock()
+	s.modelSnapshotFn = fn
+	s.mu.Unlock()
 }
 
 // SetAttachedWatchersProvider installs the callback Save consults for a session's
@@ -180,6 +214,11 @@ type LoadedSession struct {
 	// from the index so a restored session resumes on that model (issue #266).
 	// Empty for older sessions persisted before the model was recorded.
 	Model string
+	// ModelLabel/ModelID are the frozen display label + provider id captured at the
+	// last save (issue #389), carried for any caller wanting the session's
+	// historical model presentation. Empty for index files predating the fields.
+	ModelLabel string
+	ModelID    string
 	// Watchers are the session's attached (session-scoped) watcher definitions read
 	// back from the index, re-registered with the watcher manager via
 	// OnSessionRestored (issue #329 Phase 3). nil when the session has none.
@@ -304,6 +343,17 @@ func (s *SessionStore) Save(us *agent.UserSession, title string) error {
 		tokensIn:  snap.TokensIn,
 		tokensOut: snap.TokensOut,
 		model:     us.PrimaryModel(),
+	}
+	// Freeze the primary model's display label + provider id as they are right now
+	// (issue #389), so the Saved Sessions dialog renders the model this session
+	// actually ran on rather than a key that becomes opaque after a later edit. If
+	// the config can't be resolved, leave both empty — the dialog falls back to the
+	// bare Name. We hold s.mu here, so the provider must not re-enter the store.
+	if s.modelSnapshotFn != nil && sum.model != "" {
+		if label, id, ok := s.modelSnapshotFn(sum.model); ok {
+			sum.modelLabel = label
+			sum.modelID = id
+		}
 	}
 	// Capture the session's attached watcher configs once so every index write
 	// (first save, compaction rewrite, delta) carries the same set (issue #329).
@@ -441,15 +491,17 @@ func (s *SessionStore) writeFullTranscript(base, id, title, created string, sum 
 // the summary fields (issue #58) populated consistently across every write site.
 func indexFrom(id, title, created string, sum sessionSummary, watchers []config.WatcherConfig, sms []shardMeta) sessionIndex {
 	return sessionIndex{
-		SessionID: id,
-		Title:     title,
-		CreatedAt: created,
-		Turns:     sum.turns,
-		TokensIn:  sum.tokensIn,
-		TokensOut: sum.tokensOut,
-		Model:     sum.model,
-		Shards:    sms,
-		Watchers:  watchers,
+		SessionID:  id,
+		Title:      title,
+		CreatedAt:  created,
+		Turns:      sum.turns,
+		TokensIn:   sum.tokensIn,
+		TokensOut:  sum.tokensOut,
+		Model:      sum.model,
+		ModelLabel: sum.modelLabel,
+		ModelID:    sum.modelID,
+		Shards:     sms,
+		Watchers:   watchers,
 	}
 }
 
@@ -636,6 +688,8 @@ func (s *SessionStore) ListActive() ([]LoadedSession, error) {
 			Transcripts: transcripts,
 			AgentOrder:  order,
 			Model:       idx.Model,
+			ModelLabel:  idx.ModelLabel,
+			ModelID:     idx.ModelID,
 			Watchers:    idx.Watchers,
 		})
 	}
@@ -705,8 +759,13 @@ type SessionMeta struct {
 	Messages  int
 	TokensIn  int
 	TokensOut int
-	Model     string
-	File      string
+	Model     string // stable config Name (lookup key)
+	// ModelLabel/ModelID are the frozen display label + provider id snapshotted at
+	// save time (issue #389), shown by the Saved Sessions dialog. Empty for index
+	// files predating the fields — the dialog falls back to the bare Model key.
+	ModelLabel string
+	ModelID    string
+	File       string
 	// Archived is true when this session's on-disk base is "_session_archived"
 	// (its window was closed). Only ListAllSessions sets it; the active-only
 	// ListSessions always leaves it false. The browser uses it to mark closed
@@ -734,15 +793,17 @@ func (s *SessionStore) ListSessions() ([]SessionMeta, error) {
 			messages += sm.Events
 		}
 		out = append(out, SessionMeta{
-			ID:        idx.SessionID,
-			Title:     idx.Title,
-			CreatedAt: idx.CreatedAt,
-			Turns:     idx.Turns,
-			Messages:  messages,
-			TokensIn:  idx.TokensIn,
-			TokensOut: idx.TokensOut,
-			Model:     idx.Model,
-			File:      indexFilePath(base),
+			ID:         idx.SessionID,
+			Title:      idx.Title,
+			CreatedAt:  idx.CreatedAt,
+			Turns:      idx.Turns,
+			Messages:   messages,
+			TokensIn:   idx.TokensIn,
+			TokensOut:  idx.TokensOut,
+			Model:      idx.Model,
+			ModelLabel: idx.ModelLabel,
+			ModelID:    idx.ModelID,
+			File:       indexFilePath(base),
 		})
 	}
 	return out, nil
@@ -773,16 +834,18 @@ func (s *SessionStore) ListAllSessions() ([]SessionMeta, error) {
 			messages += sm.Events
 		}
 		out = append(out, SessionMeta{
-			ID:        idx.SessionID,
-			Title:     idx.Title,
-			CreatedAt: idx.CreatedAt,
-			Turns:     idx.Turns,
-			Messages:  messages,
-			TokensIn:  idx.TokensIn,
-			TokensOut: idx.TokensOut,
-			Model:     idx.Model,
-			File:      indexFilePath(base),
-			Archived:  strings.HasSuffix(base, archivedTag),
+			ID:         idx.SessionID,
+			Title:      idx.Title,
+			CreatedAt:  idx.CreatedAt,
+			Turns:      idx.Turns,
+			Messages:   messages,
+			TokensIn:   idx.TokensIn,
+			TokensOut:  idx.TokensOut,
+			Model:      idx.Model,
+			ModelLabel: idx.ModelLabel,
+			ModelID:    idx.ModelID,
+			File:       indexFilePath(base),
+			Archived:   strings.HasSuffix(base, archivedTag),
 		})
 	}
 	return out, nil
@@ -864,6 +927,8 @@ func (s *SessionStore) LoadSession(file string) (LoadedSession, error) {
 		Transcripts: transcripts,
 		AgentOrder:  order,
 		Model:       idx.Model,
+		ModelLabel:  idx.ModelLabel,
+		ModelID:     idx.ModelID,
 		Watchers:    idx.Watchers,
 	}, nil
 }
