@@ -126,7 +126,7 @@ File access is gated by `fileops.CheckFileAccess`: in-workspace uses `read`/`wri
 | Tool | Read-only | Permission gate | Description |
 | --- | --- | --- | --- |
 | `structured_output` | ❌ | none | Return the final response text + optional tool call + `final` flag |
-| `todo` | ❌ | none | Read/replace the session's task checklist; shown live in sidebar, kept in system prompt |
+| `todo` | ❌ | none | Read/replace the session's task checklist; shown live in sidebar, re-sent each turn as the trailing volatile message |
 | `skill` | ❌ | none | Load the full markdown instructions for a named skill; registered only when skills are loaded |
 
 `todo` is intentionally **not** read-only so concurrent calls stay serial, but it is retained in plan mode.

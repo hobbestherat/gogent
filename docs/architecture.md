@@ -84,7 +84,7 @@ Top-level non-internal packages:
 
 `runLoop` (`internal/agent/user_session.go`) is the shared multi-turn tool-calling loop for **both** the root task loop and sub-agents.
 
-**Per-loop setup.** Each loop scopes a cancellable `context.Context`, published onto `agent.cancel` so `StopAgent` or session-close aborts in-flight work. Before every round-trip the system prompt is rebuilt — `refreshSystemPrompt` appends `systemContext` (skills index, git status, todo checklist) so it reflects the latest state and survives compaction.
+**Per-loop setup.** Each loop scopes a cancellable `context.Context`, published onto `agent.cancel` so `StopAgent` or session-close aborts in-flight work. Before every round-trip `refreshSystemPrompt` re-evaluates `systemContext`, splitting it into a **stable** bucket (AGENTS.md instructions, repo map, skills index) installed on the system prompt and a **volatile** bucket (live git status + todo checklist) threaded through `SetVolatileContext` as a trailing per-request message after the transcript. Both reflect the latest state and survive compaction; the split keeps the volatile content out of the cacheable prefix so editing a file no longer invalidates the cached transcript (issue #404).
 
 **Loop body, in order:**
 
@@ -145,7 +145,7 @@ Structural limits compose multiplicatively (`MaxSubAgents^MaxDepth`), so `SubAge
 
 ## Todo tool
 
-`TodoItem{Content, Status (pending|in_progress|completed), Note}`. `SetTodos` replaces the list and emits `SessionEventTodo`. `RenderTodos` produces a compact markdown checklist that is injected into the **recurring** system prompt — it survives compaction because the system prompt is rebuilt every loop and is excluded from the compactable transcript.
+`TodoItem{Content, Status (pending|in_progress|completed), Note}`. `SetTodos` replaces the list and emits `SessionEventTodo`. `RenderTodos` produces a compact markdown checklist that is injected as the **recurring volatile per-request message** (the trailing message appended after the transcript, alongside the live git status) — it survives compaction because it is rebuilt every loop and is excluded from the compactable transcript. It is kept out of the cacheable system prompt so per-turn checklist updates do not invalidate the cached prefix (issue #404).
 
 ## Compaction
 

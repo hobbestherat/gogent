@@ -1145,13 +1145,15 @@ func (g *Gogent) initializeToolRegistry() {
 	// stored list back so the call's effect is unambiguous in the transcript. Read
 	// mode (todos omitted) returns the current list without mutating it, so the
 	// model can query live state before deciding its next step. The list is shown
-	// live in the sidebar and injected into the system prompt every turn (so it
-	// survives compaction). It is intentionally not read-only (write mode mutates
+	// live in the sidebar and re-injected into the model's context every turn — as
+	// the trailing volatile per-request message (issue #404), not the cacheable
+	// system prompt — so it survives compaction. It is intentionally not read-only
+	// (write mode mutates
 	// session state) so concurrent calls stay serial, but it is retained in plan
 	// mode as a way to lay out a plan's steps.
 	g.toolRegistry.Register(&tool.Tool{
 		Name:        "todo",
-		Description: "Record, update or read the session's task checklist. Pass `todos` (the full list) to replace the checklist; each item is {content, status?, note?} where status is pending, in_progress or completed (defaults to pending) and note is an optional finding/detail. Omit `todos` to read the current list back without changing it. Every call returns the stored list, its count and a summary. The list is shown live in the sidebar and stays in the system prompt; use it to lay out and track multi-step work.",
+		Description: "Record, update or read the session's task checklist. Pass `todos` (the full list) to replace the checklist; each item is {content, status?, note?} where status is pending, in_progress or completed (defaults to pending) and note is an optional finding/detail. Omit `todos` to read the current list back without changing it. Every call returns the stored list, its count and a summary. The list is shown live in the sidebar and is re-sent to you every turn (so it survives compaction); use it to lay out and track multi-step work.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
