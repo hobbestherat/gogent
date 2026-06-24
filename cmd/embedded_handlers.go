@@ -244,16 +244,18 @@ func embeddedHandlersFor(g *gogent.Gogent, wb *tuipkg.Workbench, noColor bool) t
 			out := make([]tuipkg.SessionMeta, 0, len(metas))
 			for _, m := range metas {
 				out = append(out, tuipkg.SessionMeta{
-					ID:        m.ID,
-					Title:     m.Title,
-					CreatedAt: m.CreatedAt,
-					Turns:     m.Turns,
-					Messages:  m.Messages,
-					TokensIn:  m.TokensIn,
-					TokensOut: m.TokensOut,
-					Model:     m.Model,
-					File:      m.File,
-					Archived:  m.Archived,
+					ID:         m.ID,
+					Title:      m.Title,
+					CreatedAt:  m.CreatedAt,
+					Turns:      m.Turns,
+					Messages:   m.Messages,
+					TokensIn:   m.TokensIn,
+					TokensOut:  m.TokensOut,
+					Model:      m.Model,
+					ModelLabel: m.ModelLabel,
+					ModelID:    m.ModelID,
+					File:       m.File,
+					Archived:   m.Archived,
 				})
 			}
 			return out
