@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -21,8 +22,10 @@ import (
 // survives the launching console closing, but it is an ordinary user process,
 // not a managed service. For survival across logout/reboot, run the daemon under
 // a service supervisor (NSSM, a Windows Service wrapper) or `gogent daemon start
-// --foreground` under Task Scheduler. Single-instance is enforced by the pidfile
-// plus a TCP /health liveness probe (there is no flock); the CLI subcommands
+// --foreground` under Task Scheduler. Single-instance is enforced by an
+// OS-exclusive handle on daemon.lock — the Windows analog of Unix flock, so a
+// second start is refused race-free even on a concurrent cold start; the TCP
+// /health probe is used only for status/liveness reporting. The CLI subcommands
 // (start/stop/status/restart) and pidfile/addr discovery behave the same as on
 // Unix.
 
@@ -133,25 +136,87 @@ func primaryAddr(p Paths) string {
 // On Windows this is a loopback TCP listener on an ephemeral port; the address is
 // "http://127.0.0.1:<port>" so a local client (and curl) can attach over HTTP.
 //
-// Single-instance is enforced here by the pidfile + a TCP /health liveness probe
-// rather than flock: if a daemon already answers, refuse with ErrAlreadyRunning;
-// otherwise reclaim any crash residue and bind. (This is a best-effort guard, not
-// the race-free kernel guarantee flock provides on Unix — see the file header.)
+// Single-instance is enforced by holding an OS-exclusive handle on daemon.lock
+// for the daemon's lifetime — the Windows analog of Unix flock. This is taken
+// BEFORE binding, so two concurrent cold starts cannot both proceed: exactly one
+// wins the exclusive handle and the loser gets ErrAlreadyRunning. The lock is
+// released (and the next start freed) when the returned listener is Closed.
 func ListenLocal(p Paths) (net.Listener, string, error) {
 	if err := p.ensureDir(); err != nil {
 		return nil, "", err
 	}
-	if Query(p).Running {
-		return nil, "", ErrAlreadyRunning
+
+	lock, err := acquireWindowsLock(p.Lock)
+	if err != nil {
+		return nil, "", err // ErrAlreadyRunning, or a wrapped open error
 	}
-	// No live daemon: clear any crash residue (dead pidfile/addr) before binding.
+
+	// We hold the exclusive lock: no other daemon is live, so any pidfile/addr
+	// here is stale crash residue, safe to reclaim before binding.
 	_ = cleanStale(p)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
+		_ = lock.Close()
 		return nil, "", fmt.Errorf("listen on loopback tcp: %w", err)
 	}
-	return ln, "http://" + ln.Addr().String(), nil
+	return &lockedListener{Listener: ln, lock: lock}, "http://" + ln.Addr().String(), nil
+}
+
+// lockedListener couples the loopback TCP listener with the single-instance lock
+// handle so the lock lives exactly as long as the listener: closing the listener
+// releases the lock, freeing the next start to bind.
+type lockedListener struct {
+	net.Listener
+	lock *os.File
+}
+
+// Close closes the underlying listener and releases the single-instance lock.
+func (l *lockedListener) Close() error {
+	err := l.Listener.Close()
+	if l.lock != nil {
+		_ = l.lock.Close()
+		l.lock = nil
+	}
+	if err != nil {
+		return fmt.Errorf("close listener: %w", err)
+	}
+	return nil
+}
+
+// errSharingViolation is ERROR_SHARING_VIOLATION (winerror.h): the error a
+// share-mode-0 CreateFile returns when another process already holds the file
+// open — i.e. another live daemon holds the single-instance lock.
+const errSharingViolation = syscall.Errno(32)
+
+// acquireWindowsLock opens (creating if needed) the lock file with a zero share
+// mode — exclusive access, the Windows analog of flock — and returns the holding
+// *os.File. The handle must be kept open for the lock to persist and Closed to
+// release it; the OS releases it automatically if the holder dies (even on a hard
+// kill), so it never goes stale. A live holder maps to ErrAlreadyRunning; a stale
+// lock file from a crashed daemon opens cleanly because the dead process's handle
+// was already released. Any other failure is wrapped.
+func acquireWindowsLock(path string) (*os.File, error) {
+	namep, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, fmt.Errorf("lock path %s: %w", path, err)
+	}
+	h, err := syscall.CreateFile(
+		namep,
+		syscall.GENERIC_READ|syscall.GENERIC_WRITE,
+		0, // zero share mode: exclusive
+		nil,
+		syscall.OPEN_ALWAYS,
+		syscall.FILE_ATTRIBUTE_NORMAL,
+		0,
+	)
+	if err != nil {
+		if errors.Is(err, errSharingViolation) {
+			return nil, ErrAlreadyRunning
+		}
+		return nil, fmt.Errorf("open lock file %s: %w", path, err)
+	}
+	return os.NewFile(uintptr(h), path), nil
 }
 
 // ProbeLocal reports whether a live daemon answers on the primary local transport,

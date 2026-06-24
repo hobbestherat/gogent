@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -57,10 +58,9 @@ func RemovePidfile(path string) error {
 // pid is never alive.
 
 // dirOf returns the directory component of a lifecycle-file path, used to derive
-// the daemon root so WritePidfile can create it on demand.
+// the daemon root so WritePidfile can create it on demand. It uses filepath.Dir
+// so it honours the platform separator (e.g. backslash paths on Windows) rather
+// than assuming "/"; on Unix the result is unchanged.
 func dirOf(path string) string {
-	if i := strings.LastIndexByte(path, '/'); i >= 0 {
-		return path[:i]
-	}
-	return "."
+	return filepath.Dir(path)
 }

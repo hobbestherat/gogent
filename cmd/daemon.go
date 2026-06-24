@@ -240,10 +240,11 @@ func runDaemonForeground(p daemon.Paths, opts daemonStartOpts) error {
 	// Bind the primary local transport and take the single-instance guard BEFORE
 	// building the core, so a losing concurrent start fails right here — without
 	// running buildDaemonCore/RestoreSessions or touching any session state before
-	// ownership is established (issue #358). The transport is OS-specific: a
-	// flock-guarded Unix socket on Unix, a loopback TCP listener on Windows;
-	// ListenLocal hands back the listener and the scheme-qualified discovery
-	// address to record ("unix://…" or "http://127.0.0.1:port").
+	// ownership is established (issue #358). The transport is OS-specific but the
+	// single-instance guard is race-free on both: a flock-guarded Unix socket on
+	// Unix, an exclusively-locked loopback TCP listener on Windows. ListenLocal
+	// hands back the listener and the scheme-qualified discovery address to record
+	// ("unix://…" or "http://127.0.0.1:port").
 	ln, baseAddr, err := daemon.ListenLocal(p)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)

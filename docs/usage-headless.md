@@ -336,9 +336,11 @@ Windows has no Unix-domain sockets and no `setsid`-style daemonization, so
 - **Detachment:** the daemon is spawned as a **background process** with the
   `DETACHED_PROCESS` + `CREATE_NEW_PROCESS_GROUP` creation flags, so it has no
   inherited console and survives the launching console window closing.
-- **Single-instance:** enforced by the pidfile **plus a TCP `/health` liveness
-  check** (there is no `flock`): a second `gogent daemon start` while one is
-  live is refused and reports the running instance.
+- **Single-instance:** enforced by an **OS-exclusive handle on `daemon.lock`**
+  (`CREATE_FILE` with a zero share mode — the Windows analog of `flock`), taken
+  before binding, so a second `gogent daemon start` is refused race-free and
+  reports the running instance. The TCP `/health` check is used for status
+  reporting and stale detection.
 - **Stop:** the graceful path is the daemon's own authorized **`/exit`** over
   TCP; `--force` falls back to `TerminateProcess` (no `SIGTERM`/`SIGKILL`).
 
