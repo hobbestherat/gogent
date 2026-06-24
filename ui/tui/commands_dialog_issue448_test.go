@@ -65,10 +65,10 @@ func TestCommandsDialogSpecShape(t *testing.T) {
 	// Structural sanity: floors below preferred below caps on each axis. If a floor
 	// ever rises above its preferred the dialog is pinned; if a cap drops below the
 	// floor the resolver's min-last ordering silently defeats the cap.
-	if !(spec.MinW <= spec.PreferredW && spec.PreferredW <= spec.MaxW) {
+	if spec.MinW > spec.PreferredW || spec.PreferredW > spec.MaxW {
 		t.Errorf("width ordering broken: Min %d / Pref %d / Max %d", spec.MinW, spec.PreferredW, spec.MaxW)
 	}
-	if !(spec.MinH <= spec.PrefH && spec.PrefH <= spec.MaxH) {
+	if spec.MinH > spec.PrefH || spec.PrefH > spec.MaxH {
 		t.Errorf("height ordering broken: Min %d / Pref %d / Max %d", spec.MinH, spec.PrefH, spec.MaxH)
 	}
 

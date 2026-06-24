@@ -509,3 +509,61 @@ func TestInlineDialogSpecFloors(t *testing.T) {
 		})
 	}
 }
+
+// TestCommandsDialogSpecSizing is the sizing assertion for the Custom Commands editor
+// (issue #448), mirroring the watchers/sessions/statistics sizing tests. showCommandsDialog
+// formerly sized with an inline tv.DialogSpec{MinW:84, MinH:26, PreferredW:96} — PreferredW
+// with no MaxW/MaxH/PrefH — so the width pinned at 96 and the height ballooned to ~85% of
+// the terminal (~42 rows on a 50-row screen). The dedicated commandsDialogSpec() is now
+// content-driven; this drives the REAL method through the shared resolver and pins the
+// resolved footprint across the terminals the acceptance criteria name, plus the
+// footer-min-width invariant (MinW is raised to the footer's measured width so the action
+// buttons never overlap). The deeper open-dialog / footer-render / geometry / resize checks
+// live in commands_dialog_issue448_test.go; this is the canonical sizing-spec guard.
+func TestCommandsDialogSpecSizing(t *testing.T) {
+	w := newTestWorkbench(t)
+	spec := w.commandsDialogSpec()
+
+	// Content footprint, not the old PreferredW-only inline spec.
+	if spec.PreferredW != 112 || spec.PrefH != 28 {
+		t.Errorf("preferred = %dx%d, want 112x28", spec.PreferredW, spec.PrefH)
+	}
+	// The footer never forces a clamp/overlap: MinW covers the action row's real width.
+	if need := footerRowMinWidth(commandsFooterLabels, tv.DefaultButtonGap); spec.MinW < need {
+		t.Errorf("MinW %d < footer need %d — footer buttons could overlap at the floor", spec.MinW, need)
+	}
+
+	for _, tc := range []struct {
+		name             string
+		screenW, screenH int
+		wantW, wantH     int
+	}{
+		// #448 acceptance: 200×50 → 112×28 (was the 96×42 balloon).
+		{"roomy terminal is content size not the balloon", 200, 50, 112, 28},
+		// #448 acceptance: 120×30 shrinks toward the 84×26 floor (height hits 26).
+		{"120x30 shrinks toward the floor", 120, 30, 96, 26},
+		// Width capped at the 80% default (96) below the 112 preferred; height keeps PrefH 28.
+		{"120x40 width capped at 80 percent", 120, 40, 96, 28},
+		// Ultrawide: PreferredW (112) is below the cap, so it does not sprawl.
+		{"ultrawide stays at content size", 300, 80, 112, 28},
+		// Tiny terminal: both floors win even past the screen edge.
+		{"tiny terminal floors both dimensions", 40, 16, 84, 26},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, gotW, gotH := tv.ResolveDialogRect(spec, tc.screenW, tc.screenH)
+			if gotW != tc.wantW || gotH != tc.wantH {
+				t.Errorf("size(%d,%d) = %dx%d, want %dx%d",
+					tc.screenW, tc.screenH, gotW, gotH, tc.wantW, tc.wantH)
+			}
+			if gotW < spec.MinW || gotH < spec.MinH {
+				t.Errorf("size %dx%d fell below the %dx%d floor", gotW, gotH, spec.MinW, spec.MinH)
+			}
+		})
+	}
+
+	// The crux of #448: on a roomy terminal it must NOT be the 160×42 percentage balloon.
+	_, _, bw, bh := tv.ResolveDialogRect(spec, 200, 50)
+	if bw >= 160 || bh >= 42 {
+		t.Errorf("200x50 resolved to %dx%d — the percentage balloon is back", bw, bh)
+	}
+}
