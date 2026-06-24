@@ -1602,8 +1602,43 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 		// explainable and a resumed session's next user turn is a valid request rather
 		// than a 400 on unanswered tool calls.
 		if !stoppedInLoop && maxSteps > 0 {
-			if calls, _ := s.collectToolCalls(resp); len(calls) > 0 {
+			// This is the first (and only) time the orphaned turn is run through
+			// collectToolCalls — the loop exited before its next iteration would have.
+			// So it both classifies the turn and performs the same content folding the
+			// loop body would have (embedded/salvaged finals, #390), with no
+			// double-processing.
+			calls, explicitFinal := s.collectToolCalls(resp)
+			switch {
+			case explicitFinal:
+				// The orphaned turn was itself a deliberate final — a text/embedded
+				// structured-output {final:true}, or a salvaged truncated one.
+				// collectToolCalls already folded its text into resp.Content; deliver it
+				// normally and balance any native tool_calls it left unanswered, exactly
+				// like the in-loop final path (#390). NOT a step-limit interruption: the
+				// model finished, it just landed on the cap boundary.
+				s.finalizeTranscriptToolCalls(sess, resp, nil)
+			case containsTerminalFinal(calls):
+				// The orphaned turn carried a completed NATIVE structured_output{final:true}
+				// (collectToolCalls returns it as an ordinary call, explicitFinal=false —
+				// it is only folded when the serial runner executes it). The model
+				// finished exactly at the cap boundary, so fold its answer and deliver it
+				// rather than clobbering it with the cap notice; balance the never-executed
+				// native calls. Without this a real final answer would be discarded and
+				// reported as abandoned work (issue #449, native-final edge case).
+				foldTerminalFinalResponse(resp, calls)
+				s.finalizeTranscriptToolCalls(sess, resp, nil)
+			case len(calls) > 0:
+				// Genuinely orphaned, non-final tool calls (the Session-5 repro): surface a
+				// visible STEP_LIMIT_REACHED notice in place of the orphaned content and
+				// balance the dangling tool_calls so a resumed session's next user turn is
+				// valid (issue #449).
 				resp = stopForStepLimit(resp, maxSteps)
+				// Persist the notice onto the terminal assistant message too (mirroring the
+				// truncation stop, issue #402 B5), so reopening the session shows the
+				// explanation rather than the orphaned partial content. Done before
+				// finalizeTranscriptToolCalls appends the synthetic tool results, though
+				// FoldLastAssistantContent scans back to the assistant turn regardless.
+				sess.FoldLastAssistantContent(resp.Content)
 				s.finalizeTranscriptToolCalls(sess, resp, nil)
 			}
 		}
@@ -1931,6 +1966,32 @@ func containsTerminalFinal(calls []tool.ToolCall) bool {
 		}
 	}
 	return false
+}
+
+// foldTerminalFinalResponse folds a terminal structured_output{final:true} call's
+// "response" text into resp.Content, mirroring runToolCallsSerial's terminal fold.
+// It backs the step-cap exit path (issue #449): when the orphaned (never-processed)
+// final round-trip turns out to be a completed final answer rather than abandoned
+// work, the real answer must be delivered — not overwritten by the STEP_LIMIT_REACHED
+// notice and reported as interrupted. An empty/absent "response" leaves resp.Content
+// untouched so the loop's lastAssistant fallback can still surface preceding text
+// (#171). The (never-executed) native tool_calls are balanced separately by the
+// caller via finalizeTranscriptToolCalls.
+func foldTerminalFinalResponse(resp *model.CompletionResponse, calls []tool.ToolCall) {
+	if resp == nil {
+		return
+	}
+	for _, c := range calls {
+		if c.Tool != "structured_output" {
+			continue
+		}
+		if final, _ := c.Args["final"].(bool); final {
+			if text, ok := c.Args["response"].(string); ok && text != "" {
+				resp.Content = text
+			}
+			return
+		}
+	}
 }
 
 // finalizeTranscriptToolCalls keeps the persisted transcript valid when the loop
@@ -2604,11 +2665,16 @@ func (s *UserSession) emitSubAgent(child *Agent, text string, err error) {
 
 // subAgentOutcome maps a sub-agent's final text to a terminal status. A reply
 // starting with FAILURE: is a failure, as is one stopped at its token budget
-// (BUDGET_EXCEEDED), since the task did not run to completion; anything else is
+// (BUDGET_EXCEEDED) or its per-turn step cap (STEP_LIMIT_REACHED): in both cases
+// the task was interrupted and did NOT run to completion, so a coordinator must not
+// receive the cap/budget notice as if it were a successful answer (issue #449 —
+// the sub-agent boundary counterpart of surfacing the stop). Anything else is
 // treated as completed.
 func subAgentOutcome(final string) AgentStatus {
 	up := strings.TrimSpace(strings.ToUpper(final))
-	if strings.HasPrefix(up, "FAILURE") || strings.HasPrefix(up, budgetExceededMarker) {
+	if strings.HasPrefix(up, "FAILURE") ||
+		strings.HasPrefix(up, budgetExceededMarker) ||
+		strings.HasPrefix(up, stepLimitReachedMarker) {
 		return StatusFailed
 	}
 	return StatusCompleted
