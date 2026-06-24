@@ -999,30 +999,35 @@ func (w *Workbench) RefreshTheme() {
 // is focused ('/' for find, a/t/r/e, f/u, y, Esc); the menu makes them discoverable.
 // editItems builds the &Edit submenu (issue #393): the clipboard operations
 // (Copy/Cut/Paste) and transcript search (Find), giving them a discoverable home
-// in the menu bar. Each item invokes the matching focused-widget path when
-// selected (by click or accelerator).
+// in the menu bar with accelerators (Ctrl+C/X/V/F) matching the real key
+// bindings. Each item invokes the matching focused-widget path when selected (by
+// click or accelerator) and is a graceful no-op when nothing is selectable.
 //
-// Only Paste and Find carry a menu accelerator; Copy and Cut deliberately do not.
-// A menu accelerator (MenuBar.HandleAccelerator) runs ahead of the desktop's
-// native key handling and always consumes the key once its item fires. That is
-// only safe when it matches the native behaviour:
-//
-//   - Ctrl+V / Ctrl+F: safe. The native paste path (isPasteKey) already consumes
-//     Ctrl+V unconditionally and routes through the same Paste(), and Find has no
-//     native key handler at all (it was the former View→Find accelerator), so the
-//     accelerator is the canonical binding.
-//   - Ctrl+C / Ctrl+X: NOT safe to bind here. The native copy/cut paths
-//     (isCopyKey → copyFocused, isCutKey → cutFocused) consume the key only when
-//     something was copyable/cuttable, and otherwise let it fall through — Ctrl+C
-//     to the SetUnhandledKeyFn quit tail (confirmQuit, see Run), Ctrl+X to the
-//     focused widget. An always-consuming menu accelerator would swallow those
-//     fall-throughs and break the "Ctrl+C/Ctrl+X behaviour unchanged" contract
-//     (notably quit-only-when-unconsumed). So Copy/Cut are wired for click/menu
-//     use only; their live Ctrl+C/Ctrl+X bindings stay on the native path.
+// A menu accelerator fires ahead of the desktop's native copy/cut/paste key
+// handling (MenuBar.HandleAccelerator runs before isCopyKey/isCutKey/isPasteKey)
+// and, for an *enabled* item, always consumes the key once its item fires; a
+// *disabled* item's accelerator does not fire and the key falls through to the
+// native path. Paste and Find are always enabled — Ctrl+V is consumed
+// unconditionally by the native paste path anyway, and Find has no native key
+// handler (it was the former View→Find accelerator). Copy and Cut, however, are
+// enabled only when a session window is active (something the focused
+// transcript/composer can copy or cut). With no session there is nothing to
+// copy, so they are disabled and Ctrl+C/Ctrl+X fall through to the native path —
+// which copies/cuts when possible and otherwise lets Ctrl+C reach the
+// quit-confirm tail (see Run) and Ctrl+X reach the focused widget. This keeps the
+// "Ctrl+C/Ctrl+X behaviour unchanged" contract: an always-enabled Copy/Cut would
+// swallow that fall-through.
 func (w *Workbench) editItems() []*tv.MenuItem {
+	hasSession := w.ActiveID() != ""
+	copyItem := tv.NewMenuItem("&Copy", func() { w.copySelection() }).
+		WithShortcut("Ctrl+C", tui.KeyRune, 'c', true)
+	cutItem := tv.NewMenuItem("Cu&t", func() { w.cutSelection() }).
+		WithShortcut("Ctrl+X", tui.KeyRune, 'x', true)
+	copyItem.Enabled = hasSession
+	cutItem.Enabled = hasSession
 	return []*tv.MenuItem{
-		tv.NewMenuItem("&Copy", func() { w.copySelection() }),
-		tv.NewMenuItem("Cu&t", func() { w.cutSelection() }),
+		copyItem,
+		cutItem,
 		tv.NewMenuItem("&Paste", func() { w.pasteClipboard() }).
 			WithShortcut("Ctrl+V", tui.KeyRune, 'v', true),
 		tv.NewMenuItem("----------", nil),
@@ -1032,12 +1037,13 @@ func (w *Workbench) editItems() []*tv.MenuItem {
 }
 
 // copySelection copies the focused widget's selection (or all of its content when
-// nothing is selected) to the clipboard, mirroring the Ctrl+C path. It is a
-// graceful no-op when nothing is focused or selectable.
+// nothing is selected) to the clipboard, mirroring the native Ctrl+C copy path.
+// It is a graceful no-op when nothing is focused or selectable.
 func (w *Workbench) copySelection() { w.desktop.CopyFocused() }
 
 // cutSelection cuts the focused widget's selection to the clipboard, mirroring
-// the Ctrl+X path. It is a graceful no-op when nothing is focused or selectable.
+// the native Ctrl+X path. It is a graceful no-op when nothing is focused or
+// selectable.
 func (w *Workbench) cutSelection() { w.desktop.CutFocused() }
 
 // pasteClipboard pastes the clipboard into the focused editable widget, mirroring
