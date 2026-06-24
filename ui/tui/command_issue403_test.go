@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	tui "github.com/hobbestherat/turbotui"
 )
 
 type commandSendIssue403 struct {
@@ -148,5 +150,75 @@ func TestIssue403HandleSlashCommandCustomDoesNotShadowReservedBuiltins(t *testin
 				t.Fatalf("%s should be rejected as reserved before querying custom commands", slash)
 			}
 		})
+	}
+}
+
+func TestIssue403QueuedCustomCommandPreservesExpandedTextAndModelOverride(t *testing.T) {
+	w := newTestWorkbench(t)
+	sw := w.openWindow("sess-403", "S")
+	sent := recordCommandSendsIssue403(w)
+	w.handlers.GetCustomCommand = func(name string) (CommandDef, error) {
+		if name != "review" {
+			return CommandDef{}, errors.New("not found")
+		}
+		return CommandDef{
+			Name:       name,
+			Template:   "Review $target",
+			Parameters: []CommandParam{{Name: "target", Required: true}},
+			Model:      "model-command",
+		}, nil
+	}
+
+	sw.busy = true
+	if !sw.handleSlashCommand("/review file.go") {
+		t.Fatal("custom slash command should be handled while busy")
+	}
+	assertNoCommandSendIssue403(t, sent)
+	if sw.pending != "Review file.go" {
+		t.Fatalf("queued text = %q, want expanded prompt", sw.pending)
+	}
+	if sw.pendingCmd == nil || sw.pendingCmd.model != "model-command" {
+		t.Fatalf("queued command override = %#v, want model-command", sw.pendingCmd)
+	}
+
+	sw.busy = false
+	sw.drainQueue()
+	got := waitCommandSendIssue403(t, sent)
+	if got.message != "Review file.go" || got.model != "model-command" {
+		t.Fatalf("drained send = %#v, want expanded prompt with command model", got)
+	}
+}
+
+func TestIssue403SlashCompleterListsAndAcceptsCustomCommands(t *testing.T) {
+	w := newTestWorkbench(t)
+	sw := w.openWindow("sess-403", "S")
+	layout(sw, 80, 24, 3)
+	w.handlers.ListCommands = func() []CommandInfo {
+		return []CommandInfo{
+			{Name: "review-change", Description: "Review changes"},
+			{Name: "test-suite", Description: "Run focused tests"},
+		}
+	}
+
+	sw.input.SetText("/rev")
+	sw.completer.update()
+	if !sw.completer.active() {
+		t.Fatal("slash completer should open for /rev")
+	}
+	if sw.completer.list == nil || sw.completer.list.Selected() == nil {
+		t.Fatal("slash completer has no selected row")
+	}
+	if got := sw.completer.list.Selected().Label; !strings.Contains(got, "/review-change") || !strings.Contains(got, "Review changes") {
+		t.Fatalf("selected slash completion label = %q, want command name and description", got)
+	}
+	typeKey(sw, tui.KeyEnter)
+	if got := sw.input.GetText(); got != "/review-change " {
+		t.Fatalf("accepted slash completion inserted %q, want /review-change with trailing space", got)
+	}
+
+	sw.input.SetText("/review-change target")
+	sw.completer.update()
+	if sw.completer.active() {
+		t.Fatal("slash completer should not stay open while cursor is in command arguments")
 	}
 }
