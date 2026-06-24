@@ -665,6 +665,13 @@ func (anthropicAdapter) parseStream(body io.Reader, streamCh chan<- StreamRespon
 		}
 	}
 
+	// A turn cut off by max_tokens (stop_reason "max_tokens" → "length") may have
+	// left a tool_use block's input_json_delta fragments incomplete; flag any call
+	// whose assembled args no longer parse so the agent layer can salvage or
+	// complete it deterministically (issue #390). The empty→"{}" default below is
+	// applied first, so a call that streamed no input is treated as complete, not
+	// truncated.
+	truncatedTurn := finishReason != nil && *finishReason == "length"
 	var toolCalls []ToolCall
 	for _, idx := range order {
 		acc := toolsByBlock[idx]
@@ -673,9 +680,10 @@ func (anthropicAdapter) parseStream(body io.Reader, streamCh chan<- StreamRespon
 			args = "{}"
 		}
 		toolCalls = append(toolCalls, ToolCall{
-			ID:       acc.id,
-			Type:     "function",
-			Function: FunctionCall{Name: acc.name, Arguments: args},
+			ID:        acc.id,
+			Type:      "function",
+			Function:  FunctionCall{Name: acc.name, Arguments: args},
+			Truncated: truncatedTurn && argsTruncated(args),
 		})
 	}
 
