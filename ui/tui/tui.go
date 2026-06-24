@@ -890,7 +890,14 @@ func (w *Workbench) rebuildMenu() {
 // closure. The menu bar no longer registers accelerators from its tree (since #401 it
 // is a view); the binding itself lives on the desktop registry via rebuildBindings.
 func (w *Workbench) menuActionItem(label string, id tv.ActionID) *tv.MenuItem {
-	a, _ := w.actionByID(id)
+	a, ok := w.actionByID(id)
+	if !ok {
+		// The id is not in the catalog — a catalog/menu drift. Build a plain, inert item
+		// (no run, no shortcut hint) so the drift is visible rather than masquerading as a
+		// working item with a bogus zero-chord shortcut. Every id rebuildMenu passes is a
+		// compile-time catalog constant, so this is defensive only.
+		return tv.NewMenuItem(label, nil)
+	}
 	it := tv.NewMenuItem(label, a.run).WithActionID(id)
 	c := w.chordFor(id)
 	if c == unboundChord {
@@ -909,8 +916,16 @@ func (w *Workbench) menuActionItem(label string, id tv.ActionID) *tv.MenuItem {
 // showSettingsDialog); the menu also surfaces a quick read-only summary of the
 // current configuration so the active mode is visible at a glance.
 func (w *Workbench) settingsItems() []*tv.MenuItem {
+	// Sub-agents is always present and tagged with its ActionID (issue #401): Ctrl+, is a
+	// rebindable Global whose binding lives on the desktop registry, and showSettingsDialog
+	// guards an unwired handler with a graceful "unavailable" message, so the menu entry
+	// stays in step with the binding. The editors and summary lines that actually read the
+	// settings accessors are gated below.
 	if w.handlers.GetSettings == nil || w.handlers.SetSettings == nil {
-		return []*tv.MenuItem{tv.NewMenuItem("(settings unavailable)", nil)}
+		// Keep the (tagged) Sub-agents entry and the keybinding customizer — gated only on
+		// its own handlers — but skip the entries that need the settings accessors.
+		return append([]*tv.MenuItem{w.menuActionItem("&Sub-agents…", actionConfigSubagents)},
+			w.keybindingsMenuItems()...)
 	}
 	cur := w.handlers.GetSettings()
 	mode := "one-shot"
@@ -960,16 +975,24 @@ func (w *Workbench) settingsItems() []*tv.MenuItem {
 			tv.NewMenuItem("T&heme…", func() { w.showThemeEditor() }),
 		)
 	}
-	// Keybinding customizer (issue #401): make the editor discoverable from the menu,
-	// not only the command palette. Gated on the keybinding handlers exactly like Theme
-	// is gated on its accessors, so it appears only when rebinds can be persisted.
-	if w.handlers.GetKeybindings != nil && w.handlers.SetKeybindings != nil {
-		items = append(items,
-			tv.NewMenuItem("----------", nil),
-			tv.NewMenuItem("&Keybindings…", func() { w.showKeybindingCustomizer() }),
-		)
-	}
+	items = append(items, w.keybindingsMenuItems()...)
 	return items
+}
+
+// keybindingsMenuItems returns the Config-menu entry for the keybinding customizer
+// (issue #401), or nil when the keybinding handlers are unwired. It is gated solely on
+// GetKeybindings/SetKeybindings — mirroring how Theme is gated on its own accessors —
+// so the customizer is reachable whenever rebinds can be persisted, independent of the
+// sub-agent settings handlers. A separator precedes it. Shared by both the normal and
+// the settings-unavailable paths of settingsItems so the entry can't drift.
+func (w *Workbench) keybindingsMenuItems() []*tv.MenuItem {
+	if w.handlers.GetKeybindings == nil || w.handlers.SetKeybindings == nil {
+		return nil
+	}
+	return []*tv.MenuItem{
+		tv.NewMenuItem("----------", nil),
+		tv.NewMenuItem("&Keybindings…", func() { w.showKeybindingCustomizer() }),
+	}
 }
 
 // RefreshTheme re-applies the active palette to the whole live UI after a theme

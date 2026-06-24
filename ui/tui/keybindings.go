@@ -21,7 +21,7 @@ import (
 // from chordFor (so an override applies at registration), and the customizer lists,
 // rebinds and resets these — so a default can never drift between registration and reset.
 func (w *Workbench) rebindable() []action {
-	all := w.actions()
+	all := w.rawActions()
 	out := make([]action, 0, len(all))
 	for _, a := range all {
 		if a.actionID != "" {
@@ -31,9 +31,11 @@ func (w *Workbench) rebindable() []action {
 	return out
 }
 
-// actionByID looks the catalog entry for id up; ok is false for an unknown action.
+// actionByID looks the catalog entry for id up; ok is false for an unknown action. It
+// scans rawActions() (not actions()) so the chordFor -> keybindDefault -> actionByID
+// chain does not recurse through the display-key projection.
 func (w *Workbench) actionByID(id tv.ActionID) (action, bool) {
-	for _, a := range w.actions() {
+	for _, a := range w.rawActions() {
 		if a.actionID == id {
 			return a, true
 		}
@@ -217,13 +219,15 @@ func (w *Workbench) rebuildBindings() {
 		return
 	}
 	reg.Clear()
-	for _, a := range w.actions() {
+	for _, a := range w.rawActions() {
 		if a.actionID == "" || a.scope == tv.ScopeFocus {
 			continue // unbindable, or a per-window Focus binding registered below
 		}
-		if a.enabled != nil && !a.enabled() {
-			continue // handler not wired / not currently available
-		}
+		// Every rebindable Global/Fallthrough action registers regardless of its enabled
+		// predicate (issue #401): enabled gates palette/cheatsheet display, not the live
+		// binding, so a global keeps a stable, rebindable chord. The action's own run
+		// guards an unwired handler (e.g. showSettingsDialog shows "unavailable"), so
+		// firing it is always safe.
 		chord := w.chordFor(a.actionID)
 		if chord == unboundChord {
 			continue // the user cleared this binding (issue #269)

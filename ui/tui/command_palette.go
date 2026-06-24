@@ -90,12 +90,16 @@ func (c action) available() bool {
 	return c.run != nil && c.visible()
 }
 
-// actions returns the unified command/keybinding catalog (issue #401). It is rebuilt
-// on each call so the availability predicates reflect the live handler wiring and
-// active session. Entries are listed grouped by category (Session, Window, Transcript,
-// Config, App); the palette, the help overlay and the customizer all rely on that
-// grouping. The four consumers project from this one table — see the action doc.
-func (w *Workbench) actions() []action {
+// rawActions returns the unified command/keybinding catalog (issue #401) WITHOUT the
+// display-key projection. It is the lookup catalog: actionByID / keybindDefault /
+// rebindable / rebuildBindings scan it, and crucially it does NOT call chordFor — so
+// the chordFor -> keybindDefault -> actionByID lookup chain terminates here instead of
+// recursing back through the projection. It is rebuilt on each call so the availability
+// predicates reflect the live handler wiring and active session. Entries are grouped by
+// category (Session, Window, Transcript, Config, App); the palette, the help overlay and
+// the customizer all rely on that grouping. Display consumers call actions() (which adds
+// the key hints); everything that only needs identity/scope/default uses rawActions().
+func (w *Workbench) rawActions() []action {
 	avail := func(ok bool) func() bool { return func() bool { return ok } }
 	h := w.handlers
 	toggle := func(k eventKind) func() {
@@ -230,12 +234,19 @@ func (w *Workbench) actions() []action {
 		{category: "App", name: "Quit", run: w.confirmQuit,
 			actionID: actionAppQuit, scope: tv.ScopeGlobal, deflt: tv.Chord{Rune: 'q', Ctrl: true}},
 	}
-	// Derive the key hint from chordFor for every entry that names an action (issue
-	// #401): the override-or-default chord is the single source of truth, so the palette
-	// and cheatsheet can never drift from what the key actually does, and a rebind shows
-	// through without touching the registry. chordLabel renders a cleared (unbound)
-	// action as "—". Entries without an actionID (slash commands, palette-only) keep
-	// their literal table keys.
+	return cmds
+}
+
+// actions returns the catalog with each rebindable entry's display key hint projected
+// from its current binding (issue #401): the override-or-default chord is the single
+// source of truth, so the palette and cheatsheet can never drift from what the key
+// actually does, and a rebind shows through without touching the registry. chordLabel
+// renders a cleared (unbound) action as "—"; entries without an actionID (slash commands,
+// palette-only) keep their literal table keys. This is the DISPLAY catalog — the palette
+// and help overlay use it; identity/default lookups use rawActions() to avoid recursing
+// through chordFor.
+func (w *Workbench) actions() []action {
+	cmds := w.rawActions()
 	for i := range cmds {
 		if cmds[i].actionID == "" {
 			continue
