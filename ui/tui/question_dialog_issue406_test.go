@@ -167,6 +167,84 @@ func TestIssue406QuestionDialogRendersTextPlaceholders(t *testing.T) {
 	}
 }
 
+func TestIssue406QuestionDialogEnterAdvancesSingleLineTextFocus(t *testing.T) {
+	app := tui.NewWithSize(90, 26, &bytes.Buffer{})
+	desktop := tv.NewDesktop(app)
+	result := make(chan agent.QuestionResponse, 1)
+	req := agent.QuestionRequest{
+		Title: "Enter focus",
+		Topics: []agent.QuestionTopic{{
+			Title: "Details",
+			Items: []agent.QuestionItem{
+				{ID: "first", Label: "First", Type: agent.QuestionText},
+				{ID: "second", Label: "Second", Type: agent.QuestionText},
+			},
+		}},
+	}
+
+	showQuestionDialog(desktop, req, func(resp agent.QuestionResponse) {
+		result <- resp
+	})
+	issue406TypeString(t, app, "Ada")
+	issue406Dispatch(t, app, tui.TypeEvent{Key: tui.KeyEnter})
+	issue406TypeString(t, app, "Lovelace")
+	issue406SubmitViaDialogRoot(t, desktop)
+
+	select {
+	case got := <-result:
+		if got.Answers["first"] != "Ada" || got.Answers["second"] != "Lovelace" {
+			t.Fatalf("answers after Enter focus advance = %#v, want first=Ada second=Lovelace", got.Answers)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for submit result")
+	}
+}
+
+func TestIssue406WorkbenchAskQuestionsBlocksAndResolvesThroughDialog(t *testing.T) {
+	w := newTestWorkbench(t)
+	w.openWindow("s", "Session")
+	req := agent.QuestionRequest{
+		SessionID: "s",
+		Title:     "Bridge",
+		Topics: []agent.QuestionTopic{{
+			Title: "Details",
+			Items: []agent.QuestionItem{{ID: "goal", Label: "Goal", Type: agent.QuestionText, Required: true}},
+		}},
+	}
+	done := make(chan agent.QuestionResponse, 1)
+
+	go func() {
+		resp, err := w.AskQuestions(req)
+		if err != nil {
+			t.Errorf("AskQuestions returned unexpected error: %v", err)
+		}
+		done <- resp
+	}()
+
+	drainPostedEventually(t, w)
+	drainPosted(t, w)
+	if top := w.desktop.TopLayer(); top == nil || top.Name != "question-dialog" {
+		t.Fatalf("AskQuestions did not present question dialog; top=%v", top)
+	}
+	select {
+	case got := <-done:
+		t.Fatalf("AskQuestions returned before dialog resolution: %+v", got)
+	default:
+	}
+
+	issue406TypeString(t, w.app, "ship it")
+	issue406SubmitViaDialogRoot(t, w.desktop)
+
+	select {
+	case got := <-done:
+		if got.Cancelled || got.Answers["goal"] != "ship it" {
+			t.Fatalf("AskQuestions response = %+v, want goal answer", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for AskQuestions to resolve")
+	}
+}
+
 func issue406Dispatch(t *testing.T, app *tui.App, ev tui.TypeEvent) {
 	t.Helper()
 	handlers := append([]func(tui.TypeEvent){}, *exportedField[[]func(tui.TypeEvent)](t, app, "typeHandlers")...)
