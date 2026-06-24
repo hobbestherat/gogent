@@ -1338,6 +1338,14 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 		// dropping the work done so far (issue #28).
 		if agent.BudgetExceeded() {
 			resp = stopForBudget(agent, resp)
+			// The budget check runs before this turn's calls are collected/executed, so
+			// the just-advanced resp may carry native tool_calls that sendCtx already
+			// persisted but the loop never ran. Balance them — the same orphaning the
+			// step-cap exit fixes (issue #449), one break away — so the BUDGET_EXCEEDED
+			// stop leaves the transcript valid for resume rather than dangling an
+			// unanswered tool_call_id that 400s the next user turn. A budget stop on a
+			// tool-free turn has no native calls, so this is a no-op there.
+			s.finalizeTranscriptToolCalls(sess, resp, nil)
 			stoppedInLoop = true
 			break
 		}
