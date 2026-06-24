@@ -127,6 +127,25 @@ func TestIssue393EditMenuAcceleratorsAreRegisteredByRebuildMenu(t *testing.T) {
 	}
 }
 
+func TestIssue393CopyCutAcceleratorsDoNotSwallowUnconsumedCtrlCOrCtrlX(t *testing.T) {
+	w := newTestWorkbench(t)
+	w.rebuildMenu()
+	w.desktop.SetFocus(nil)
+
+	bar := issue393MenuBar(t, w)
+	for _, tt := range []struct {
+		name string
+		ev   tui.TypeEvent
+	}{
+		{"Copy", tui.TypeEvent{Key: tui.KeyRune, Rune: 'c', Ctrl: true}},
+		{"Cut", tui.TypeEvent{Key: tui.KeyRune, Rune: 'x', Ctrl: true}},
+	} {
+		if bar.HandleAccelerator(tt.ev) {
+			t.Fatalf("%s accelerator was consumed with no focus; Ctrl+C/Ctrl+X must fall through when copy/cut do not handle", tt.name)
+		}
+	}
+}
+
 func TestIssue393EditClipboardItemsInvokeFocusedDesktopPaths(t *testing.T) {
 	w := newTestWorkbench(t)
 	field := tv.NewComponent(tv.Rect{X: 0, Y: 0, W: 10, H: 1})
