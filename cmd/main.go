@@ -198,6 +198,9 @@ func main() {
 		g.GetPermissionService().SetPrompter(wb)
 		// Route diff-review approvals (issue #64) to the workbench modal too.
 		g.SetReviewer(wb)
+		// Route the model-facing ask_user tool (issue #406) to the workbench's
+		// tabbed question dialog.
+		g.SetQuestionAsker(wb)
 
 		// embeddedHandlers rebuilds the in-process Handlers for a core g via the
 		// package-level embeddedHandlersFor, so the daemon->embedded handoff can
