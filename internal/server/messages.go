@@ -60,17 +60,11 @@ func (svc messagesSvc) Stream(r *http.Request, req sendMessageRequest, id string
 
 	// Subscribe before kicking off the turn so no early events are missed.
 	sub, unsub := svc.s.hub.subscribeSession(id)
-	defer unsub()
 	_ = us // session existence already checked above
 
-	if req.Mode == "plan" {
+	planMode := req.Mode == "plan"
+	if planMode {
 		svc.s.g.SetPlanMode(id, true)
-		defer func() {
-			svc.s.g.SetPlanMode(id, false)
-			release()
-		}()
-	} else {
-		defer release()
 	}
 
 	modelName := req.Model
@@ -79,6 +73,24 @@ func (svc messagesSvc) Stream(r *http.Request, req sendMessageRequest, id string
 
 	return &webapi.EventStreamResponse{
 		Producer: func(stream webapi.EventStream) error {
+			// The busy claim, plan-mode restore and unsubscribe MUST be tied to the
+			// producer's lifetime, not the handler method's: webapi invokes Producer from
+			// processResults AFTER the handler returns (handlerValue.Call has already run
+			// the handler's defers by then). A handler-level `defer release()` would drop
+			// the concurrency claim before the streamed model loop even starts, so a
+			// second turn would wrongly get 200 mid-stream instead of 409 (issue #353,
+			// busy gate). Releasing here holds it for the whole streamed turn — and
+			// unsubscribing here, rather than at handler return, keeps the subscription
+			// live so the turn's events actually reach the stream. A returned
+			// EventStreamResponse always has its Producer invoked by writeEventStream (the
+			// only skip is a non-flushable writer, which 500s SSE entirely), so the claim
+			// cannot leak in any functioning stream.
+			defer release()
+			defer unsub()
+			if planMode {
+				defer svc.s.g.SetPlanMode(id, false)
+			}
+
 			// Run the model loop off the SSE goroutine so the stream context
 			// (cancelled on client disconnect) aborts in-flight model work.
 			done := make(chan struct{})

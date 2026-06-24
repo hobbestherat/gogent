@@ -64,6 +64,14 @@ const (
 	// mirror) and config/CLI-activated yolo is announced too. A UI sets a
 	// display-only field from it and refreshes the status line.
 	SessionEventYolo SessionEventType = "yolo"
+	// SessionEventBackground announces whether the session currently has async
+	// (fire-and-forget) sub-agents running in the background (issue #353). Background
+	// holds the current value. The backend emits it on the 0→1 and 1→0 edges of the
+	// background-worker count, so a UI can show a third "working in background" state
+	// (distinct from idle) while the main loop is done but spawned workers run on.
+	// It is backend-owned, like SessionEventYolo: a UI sets a display-only field from
+	// it rather than inferring background-ness from the sub-agent tree.
+	SessionEventBackground SessionEventType = "background"
 )
 
 // SessionStats is a point-in-time, mutex-free snapshot of a session's per-session
@@ -124,6 +132,9 @@ type SessionEvent struct {
 	Plan string
 	// Yolo carries the effective yolo state on SessionEventYolo (issue #356).
 	Yolo bool
+	// Background carries whether any async sub-agent is running, on
+	// SessionEventBackground (issue #353).
+	Background bool
 }
 
 // SessionObserver receives SessionEvents as a task loop progresses. It is always
@@ -176,7 +187,19 @@ type UserSession struct {
 
 	// Interactive (experimental) sub-agent bookkeeping.
 	interactive map[string]*InteractiveAgent
-	agentEvents chan AgentEvent
+	// background tracks async (fire-and-forget, one-shot) sub-agents launched by
+	// spawn_subagent{async:true} (issue #353). An entry exists only while its worker
+	// goroutine runs; runBackground removes it on exit. len(background) > 0 is what
+	// HasBackgroundWork reports, driving the "working in background" session state.
+	// Guarded by mu.
+	background map[string]*BackgroundAgent
+	// backgroundResults holds completed async sub-agent results awaiting re-injection
+	// into the root loop's transcript (issue #353). Appended (FIFO, completion order)
+	// by the worker goroutine and drained by the root runLoop at a turn boundary, so
+	// the loop — the sole owner of the transcript — never races the workers on it.
+	// Guarded by mu.
+	backgroundResults []string
+	agentEvents       chan AgentEvent
 	// pendingTerminal holds terminal (completed/failed) events that did not fit
 	// in agentEvents when it was full. Terminal events must never be dropped, or
 	// a coordinator's wait_agent_event blocks forever on an event that was
@@ -276,6 +299,7 @@ func NewUserSession(id string, agent *Agent) *UserSession {
 		subAgentCfg:    config.DefaultSubAgentConfig(),
 		maxSteps:       config.DefaultMaxSteps,
 		interactive:    make(map[string]*InteractiveAgent),
+		background:     make(map[string]*BackgroundAgent),
 		agentEvents:    make(chan AgentEvent, 64),
 		currentTask:    nil,
 		tokenCountIn:   0,
@@ -1035,11 +1059,18 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 
 	emit(SessionEvent{Type: SessionEventThinking, Step: 0})
 
-	// First request carries the user message.
+	// First request carries the user message. The root loop also splices in any
+	// async sub-agent results that completed while the session was idle, so a
+	// background completion lands on the very next user turn rather than waiting for
+	// this turn's first tool round (issue #353).
+	firstMessages := []model.Message{{Role: model.RoleUser, Content: initialMessage}}
+	if agent.Kind == KindRoot {
+		firstMessages = append(firstMessages, s.takeBackgroundResults()...)
+	}
 	s.compactIfNeeded(sess, emit)
 	refreshSystemPrompt()
 	resp, err := s.modelRoundTrip(ctx, sess, agent,
-		[]model.Message{{Role: model.RoleUser, Content: initialMessage}},
+		firstMessages,
 		tools,
 		reasoningSink(0),
 	)
@@ -1222,6 +1253,14 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 				// at Interject-press; re-emitting it here would duplicate it as a model
 				// thought (issue #242).
 			}
+		}
+		// Re-inject any async sub-agent results that completed since the last round at
+		// this same safe turn boundary (issue #353). The worker only queued the text;
+		// the loop — the sole owner of the transcript — appends it here, so the splice
+		// never races the worker goroutines. Ordered after any user note so a fresh
+		// clarification still leads.
+		if agent.Kind == KindRoot {
+			nextMessages = append(nextMessages, s.takeBackgroundResults()...)
 		}
 
 		if err := advance(nextMessages, step+1); err != nil {
@@ -1661,7 +1700,12 @@ three modules in parallel instead of reading them one after another, in ONE call
   ]}}
 Each sub-agent runs to completion and returns a result starting with "SUCCESS: "
 or "FAILURE: ". Use a single "name"/"task" pair only for a lone subtask; always
-batch two or more independent subtasks into the one call's "subtasks" array.`
+batch two or more independent subtasks into the one call's "subtasks" array.
+Add "async": true to the call when you would rather keep working than wait: it
+returns a pending handle per subtask immediately (no blocking) and re-injects each
+result into the conversation when that sub-agent finishes. Use it to start
+background work and carry on; omit it (the default) when you need every result in
+hand before continuing.`
 
 // coordinatorInstructionsInteractive describes asynchronous fire-and-forget
 // delegation with a concrete launch → continue → wait_agent_event → react recipe.
@@ -1714,6 +1758,11 @@ latency by running work concurrently. Choose the style by what you will do next:
     ]}}
   Always batch the independent parts into ONE call (never one spawn per part across
   turns). Each child returns "SUCCESS: " or "FAILURE: ".
+  Add "async": true to that SAME call when you can keep working instead of waiting:
+  it returns a pending handle per subtask IMMEDIATELY (it does NOT block), and each
+  result is re-injected into the conversation when that sub-agent finishes. Reach for
+  it to start background work (research, a long check) and carry on with your main
+  task — the result comes back on its own, with no polling or waiting needed.
 - FIRE-AND-FORGET (launch_agent family): use when you want to kick work off and KEEP
   WORKING — e.g. background research while you refactor. Recipe:
     1. launch_agent {name, task} -> returns an agent_id IMMEDIATELY; you are NOT blocked.
@@ -2079,6 +2128,217 @@ func (s *UserSession) SpawnSubAgent(ctx context.Context, parentAgentID, name, ta
 	return final, nil
 }
 
+// --- Asynchronous (fire-and-forget, one-shot) sub-agents -----------------------
+//
+// These back spawn_subagent{async:true} (issue #353). They reuse the interactive
+// engine's primitives — a background goroutine, a session-scoped context, the
+// shared SubAgentLimiter (acquire-or-reject), and the agent tree — but run the
+// child as a plain ONE-SHOT loop (no CLARIFY, no inbox): the tool returns a
+// pending handle immediately and the result is re-injected into the root loop's
+// transcript when the worker finishes, instead of the coordinator manually driving
+// launch_agent → wait_agent_event.
+
+// BackgroundAgent tracks one asynchronous one-shot sub-agent. It is the one-shot
+// analogue of InteractiveAgent: no inbox, since a background worker never pauses
+// for a CLARIFY — it runs to completion and its result is re-injected.
+type BackgroundAgent struct {
+	ID      string
+	Name    string
+	agent   *Agent
+	done    chan struct{}    // closed to request termination
+	once    sync.Once        // guards a single close(done)
+	limiter *SubAgentLimiter // the concurrency slot acquired at launch, released once when the worker exits
+}
+
+// LaunchBackgroundSubAgent starts an asynchronous one-shot sub-agent and returns
+// its agent_id immediately. The worker runs concurrently on its own goroutine; its
+// result is re-injected into the root loop's transcript when it completes (see
+// runBackground / takeBackgroundResults), so the coordinator keeps working instead
+// of blocking on the child.
+//
+// Like LaunchInteractiveAgent it counts against the shared SubAgentLimiter and must
+// stay non-blocking, so the slot is acquired-or-the-launch-is-rejected (rather than
+// running inline): the coordinator can retry once a slot frees. The slot is released
+// in runBackground when the worker exits, on every terminal path.
+func (s *UserSession) LaunchBackgroundSubAgent(parentAgentID, name, task string) (string, error) {
+	s.mu.RLock()
+	limiter := s.subAgentLimiter
+	s.mu.RUnlock()
+	if !limiter.tryAcquire() {
+		return "", fmt.Errorf("sub-agent concurrency limit reached: wait for a running sub-agent to finish before spawning another")
+	}
+
+	child, err := s.newSubAgent(parentAgentID, name, task, KindTool)
+	if err != nil {
+		limiter.release() // never started the worker; give the slot back
+		return "", err
+	}
+
+	ba := &BackgroundAgent{
+		ID:      child.ID,
+		Name:    child.DisplayName(),
+		agent:   child,
+		done:    make(chan struct{}),
+		limiter: limiter, // release exactly this acquired slot when the worker exits
+	}
+	first := s.addBackground(ba)
+
+	child.SetStatus(StatusRunning)
+	s.emitSubAgent(child, "launched (background): "+task, nil)
+	// Announce the 0→1 edge so the session shows "working in background" even after
+	// the main loop's turn ends (issue #353).
+	if first {
+		s.emit(SessionEvent{Type: SessionEventBackground, Background: true})
+	}
+
+	go s.runBackground(ba, task)
+	return child.ID, nil
+}
+
+// runBackground drives an asynchronous one-shot sub-agent to completion on its own
+// goroutine and queues its result for re-injection into the root transcript.
+func (s *UserSession) runBackground(ba *BackgroundAgent, task string) {
+	// Wind the worker down on every terminal path (completion, failure, cancellation,
+	// panic). Defers run LIFO, so register removeBackground FIRST and limiter.release
+	// SECOND: the slot is released before removeBackground emits the 1→0
+	// SessionEventBackground edge, so by the time the session reads "no background
+	// work" the concurrency slot is already free for the next spawn. removeBackground
+	// also drops the agent from the background set (HasBackgroundWork → false when this
+	// was the last worker).
+	defer s.removeBackground(ba.ID)
+	// Release the exact limiter captured at acquire time so exactly one release pairs
+	// with the one acquire (never a re-read of s.subAgentLimiter).
+	defer ba.limiter.release()
+
+	// This runs on its own goroutine, so a panic here would crash the whole process.
+	// Contain it and finish the agent as failed instead (issue #8).
+	defer func() {
+		if r := recover(); r != nil {
+			s.finishBackground(ba, StatusFailed, fmt.Sprintf("panic: %v", r))
+		}
+	}()
+
+	// Background workers are asynchronous and outlive any single turn, so their loop
+	// is scoped to the session (background) rather than a turn context. Terminating
+	// the agent (done closed by Stop / TerminateInteractiveAgent-style close, or
+	// agent.Cancel via StopAgent) cancels its in-flight model work too (issue #24).
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-ba.done:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	ba.agent.SetState(StateThinking)
+	ba.agent.SetStatus(StatusRunning)
+	responses, err := s.runLoop(ctx, ba.agent, ba.agent.ID, ba.agent.SeededMessage(task), s.subAgentPrompt(true))
+	ba.agent.SetState(StateIdle)
+	if err != nil {
+		s.finishBackground(ba, StatusFailed, err.Error())
+		return
+	}
+	final := ""
+	if len(responses) > 0 {
+		final = strings.TrimSpace(responses[len(responses)-1].Content)
+	}
+	s.finishBackground(ba, subAgentOutcome(final), final)
+}
+
+// finishBackground records a terminal status for an async sub-agent, notifies the
+// UI observer, and queues its result for re-injection into the root loop. Unlike
+// finishInteractive it does NOT push an AgentEvent onto agentEvents: a background
+// result is delivered by re-injection, and the model never drives wait_agent_event
+// for it, so pushing terminal events the coordinator never drains would let
+// pendingTerminal grow without bound over a long session (issue #27 inverted).
+func (s *UserSession) finishBackground(ba *BackgroundAgent, status AgentStatus, result string) {
+	ba.agent.SetState(StateIdle)
+	ba.agent.SetStatus(status)
+	ba.agent.SetResult(result)
+	// Deliberately do NOT touch the parent's state: an async spawn never set the root
+	// to StateWaitingForSubAgent (unlike the blocking SpawnSubAgent / interactive
+	// paths), because the root keeps running its own loop while the worker is in
+	// flight. The root owns its own state machine; the worker only re-injects its
+	// result and updates the session-level background flag (issue #353).
+	s.emitSubAgent(ba.agent, "", nil)
+	s.enqueueBackgroundResult(ba.Name, status, result)
+}
+
+// addBackground registers a background worker and reports whether it is the first
+// one (the 0→1 edge), so the caller emits SessionEventBackground exactly on the edge.
+func (s *UserSession) addBackground(ba *BackgroundAgent) (first bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	first = len(s.background) == 0
+	s.background[ba.ID] = ba
+	return first
+}
+
+// removeBackground unregisters a finished background worker. When it was the last
+// one (the 1→0 edge) it emits SessionEventBackground{false} so the session can fall
+// back to idle once the main loop is also done.
+func (s *UserSession) removeBackground(id string) {
+	s.mu.Lock()
+	_, ok := s.background[id]
+	delete(s.background, id)
+	empty := ok && len(s.background) == 0
+	s.mu.Unlock()
+	if empty {
+		s.emit(SessionEvent{Type: SessionEventBackground, Background: false})
+	}
+}
+
+// HasBackgroundWork reports whether any async sub-agent is currently running. It
+// backs the "working in background" session state surfaced by sessionToView and the
+// TUI (issue #353).
+func (s *UserSession) HasBackgroundWork() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.background) > 0
+}
+
+// backgroundResultTemplate frames a re-injected async result so the model reads it
+// as a delivered background completion rather than a fresh user instruction. %q is
+// the sub-agent name, %s its result text.
+const backgroundResultTemplate = "[Background sub-agent %q finished]\n%s"
+
+// enqueueBackgroundResult appends a completed async result to the re-injection
+// queue. The root runLoop drains it at a turn boundary (takeBackgroundResults).
+func (s *UserSession) enqueueBackgroundResult(name string, status AgentStatus, result string) {
+	if strings.TrimSpace(name) == "" {
+		name = "sub-agent"
+	}
+	body := result
+	if strings.TrimSpace(body) == "" {
+		body = "(no result text; status: " + string(status) + ")"
+	}
+	s.mu.Lock()
+	s.backgroundResults = append(s.backgroundResults, fmt.Sprintf(backgroundResultTemplate, name, body))
+	s.mu.Unlock()
+}
+
+// takeBackgroundResults drains the queued async results as role:user messages to
+// splice into the root loop's next request (issue #353, re-injection approach A).
+// They are role:user — not role:tool — because a background completion has no
+// matching tool_call id in the live turn; a tool message without one would break
+// strict providers. Returns nil when nothing is queued. FIFO == completion order.
+func (s *UserSession) takeBackgroundResults() []model.Message {
+	s.mu.Lock()
+	queued := s.backgroundResults
+	s.backgroundResults = nil
+	s.mu.Unlock()
+	if len(queued) == 0 {
+		return nil
+	}
+	msgs := make([]model.Message, len(queued))
+	for i, text := range queued {
+		msgs[i] = model.Message{Role: model.RoleUser, Content: text}
+	}
+	return msgs
+}
+
 // --- Interactive (experimental) sub-agents -------------------------------------
 
 // AgentEventType classifies a coordinator-facing interactive sub-agent event.
@@ -2366,11 +2626,28 @@ func (s *UserSession) TerminateInteractiveAgent(agentID string) error {
 func (s *UserSession) InteractiveAgentStatus(agentID string) (AgentStatus, string, error) {
 	s.mu.RLock()
 	ia := s.interactive[agentID]
+	ba := s.background[agentID]
+	root := s.RootAgent
 	s.mu.RUnlock()
-	if ia == nil {
-		return "", "", &NotFoundError{ID: agentID}
+	if ia != nil {
+		return ia.agent.GetStatus(), ia.agent.GetResult(), nil
 	}
-	return ia.agent.GetStatus(), ia.agent.GetResult(), nil
+	// An async (spawn_subagent{async:true}) handle is queryable the same way while the
+	// worker runs (issue #353).
+	if ba != nil {
+		return ba.agent.GetStatus(), ba.agent.GetResult(), nil
+	}
+	// A finished async worker is dropped from the background map but stays in the
+	// agent tree, so resolve a completed/failed handle there: the symbolic-future
+	// handle remains queryable for its terminal status and result after completion,
+	// matching the MCP-task-handle semantics the design cites, rather than going
+	// NotFound the instant the work lands (issue #353).
+	if root != nil {
+		if a := root.GetAgentByID(agentID); a != nil {
+			return a.GetStatus(), a.GetResult(), nil
+		}
+	}
+	return "", "", &NotFoundError{ID: agentID}
 }
 
 // ListInteractiveAgents returns the ids of all interactive sub-agents launched
@@ -2390,13 +2667,33 @@ func (s *UserSession) ListInteractiveAgents() []string {
 // the work aborts immediately instead of running to the request timeout.
 func (s *UserSession) StopAgent(agentID string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	agent := s.RootAgent.GetAgentByID(agentID)
 	if agent == nil {
+		s.mu.Unlock()
 		return &NotFoundError{ID: agentID}
 	}
+	// Snapshot any async (background) workers within the stopped agent's subtree.
+	// Unlike blocking sub-agents — whose loops inherit the parent's context and so are
+	// cancelled transitively by agent.Cancel below — background workers run on a
+	// session-scoped context (they outlive a single turn by design), so cancelling
+	// only the target would leave them running after a user-visible /stop. Closing
+	// their done channel cancels the worker even before it reaches runLoop, and
+	// cancelling the worker's own agent aborts its in-flight model round-trip (issue
+	// #353, cancellation criterion). GetAgentByID scopes this to the target's subtree,
+	// so StopAgent("root") stops every background worker while StopAgent on a specific
+	// handle stops just that one.
+	var workers []*BackgroundAgent
+	for _, ba := range s.background {
+		if agent.GetAgentByID(ba.agent.ID) != nil {
+			workers = append(workers, ba)
+		}
+	}
+	s.mu.Unlock()
 
+	for _, ba := range workers {
+		ba.once.Do(func() { close(ba.done) })
+		ba.agent.Cancel()
+	}
 	agent.Cancel()
 	agent.SetState(StateIdle)
 	return nil
@@ -2408,9 +2705,21 @@ func (s *UserSession) StopAgent(agentID string) error {
 func (s *UserSession) Stop() {
 	s.mu.RLock()
 	root := s.RootAgent
+	// Snapshot the async workers so their done channels are closed too: closing done
+	// cancels a background loop's session-scoped context (it does not inherit a turn
+	// context), which a.Cancel below also does via the loop's published cancel — both
+	// are idempotent, so doing both is safe and guarantees cancellation regardless of
+	// whether the worker has reached runLoop yet (issue #353).
+	workers := make([]*BackgroundAgent, 0, len(s.background))
+	for _, ba := range s.background {
+		workers = append(workers, ba)
+	}
 	s.mu.RUnlock()
 	if root == nil {
 		return
+	}
+	for _, ba := range workers {
+		ba.once.Do(func() { close(ba.done) })
 	}
 	for _, a := range root.ListAllAgents() {
 		a.Cancel()

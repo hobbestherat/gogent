@@ -275,10 +275,26 @@ func (s *Server) createSession(id string, persisted bool) *agent.UserSession {
 
 // markBusy claims a session for a turn, returning a release func. The second
 // concurrent claim for the same session returns false (caller returns 409).
+//
+// A session is busy not only while a foreground turn holds the claim but also while
+// async sub-agents launched by spawn_subagent{async:true} are still running in the
+// background (issue #353). The foreground turn's claim is released when its runLoop
+// returns its final answer, but background work outlives that turn; treating the
+// session as available then would (a) let a concurrent turn start while
+// "working in background" is still showing — disagreeing with sessionToView and the
+// TUI, the other two layers of the busy state — and (b) let a later user turn
+// interleave with not-yet-delivered background re-injection, weakening the defined
+// re-injection order. So a fresh claim is rejected while background work is in
+// flight, threading the third state through this server concurrency layer too. The
+// check is HasBackgroundWork rather than a held claim, so no deferred-release
+// bookkeeping is needed and there is no window where the gate could leak.
 func (s *Server) markBusy(sessionID string) (func(), bool) {
 	s.busyMu.Lock()
 	defer s.busyMu.Unlock()
 	if _, ok := s.busy[sessionID]; ok {
+		return nil, false
+	}
+	if us := s.g.GetUserSession(sessionID); us != nil && us.HasBackgroundWork() {
 		return nil, false
 	}
 	s.busy[sessionID] = struct{}{}

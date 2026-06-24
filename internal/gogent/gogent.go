@@ -802,12 +802,21 @@ func (g *Gogent) initializeToolRegistry() {
 			"\"subtasks\" array; do NOT issue spawns one-per-turn (they then run serially with no " +
 			"speed-up). Use \"name\"/\"task\" only for a single lone task. In one-shot mode (the " +
 			"default) each sub-agent runs to completion and its result ends with SUCCESS: or " +
-			"FAILURE:; in interactive mode it may return a CLARIFY: question instead.",
+			"FAILURE:; in interactive mode it may return a CLARIFY: question instead. " +
+			"Set \"async\": true to NOT block: each sub-agent is launched in the background, the call " +
+			"returns a pending handle per subtask IMMEDIATELY, and each result is re-injected into the " +
+			"conversation when it completes — use it to start work and keep going.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"name": map[string]interface{}{"type": "string", "description": "Sub-agent name (single-task mode)"},
 				"task": map[string]interface{}{"type": "string", "description": "Task description (single-task mode)"},
+				"async": map[string]interface{}{
+					"type": "boolean",
+					"description": "When true, launch the sub-agent(s) in the background and return a pending " +
+						"handle per subtask immediately instead of blocking; each result is re-injected into " +
+						"the conversation when it completes. Default false (block until all finish).",
+				},
 				"subtasks": map[string]interface{}{
 					"type": "array",
 					"description": "Parallel batch of independent tasks; all run concurrently in " +
@@ -843,12 +852,19 @@ func (g *Gogent) initializeToolRegistry() {
 				return nil, fmt.Errorf("session not found: %s", ctx.SessionID)
 			}
 			loopCtx := toolLoopContext(ctx)
+			async, _ := args["async"].(bool)
 
 			rawBatch, hasBatch := args["subtasks"]
 			if hasBatch {
 				items, ok := rawBatch.([]interface{})
 				if !ok {
 					return nil, fmt.Errorf("subtasks must be an array")
+				}
+				// Async mode: launch each subtask in the background and return a pending
+				// handle per subtask immediately, without blocking the main loop. Results
+				// are re-injected into the transcript as each worker completes (issue #353).
+				if async {
+					return spawnAsyncBatch(session, ctx.AgentID, items), nil
 				}
 				type out struct {
 					Name   string `json:"name"`
@@ -906,13 +922,20 @@ func (g *Gogent) initializeToolRegistry() {
 					})
 				}
 				session.RunSubAgentsBounded(tasks)
-				return map[string]interface{}{"success": true, "mode": map[string]bool{"one_shot": true, "interactive": false}, "results": results}, nil
+				return map[string]interface{}{"success": true, "mode": map[string]bool{"one_shot": true, "interactive": false, "async": false}, "results": results}, nil
 			}
 
 			name, _ := args["name"].(string)
 			task, _ := args["task"].(string)
 			if strings.TrimSpace(task) == "" {
 				return nil, fmt.Errorf("task is required")
+			}
+			if async {
+				// Single async subtask: launch in the background and return its pending
+				// handle immediately (issue #353).
+				return spawnAsyncBatch(session, ctx.AgentID, []interface{}{
+					map[string]interface{}{"name": name, "task": task},
+				}), nil
 			}
 			result, err := session.SpawnSubAgent(loopCtx, ctx.AgentID, name, task, true)
 			if err != nil {
@@ -922,7 +945,7 @@ func (g *Gogent) initializeToolRegistry() {
 				"success": true,
 				"name":    name,
 				"task":    task,
-				"mode":    map[string]bool{"one_shot": true, "interactive": false},
+				"mode":    map[string]bool{"one_shot": true, "interactive": false, "async": false},
 				"result":  result,
 			}, nil
 		},
@@ -2820,6 +2843,60 @@ func (g *Gogent) ExecuteToolCall(toolCall *tool.ToolCall, sessionID, agentID, me
 // report; the model simply re-issues wait_agent_event on a timed_out result
 // (issue #284 — the parent must never be blocked).
 const defaultWaitAgentEventTimeout = 30 * time.Second
+
+// spawnAsyncBatch launches each subtask in items as an async (fire-and-forget)
+// one-shot sub-agent and returns a pending-result handle per subtask immediately,
+// without blocking the main loop (issue #353). Each entry is the same union shape
+// the blocking path accepts — a {name, task} object (preferred) or a bare task
+// string — so a weak model's ["do X","do Y"] batch still launches. Results are
+// re-injected into the transcript by the session as each worker completes. The
+// returned shape mirrors the MCP-Tasks resultType:"task" handle: a list of tasks
+// each carrying a handle and a status ("running" once launched, "error" if the
+// launch was rejected, e.g. at the concurrency cap).
+func spawnAsyncBatch(session *agent.UserSession, parentAgentID string, items []interface{}) map[string]interface{} {
+	type task struct {
+		Name   string `json:"name"`
+		Task   string `json:"task"`
+		Handle string `json:"handle,omitempty"`
+		Status string `json:"status"`
+		Error  string `json:"error,omitempty"`
+	}
+	tasks := make([]task, 0, len(items))
+	for _, raw := range items {
+		var name, taskText string
+		switch v := raw.(type) {
+		case map[string]interface{}:
+			name, _ = v["name"].(string)
+			taskText, _ = v["task"].(string)
+		case string:
+			taskText = v
+		default:
+			tasks = append(tasks, task{Status: "error", Error: "invalid subtask item"})
+			continue
+		}
+		t := task{Name: name, Task: taskText}
+		if strings.TrimSpace(taskText) == "" {
+			t.Status = "error"
+			t.Error = "missing subtask.task"
+			tasks = append(tasks, t)
+			continue
+		}
+		handle, err := session.LaunchBackgroundSubAgent(parentAgentID, name, taskText)
+		if err != nil {
+			t.Status = "error"
+			t.Error = err.Error()
+		} else {
+			t.Handle = handle
+			t.Status = "running"
+		}
+		tasks = append(tasks, t)
+	}
+	return map[string]interface{}{
+		"success": true,
+		"mode":    map[string]bool{"one_shot": true, "interactive": false, "async": true},
+		"tasks":   tasks,
+	}
+}
 
 // oneShotOnlyTools are the blocking coordination tools; interactiveOnlyTools are
 // the asynchronous (fire-and-forget) ones. A session is handed a registry with

@@ -93,6 +93,13 @@ type SessionWindow struct {
 	liveThought    *transcriptRecord
 	liveThoughtBuf string
 	busy           bool
+	// background is true while the session has async sub-agents running in the
+	// background (issue #353), driven by the backend's SessionEventBackground. It is
+	// the third busy state: when the main loop's turn ends (busy→false) while workers
+	// are still running, the session shows "working in background..." instead of idle,
+	// and the busy→idle edge logic (drainQueue/maybeSupervise/failPendingTools/
+	// foldLiveThought) is deferred until BOTH the loop is done AND no workers remain.
+	background bool
 	// statusState is the current left-hand status text (idle/working.../thinking
 	// ... (step N)); statusStats holds the latest per-session stats snapshot.
 	// refreshStatus composes the two into the single bottom status line.
@@ -1476,7 +1483,7 @@ func (sw *SessionWindow) caretOnLastVisualLine() bool {
 // On the busy→idle edge it drains any message queued during the turn as the next
 // user turn (issue #170, phase 1).
 func (sw *SessionWindow) setBusy(busy bool) {
-	wasBusy := sw.busy
+	wasIdle := sw.effectiveIdle()
 	sw.busy = busy
 	if busy {
 		sw.statusState = "working..."
@@ -1484,38 +1491,98 @@ func (sw *SessionWindow) setBusy(busy bool) {
 		// controls, issue #201), so its label no longer needs a "..." state.
 		sw.turnStart = time.Now()
 		sw.turnStartOut = sw.statusStats.TokensOut
-	} else {
-		sw.statusState = "idle"
-		sw.turnStart = time.Time{}
-		sw.turnStartOut = 0
-		// The turn is over: any tool entry still marked "running" never got its
-		// result event (cancel, early loop exit, backend crash). Flip it to a
-		// terminal state so nothing is left stuck "running" (issue #187). A clean
-		// turn leaves the map empty, so this is a no-op then.
-		sw.failPendingTools("interrupted")
-		// Likewise fold any live streamed thinking entry left open by a cancelled or
-		// crashed turn so it doesn't stay expanded "thinking…" forever (issue #217).
-		sw.foldLiveThought()
+		sw.refreshStatus()
+		return
 	}
+	// The main loop's turn ended. If async sub-agents are still running in the
+	// background, the session is NOT idle (issue #353): show the background state and
+	// hold off the busy→idle edge work until the workers also finish.
+	if sw.background {
+		sw.statusState = backgroundStatusText
+		sw.refreshStatus()
+		return
+	}
+	sw.enterIdle(!wasIdle)
+}
+
+// backgroundStatusText is the left-hand status shown while only async sub-agents are
+// running (the main loop has finished its turn) — issue #353.
+const backgroundStatusText = "working in background..."
+
+// effectiveIdle reports whether the session is truly idle: no foreground turn AND no
+// background sub-agents. The busy→idle edge logic must run only on the transition
+// into this state (issue #353).
+func (sw *SessionWindow) effectiveIdle() bool {
+	return !sw.busy && !sw.background
+}
+
+// setBackground updates the background-work flag from the backend's
+// SessionEventBackground (issue #353) and reconciles the status line. It is the
+// counterpart to setBusy for the third state. When background work starts while the
+// main loop is idle it shows "working in background..."; when it clears it either
+// falls back to "working..." (a foreground turn is still running) or runs the
+// busy→idle edge logic (the session is now truly idle).
+func (sw *SessionWindow) setBackground(on bool) {
+	wasIdle := sw.effectiveIdle()
+	sw.background = on
+	switch {
+	case sw.busy:
+		// A foreground turn is in flight; it owns the status line. Just keep the timer
+		// and refresh so liveStats still ticks.
+		sw.refreshStatus()
+	case on:
+		// Idle main loop, background work starting: show the background state and
+		// anchor the elapsed timer if a turn was not already timing.
+		sw.statusState = backgroundStatusText
+		if sw.turnStart.IsZero() {
+			sw.turnStart = time.Now()
+			sw.turnStartOut = sw.statusStats.TokensOut
+		}
+		sw.refreshStatus()
+	default:
+		// Background work just finished and no foreground turn is running -> truly idle.
+		sw.enterIdle(!wasIdle)
+	}
+}
+
+// enterIdle settles the status line to idle and, on a real transition into idle,
+// runs the busy→idle edge work — failing orphaned tools, folding any live thought,
+// restoring focus off the running-turn buttons, draining a queued message and
+// running the supervisor watchdog (issues #187, #217, #201, #170, #172). It is the
+// single funnel for "the session just became truly idle", shared by the
+// foreground-turn end (setBusy) and the background-work end (setBackground), so the
+// edge work fires exactly once whichever finishes last (issue #353).
+func (sw *SessionWindow) enterIdle(transition bool) {
+	sw.statusState = "idle"
+	sw.turnStart = time.Time{}
+	sw.turnStartOut = 0
+	// The turn is over: any tool entry still marked "running" never got its
+	// result event (cancel, early loop exit, backend crash). Flip it to a
+	// terminal state so nothing is left stuck "running" (issue #187). A clean
+	// turn leaves the map empty, so this is a no-op then.
+	sw.failPendingTools("interrupted")
+	// Likewise fold any live streamed thinking entry left open by a cancelled or
+	// crashed turn so it doesn't stay expanded "thinking…" forever (issue #217).
+	sw.foldLiveThought()
 	sw.refreshStatus()
-	// On the busy→idle edge the running-turn buttons are about to be hidden by the
+	if !transition {
+		return
+	}
+	// On the →idle edge the running-turn buttons are about to be hidden by the
 	// next layout. If one of them currently holds keyboard focus, restore it to the
 	// prompt first (issue #201): turbotv only re-homes a stale focus on layer
 	// add/remove/raise, not on a Visible flip during layout, so a focused-but-hidden
 	// button would otherwise swallow keystrokes until the user tabbed or clicked.
-	if wasBusy && !busy {
-		sw.restoreInputFocusFromButtons()
-	}
-	// Auto-submit a queued message on the busy→idle transition. Guarded by the
-	// edge (wasBusy && !busy) so it fires once per turn, and skipped while
-	// draining so a drained message is not itself re-queued.
-	if wasBusy && !busy && !sw.draining {
+	sw.restoreInputFocusFromButtons()
+	// Auto-submit a queued message on the →idle transition. Skipped while draining so
+	// a drained message is not itself re-queued.
+	if !sw.draining {
 		sw.drainQueue()
-		// Run the supervisor's idle watchdog on the same busy→idle edge, after the
-		// queue has had its chance to drain (issue #172). drainQueue re-enters the
-		// submit path synchronously, so by here sw.busy reflects whether a queued
-		// message fired; maybeSupervise no-ops while busy/pending so a drained real
-		// message always takes precedence over a nudge.
+		// Run the supervisor's idle watchdog on the same edge, after the queue has had
+		// its chance to drain (issue #172). drainQueue re-enters the submit path
+		// synchronously, so by here sw.busy reflects whether a queued message fired;
+		// maybeSupervise no-ops while busy/pending so a drained real message always
+		// takes precedence over a nudge.
 		sw.maybeSupervise()
 	}
 }
@@ -1528,7 +1595,7 @@ func (sw *SessionWindow) setBusy(busy bool) {
 func (sw *SessionWindow) refreshStatus() {
 	budget := sw.wb.budgetConfig()
 	live := sw.liveStats()
-	sw.status.FG = statusColor(!sw.busy, sw.statusStats, budget)
+	sw.status.FG = statusColorFor(sw.busy, sw.background, sw.statusStats, budget)
 	state := sw.statusState
 	if sw.planMode {
 		// Surface plan mode at the left of the status line so the read-only turn
@@ -1554,7 +1621,10 @@ func (sw *SessionWindow) refreshStatus() {
 // turn started and the output-token throughput) shown only while a turn is in
 // flight. It returns a zero value when idle or before the turn has started.
 func (sw *SessionWindow) liveStats() liveStats {
-	if !sw.busy || sw.turnStart.IsZero() {
+	// Keep the elapsed/throughput figures alive while ANY work is in flight —
+	// foreground turn or background sub-agents (issue #353) — so the status line does
+	// not freeze its timer when only background workers remain.
+	if (!sw.busy && !sw.background) || sw.turnStart.IsZero() {
 		return liveStats{}
 	}
 	elapsed := time.Since(sw.turnStart)
@@ -1623,6 +1693,11 @@ func (sw *SessionWindow) apply(ev agent.SessionEvent) {
 		// Backend-owned yolo indicator (issue #356): the display field is set here
 		// (never from the local toggle) so it is correct however yolo was activated.
 		sw.applyYoloMode(ev.Yolo)
+	case agent.SessionEventBackground:
+		// Backend-owned "working in background" indicator (issue #353): set the
+		// display state from the event (never inferred locally) so the status line and
+		// sidebar glyph stay correct whether the main loop is mid-turn or already idle.
+		sw.setBackground(ev.Background)
 	case agent.SessionEventTodo:
 		// The checklist is rendered in the sidebar; nothing to add to the
 		// transcript (issue #43).
@@ -2706,6 +2781,21 @@ func statusColor(idle bool, stats agent.SessionStats, budget config.BudgetConfig
 	// and signals an active turn without colliding with the amber/red severity
 	// colours above.
 	return colorAgent
+}
+
+// statusColorFor folds the third "working in background" state (issue #353) into
+// statusColor. It defers to statusColor for the foreground/idle/severity colours,
+// then — and only when the plain idle colour would otherwise show (no budget/context
+// severity in play) — substitutes the background role colour so a session running
+// only background sub-agents reads distinctly from both idle and a live turn. The
+// colour is colorInfo, a theme role (t.Info) recoloured on a live theme switch like
+// the rest of the chrome (issue #379) — never a hardcoded value.
+func statusColorFor(busy, background bool, stats agent.SessionStats, budget config.BudgetConfig) tui.Color {
+	c := statusColor(!busy, stats, budget)
+	if background && !busy && c == colorNote {
+		return colorInfo
+	}
+	return c
 }
 
 // budgetStatus classifies a session's cumulative token usage against the

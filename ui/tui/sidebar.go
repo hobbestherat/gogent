@@ -107,6 +107,14 @@ type sidebar struct {
 	// and is reconciled on the UI thread by syncBusy from Workbench.tickBusyStatuses.
 	busy map[string]bool
 
+	// background tracks which sessions currently have async sub-agents running in the
+	// background (issue #353), so their node shows the third "background" marker (◐ vs
+	// busy ● / idle ○) and keeps it across unrelated relabels. It mirrors
+	// SessionWindow.background and is reconciled on the UI thread by syncBackground from
+	// Workbench.tickBusyStatuses, exactly like busy. busy takes precedence: a session
+	// that is both shows ● (a foreground turn dominates the glyph).
+	background map[string]bool
+
 	// clarify tracks which sessions currently have at least one sub-agent blocked
 	// waiting for the user (a CLARIFY question, issue #207), so their node keeps the
 	// "needs input" badge across unrelated relabels (rename/pin). A session can host
@@ -189,6 +197,7 @@ func newSidebar(wb *Workbench) *sidebar {
 		todos:          make(map[string][]agent.TodoItem),
 		approvals:      make(map[string]bool),
 		busy:           make(map[string]bool),
+		background:     make(map[string]bool),
 		clarify:        make(map[string]bool),
 		clarifyCount:   make(map[string]int),
 		overallBandH:   overallBandHeight,
@@ -495,7 +504,7 @@ func (s *sidebar) addSession(id, title string, pinned bool) {
 	if _, ok := s.sessions[id]; ok {
 		return
 	}
-	node := tv.NewTreeNode(sessionLabel(title, s.busy[id], pinned, s.approvals[id], s.clarify[id]))
+	node := tv.NewTreeNode(sessionLabelState(title, s.busy[id], s.background[id], pinned, s.approvals[id], s.clarify[id]))
 	node.Expanded = true
 	node.Data = nodeRef{sessionID: id, name: title}
 	s.sessions[id] = node
@@ -544,6 +553,7 @@ func (s *sidebar) removeSession(id string) {
 	delete(s.sessions, id)
 	delete(s.approvals, id)
 	delete(s.busy, id)
+	delete(s.background, id)
 	delete(s.clarify, id)
 	delete(s.clarifyCount, id)
 	// No global header counter to resync on close (issue #230): the per-session
@@ -587,7 +597,7 @@ func (s *sidebar) setApproval(id, title string, pinned, pending bool) {
 		delete(s.approvals, id)
 	}
 	if node := s.sessions[id]; node != nil {
-		node.Label = sessionLabel(title, s.busy[id], pinned, pending, s.clarify[id])
+		node.Label = sessionLabelState(title, s.busy[id], s.background[id], pinned, pending, s.clarify[id])
 	}
 }
 
@@ -613,7 +623,7 @@ func (s *sidebar) setClarify(id, title string, pinned, waiting bool) {
 		delete(s.clarifyCount, id)
 	}
 	if node := s.sessions[id]; node != nil {
-		node.Label = sessionLabel(title, s.busy[id], pinned, s.approvals[id], s.clarify[id])
+		node.Label = sessionLabelState(title, s.busy[id], s.background[id], pinned, s.approvals[id], s.clarify[id])
 	}
 }
 
@@ -629,7 +639,7 @@ func (s *sidebar) setBusy(id, title string, pinned, busy bool) {
 		delete(s.busy, id)
 	}
 	if node := s.sessions[id]; node != nil {
-		node.Label = sessionLabel(title, busy, pinned, s.approvals[id], s.clarify[id])
+		node.Label = sessionLabelState(title, busy, s.background[id], pinned, s.approvals[id], s.clarify[id])
 	}
 }
 
@@ -653,6 +663,45 @@ func (s *sidebar) syncBusy(busyIDs map[string]bool) bool {
 			title = ref.name
 		}
 		s.setBusy(id, title, s.wb.IsPinned(id), want)
+		changed = true
+	}
+	return changed
+}
+
+// setBackground toggles the "working in background" marker (◐) on a session node and
+// records the state so a later relabel keeps the marker correct (issue #353). It is
+// the background-state twin of setBusy: a no-op on the node for an unknown session,
+// but the intent is still recorded so a node added later picks up the marker. busy
+// takes precedence in the rendered glyph (sessionStatusGlyph), so a session that is
+// both shows ●. Runs on the UI thread.
+func (s *sidebar) setBackground(id, title string, pinned, background bool) {
+	if background {
+		s.background[id] = true
+	} else {
+		delete(s.background, id)
+	}
+	if node := s.sessions[id]; node != nil {
+		node.Label = sessionLabelState(title, s.busy[id], background, pinned, s.approvals[id], s.clarify[id])
+	}
+}
+
+// syncBackground reconciles every session's background marker against bgIDs (the set
+// of session ids with async sub-agents running) and reports whether any marker moved.
+// It mirrors syncBusy and is driven by Workbench.tickBusyStatuses on the same tick;
+// the returned bool lets the caller redraw exactly on a transition, including the
+// →idle edge that empties the set. Runs on the UI thread.
+func (s *sidebar) syncBackground(bgIDs map[string]bool) bool {
+	changed := false
+	for id, node := range s.sessions {
+		want := bgIDs[id]
+		if want == s.background[id] {
+			continue
+		}
+		title := id
+		if ref, ok := node.Data.(nodeRef); ok {
+			title = ref.name
+		}
+		s.setBackground(id, title, s.wb.IsPinned(id), want)
 		changed = true
 	}
 	return changed
@@ -1014,7 +1063,7 @@ func (s *sidebar) relabelSession(id, title string, pinned bool) {
 		ref.name = title
 		node.Data = ref
 	}
-	node.Label = sessionLabel(title, s.busy[id], pinned, s.approvals[id], s.clarify[id])
+	node.Label = sessionLabelState(title, s.busy[id], s.background[id], pinned, s.approvals[id], s.clarify[id])
 }
 
 // reorder reorders the tree's roots to match order. Sessions absent from order
@@ -1059,11 +1108,20 @@ func (s *sidebar) reorder(order []string) {
 // setters — those take (id, title, pinned, <feature flag>). Keep that in mind when
 // adding a call site so the two adjacent bools are not transposed.
 func sessionLabel(title string, busy, pinned, pending, clarify bool) string {
+	return sessionLabelState(title, busy, false, pinned, pending, clarify)
+}
+
+// sessionLabelState is sessionLabel with the third "working in background" state
+// (issue #353) made explicit: the leading glyph is the tri-state ●/◐/○ from
+// sessionStatusGlyph. sessionLabel is a thin wrapper (background=false) so existing
+// call sites and tests are unaffected; the sidebar's own call sites pass the
+// session's background flag so a row coordinating only async sub-agents shows ◐.
+func sessionLabelState(title string, busy, background, pinned, pending, clarify bool) string {
 	var label string
 	if pinned {
-		label = fmt.Sprintf("%s %s %s", sessionStatusIcon(busy), "★", title)
+		label = fmt.Sprintf("%s %s %s", sessionStatusGlyph(busy, background), "★", title)
 	} else {
-		label = fmt.Sprintf("%s %s", sessionStatusIcon(busy), title)
+		label = fmt.Sprintf("%s %s", sessionStatusGlyph(busy, background), title)
 	}
 	if pending {
 		label += " " + approvalBadge
@@ -1079,12 +1137,25 @@ func sessionLabel(title string, busy, pinned, pending, clarify bool) string {
 // idle. These are deliberately distinct from statusIcon's sub-agent lifecycle set
 // (▶ ‖ ✓ ✗ •) so a session row — even one coordinating a working sub-agent — reads
 // as a session, never as a sub-agent. The sub-agent triangle (▶) therefore never
-// appears on a session row.
+// appears on a session row. It is the two-state form retained for callers that have
+// no background notion; sessionStatusGlyph adds the third (◐) state.
 func sessionStatusIcon(busy bool) string {
-	if busy {
+	return sessionStatusGlyph(busy, false)
+}
+
+// sessionStatusGlyph maps a session's busy/background state to its leading row glyph
+// (issue #353): ● when a foreground turn is in flight, ◐ when only async sub-agents
+// run in the background (the main loop is idle), ○ when fully idle. busy dominates —
+// a session that is both shows ● — so the glyph always reflects the strongest signal.
+func sessionStatusGlyph(busy, background bool) string {
+	switch {
+	case busy:
 		return "●"
+	case background:
+		return "◐"
+	default:
+		return "○"
 	}
-	return "○"
 }
 
 // agentLabel renders a sub-agent row with a status icon and mode marker.
