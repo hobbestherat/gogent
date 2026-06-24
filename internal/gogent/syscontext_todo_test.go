@@ -1,10 +1,13 @@
 package gogent
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"gogent/internal/agent"
+	"gogent/internal/vcs"
 )
 
 // TestBuildSystemContextInjectsTodos verifies the live checklist is rendered
@@ -131,5 +134,60 @@ func TestBuildSystemContextTodoWiredThroughTool(t *testing.T) {
 	_, ctx := g.buildSystemContext(id)
 	if !strings.Contains(ctx, "◐ ship it (almost)") {
 		t.Errorf("tool-written todo (with note) not injected into system context:\n%s", ctx)
+	}
+}
+
+func TestBuildSystemContextSplitsStableAndVolatileBuckets(t *testing.T) {
+	if !vcs.Available() {
+		t.Skip("git not installed")
+	}
+	repo := t.TempDir()
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.email", "test@example.com"},
+		{"config", "user.name", "Test"},
+		{"config", "commit.gpgsign", "false"},
+	} {
+		res, err := vcs.Run(repo, vcs.DefaultTimeout, args...)
+		if err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+		if !res.OK() {
+			t.Fatalf("git %v failed: exit=%d stderr=%s", args, res.ExitCode, res.Stderr)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repo, "changed.txt"), []byte("dirty\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	const id = "ctx-split"
+	g := NewGogentWithWorkspace(t.TempDir(), repo)
+	g.store = nil
+	g.gitRepo = true
+	g.agentsContext = "## Project instructions (AGENTS.md)\nstable agent rules"
+	g.repoMap = "## Repository map\nstable repo map"
+	g.NewSession(id)
+	g.GetUserSession(id).SetTodos([]agent.TodoItem{{Content: "volatile todo", Status: agent.TodoPending}})
+
+	stable, volatile := g.buildSystemContext(id)
+	for _, want := range []string{"stable agent rules", "stable repo map"} {
+		if !strings.Contains(stable, want) {
+			t.Errorf("stable context missing %q:\n%s", want, stable)
+		}
+	}
+	for _, forbidden := range []string{"## Git status", "changed.txt", "## Task checklist", "volatile todo"} {
+		if strings.Contains(stable, forbidden) {
+			t.Errorf("stable context contains volatile marker %q:\n%s", forbidden, stable)
+		}
+	}
+	for _, want := range []string{"## Git status", "changed.txt", "## Task checklist", "volatile todo"} {
+		if !strings.Contains(volatile, want) {
+			t.Errorf("volatile context missing %q:\n%s", want, volatile)
+		}
+	}
+	for _, forbidden := range []string{"stable agent rules", "stable repo map"} {
+		if strings.Contains(volatile, forbidden) {
+			t.Errorf("volatile context contains stable marker %q:\n%s", forbidden, volatile)
+		}
 	}
 }

@@ -291,10 +291,10 @@ func TestVertexAnthropicThinkingBlockReplayedBeforeToolUse(t *testing.T) {
 	}
 }
 
-func TestVertexAnthropicDirectAnthropicBodyUnchanged(t *testing.T) {
-	// The shared adapter must keep the direct Anthropic (non-vertex) body
-	// byte-identical: model present, anthropic_version absent, system a scalar
-	// string, temperature present, no cache_control.
+func TestDirectAnthropicBodyEmitsPromptCacheBreakpoints(t *testing.T) {
+	// Direct Anthropic keeps the direct-only fields (model present, no
+	// anthropic_version body field, sampling params present) while also emitting
+	// the same prompt-cache breakpoints as vertex-anthropic (issue #404).
 	temp := float32(0.3)
 	var buf bytes.Buffer
 	if err := (anthropicAdapter{}).buildBody(CompletionRequest{
@@ -315,14 +315,72 @@ func TestVertexAnthropicDirectAnthropicBodyUnchanged(t *testing.T) {
 	if _, ok := body["anthropic_version"]; ok {
 		t.Error("direct body has anthropic_version; it should ride the header, not the body")
 	}
-	if s, ok := body["system"].(string); !ok || s != "sys" {
-		t.Errorf("direct body system = %v, want scalar string \"sys\"", body["system"])
+	sys, ok := body["system"].([]any)
+	if !ok || len(sys) != 1 {
+		t.Fatalf("direct body system = %v, want one-element block array", body["system"])
+	}
+	sysBlock := sys[0].(map[string]any)
+	if sysBlock["type"] != "text" || sysBlock["text"] != "sys" {
+		t.Errorf("direct system block = %v, want text block with sys", sysBlock)
+	}
+	if cc, ok := sysBlock["cache_control"].(map[string]any); !ok || cc["type"] != "ephemeral" {
+		t.Errorf("direct system cache_control = %v, want ephemeral", sysBlock["cache_control"])
 	}
 	if body["temperature"] == nil {
 		t.Error("direct body missing temperature; non-vertex path must keep sampling params")
 	}
-	if strings.Contains(buf.String(), "cache_control") {
-		t.Error("direct body has cache_control; caching is vertex-only")
+
+	msgs := body["messages"].([]any)
+	last := msgs[len(msgs)-1].(map[string]any)
+	blocks := last["content"].([]any)
+	lastBlock := blocks[len(blocks)-1].(map[string]any)
+	if cc, ok := lastBlock["cache_control"].(map[string]any); !ok || cc["type"] != "ephemeral" {
+		t.Errorf("direct last-turn cache_control = %v, want ephemeral", lastBlock["cache_control"])
+	}
+}
+
+func TestVertexAnthropicVolatileTailMergesAfterToolResultButBreakpointStaysOnTranscript(t *testing.T) {
+	body, _ := buildVertexAnthropicBody(t, CompletionRequest{
+		Model:     "claude-opus-4-8",
+		MaxTokens: intp(100),
+		Messages: []Message{
+			{Role: RoleSystem, Content: "stable system"},
+			{Role: RoleUser, Content: "question"},
+			{
+				Role: RoleAssistant,
+				ToolCalls: []ToolCall{{
+					ID:       "toolu_1",
+					Type:     "function",
+					Function: FunctionCall{Name: "lookup", Arguments: `{"q":"x"}`},
+				}},
+			},
+			{Role: RoleTool, ToolCallID: "toolu_1", Content: `{"answer":"42"}`},
+			{Role: RoleUser, Content: "## Git status\nM file.go", Volatile: true},
+		},
+	})
+
+	msgs := body["messages"].([]any)
+	last := msgs[len(msgs)-1].(map[string]any)
+	if last["role"] != "user" {
+		t.Fatalf("last message role = %v, want merged user turn", last["role"])
+	}
+	blocks := last["content"].([]any)
+	if len(blocks) != 2 {
+		t.Fatalf("last user blocks = %v, want tool_result + volatile text", blocks)
+	}
+	toolResult := blocks[0].(map[string]any)
+	if toolResult["type"] != "tool_result" || toolResult["tool_use_id"] != "toolu_1" {
+		t.Fatalf("first merged block = %v, want tool_result", toolResult)
+	}
+	if cc, ok := toolResult["cache_control"].(map[string]any); !ok || cc["type"] != "ephemeral" {
+		t.Errorf("tool_result cache_control = %v, want breakpoint on last transcript block", toolResult["cache_control"])
+	}
+	volatile := blocks[1].(map[string]any)
+	if volatile["type"] != "text" || volatile["text"] != "## Git status\nM file.go" {
+		t.Fatalf("second merged block = %v, want volatile text", volatile)
+	}
+	if _, ok := volatile["cache_control"]; ok {
+		t.Errorf("volatile tail has cache_control; breakpoint must stay on transcript block: %v", volatile)
 	}
 }
 
