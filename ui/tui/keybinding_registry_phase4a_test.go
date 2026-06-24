@@ -490,18 +490,19 @@ func TestCommandsFallbackToHardcodedHints(t *testing.T) {
 	}
 }
 
-// TestChordDisplayHelper unit-tests the chordDisplay helper directly across its
-// three branches: nil desktop, registered action, unregistered action.
-func TestChordDisplayHelper(t *testing.T) {
-	if _, ok := (&Workbench{}).chordDisplay(actionHelpOverlay); ok {
-		t.Error("chordDisplay must report false with no desktop")
+// TestChordForHelper unit-tests the unified chord lookup directly. Since #401 the
+// display path is catalog-based rather than registry-based: it works without a
+// desktop, reflects overrides, and unknown actions resolve to the zero chord.
+func TestChordForHelper(t *testing.T) {
+	if got := chordLabel((&Workbench{}).chordFor(actionHelpOverlay)); got != "?" {
+		t.Errorf("bare workbench help display = %q, want ?", got)
 	}
 	w := newTestWorkbench(t)
-	if disp, ok := w.chordDisplay(actionHelpOverlay); !ok || disp != "?" {
-		t.Errorf("chordDisplay(help) = %q,%v, want \"?\",true", disp, ok)
+	if disp := chordLabel(w.chordFor(actionHelpOverlay)); disp != "?" {
+		t.Errorf("chordFor(help) display = %q, want ?", disp)
 	}
-	if _, ok := w.chordDisplay(tv.ActionID("does.not.exist")); ok {
-		t.Error("chordDisplay must report false for an unregistered action")
+	if got := w.chordFor(tv.ActionID("does.not.exist")); got != (tv.Chord{}) {
+		t.Errorf("unknown action chord = %+v, want zero chord", got)
 	}
 }
 

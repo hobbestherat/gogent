@@ -93,7 +93,9 @@ func TestIssue393RebuildMenuInstallsEditMenuBetweenFileAndSession(t *testing.T) 
 	issue393AssertShortcut(t, edit.Children[0], "Ctrl+C", 'c')
 	issue393AssertShortcut(t, edit.Children[1], "Ctrl+X", 'x')
 	issue393AssertShortcut(t, edit.Children[2], "Ctrl+V", 'v')
-	issue393AssertShortcut(t, edit.Children[4], "Ctrl+F", 'f')
+	if edit.Children[4].Shortcut == nil || edit.Children[4].Shortcut.Display != "/" {
+		t.Fatalf("Find shortcut = %+v, want transcript.find display /", edit.Children[4].Shortcut)
+	}
 }
 
 func issue393MenuLabels(items []*tv.MenuItem) []string {
@@ -118,11 +120,20 @@ func TestIssue393EditMenuAcceleratorsAreRegisteredByRebuildMenu(t *testing.T) {
 	}{
 		{"Copy", tui.TypeEvent{Key: tui.KeyRune, Rune: 'c', Ctrl: true}},
 		{"Cut", tui.TypeEvent{Key: tui.KeyRune, Rune: 'x', Ctrl: true}},
-		{"Paste", tui.TypeEvent{Key: tui.KeyRune, Rune: 'v', Ctrl: true}},
-		{"Find", tui.TypeEvent{Key: tui.KeyRune, Rune: 'f', Ctrl: true}},
 	} {
 		if _, ok := reg.Match(tt.ev); !ok {
 			t.Fatalf("%s accelerator %+v is not registered in rebuilt menu", tt.name, tt.ev)
+		}
+	}
+	for _, tt := range []struct {
+		name string
+		ev   tui.TypeEvent
+	}{
+		{"Paste", tui.TypeEvent{Key: tui.KeyRune, Rune: 'v', Ctrl: true}},
+		{"Find", tui.TypeEvent{Key: tui.KeyRune, Rune: 'f', Ctrl: true}},
+	} {
+		if _, ok := reg.Match(tt.ev); ok {
+			t.Fatalf("%s display-only shortcut %+v unexpectedly registered as a Global binding", tt.name, tt.ev)
 		}
 	}
 }
@@ -133,7 +144,6 @@ func TestIssue393CopyCutAcceleratorsDoNotSwallowUnconsumedCtrlCOrCtrlX(t *testin
 	w.rebuildMenu()
 	w.desktop.SetFocus(nil)
 
-	bar := issue393MenuBar(t, w)
 	for _, tt := range []struct {
 		name string
 		ev   tui.TypeEvent
@@ -141,7 +151,7 @@ func TestIssue393CopyCutAcceleratorsDoNotSwallowUnconsumedCtrlCOrCtrlX(t *testin
 		{"Copy", tui.TypeEvent{Key: tui.KeyRune, Rune: 'c', Ctrl: true}},
 		{"Cut", tui.TypeEvent{Key: tui.KeyRune, Rune: 'x', Ctrl: true}},
 	} {
-		if bar.HandleAccelerator(tt.ev) {
+		if w.desktop.Bindings().Dispatch(tt.ev) {
 			t.Fatalf("%s accelerator was consumed with no focus; Ctrl+C/Ctrl+X must fall through when copy/cut do not handle", tt.name)
 		}
 	}

@@ -103,6 +103,29 @@ func selectCustomizerRow(t *testing.T, w *Workbench, visibleRow int) {
 	}
 }
 
+func customizerRowForAction(t *testing.T, w *Workbench, id tv.ActionID) int {
+	t.Helper()
+	row := -1
+	category := ""
+	for _, a := range w.rebindable() {
+		if a.category != category {
+			category = a.category
+			row++
+		}
+		row++
+		if a.actionID == id {
+			return row
+		}
+	}
+	t.Fatalf("action %q not found in rebindable catalog", id)
+	return 0
+}
+
+func selectCustomizerAction(t *testing.T, w *Workbench, id tv.ActionID) {
+	t.Helper()
+	selectCustomizerRow(t, w, customizerRowForAction(t, w, id))
+}
+
 func pressConfirm(t *testing.T, w *Workbench, yes bool) {
 	t.Helper()
 	top := w.desktop.TopLayer()
@@ -154,14 +177,18 @@ func TestKeybindingCustomizerDiscoverabilityAndRows(t *testing.T) {
 		t.Fatalf("top layer after Customize = %v, want keybinding-customizer", top)
 	}
 
-	rowDefault := w.keybindRowText(keybindActions()[2]) // Toggle messages.
+	toggleMsg, ok := w.actionByID(actionTranscriptToggleMsg)
+	if !ok {
+		t.Fatal("Toggle messages action missing")
+	}
+	rowDefault := w.keybindRowText(toggleMsg)
 	for _, want := range []string{"Toggle messages", "a", "(default)"} {
 		if !strings.Contains(rowDefault, want) {
 			t.Fatalf("default row %q missing %q", rowDefault, want)
 		}
 	}
 	w.applyBinding(actionTranscriptToggleMsg, tv.Chord{Rune: 'm'})
-	rowCustom := w.keybindRowText(keybindActions()[2])
+	rowCustom := w.keybindRowText(toggleMsg)
 	for _, want := range []string{"Toggle messages", "m", "(custom)"} {
 		if !strings.Contains(rowCustom, want) {
 			t.Fatalf("custom row %q missing %q", rowCustom, want)
@@ -179,7 +206,7 @@ func TestKeybindingCustomizerCaptureAppliesLivePersistsAndUpdatesDisplay(t *test
 	if top := w.desktop.TopLayer(); top == nil || top.Name != "keybinding-customizer" {
 		t.Fatalf("top layer after customizer = %v, want keybinding-customizer", top)
 	}
-	selectCustomizerRow(t, w, 3) // Transcript header, Find, Esc, Toggle messages.
+	selectCustomizerAction(t, w, actionTranscriptToggleMsg)
 	if !typeFocused(w, tui.TypeEvent{Key: tui.KeyEnter}) {
 		t.Fatal("Enter did not enter capture mode")
 	}
@@ -250,7 +277,7 @@ func TestKeybindingCustomizerConflictCancelLeavesBindings(t *testing.T) {
 	w.openWindow("s", "S")
 
 	w.showKeybindingCustomizer()
-	selectCustomizerRow(t, w, 3) // Toggle messages.
+	selectCustomizerAction(t, w, actionTranscriptToggleMsg)
 	typeFocused(w, tui.TypeEvent{Key: tui.KeyEnter})
 	typeFocused(w, tui.TypeEvent{Key: tui.KeyRune, Rune: 'r'}) // Toggle thinking's chord.
 	if top := w.desktop.TopLayer(); top == nil || top.Name != "confirm-dialog" {
@@ -269,7 +296,7 @@ func TestKeybindingCustomizerConflictConfirmSwapsBindings(t *testing.T) {
 	w.handlers.SetKeybindings = func(k config.KeybindingsConfig) { persisted = k }
 
 	w.showKeybindingCustomizer()
-	selectCustomizerRow(t, w, 3) // Toggle messages.
+	selectCustomizerAction(t, w, actionTranscriptToggleMsg)
 	typeFocused(w, tui.TypeEvent{Key: tui.KeyEnter})
 	typeFocused(w, tui.TypeEvent{Key: tui.KeyRune, Rune: 'r'}) // Toggle thinking's chord.
 	pressConfirm(t, w, true)
@@ -289,7 +316,7 @@ func TestKeybindingCustomizerRejectsUndeliverableChord(t *testing.T) {
 	w.openWindow("s", "S")
 
 	w.showKeybindingCustomizer()
-	selectCustomizerRow(t, w, 3) // Toggle messages.
+	selectCustomizerAction(t, w, actionTranscriptToggleMsg)
 	typeFocused(w, tui.TypeEvent{Key: tui.KeyEnter})
 	typeFocused(w, tui.TypeEvent{Key: tui.KeyRune, Rune: 'm', Ctrl: true})
 
@@ -297,7 +324,11 @@ func TestKeybindingCustomizerRejectsUndeliverableChord(t *testing.T) {
 	if w.isOverridden(actionTranscriptToggleMsg) {
 		t.Fatal("undeliverable capture recorded an override")
 	}
-	ok, reason := w.validateCapture(keybindActions()[2], tv.Chord{Rune: 'm', Ctrl: true})
+	toggleMsg, okAction := w.actionByID(actionTranscriptToggleMsg)
+	if !okAction {
+		t.Fatal("Toggle messages action missing")
+	}
+	ok, reason := w.validateCapture(toggleMsg, tv.Chord{Rune: 'm', Ctrl: true})
 	if ok || strings.TrimSpace(reason) == "" {
 		t.Fatalf("validateCapture(Ctrl+M) = %v,%q, want rejection with reason", ok, reason)
 	}
@@ -310,7 +341,7 @@ func TestKeybindingCustomizerBackspaceClearsBinding(t *testing.T) {
 	w.handlers.SetKeybindings = func(k config.KeybindingsConfig) { persisted = k }
 
 	w.showKeybindingCustomizer()
-	selectCustomizerRow(t, w, 3) // Toggle messages.
+	selectCustomizerAction(t, w, actionTranscriptToggleMsg)
 	if !typeFocused(w, tui.TypeEvent{Key: tui.KeyEnter}) {
 		t.Fatal("Enter did not enter capture mode")
 	}
@@ -344,7 +375,7 @@ func TestKeybindingCustomizerResetSelectedAndResetAll(t *testing.T) {
 	w.applyBinding(actionTranscriptToggleMsg, tv.Chord{Rune: 'm'})
 	w.applyBinding(actionTranscriptToggleThink, tv.Chord{Rune: 'q'})
 	w.showKeybindingCustomizer()
-	selectCustomizerRow(t, w, 3) // Toggle messages.
+	selectCustomizerAction(t, w, actionTranscriptToggleMsg)
 	pressBottomButton(t, w, 0)
 	assertChord(t, chordForAction(t, w, actionTranscriptToggleMsg), tv.Chord{Rune: 'a'})
 	assertChord(t, chordForAction(t, w, actionTranscriptToggleThink), tv.Chord{Rune: 'q'})
@@ -432,7 +463,7 @@ func TestKeybindingCustomizerClearEscapeHatchRequiresConfirmation(t *testing.T) 
 	w.handlers.SetKeybindings = func(k config.KeybindingsConfig) { persisted = k }
 
 	w.showKeybindingCustomizer()
-	selectCustomizerRow(t, w, 11) // App / Keybinding help.
+	selectCustomizerAction(t, w, actionHelpOverlay)
 	typeFocused(w, tui.TypeEvent{Key: tui.KeyEnter})
 	typeFocused(w, tui.TypeEvent{Key: tui.KeyBackspace})
 	if top := w.desktop.TopLayer(); top == nil || top.Name != "confirm-dialog" {
@@ -445,7 +476,7 @@ func TestKeybindingCustomizerClearEscapeHatchRequiresConfirmation(t *testing.T) 
 	}
 
 	w.showKeybindingCustomizer()
-	selectCustomizerRow(t, w, 11) // App / Keybinding help.
+	selectCustomizerAction(t, w, actionHelpOverlay)
 	typeFocused(w, tui.TypeEvent{Key: tui.KeyEnter})
 	typeFocused(w, tui.TypeEvent{Key: tui.KeyBackspace})
 	pressConfirm(t, w, true)
@@ -478,7 +509,7 @@ func TestKeybindingSelfLockoutRequiresConfirmation(t *testing.T) {
 	w := newTestWorkbench(t)
 
 	w.showKeybindingCustomizer()
-	selectCustomizerRow(t, w, 11) // App / Keybinding help.
+	selectCustomizerAction(t, w, actionHelpOverlay)
 	typeFocused(w, tui.TypeEvent{Key: tui.KeyEnter})
 	typeFocused(w, tui.TypeEvent{Key: tui.KeyF2})
 	if top := w.desktop.TopLayer(); top == nil || top.Name != "confirm-dialog" {
@@ -488,7 +519,7 @@ func TestKeybindingSelfLockoutRequiresConfirmation(t *testing.T) {
 	assertChord(t, chordForAction(t, w, actionHelpOverlay), tv.Chord{Rune: '?'})
 
 	w.showKeybindingCustomizer()
-	selectCustomizerRow(t, w, 11) // App / Keybinding help.
+	selectCustomizerAction(t, w, actionHelpOverlay)
 	typeFocused(w, tui.TypeEvent{Key: tui.KeyEnter})
 	typeFocused(w, tui.TypeEvent{Key: tui.KeyF2})
 	pressConfirm(t, w, true)

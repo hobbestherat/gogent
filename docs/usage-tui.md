@@ -92,14 +92,22 @@ menu is replaced with the placeholder **(settings unavailable)**.
 | Notifications…                | —        | Open notification settings (when wired)                  |
 | Notifications: \<on\|off\>     | —        | Quick-toggle notifications                                |
 | Theme…                        | —        | Open the theme editor (when wired)                       |
+| Keybindings…                  | —        | Open the keybinding customizer (when wired)              |
+
+The **Keybindings…** item opens the editor that rebinds shortcuts; it appears only when
+the host wires the keybinding getter/setter. (The Help menu's **Keybindings (?)…** opens
+the read-only cheatsheet instead.) See [Keybinding customizer](#keybinding-customizer).
 
 ### Help
 
 | Item                  | Shortcut | Description                          |
 |-----------------------|----------|--------------------------------------|
-| Command Palette…      | Ctrl+K   | Open the command palette             |
+| Command Palette…      | :        | Open the command palette             |
 | Keybindings (?)…      | ?        | Open the keybinding reference        |
 | About                 | —        | Show version/about information       |
+
+Menu shortcut hints reflect the **live** binding: if you rebind an action in the
+customizer, its menu hint updates to the new chord.
 
 ---
 
@@ -132,17 +140,20 @@ the transcript view, the sidebar, and the message input box.
 
 ### Global / desktop
 
+All chords below are **defaults**. The catalog chords are rebindable from the
+[keybinding customizer](#keybinding-customizer); the exceptions are Ctrl+C (the native
+quit-when-unconsumed tail) and the fixed Ctrl+K / Ctrl+F convenience accelerators.
+
 | Action                  | Shortcut        | Notes                                            |
 |-------------------------|-----------------|--------------------------------------------------|
 | Quit                    | Ctrl+Q, Ctrl+C  | Confirms via `confirmQuit`                       |
-| Command palette         | Ctrl+K          | —                                                |
-| Command palette         | `:`             | Only when not in a text input                    |
+| Command palette         | Ctrl+K, `:`     | Ctrl+K anywhere (fixed); `:` outside a text input (rebindable) |
+| Find in transcript      | Ctrl+F, `/`     | Ctrl+F anywhere (fixed); `/` while a transcript is focused (rebindable) |
 | Keybinding help         | `?`             | Only when not in a text input                    |
 | New session             | Ctrl+N          | —                                                |
 | Next session            | Ctrl+]          | —                                                |
 | Close session           | Ctrl+W          | —                                                |
 | Sub-agent settings      | Ctrl+,          | —                                                |
-| Find                    | Ctrl+F          | —                                                |
 | Tile vertically         | Ctrl+Shift+V    | —                                                |
 | Tile horizontally       | Ctrl+Shift+H    | —                                                |
 | Tile grid               | Ctrl+Shift+G    | —                                                |
@@ -435,6 +446,29 @@ a `#RRGGBB` hex string, or `default`, plus a live swatch (`▉▉ Aa`). Roles ar
 
 The role list lives in a scrolling viewport with a scrollbar. Buttons: **Reset**, **Save**
 (persists and re-applies live), **Cancel**.
+
+---
+
+## Keybinding customizer
+
+Open with **Config → Keybindings…** (or the command palette's *Customize keybindings*).
+Title: **Customize Keybindings**. It lists every rebindable action grouped by category,
+showing each action's current chord and a `(default)`/`(custom)`/`(unbound)` tag.
+
+- **Enter** on a row enters *capture mode*: the next chord you press becomes the new
+  binding. **Esc** cancels capture; **Backspace** clears the binding (unbinds it).
+- A change takes effect **immediately** — in every open window — and is persisted to
+  `config.json` under `keybindings.overrides`. The matching menu shortcut hint updates too.
+- If the captured chord is already used by another action in the same scope, a prompt
+  offers to **reassign** it (a lossless swap that gives the other action your action's old
+  chord). Rebinding a path *to* this customizer (`?`/`:`) asks for confirmation first.
+- A *Global* shortcut must be a chorded key (Ctrl/Alt or a function key); a plain letter
+  is rejected because text inputs would capture it.
+- **Reset** restores the selected action's default; **Reset All** restores every default.
+
+Every action ID, default, and scope is listed in
+[configuration.md → KeybindingsConfig](configuration.md#keybindingsconfig). Slash commands
+(`/fork`, `/stop`, …) are typed text, not keybindings, and are not shown here.
 
 ---
 

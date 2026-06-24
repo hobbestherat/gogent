@@ -9,34 +9,44 @@ import (
 	tv "github.com/hobbestherat/turbotui/turbotv"
 )
 
-// command is one entry in the central command/keybinding table — the single
-// source of truth shared by the command palette and the keybinding help overlay
-// (issue #60). The palette offers every entry that carries an action and passes
-// its optional availability predicate; the help overlay lists every visible
-// entry grouped by category, so the cheatsheet can never drift from the real
-// bindings.
-type command struct {
-	category string // help-overlay grouping, e.g. "Session"
-	name     string // human description shown in both views
-	keys     string // key hint shown in both views ("" when unbound)
-	// actionID ties this entry to its turbotui BindingRegistry binding (issue #269,
-	// phase 4a). When set and the binding resolves, commands() overwrites keys with
-	// the registry's real chord (registry.BindingFor(actionID).Chord.String()) so the
-	// palette and cheatsheet can never drift from the live binding. Empty leaves the
-	// keys hint as built in the table (slash commands and menu accelerators). The two
-	// composite hints that name more than one chord ("Ctrl+F, /" and "Ctrl+K, :") also
-	// leave actionID empty, but build their variable half from chordFor so a phase-4b
-	// rebind of the '/' or ':' chord still shows through (issue #269).
+// action is one entry in the unified command/keybinding catalog — the single source
+// of truth shared by the command palette, the '?' cheatsheet, the menu bar's shortcut
+// hints, and the desktop BindingRegistry (issue #401, merging the old commands() and
+// keybindActions() tables). Four consumers project from actions(): the palette offers
+// every entry whose run is non-nil and whose availability predicate passes; the
+// cheatsheet lists every visible entry grouped by category; the menu bar tags its
+// rebindable items with the matching actionID and reads their shortcut display from
+// chordFor; and rebuildBindings registers every entry that carries an actionID.
+//
+// There is deliberately NO Target field: Target gates a ScopeFocus binding to one
+// window's transcript and is only meaningful at per-window registration time (see
+// SessionWindow.registerTranscriptBindings), not on this static catalog.
+type action struct {
+	category string // cheatsheet grouping, e.g. "Session"
+	name     string // human description shown in palette and cheatsheet
+	// keys is the display hint shown in the palette/cheatsheet. For a rebindable entry
+	// (actionID != "") actions() overwrites it from chordFor so it can never drift from
+	// the live binding; for a slash command or palette-only entry (actionID == "") it is
+	// the literal hint built in the table (e.g. "/fork"), or "" when there is none.
+	keys    string
+	run     func()      // palette action; nil marks a reference-only / display-only entry
+	enabled func() bool // availability predicate; nil means always available
+
+	// actionID ties this entry to its BindingRegistry binding (issue #401). Empty marks
+	// an entry that is not rebindable — slash commands (typed text, not keybindings) and
+	// palette-only commands with no shortcut. A non-empty actionID is registered by
+	// rebuildBindings (Global/Fallthrough once, Focus per window) and is the opaque key
+	// the customizer rebinds and persists; it is the contract a tester targets.
 	actionID tv.ActionID
-	run      func()      // palette action; nil marks a reference-only binding
-	enabled  func() bool // availability predicate; nil means always available
+	scope    tv.Scope // dispatch scope of the binding (Global / Focus / Fallthrough)
+	deflt    tv.Chord // built-in default chord (the binding when no override is recorded)
 }
 
-// Action identifiers (issue #269, phase 4a). These are the opaque keys gogent shares
-// with turbotui's BindingRegistry: the transcript-context keys are registered at
-// ScopeFocus (scoped to a session window's transcript) and the help/palette keys at
-// ScopeFallthrough. They are the contract a tester targets, so they are stable
-// strings, not generated.
+// Action identifiers (issue #401, extending #269). These are the opaque keys gogent
+// shares with turbotui's BindingRegistry. Global chords (menu accelerators) fire before
+// the focused widget; the transcript-context keys are ScopeFocus (scoped to a session
+// window's transcript); the help/palette keys are ScopeFallthrough. They are the
+// contract a tester targets, so they are stable strings, not generated.
 const (
 	actionTranscriptFind        tv.ActionID = "transcript.find"
 	actionTranscriptShowAll     tv.ActionID = "transcript.showAll"
@@ -50,26 +60,46 @@ const (
 
 	actionHelpOverlay    tv.ActionID = "app.help"
 	actionCommandPalette tv.ActionID = "app.commandPalette"
+
+	// Global menu-accelerator actions promoted to rebindable bindings (issue #401):
+	// they were hardcoded Ctrl/Ctrl+Shift menu accelerators owned by the menu bar, so a
+	// customizer rebind could never reach them. They now register on the desktop registry
+	// from chordFor and survive a menu rebuild.
+	actionSessionNew           tv.ActionID = "session.new"
+	actionSessionNext          tv.ActionID = "session.next"
+	actionSessionClose         tv.ActionID = "session.close"
+	actionAppQuit              tv.ActionID = "app.quit"
+	actionConfigSubagents      tv.ActionID = "config.subagents"
+	actionWindowTileVertical   tv.ActionID = "window.tileVertical"
+	actionWindowTileHorizontal tv.ActionID = "window.tileHorizontal"
+	actionWindowTileGrid       tv.ActionID = "window.tileGrid"
+	actionWindowMaximizeAll    tv.ActionID = "window.maximizeAll"
+	actionWindowCascade        tv.ActionID = "window.cascade"
 )
 
-// visible reports whether the command should appear in the help overlay: a
-// command gated behind an unwired handler is hidden so the cheatsheet only lists
-// things that actually work.
-func (c command) visible() bool {
+// visible reports whether the action should appear in the help overlay: an action
+// gated behind an unwired handler is hidden so the cheatsheet only lists things that
+// actually work.
+func (c action) visible() bool {
 	return c.enabled == nil || c.enabled()
 }
 
-// available reports whether the command should be offered in the palette: it
-// must carry an action and be visible in the current configuration.
-func (c command) available() bool {
+// available reports whether the action should be offered in the palette: it must
+// carry a runnable action and be visible in the current configuration.
+func (c action) available() bool {
 	return c.run != nil && c.visible()
 }
 
-// commands returns the central command/keybinding table. It is rebuilt on each
-// call so the availability predicates reflect the live handler wiring and active
-// session. The entries are listed grouped by category (Session, Transcript,
-// Config, App); both the palette and the help overlay rely on that grouping.
-func (w *Workbench) commands() []command {
+// rawActions returns the unified command/keybinding catalog (issue #401) WITHOUT the
+// display-key projection. It is the lookup catalog: actionByID / keybindDefault /
+// rebindable / rebuildBindings scan it, and crucially it does NOT call chordFor — so
+// the chordFor -> keybindDefault -> actionByID lookup chain terminates here instead of
+// recursing back through the projection. It is rebuilt on each call so the availability
+// predicates reflect the live handler wiring and active session. Entries are grouped by
+// category (Session, Window, Transcript, Config, App); the palette, the help overlay and
+// the customizer all rely on that grouping. Display consumers call actions() (which adds
+// the key hints); everything that only needs identity/scope/default uses rawActions().
+func (w *Workbench) rawActions() []action {
 	avail := func(ok bool) func() bool { return func() bool { return ok } }
 	h := w.handlers
 	toggle := func(k eventKind) func() {
@@ -85,13 +115,16 @@ func (w *Workbench) commands() []command {
 			w.desktop.Redraw()
 		}
 	}
-	cmds := []command{
+	cmds := []action{
 		// Session lifecycle and arrangement.
-		{category: "Session", name: "New session", keys: "Ctrl+N", run: func() { w.NewSession() }},
+		{category: "Session", name: "New session", run: func() { w.NewSession() },
+			actionID: actionSessionNew, scope: tv.ScopeGlobal, deflt: tv.Chord{Rune: 'n', Ctrl: true}},
 		{category: "Session", name: "Fork session", keys: "/fork", run: sessionCmd("/fork")},
-		{category: "Session", name: "Next session", keys: "Ctrl+]", run: func() { w.cycle(1) }},
+		{category: "Session", name: "Next session", run: func() { w.cycle(1) },
+			actionID: actionSessionNext, scope: tv.ScopeGlobal, deflt: tv.Chord{Rune: ']', Ctrl: true}},
 		{category: "Session", name: "Previous session", run: func() { w.cycle(-1) }},
-		{category: "Session", name: "Close session", keys: "Ctrl+W", run: w.CloseActive},
+		{category: "Session", name: "Close session", run: w.CloseActive,
+			actionID: actionSessionClose, scope: tv.ScopeGlobal, deflt: tv.Chord{Rune: 'w', Ctrl: true}},
 		{category: "Session", name: "Close other sessions", run: func() { w.CloseOthers(w.ActiveID()) }},
 		{category: "Session", name: "Close all sessions", run: w.CloseAll},
 		{category: "Session", name: "Rename session", run: func() { w.RenameSession(w.ActiveID()) }},
@@ -129,41 +162,51 @@ func (w *Workbench) commands() []command {
 			enabled: avail(h.ListSavedSessions != nil)},
 
 		// Window arrangement (issue #241): tile or maximize every open window across
-		// the work area. Mirrored on the View menu with the same Ctrl+Shift chords.
-		{category: "Window", name: "Tile vertically", keys: "Ctrl+Shift+V",
-			run: func() { w.arrange(tv.TileRows) }},
-		{category: "Window", name: "Tile horizontally", keys: "Ctrl+Shift+H",
-			run: func() { w.arrange(tv.TileColumns) }},
-		{category: "Window", name: "Tile grid", keys: "Ctrl+Shift+G",
-			run: func() { w.arrange(tv.TileGrid) }},
-		{category: "Window", name: "Cascade windows", keys: "Ctrl+Shift+D",
-			run: func() { w.arrange(tv.TileCascade) }},
-		{category: "Window", name: "Maximize all windows", keys: "Ctrl+Shift+M",
-			run: w.maximizeAll},
+		// the work area. Mirrored on the View menu, which tags the same actionIDs.
+		{category: "Window", name: "Tile vertically", run: func() { w.arrange(tv.TileRows) },
+			actionID: actionWindowTileVertical, scope: tv.ScopeGlobal, deflt: tv.Chord{Rune: 'v', Ctrl: true, Shift: true}},
+		{category: "Window", name: "Tile horizontally", run: func() { w.arrange(tv.TileColumns) },
+			actionID: actionWindowTileHorizontal, scope: tv.ScopeGlobal, deflt: tv.Chord{Rune: 'h', Ctrl: true, Shift: true}},
+		{category: "Window", name: "Tile grid", run: func() { w.arrange(tv.TileGrid) },
+			actionID: actionWindowTileGrid, scope: tv.ScopeGlobal, deflt: tv.Chord{Rune: 'g', Ctrl: true, Shift: true}},
+		{category: "Window", name: "Cascade windows", run: func() { w.arrange(tv.TileCascade) },
+			actionID: actionWindowCascade, scope: tv.ScopeGlobal, deflt: tv.Chord{Rune: 'd', Ctrl: true, Shift: true}},
+		{category: "Window", name: "Maximize all windows", run: w.maximizeAll,
+			actionID: actionWindowMaximizeAll, scope: tv.ScopeGlobal, deflt: tv.Chord{Rune: 'm', Ctrl: true, Shift: true}},
 
 		// Transcript view controls. The single-letter keys only fire while a
-		// transcript is focused; listing them here is exactly the cheatsheet the
-		// help overlay exists to provide.
-		{category: "Transcript", name: "Find in transcript", keys: "Ctrl+F, " + chordLabel(w.chordFor(actionTranscriptFind)),
-			run: func() { w.withActiveTranscript((*SessionWindow).promptFind) }},
-		{category: "Transcript", name: "Show all (clear filter)", keys: "Esc", actionID: actionTranscriptShowAll,
-			run: func() { w.transcriptDo((*transcriptModel).showAll) }},
-		{category: "Transcript", name: "Toggle messages", keys: "a", actionID: actionTranscriptToggleMsg, run: toggle(kindAssistant)},
-		{category: "Transcript", name: "Toggle tool calls", keys: "t", actionID: actionTranscriptToggleTool, run: toggle(kindTool)},
-		{category: "Transcript", name: "Toggle thinking", keys: "r", actionID: actionTranscriptToggleThink, run: toggle(kindThinking)},
-		{category: "Transcript", name: "Toggle errors", keys: "e", actionID: actionTranscriptToggleErr, run: toggle(kindError)},
-		{category: "Transcript", name: "Fold all", keys: "f", actionID: actionTranscriptFoldAll,
-			run: func() { w.transcriptDo(func(m *transcriptModel) { m.setFold(true) }) }},
-		{category: "Transcript", name: "Unfold all", keys: "u", actionID: actionTranscriptUnfoldAll,
-			run: func() { w.transcriptDo(func(m *transcriptModel) { m.setFold(false) }) }},
-		{category: "Transcript", name: "Copy last answer", keys: "y", actionID: actionTranscriptCopyAnswer,
-			run: func() { w.withActiveTranscript((*SessionWindow).copyLastAnswer) }},
+		// transcript is focused (ScopeFocus); listing them here is exactly the
+		// cheatsheet the help overlay exists to provide.
+		{category: "Transcript", name: "Find in transcript",
+			run:      func() { w.withActiveTranscript((*SessionWindow).promptFind) },
+			actionID: actionTranscriptFind, scope: tv.ScopeFocus, deflt: tv.Chord{Rune: '/'}},
+		{category: "Transcript", name: "Show all (clear filter)",
+			run:      func() { w.transcriptDo((*transcriptModel).showAll) },
+			actionID: actionTranscriptShowAll, scope: tv.ScopeFocus, deflt: tv.Chord{Key: tui.KeyEscape}},
+		{category: "Transcript", name: "Toggle messages", run: toggle(kindAssistant),
+			actionID: actionTranscriptToggleMsg, scope: tv.ScopeFocus, deflt: tv.Chord{Rune: 'a'}},
+		{category: "Transcript", name: "Toggle tool calls", run: toggle(kindTool),
+			actionID: actionTranscriptToggleTool, scope: tv.ScopeFocus, deflt: tv.Chord{Rune: 't'}},
+		{category: "Transcript", name: "Toggle thinking", run: toggle(kindThinking),
+			actionID: actionTranscriptToggleThink, scope: tv.ScopeFocus, deflt: tv.Chord{Rune: 'r'}},
+		{category: "Transcript", name: "Toggle errors", run: toggle(kindError),
+			actionID: actionTranscriptToggleErr, scope: tv.ScopeFocus, deflt: tv.Chord{Rune: 'e'}},
+		{category: "Transcript", name: "Fold all",
+			run:      func() { w.transcriptDo(func(m *transcriptModel) { m.setFold(true) }) },
+			actionID: actionTranscriptFoldAll, scope: tv.ScopeFocus, deflt: tv.Chord{Rune: 'f'}},
+		{category: "Transcript", name: "Unfold all",
+			run:      func() { w.transcriptDo(func(m *transcriptModel) { m.setFold(false) }) },
+			actionID: actionTranscriptUnfoldAll, scope: tv.ScopeFocus, deflt: tv.Chord{Rune: 'u'}},
+		{category: "Transcript", name: "Copy last answer",
+			run:      func() { w.withActiveTranscript((*SessionWindow).copyLastAnswer) },
+			actionID: actionTranscriptCopyAnswer, scope: tv.ScopeFocus, deflt: tv.Chord{Rune: 'y'}},
 		{category: "Transcript", name: "Copy last code block",
 			run: func() { w.withActiveTranscript((*SessionWindow).copyLastCode) }},
 
 		// Configuration browsers and editors.
-		{category: "Config", name: "Sub-agent settings", keys: "Ctrl+,", run: w.showSettingsDialog,
-			enabled: avail(h.GetSettings != nil && h.SetSettings != nil)},
+		{category: "Config", name: "Sub-agent settings", run: w.showSettingsDialog,
+			enabled:  avail(h.GetSettings != nil && h.SetSettings != nil),
+			actionID: actionConfigSubagents, scope: tv.ScopeGlobal, deflt: tv.Chord{Rune: ',', Ctrl: true}},
 		{category: "Config", name: "Models", run: w.showModelEditor},
 		{category: "Config", name: "Resources (tools & skills)", run: w.showResourcesDialog},
 		{category: "Config", name: "Statistics", run: w.showStatisticsDialog,
@@ -173,58 +216,44 @@ func (w *Workbench) commands() []command {
 		{category: "Config", name: "Theme editor", run: w.showThemeEditor,
 			enabled: avail(h.GetTheme != nil && h.SetTheme != nil)},
 
-		// Application-wide actions. The palette itself is reference-only (you are
-		// already in it); the sidebar pin and help/quit are runnable.
+		// Application-wide actions. The command palette and help overlay are full
+		// rebindable actions (issue #401): their run IS the registry handler for the
+		// ':' / '?' fallthrough keys, so the menu OnSelect and the binding fire the same
+		// closure.
 		{category: "App", name: "Pin / unpin sidebar", run: w.ToggleSidebarPin},
-		{category: "App", name: "Command palette", keys: "Ctrl+K, " + chordLabel(w.chordFor(actionCommandPalette))},
-		{category: "App", name: "Keybinding help", keys: "?", actionID: actionHelpOverlay, run: w.showHelpOverlay},
+		{category: "App", name: "Command palette", run: w.showCommandPalette,
+			actionID: actionCommandPalette, scope: tv.ScopeFallthrough, deflt: tv.Chord{Rune: ':'}},
+		{category: "App", name: "Keybinding help", run: w.showHelpOverlay,
+			actionID: actionHelpOverlay, scope: tv.ScopeFallthrough, deflt: tv.Chord{Rune: '?'}},
 		// Re-open the welcome/onboarding dialog on demand (issue #342): always
 		// available, and because the ? cheatsheet renders from this same table it
 		// appears there too. The dialog's checkbox doubles as the startup-preference
 		// toggle, so this is also how a user re-enables the startup dialog.
 		{category: "App", name: "Show welcome", run: w.showWelcomeDialog},
 		{category: "App", name: "Customize keybindings", run: w.showKeybindingCustomizer},
-		{category: "App", name: "Quit", keys: "Ctrl+Q", run: w.confirmQuit},
-	}
-	// Derive the key hint from the live registry for every entry that names an action
-	// (issue #269, phase 4a): the binding is the single source of truth, so the
-	// palette and cheatsheet can never drift from what the key actually does. Entries
-	// without an actionID (slash commands, menu accelerators) keep their table keys;
-	// the two composite hints already folded their live chord in above via chordFor.
-	for i := range cmds {
-		if cmds[i].actionID == "" {
-			continue
-		}
-		// A cleared action shows the unbound marker rather than its stale default: it has
-		// no registry binding, so chordDisplay would fall back to the hardcoded hint.
-		if w.isUnbound(cmds[i].actionID) {
-			cmds[i].keys = chordLabel(unboundChord)
-			continue
-		}
-		if disp, ok := w.chordDisplay(cmds[i].actionID); ok {
-			cmds[i].keys = disp
-		}
+		{category: "App", name: "Quit", run: w.confirmQuit,
+			actionID: actionAppQuit, scope: tv.ScopeGlobal, deflt: tv.Chord{Rune: 'q', Ctrl: true}},
 	}
 	return cmds
 }
 
-// chordDisplay returns the conventional display string for the chord bound to
-// actionID in the desktop's scoped BindingRegistry (issue #269, phase 4a), and false
-// when there is no desktop yet or no binding carries the action. Callers fall back to
-// the hardcoded keys hint on false, so a workbench built without a desktop (e.g. the
-// zero value used by unit tests) renders the catalog's default hints unchanged.
-func (w *Workbench) chordDisplay(id tv.ActionID) (string, bool) {
-	if w.desktop == nil {
-		return "", false
+// actions returns the catalog with each rebindable entry's display key hint projected
+// from its current binding (issue #401): the override-or-default chord is the single
+// source of truth, so the palette and cheatsheet can never drift from what the key
+// actually does, and a rebind shows through without touching the registry. chordLabel
+// renders a cleared (unbound) action as "—"; entries without an actionID (slash commands,
+// palette-only) keep their literal table keys. This is the DISPLAY catalog — the palette
+// and help overlay use it; identity/default lookups use rawActions() to avoid recursing
+// through chordFor.
+func (w *Workbench) actions() []action {
+	cmds := w.rawActions()
+	for i := range cmds {
+		if cmds[i].actionID == "" {
+			continue
+		}
+		cmds[i].keys = chordLabel(w.chordFor(cmds[i].actionID))
 	}
-	reg := w.desktop.ScopedBindings()
-	if reg == nil {
-		return "", false
-	}
-	if b, ok := reg.BindingFor(id); ok {
-		return displayChord(b.Chord), true
-	}
-	return "", false
+	return cmds
 }
 
 // displayChord renders a chord as the keys the user actually presses, for the
@@ -254,9 +283,9 @@ func displayChord(c tv.Chord) string {
 // session_window.go. It reads sw.planPending under w.mu, matching how
 // editActiveGoal looks up the active window, and is safe on an empty workbench.
 func (w *Workbench) activePlanPending() bool {
-	// commands() runs this predicate while filtering, so it must tolerate the
+	// actions() runs this predicate while filtering, so it must tolerate the
 	// desktop-less zero-value Workbench unit tests build: ActiveID dereferences the
-	// desktop, so without this guard the predicate would panic (cf. chordDisplay).
+	// desktop, so without this guard the predicate would panic (cf. activePlanPending).
 	if w.desktop == nil {
 		return false
 	}
@@ -353,9 +382,9 @@ func fuzzyScore(pattern, text string) (int, bool) {
 // filterCommands returns the available commands fuzzy-matching query, best match
 // first. Ties keep the table's (category-grouped) order, so an empty query lists
 // every command in its natural grouping. The sort is stable and deterministic.
-func filterCommands(cmds []command, query string) []command {
+func filterCommands(cmds []action, query string) []action {
 	type scored struct {
-		cmd   command
+		cmd   action
 		score int
 	}
 	matches := make([]scored, 0, len(cmds))
@@ -370,7 +399,7 @@ func filterCommands(cmds []command, query string) []command {
 	sort.SliceStable(matches, func(i, j int) bool {
 		return matches[i].score < matches[j].score
 	})
-	out := make([]command, len(matches))
+	out := make([]action, len(matches))
 	for i, m := range matches {
 		out[i] = m.cmd
 	}
@@ -383,7 +412,7 @@ const commandRowNameWidth = 30
 
 // formatCommandRow renders one palette row: the padded name followed by its key
 // hint (when bound).
-func formatCommandRow(c command) string {
+func formatCommandRow(c action) string {
 	row := padName(c.name, commandRowNameWidth)
 	if c.keys != "" {
 		row += "  " + c.keys
@@ -394,7 +423,7 @@ func formatCommandRow(c command) string {
 // helpText renders the keybinding cheatsheet from the visible commands, grouped
 // under their category headers in table order. It is pure so the overlay's body
 // can be unit-tested without a live desktop.
-func helpText(cmds []command) string {
+func helpText(cmds []action) string {
 	var b strings.Builder
 	cur := ""
 	for _, c := range cmds {
@@ -431,7 +460,7 @@ const helpVChrome = 5
 // availableCommandCount reports how many commands the palette will list with an
 // empty query — every command that carries an action and is visible in the current
 // configuration. It is the row count the palette's MaxH is keyed to.
-func availableCommandCount(cmds []command) int {
+func availableCommandCount(cmds []action) int {
 	n := 0
 	for _, c := range cmds {
 		if c.available() {
@@ -472,7 +501,7 @@ func newCloseableDialog(title string, x, y, width, height int, closeFn func()) *
 }
 
 func (w *Workbench) showCommandPalette() {
-	all := w.commands()
+	all := w.actions()
 	// List-driven, so it benefits from width — keep it near the percentage default
 	// (no PreferredW) with a 40×10 floor — but cap the height to the actual command
 	// count (+ chrome) so a short palette does not fill 42 rows on a roomy terminal
@@ -521,7 +550,7 @@ func (w *Workbench) showCommandPalette() {
 		if n == nil {
 			return
 		}
-		c, ok := n.Data.(command)
+		c, ok := n.Data.(action)
 		if !ok || c.run == nil {
 			return
 		}
@@ -571,7 +600,7 @@ func (w *Workbench) showCommandPalette() {
 // command table that drives the palette so the two can never disagree. Esc or
 // Close dismisses.
 func (w *Workbench) showHelpOverlay() {
-	help := helpText(w.commands())
+	help := helpText(w.actions())
 	// Read-only and list-driven, so keep it near the percentage default width (no
 	// PreferredW) with a 44×12 floor — but cap the height to the cheatsheet's line
 	// count (+ chrome) so a short binding list does not fill 42 rows (issues #299,

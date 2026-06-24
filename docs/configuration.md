@@ -241,6 +241,76 @@ Each entry in `mcp_servers[]` is an `MCPServerConfig`:
 
 ---
 
+## `KeybindingsConfig`
+
+Customises the TUI keyboard shortcuts. Edit it from the running app via **Config →
+Keybindings…** (or the command palette's *Customize keybindings*); the editor writes
+this section back to `config.json`. Hand-editing is also supported.
+
+| JSON tag | Type | Default | Description |
+|---|---|---|---|
+| `overrides,omitempty` | map[string]string | — | Maps an action ID to a chord spec. Only actions rebound away from their built-in default are stored. |
+
+**`overrides` semantics.** Each key is a stable action ID (below); each value is a
+**chord spec**. Modifiers are joined to the key token with `+` in `Ctrl+Alt+Shift`
+order — e.g. `Ctrl+T`, `Ctrl+Shift+R`, `Alt+F4`. A lone character is a literal key
+(`a`, `/`, `?`, `:`, `+`); a named key uses its token (`Esc`, `Enter`, `Tab`,
+`Backspace`, `Up`/`Down`/`Left`/`Right`, `Home`/`End`, `PageUp`/`PageDown`,
+`Insert`/`Delete`, `F1`–`F12`). The special value `"none"` **unbinds** the action
+(no key fires it, not even its default). An override is **ignored** on load when its
+action ID is unknown, its spec is unparseable, the terminal can't deliver the chord,
+it breaks the scope rule, or it would collide (same scope) with another action — so a
+stale or hand-edited config can't break startup. Letter matching is case-insensitive.
+
+**Scope rule.** A *Global* action's chord must be chorded (Ctrl/Alt or a function/named
+key): a plain printable key bound globally would be stolen from every text input.
+*Focus* and *Fallthrough* actions may use plain keys (they fire only when focus is not
+in a text input). The editor enforces this; a hand-edited violation is dropped on load.
+
+**Action IDs** (ID — default — scope):
+
+| Action ID | Default | Scope | What it does |
+|---|---|---|---|
+| `session.new` | `Ctrl+N` | Global | New session |
+| `session.next` | `Ctrl+]` | Global | Next session |
+| `session.close` | `Ctrl+W` | Global | Close active session |
+| `app.quit` | `Ctrl+Q` | Global | Quit |
+| `config.subagents` | `Ctrl+,` | Global | Open Sub-agent settings |
+| `window.tileVertical` | `Ctrl+Shift+V` | Global | Tile windows vertically |
+| `window.tileHorizontal` | `Ctrl+Shift+H` | Global | Tile windows horizontally |
+| `window.tileGrid` | `Ctrl+Shift+G` | Global | Tile windows in a grid |
+| `window.maximizeAll` | `Ctrl+Shift+M` | Global | Maximize all windows |
+| `window.cascade` | `Ctrl+Shift+D` | Global | Cascade windows |
+| `transcript.find` | `/` | Focus | Find in transcript |
+| `transcript.showAll` | `Esc` | Focus | Clear filter / search |
+| `transcript.toggle.messages` | `a` | Focus | Toggle assistant messages |
+| `transcript.toggle.tools` | `t` | Focus | Toggle tool calls |
+| `transcript.toggle.thinking` | `r` | Focus | Toggle thinking |
+| `transcript.toggle.errors` | `e` | Focus | Toggle errors |
+| `transcript.foldAll` | `f` | Focus | Fold all |
+| `transcript.unfoldAll` | `u` | Focus | Unfold all |
+| `transcript.copyAnswer` | `y` | Focus | Copy last answer |
+| `app.commandPalette` | `:` | Fallthrough | Open the command palette |
+| `app.help` | `?` | Fallthrough | Open the keybinding cheatsheet |
+
+*Global* chords fire anywhere (before the focused widget) but are suppressed while a
+modal dialog is up. *Focus* chords fire only while a session transcript holds focus.
+*Fallthrough* chords fire only when the key reaches the desktop unconsumed (i.e. focus
+is not in a text input). Slash commands (`/fork`, `/stop`, …) are typed text, not
+keybindings, and are not customisable here.
+
+```json
+"keybindings": {
+  "overrides": {
+    "session.new": "Ctrl+T",
+    "transcript.toggle.thinking": "i",
+    "transcript.find": "none"
+  }
+}
+```
+
+---
+
 ## `ExperimentalConfig`
 
 | JSON tag | Type | Default | Description |

@@ -407,8 +407,8 @@ type Workbench struct {
 	handlers     Handlers
 	// keybindings holds the user's keyboard-shortcut overrides (issue #269): an
 	// actionID -> chord map carrying ONLY actions rebound away from their catalog
-	// default. registerTranscriptBindings / registerFallthroughBindings consult it
-	// (via chordFor) when registering, so a persisted override is applied the moment
+	// default. rebuildBindings / registerTranscriptBindings consult it (via chordFor)
+	// when registering, so a persisted override is applied the moment
 	// a binding is registered; the customizer mutates it and persists via the
 	// GetKeybindings/SetKeybindings handlers. Touched only on the UI thread, like the
 	// rest of the workbench's binding state.
@@ -611,34 +611,8 @@ func NewWorkbench(models []*config.ModelConfig) *Workbench {
 		w.sidebar.reposition(w.app.Width(), w.app.Height())
 	})
 	w.rebuildMenu()
-	w.registerFallthroughBindings()
+	w.rebuildBindings()
 	return w
-}
-
-// registerFallthroughBindings registers the app-fallthrough keys ('?' opens the
-// keybinding help, ':' opens the command palette) as Fallthrough-scope bindings on
-// the desktop's BindingRegistry (issue #269, phase 4a). The toolkit consults them at
-// the unhandledKeyFn dispatch position — after the focused widget and focus
-// navigation decline the key — so they fire only when '?'/':' reach the desktop
-// unconsumed (focus on a transcript/sidebar, not a text input where they are literal
-// characters), exactly as the old SetUnhandledKeyFn cases did. Ctrl+C is deliberately
-// left in SetUnhandledKeyFn (see Run): its quit-only-when-unconsumed rule must run at
-// that tail position.
-func (w *Workbench) registerFallthroughBindings() {
-	reg := w.desktop.ScopedBindings()
-	// Chords come from chordFor (override-or-catalog-default, issue #269) so a
-	// persisted rebind of '?'/':' takes effect; with no override these are the
-	// catalog defaults '?' and ':'. A cleared (unbound) action registers nothing, so
-	// its key fires nothing.
-	register := func(id tv.ActionID, handler func() bool) {
-		chord := w.chordFor(id)
-		if chord == unboundChord {
-			return
-		}
-		reg.Register(tv.KeyBinding{Chord: chord, ActionID: id, Scope: tv.ScopeFallthrough}, handler)
-	}
-	register(actionHelpOverlay, func() bool { w.showHelpOverlay(); return true })
-	register(actionCommandPalette, func() bool { w.showCommandPalette(); return true })
 }
 
 // SetModels updates the list of available models offered in each session window.
@@ -741,10 +715,17 @@ func (w *Workbench) SetHandlers(h Handlers) {
 // the render loop. It is a thin, exported wrapper over the desktop's own queue.
 func (w *Workbench) Post(fn func()) { w.desktop.Post(fn) }
 
-// RefreshMenu rebuilds the menu bar from the current Handlers and state. The
-// daemon-handoff controller calls it (on the UI thread) after swapping Handlers
-// so the Daemon menu reflects the new attachment mode immediately.
-func (w *Workbench) RefreshMenu() { w.rebuildMenu() }
+// RefreshMenu rebuilds the menu bar AND the binding registry from the current
+// Handlers and state. The daemon-handoff controller calls it (on the UI thread)
+// after swapping Handlers so the Daemon menu reflects the new attachment mode
+// immediately. Rebuilding the bindings too keeps handler-gated Global accelerators
+// (e.g. Ctrl+, Sub-agents, which rebuildBindings skips while its handler is unwired)
+// in step with the new Handlers — the menu bar no longer registers them on SetMenuBar
+// since #401, so RefreshMenu owns that re-registration.
+func (w *Workbench) RefreshMenu() {
+	w.rebuildBindings()
+	w.rebuildMenu()
+}
 
 // SessionIDs returns the ids of the open, live (non-read-only) session windows.
 // The handoff controller uses it to rewire each window's backend observer after a
@@ -809,12 +790,9 @@ func (w *Workbench) rebuildMenu() {
 	activeRO := active != "" && w.sessions[active] != nil && w.sessions[active].readOnly
 	w.mu.Unlock()
 	sessionItems := []*tv.MenuItem{
-		tv.NewMenuItem("&New Session", func() { w.NewSession() }).
-			WithShortcut("Ctrl+N", tui.KeyRune, 'n', true),
-		tv.NewMenuItem("Ne&xt Session", func() { w.cycle(1) }).
-			WithShortcut("Ctrl+]", tui.KeyRune, ']', true),
-		tv.NewMenuItem("&Close Session", func() { w.CloseActive() }).
-			WithShortcut("Ctrl+W", tui.KeyRune, 'w', true),
+		w.menuActionItem("&New Session", actionSessionNew),
+		w.menuActionItem("Ne&xt Session", actionSessionNext),
+		w.menuActionItem("&Close Session", actionSessionClose),
 		tv.NewMenuItem("----------", nil),
 		tv.NewMenuItem("Close &Others", func() { w.CloseOthers(w.ActiveID()) }),
 		tv.NewMenuItem("Close Al&l", func() { w.CloseAll() }),
@@ -874,9 +852,7 @@ func (w *Workbench) rebuildMenu() {
 	editMenuItems := w.editItems()
 	subMenus := []*tv.MenuItem{
 		tv.NewSubMenu("&File",
-			tv.NewMenuItem("E&xit", func() {
-				w.confirmQuit()
-			}).WithShortcut("Ctrl+Q", tui.KeyRune, 'q', true),
+			w.menuActionItem("E&xit", actionAppQuit),
 		),
 		tv.NewSubMenu("&Edit", editMenuItems...),
 		tv.NewSubMenu("&Session", sessionItems...),
@@ -890,8 +866,7 @@ func (w *Workbench) rebuildMenu() {
 	}
 	subMenus = append(subMenus,
 		tv.NewSubMenu("&Help",
-			tv.NewMenuItem("Command &Palette…", func() { w.showCommandPalette() }).
-				WithShortcut("Ctrl+K", tui.KeyRune, 'k', true),
+			w.menuActionItem("Command &Palette…", actionCommandPalette),
 			tv.NewMenuItem("&Keybindings (?)…", func() { w.showHelpOverlay() }),
 			tv.NewMenuItem("&Welcome…", func() { w.showWelcomeDialog() }),
 			tv.NewMenuItem("----------", nil),
@@ -904,11 +879,36 @@ func (w *Workbench) rebuildMenu() {
 	bar := tv.NewMenuBar(tv.Rect{X: 0, Y: 0, W: w.app.Width(), H: 1}, subMenus...)
 	applyMenuBarShadow(bar) // honour the NoShadow theme setting (issue #215)
 	w.desktop.SetMenuBar(bar)
-	// Wire the Edit→Copy/Cut accelerators after SetMenuBar — which calls
-	// bar.RebuildBindings() and would otherwise wipe these custom bindings. See
-	// wireEditClipboardAccelerators for why they can't be plain WithShortcut items.
-	w.wireEditClipboardAccelerators(bar, editMenuItems)
 	w.desktop.Redraw()
+}
+
+// menuActionItem builds a menu item for a rebindable catalog action (issue #401): it
+// tags the item with the action's ActionID and renders a display-only shortcut hint
+// from the action's current chord (chordFor), so the hint tracks a rebind on the next
+// rebuildMenu. The item's OnSelect is the SAME catalog run that rebuildBindings
+// registers for this ActionID, so a click and the keyboard accelerator fire one
+// closure. The menu bar no longer registers accelerators from its tree (since #401 it
+// is a view); the binding itself lives on the desktop registry via rebuildBindings.
+func (w *Workbench) menuActionItem(label string, id tv.ActionID) *tv.MenuItem {
+	a, ok := w.actionByID(id)
+	if !ok {
+		// The id is not in the catalog — a catalog/menu drift. Build a plain, inert item
+		// (no run, no shortcut hint) so the drift is visible rather than masquerading as a
+		// working item with a bogus zero-chord shortcut. Every id rebuildMenu passes is a
+		// compile-time catalog constant, so this is defensive only.
+		return tv.NewMenuItem(label, nil)
+	}
+	it := tv.NewMenuItem(label, a.run).WithActionID(id)
+	c := w.chordFor(id)
+	if c == unboundChord {
+		it.Shortcut = &tv.MenuShortcut{Display: chordLabel(c)} // "—"
+	} else {
+		it.Shortcut = &tv.MenuShortcut{
+			Display: displayChord(c),
+			Key:     c.Key, Rune: c.Rune, Ctrl: c.Ctrl, Shift: c.Shift, Alt: c.Alt,
+		}
+	}
+	return it
 }
 
 // settingsItems builds the Settings submenu. The sub-agent execution-model
@@ -916,8 +916,16 @@ func (w *Workbench) rebuildMenu() {
 // showSettingsDialog); the menu also surfaces a quick read-only summary of the
 // current configuration so the active mode is visible at a glance.
 func (w *Workbench) settingsItems() []*tv.MenuItem {
+	// Sub-agents is always present and tagged with its ActionID (issue #401): Ctrl+, is a
+	// rebindable Global whose binding lives on the desktop registry, and showSettingsDialog
+	// guards an unwired handler with a graceful "unavailable" message, so the menu entry
+	// stays in step with the binding. The editors and summary lines that actually read the
+	// settings accessors are gated below.
 	if w.handlers.GetSettings == nil || w.handlers.SetSettings == nil {
-		return []*tv.MenuItem{tv.NewMenuItem("(settings unavailable)", nil)}
+		// Keep the (tagged) Sub-agents entry and the keybinding customizer — gated only on
+		// its own handlers — but skip the entries that need the settings accessors.
+		return append([]*tv.MenuItem{w.menuActionItem("&Sub-agents…", actionConfigSubagents)},
+			w.keybindingsMenuItems()...)
 	}
 	cur := w.handlers.GetSettings()
 	mode := "one-shot"
@@ -932,8 +940,7 @@ func (w *Workbench) settingsItems() []*tv.MenuItem {
 		recursive = "on"
 	}
 	items := []*tv.MenuItem{
-		tv.NewMenuItem("&Sub-agents…", func() { w.showSettingsDialog() }).
-			WithShortcut("Ctrl+,", tui.KeyRune, ',', true),
+		w.menuActionItem("&Sub-agents…", actionConfigSubagents),
 		tv.NewMenuItem("&Models…", func() { w.showModelEditor() }),
 		tv.NewMenuItem("&Resources…", func() { w.showResourcesDialog() }),
 	}
@@ -968,7 +975,24 @@ func (w *Workbench) settingsItems() []*tv.MenuItem {
 			tv.NewMenuItem("T&heme…", func() { w.showThemeEditor() }),
 		)
 	}
+	items = append(items, w.keybindingsMenuItems()...)
 	return items
+}
+
+// keybindingsMenuItems returns the Config-menu entry for the keybinding customizer
+// (issue #401), or nil when the keybinding handlers are unwired. It is gated solely on
+// GetKeybindings/SetKeybindings — mirroring how Theme is gated on its own accessors —
+// so the customizer is reachable whenever rebinds can be persisted, independent of the
+// sub-agent settings handlers. A separator precedes it. Shared by both the normal and
+// the settings-unavailable paths of settingsItems so the entry can't drift.
+func (w *Workbench) keybindingsMenuItems() []*tv.MenuItem {
+	if w.handlers.GetKeybindings == nil || w.handlers.SetKeybindings == nil {
+		return nil
+	}
+	return []*tv.MenuItem{
+		tv.NewMenuItem("----------", nil),
+		tv.NewMenuItem("&Keybindings…", func() { w.showKeybindingCustomizer() }),
+	}
 }
 
 // RefreshTheme re-applies the active palette to the whole live UI after a theme
@@ -1014,59 +1038,24 @@ func (w *Workbench) RefreshTheme() {
 // selected (by click or accelerator) and is a graceful no-op when nothing is
 // selectable.
 //
-// Paste and Find carry their accelerators here via WithShortcut: Ctrl+V is
-// consumed unconditionally by the native paste path anyway, and Ctrl+F has no
-// native key handler of its own (it was the former View→Find accelerator), so a
-// regular always-consuming menu accelerator matches their real behaviour.
-//
-// Copy and Cut are intentionally built WITHOUT a shortcut here; their Ctrl+C /
-// Ctrl+X accelerators are attached afterwards by wireEditClipboardAccelerators
-// (see there for why). They still copy/cut when clicked, via OnSelect.
+// Since #401 the menu bar is a display-only view — it no longer registers
+// accelerators from its tree — so WithShortcut here only renders the hint. The real
+// key bindings live on the desktop registry: Ctrl+V is consumed by turbotui's native
+// paste path; Ctrl+C/Ctrl+X are registered by registerClipboardBindings with handlers
+// that decline when nothing was copied/cut (so Ctrl+C still reaches the quit-confirm
+// tail), which is why they can be plain display hints here without the old
+// always-consuming pitfall. Find is the transcript.find action (ScopeFocus '/'), so
+// its item is tagged via menuActionItem and shows the live chord.
 func (w *Workbench) editItems() []*tv.MenuItem {
 	return []*tv.MenuItem{
-		tv.NewMenuItem("&Copy", func() { w.copySelection() }),
-		tv.NewMenuItem("Cu&t", func() { w.cutSelection() }),
+		tv.NewMenuItem("&Copy", func() { w.copySelection() }).
+			WithShortcut("Ctrl+C", tui.KeyRune, 'c', true),
+		tv.NewMenuItem("Cu&t", func() { w.cutSelection() }).
+			WithShortcut("Ctrl+X", tui.KeyRune, 'x', true),
 		tv.NewMenuItem("&Paste", func() { w.pasteClipboard() }).
 			WithShortcut("Ctrl+V", tui.KeyRune, 'v', true),
 		tv.NewMenuItem("----------", nil),
-		tv.NewMenuItem("&Find…", func() { w.withActiveTranscript((*SessionWindow).promptFind) }).
-			WithShortcut("Ctrl+F", tui.KeyRune, 'f', true),
-	}
-}
-
-// wireEditClipboardAccelerators attaches the Ctrl+C / Ctrl+X accelerators to the
-// Edit→Copy / Edit→Cut items after the menu bar (and its binding registry) have
-// been built. It must run after Desktop.SetMenuBar, which calls
-// bar.RebuildBindings() and would otherwise clear the custom bindings registered
-// here (and, since this also sets the items' Shortcut, re-register them with the
-// always-consuming auto handler instead).
-//
-// Copy and Cut cannot use a plain WithShortcut item. turbotui registers each
-// shortcut-bearing item with a handler that, for an enabled item, always reports
-// the key as consumed once OnSelect runs — it can't tell whether the focused
-// widget actually had anything to copy/cut. That accelerator fires ahead of the
-// desktop's native isCopyKey/isCutKey handling, so an always-consuming Copy/Cut
-// would swallow Ctrl+C / Ctrl+X even when nothing was copyable/cuttable, breaking
-// the "Ctrl+C/Ctrl+X behaviour unchanged" contract — Ctrl+C must reach the
-// quit-confirm tail (see Run) and Ctrl+X the focused widget when copy/cut decline.
-//
-// So we register our own bindings whose handler returns the bool from
-// CopyFocused()/CutFocused(): the accelerator consumes the key only when the copy
-// or cut actually happened, and otherwise declines so the key falls through to
-// the native path. The item keeps its Shortcut purely to render the hint; we set
-// it here (not via WithShortcut in editItems) so turbotui's NewMenuBar does not
-// also auto-register the always-consuming binding for it.
-func (w *Workbench) wireEditClipboardAccelerators(bar *tv.MenuBar, items []*tv.MenuItem) {
-	reg := bar.Registry()
-	for _, it := range items {
-		switch it.Label {
-		case "&Copy":
-			it.Shortcut = &tv.MenuShortcut{Display: "Ctrl+C", Key: tui.KeyRune, Rune: 'c', Ctrl: true}
-			reg.Register(tv.KeyBinding{Chord: it.Shortcut.Chord()}, func() bool { return w.desktop.CopyFocused() })
-		case "Cu&t":
-			it.Shortcut = &tv.MenuShortcut{Display: "Ctrl+X", Key: tui.KeyRune, Rune: 'x', Ctrl: true}
-			reg.Register(tv.KeyBinding{Chord: it.Shortcut.Chord()}, func() bool { return w.desktop.CutFocused() })
-		}
+		w.menuActionItem("&Find…", actionTranscriptFind),
 	}
 }
 
@@ -1112,22 +1101,19 @@ func (w *Workbench) viewItems() []*tv.MenuItem {
 		}),
 		tv.NewMenuItem("----------", nil),
 		// Window arrangement (issue #241): tile or maximize every open window across
-		// the work area in one action. Accelerators are Ctrl+Shift chords dispatched
-		// by the menu bar even when no menu is open (like Ctrl+N); they are also in
-		// the command palette / help cheatsheet via Workbench.commands().
-		tv.NewMenuItem("Tile &Vertically", func() { w.arrange(tv.TileRows) }).
-			WithShortcutMod("Ctrl+Shift+V", tui.KeyRune, 'v', true, true, false),
-		tv.NewMenuItem("Tile &Horizontally", func() { w.arrange(tv.TileColumns) }).
-			WithShortcutMod("Ctrl+Shift+H", tui.KeyRune, 'h', true, true, false),
-		tv.NewMenuItem("Tile &Grid", func() { w.arrange(tv.TileGrid) }).
-			WithShortcutMod("Ctrl+Shift+G", tui.KeyRune, 'g', true, true, false),
-		tv.NewMenuItem("Maximi&ze All", func() { w.maximizeAll() }).
-			WithShortcutMod("Ctrl+Shift+M", tui.KeyRune, 'm', true, true, false),
+		// the work area in one action. These are rebindable Global actions (issue
+		// #401): menuActionItem tags each with its actionID and shows the live chord,
+		// while rebuildBindings registers the accelerator on the desktop registry so it
+		// fires even when no menu is open (like Ctrl+N). They are also in the command
+		// palette / help cheatsheet via Workbench.actions().
+		w.menuActionItem("Tile &Vertically", actionWindowTileVertical),
+		w.menuActionItem("Tile &Horizontally", actionWindowTileHorizontal),
+		w.menuActionItem("Tile &Grid", actionWindowTileGrid),
+		w.menuActionItem("Maximi&ze All", actionWindowMaximizeAll),
 		// Cascade overlaps the windows in a diagonal stack so every title bar stays
 		// visible while the front window stays large (issue #271). Ctrl+Shift+C would
-		// clash with copy, so the accelerator is Ctrl+Shift+D (diagonal).
-		tv.NewMenuItem("Casca&de Windows", func() { w.arrange(tv.TileCascade) }).
-			WithShortcutMod("Ctrl+Shift+D", tui.KeyRune, 'd', true, true, false),
+		// clash with copy, so the default accelerator is Ctrl+Shift+D (diagonal).
+		w.menuActionItem("Casca&de Windows", actionWindowCascade),
 		tv.NewMenuItem("----------", nil),
 		tv.NewMenuItem(pinLabel, func() { w.ToggleSidebarPin() }),
 		// Secondary keyboard fallback for the sidebar (issue #314). The primary
@@ -2421,7 +2407,7 @@ func (w *Workbench) Run() error {
 	}
 	w.desktop.SetUnhandledKeyFn(func(event tui.TypeEvent) {
 		// '?' and ':' are handled one step earlier, at the Fallthrough dispatch stage
-		// (registerFallthroughBindings), which runs before this callback. Only Ctrl+C
+		// (registered by rebuildBindings), which runs before this callback. Only Ctrl+C
 		// remains here: it must stay at the unhandledKeyFn tail so it requests quit
 		// confirmation only when no focused widget consumed it (the quit-only-when-
 		// unconsumed rule).
