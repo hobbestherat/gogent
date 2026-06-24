@@ -156,6 +156,7 @@ func (s *Server) buildAPI() *webapi.API {
 	settings := settingsSvc{s: s}
 	sys := systemSvc{s: s}
 	watchers := watchersSvc{s: s}
+	commands := commandsSvc{s: s}
 
 	// AuthLevel: AuthRequired for everything except the auth/login flow and the
 	// public health check. webapi's provider authenticates loopback, password
@@ -235,6 +236,15 @@ func (s *Server) buildAPI() *webapi.API {
 			{Path: "/watchers/:id/toggle", Method: http.MethodPost, Handler: watchers.Toggle, AuthLevel: req},
 			{Path: "/watchers/:id/run", Method: http.MethodPost, Handler: watchers.Run, AuthLevel: req},
 			{Path: "/watchers/:id/stop", Method: http.MethodPost, Handler: watchers.Stop, AuthLevel: req},
+
+			// --- custom commands (issue #403) ---
+			{Path: "/commands", Method: http.MethodGet, Handler: commands.List, AuthLevel: req},
+			{Path: "/commands", Method: http.MethodPost, Handler: commands.Create, AuthLevel: req},
+			{Path: "/commands/:name", Method: http.MethodGet, Handler: commands.Get, AuthLevel: req},
+			{Path: "/commands/:name", Method: http.MethodPut, Handler: commands.Update, AuthLevel: req},
+			{Path: "/commands/:name", Method: http.MethodDelete, Handler: commands.Delete, AuthLevel: req},
+			{Path: "/commands/:name/history", Method: http.MethodGet, Handler: commands.History, AuthLevel: req},
+			{Path: "/commands/:name/restore", Method: http.MethodPost, Handler: commands.Restore, AuthLevel: req},
 
 			// --- system ---
 			{Path: "/health", Method: http.MethodGet, Handler: sys.Health, AuthLevel: pub},

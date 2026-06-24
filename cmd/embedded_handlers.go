@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"gogent/internal/agent"
+	"gogent/internal/command"
 	"gogent/internal/config"
 	"gogent/internal/fileops"
 	"gogent/internal/gogent"
@@ -400,5 +401,82 @@ func embeddedHandlersFor(g *gogent.Gogent, wb *tuipkg.Workbench, noColor bool) t
 		RunWatcher:     func(idOrName string) error { return g.RunWatcherNow(idOrName) },
 		StopWatcher:    func(idOrName string) error { return g.StopWatcher(idOrName) },
 		DeleteWatcher:  func(idOrName string) error { return g.DeleteWatcher(idOrName) },
+
+		// --- Custom slash commands (issue #403) ---
+		// Close over the gogent command service; map between the persisted
+		// config.CommandDef and the decoupled ui/tui DTO at the seam.
+		ListCommands: func() []tuipkg.CommandInfo {
+			defs := g.ListCommands()
+			out := make([]tuipkg.CommandInfo, 0, len(defs))
+			for _, d := range defs {
+				out = append(out, tuipkg.CommandInfo{Name: d.Name, Description: d.Description, Version: d.Version})
+			}
+			return out
+		},
+		ReservedCommandNames: func() map[string]bool { return command.ReservedNames() },
+		OnSendCommand: func(sessionID, message, modelName, agentName string, subtask bool, effort string) {
+			// Background goroutine: contain a panic so one command's crash surfaces as
+			// an error in its window rather than taking down the TUI (mirrors OnSend).
+			defer func() {
+				if r := recover(); r != nil {
+					wb.EmitSessionEvent(sessionID, agent.SessionEvent{
+						Type: agent.SessionEventError,
+						Err:  fmt.Errorf("custom command panicked: %v", r),
+					})
+				}
+			}()
+			// agent/subtask route the prompt through a one-shot sub-agent; its result
+			// is surfaced as the turn's final answer. Otherwise it is an ordinary turn
+			// with the model override applied.
+			if subtask || agentName != "" {
+				result, err := g.RunCommandSubtask(context.Background(), sessionID, agentName, message)
+				if err != nil {
+					wb.EmitSessionEvent(sessionID, agent.SessionEvent{Type: agent.SessionEventError, Err: err})
+					return
+				}
+				wb.EmitSessionEvent(sessionID, agent.SessionEvent{Type: agent.SessionEventFinal, Text: result})
+				return
+			}
+			if _, err := g.SendMessageToSessionWithModelAndEffort(context.Background(), sessionID, "root", message, modelName, effort); err != nil {
+				wb.EmitSessionEvent(sessionID, agent.SessionEvent{Type: agent.SessionEventError, Err: err})
+			}
+		},
+		GetCustomCommand: func(name string) (tuipkg.CommandDef, error) {
+			def, err := g.GetCommand(name)
+			if err != nil {
+				return tuipkg.CommandDef{}, fmt.Errorf("get command: %w", err)
+			}
+			return toUICommand(def), nil
+		},
+		CreateCommand: func(def tuipkg.CommandDef) error {
+			if _, err := g.CreateCommand(fromUICommand(def)); err != nil {
+				return fmt.Errorf("create command: %w", err)
+			}
+			return nil
+		},
+		UpdateCommand: func(def tuipkg.CommandDef) error {
+			if _, err := g.UpdateCommand(fromUICommand(def)); err != nil {
+				return fmt.Errorf("update command: %w", err)
+			}
+			return nil
+		},
+		DeleteCommand: func(name string) error { return g.DeleteCommand(name) },
+		GetCommandHistory: func(name string) ([]tuipkg.CommandVersion, error) {
+			vers, err := g.GetCommandHistory(name)
+			if err != nil {
+				return nil, fmt.Errorf("command history: %w", err)
+			}
+			out := make([]tuipkg.CommandVersion, 0, len(vers))
+			for _, v := range vers {
+				out = append(out, toUICommandVersion(v))
+			}
+			return out, nil
+		},
+		RestoreCommandVer: func(name string, v int) error {
+			if _, err := g.RestoreCommandVersion(name, v); err != nil {
+				return fmt.Errorf("restore command version: %w", err)
+			}
+			return nil
+		},
 	}
 }

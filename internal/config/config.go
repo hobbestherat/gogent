@@ -769,6 +769,68 @@ type WatcherOutput struct {
 	Notify bool `json:"notify,omitempty"`
 }
 
+// CommandStore is the on-disk shape of ~/.gogent/commands.json: the user-defined
+// custom slash commands (issue #403). It mirrors the per-feature-file precedent
+// (WatcherStore / watchers.json) — loaded and saved atomically and leniently by
+// internal/gogent — keeping config.json free of potentially many command
+// definitions. Global scope only for v1; per-project commands are a follow-up.
+type CommandStore struct {
+	Commands []CommandDef `json:"commands"`
+}
+
+// CommandDef is one custom slash command. The top-level fields always mirror the
+// latest version's content; Versions is the append-only history (every save
+// appends a snapshot and is kept forever). Name is the natural key and the token
+// the user types (/<name>); it is validated to not collide with a built-in or
+// another custom command.
+type CommandDef struct {
+	// Name is the command token typed after the slash (e.g. "create-component").
+	Name string `json:"name"`
+	// Description is the one-line summary shown in the editor, palette and the
+	// slash-completion popup.
+	Description string `json:"description,omitempty"`
+	// Parameters are the declared named parameters, in binding (declaration) order.
+	Parameters []CommandParam `json:"parameters,omitempty"`
+	// Template is the prompt text with $name / ${name} placeholders that expand at
+	// invocation and is sent to the agent as a normal user message.
+	Template string `json:"template"`
+	// Model overrides the session model for this invocation; "" = current model.
+	Model string `json:"model,omitempty"`
+	// Agent routes the expanded prompt to a named sub-agent; "" = current agent.
+	Agent string `json:"agent,omitempty"`
+	// Subtask, when true, forces the invocation through a sub-agent spawn.
+	Subtask bool `json:"subtask,omitempty"`
+	// Version is the current (latest) version number; create sets it to 1 and every
+	// update/restore increments it.
+	Version int `json:"version"`
+	// Versions is the immutable, append-only history. Index order is chronological;
+	// the last entry's content always equals the top-level fields.
+	Versions []CommandVersion `json:"versions,omitempty"`
+}
+
+// CommandParam is one declared parameter of a custom command. Name is the
+// placeholder identifier ($name / ${name}); Required gates the missing-value
+// error; Default supplies the value when an optional parameter is omitted.
+type CommandParam struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+	Default     string `json:"default,omitempty"`
+}
+
+// CommandVersion is an immutable snapshot of a command's content at one save. The
+// history is append-only: updates and restores both append a fresh snapshot, so a
+// command's full evolution is always recoverable.
+type CommandVersion struct {
+	Version    int            `json:"version"`
+	Template   string         `json:"template"`
+	Parameters []CommandParam `json:"parameters,omitempty"`
+	Model      string         `json:"model,omitempty"`
+	Agent      string         `json:"agent,omitempty"`
+	Subtask    bool           `json:"subtask,omitempty"`
+	SavedAt    string         `json:"saved_at"` // RFC3339
+}
+
 // ScheduleConfig is the JSON shape of a watcher schedule. Exactly one of Every
 // (a duration like "5m") or DailyAt (an "HH:MM" wall-clock time, interpreted in
 // Timezone) must be set; see Schedule for the validation rules.

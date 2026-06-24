@@ -146,6 +146,13 @@ type SessionWindow struct {
 	// queued message cannot itself be re-queued. Touched only on the UI thread.
 	pending  string
 	draining bool
+	// pendingCmd carries the per-invocation overrides (model/agent/subtask) of a
+	// custom command queued while busy (issue #403), paired with pending. Without
+	// it the drain would re-send the expanded text through the normal submit path
+	// and silently lose the command's model override. nil for an ordinary queued
+	// message; a normal enqueue clears it so a later plain message never inherits a
+	// stale override. Touched only on the UI thread.
+	pendingCmd *pendingCommand
 	// submitFn re-enters the input submit path (issue #170): the drain-on-idle
 	// logic uses it to auto-fire a queued message as the next user turn, reusing
 	// the exact same send path (mention expansion, busy/transcript handling) as a
@@ -1299,6 +1306,25 @@ func reseedButton(b *tv.Button, th tv.Theme) {
 func (sw *SessionWindow) enqueue(text string) {
 	replaced := sw.pending != ""
 	sw.pending = text
+	sw.pendingCmd = nil // a plain message must not inherit a queued command's override
+	if replaced {
+		sw.addNote("queued message replaced: " + text)
+	} else {
+		sw.addNote("queued (will send when the agent finishes): " + text)
+	}
+	sw.refreshStatus()
+}
+
+// enqueueCommand stows an expanded custom-command prompt and its overrides as the
+// single latest-wins pending slot (issue #403). It mirrors enqueue but pairs the
+// text with the command's overrides so drainQueue re-applies the model override
+// instead of falling back to the session's current model. The expanded text is
+// already mention-free, so the drain sends it verbatim (no re-expansion).
+func (sw *SessionWindow) enqueueCommand(text string, ov pendingCommand) {
+	replaced := sw.pending != ""
+	sw.pending = text
+	cmd := ov
+	sw.pendingCmd = &cmd
 	if replaced {
 		sw.addNote("queued message replaced: " + text)
 	} else {
@@ -1350,6 +1376,7 @@ func (sw *SessionWindow) clearQueue(note string) {
 		return
 	}
 	sw.pending = ""
+	sw.pendingCmd = nil
 	if note != "" {
 		sw.addNote(note)
 	}
@@ -1367,7 +1394,17 @@ func (sw *SessionWindow) drainQueue() {
 	}
 	text := sw.pending
 	sw.pending = ""
+	cmd := sw.pendingCmd
+	sw.pendingCmd = nil
 	sw.draining = true
+	if cmd != nil {
+		// A queued custom command: re-send the already-expanded text directly so its
+		// model override is re-applied (the normal submit path would use the current
+		// model). No mention expansion — the text is already final.
+		sw.sendCommandNow(text, *cmd)
+		sw.draining = false
+		return
+	}
 	sw.input.SetText(text)
 	sw.submitFn()
 	sw.input.Clear()
@@ -1845,7 +1882,104 @@ func (sw *SessionWindow) handleSlashCommand(text string) bool {
 		sw.handleWatcherCommand(fields[1:])
 		return true
 	}
+	// Not a built-in: a custom command (issue #403) may match. The built-in switch
+	// is consulted first and returns above, so a custom command can never shadow a
+	// built-in. An unresolved name falls through to false, sending the raw text to
+	// the model unchanged (the prior behaviour).
+	if sw.dispatchCustomCommand(fields[0], fields[1:]) {
+		return true
+	}
 	return false
+}
+
+// dispatchCustomCommand resolves "/name" against the custom-command registry and,
+// when found, expands its template with the invocation args and sends the result
+// to the agent as a normal user message (issue #403). It returns true when it
+// handled the command (sent or reported an error) and false when no custom
+// command matched, so the caller can fall back to sending the raw text.
+//
+// A missing required parameter is reported as a transcript note and the command
+// is NOT sent. The command's overrides are applied per invocation: model selects
+// the turn's model, and a non-empty agent or subtask routes the prompt through a
+// spawned sub-agent (via the OnSendCommand seam).
+func (sw *SessionWindow) dispatchCustomCommand(slashName string, args []string) bool {
+	if sw.wb == nil || sw.wb.handlers.GetCustomCommand == nil {
+		return false
+	}
+	name := strings.TrimPrefix(slashName, "/")
+	// Defence in depth: never let a custom command shadow a built-in, even if one
+	// was hand-written into commands.json past the backend's create-time collision
+	// check. The client-side built-ins are already handled by the switch above and
+	// never reach here; this additionally protects the backend/ file-tool built-ins
+	// (calc/echo/help, read/write/edit), which have no client-side handler. A
+	// reserved name is treated as "not a custom command" so the raw text is sent
+	// unchanged, exactly as before this feature existed. The reserved set comes from
+	// the backend's single source of truth (with a local fallback).
+	if sw.wb.reservedBuiltins()[name] {
+		return false
+	}
+	def, err := sw.wb.handlers.GetCustomCommand(name)
+	if err != nil {
+		return false // not a custom command — let the caller send the raw text
+	}
+	expanded, err := expandTemplate(def, args)
+	if err != nil {
+		sw.echoCommand(slashName, "", err)
+		return true
+	}
+	sw.sendCommandMessage(expanded, pendingCommand{model: def.Model, agent: def.Agent, subtask: def.Subtask})
+	return true
+}
+
+// pendingCommand records the per-invocation overrides of a custom command so they
+// survive being queued while the agent is busy (issue #403): model selects the
+// turn's model, and agent/subtask route it through a spawned sub-agent. Carrying
+// them with the queued text means a command invoked mid-turn re-applies every
+// override when it drains, not just the model.
+type pendingCommand struct {
+	model   string
+	agent   string
+	subtask bool
+}
+
+// sendCommandMessage sends an already-expanded custom-command prompt as a normal
+// user turn with the given overrides. While a turn is running it queues the
+// message AND its overrides (so the drain re-applies them) rather than dropping
+// the model override; otherwise it sends immediately.
+func (sw *SessionWindow) sendCommandMessage(message string, ov pendingCommand) {
+	if sw.wb == nil || strings.TrimSpace(message) == "" {
+		return
+	}
+	if sw.busy {
+		sw.enqueueCommand(message, ov)
+		return
+	}
+	sw.sendCommandNow(message, ov)
+}
+
+// sendCommandNow performs the immediate send of an expanded command prompt,
+// mirroring the non-busy submit path and applying the model override (empty = the
+// session's current model). It is the single send site shared by the direct and
+// drain-on-idle paths so the override is applied identically in both.
+func (sw *SessionWindow) sendCommandNow(message string, ov pendingCommand) {
+	sw.completer.hide()
+	sw.addUser(message)
+	sw.setBusy(true)
+	sw.planPending = false
+	modelName := sw.selectedModelName()
+	if strings.TrimSpace(ov.model) != "" {
+		modelName = ov.model
+	}
+	effort := sw.selectedEffort()
+	// Prefer the override-aware seam so model/agent/subtask are all applied; fall
+	// back to plain OnSend (model only) when the backend hasn't wired it.
+	if sw.wb.handlers.OnSendCommand != nil {
+		go sw.wb.handlers.OnSendCommand(sw.id, message, modelName, ov.agent, ov.subtask, effort)
+		return
+	}
+	if sw.wb.handlers.OnSend != nil {
+		go sw.wb.handlers.OnSend(sw.id, message, modelName, effort)
+	}
 }
 
 // handleWatcherCommand implements /watcher (issue #329 Phase 4): a client-side

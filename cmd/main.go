@@ -19,6 +19,7 @@ import (
 
 	"gogent/internal/agent"
 	"gogent/internal/command"
+	"gogent/internal/config"
 	"gogent/internal/daemon"
 	"gogent/internal/diag"
 	"gogent/internal/gogent"
@@ -331,6 +332,75 @@ func toWatcherInfo(info watcher.WatcherInfo) tuipkg.WatcherInfo {
 	}
 	if !info.LastRun.IsZero() {
 		out.LastRun = info.LastRun.Format("2006-01-02 15:04")
+	}
+	return out
+}
+
+// toUICommand maps a persisted custom command into the decoupled ui/tui DTO
+// (issue #403). fromUICommand is its inverse, used when the editor saves.
+func toUICommand(d config.CommandDef) tuipkg.CommandDef {
+	out := tuipkg.CommandDef{
+		Name:        d.Name,
+		Description: d.Description,
+		Parameters:  toUICommandParams(d.Parameters),
+		Template:    d.Template,
+		Model:       d.Model,
+		Agent:       d.Agent,
+		Subtask:     d.Subtask,
+		Version:     d.Version,
+	}
+	for _, v := range d.Versions {
+		out.Versions = append(out.Versions, toUICommandVersion(v))
+	}
+	return out
+}
+
+func fromUICommand(d tuipkg.CommandDef) config.CommandDef {
+	out := config.CommandDef{
+		Name:        d.Name,
+		Description: d.Description,
+		Parameters:  fromUICommandParams(d.Parameters),
+		Template:    d.Template,
+		Model:       d.Model,
+		Agent:       d.Agent,
+		Subtask:     d.Subtask,
+		Version:     d.Version,
+	}
+	// Versions are owned by the backend (append-only); the editor never sends them
+	// back, so they are intentionally not mapped here.
+	return out
+}
+
+func toUICommandVersion(v config.CommandVersion) tuipkg.CommandVersion {
+	return tuipkg.CommandVersion{
+		Version:    v.Version,
+		Template:   v.Template,
+		Parameters: toUICommandParams(v.Parameters),
+		Model:      v.Model,
+		Agent:      v.Agent,
+		Subtask:    v.Subtask,
+		SavedAt:    v.SavedAt,
+	}
+}
+
+func toUICommandParams(params []config.CommandParam) []tuipkg.CommandParam {
+	if params == nil {
+		return nil
+	}
+	out := make([]tuipkg.CommandParam, len(params))
+	for i, p := range params {
+		out[i] = tuipkg.CommandParam{Name: p.Name, Description: p.Description, Required: p.Required, Default: p.Default}
+	}
+	return out
+}
+
+func fromUICommandParams(params []tuipkg.CommandParam) []config.CommandParam {
+	if params == nil {
+		return nil
+	}
+	out := make([]config.CommandParam, len(params))
+	for i, p := range params {
+		out[i] = config.CommandParam{Name: p.Name, Description: p.Description, Required: p.Required, Default: p.Default}
 	}
 	return out
 }
