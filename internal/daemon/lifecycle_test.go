@@ -306,7 +306,14 @@ func TestStopUsesSocketExitWhenPidfileIsBad(t *testing.T) {
 			}
 			tc.writeSetup(t, p)
 
-			if err := Stop(p, 2*time.Second, false); err != nil {
+			// The /exit handler closes the stub server in a detached goroutine,
+			// so the socket goes dead asynchronously after Stop observes the 2xx.
+			// Stop polls waitSocketDead up to this timeout; a generous ceiling
+			// keeps the close goroutine's scheduling latency under -race CI load
+			// from flaking the assertion. Success still returns the instant the
+			// socket is seen dead, so the larger ceiling adds no slack on the
+			// happy path — it only widens tolerance for the async teardown.
+			if err := Stop(p, 10*time.Second, false); err != nil {
 				t.Fatalf("Stop: %v", err)
 			}
 			assertMissing(t, p.Pid)
