@@ -79,6 +79,12 @@ type Gogent struct {
 	// that chose "approve all this session", so their later edits skip the gate.
 	reviewer          EditReviewer
 	reviewApprovedAll map[string]bool
+	// questionAsker, when set, renders the model-facing `ask_user` tool's
+	// structured question form and blocks the agent goroutine until the user
+	// answers (issue #406). It mirrors reviewer/permission's Prompter: nil means
+	// headless, where ask_user reports it cannot ask rather than hanging. Wired in
+	// cmd/main.go alongside SetReviewer/SetPrompter. Guarded by g.mu.
+	questionAsker agent.QuestionAsker
 	// mcpClients holds the connected MCP servers (issue #36) so their transports
 	// (e.g. stdio subprocesses) can be released on shutdown.
 	mcpClients []*mcp.Client
@@ -1246,6 +1252,64 @@ func (g *Gogent) initializeToolRegistry() {
 			},
 		})
 	}
+
+	// ask_user: let the model ask the user a structured, multi-topic question and
+	// get machine-readable answers back in-turn (issue #406). It is NOT ReadOnly so
+	// it runs on the serial path and blocks the agent goroutine until answered,
+	// exactly like a permission prompt; NOT Strict because its schema nests
+	// arrays/objects. The result is a flat JSON object keyed by item id.
+	g.toolRegistry.Register(&tool.Tool{
+		Name: "ask_user",
+		Description: "Ask the user a structured, multi-part question and get machine-readable answers back " +
+			"in-turn, without ending your turn. Use it when you need several specific pieces of input at once — " +
+			"onboarding-style interviews, gathering scope/constraints/preferences before planning — and want the " +
+			"answers as data rather than parsing prose. Group related questions into topics (each becomes a tab); " +
+			"each topic holds items. An item's type selects its widget: \"text\" (one line), \"textarea\" " +
+			"(multi-line), \"choice\" (pick one of options), \"multiselect\" (pick any of options). Give every item " +
+			"a unique \"id\": the result is a JSON object keyed by those ids — multiselect yields an array of the " +
+			"chosen option strings, choice/text/textarea a single string. Items left blank are omitted from the " +
+			"result. Set \"required\":true to force an answer before the user can submit. Prefer this over asking " +
+			"one question per turn in prose. If the call returns an error (for example \"ask_user unavailable: no " +
+			"interactive UI\" in a headless run, or the user cancelled), fall back to asking your question in plain " +
+			"text and ending your turn.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"title":   map[string]interface{}{"type": "string", "description": "Overall form title shown in the dialog header."},
+				"summary": map[string]interface{}{"type": "string", "description": "Optional one-line context shown above the tabs."},
+				"topics": map[string]interface{}{
+					"type":        "array",
+					"description": "Groups of questions; each becomes a tab. At least one is required.",
+					"items": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"title": map[string]interface{}{"type": "string", "description": "Tab/topic heading."},
+							"items": map[string]interface{}{
+								"type":        "array",
+								"description": "The individual questions in this topic.",
+								"items": map[string]interface{}{
+									"type": "object",
+									"properties": map[string]interface{}{
+										"id":          map[string]interface{}{"type": "string", "description": "Stable, unique key; used in the result map."},
+										"label":       map[string]interface{}{"type": "string", "description": "The question text shown to the user."},
+										"type":        map[string]interface{}{"type": "string", "enum": []string{"text", "textarea", "choice", "multiselect"}, "description": "Widget kind."},
+										"options":     map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Required for choice/multiselect; the selectable values."},
+										"required":    map[string]interface{}{"type": "boolean", "description": "When true, the user must answer before submitting."},
+										"placeholder": map[string]interface{}{"type": "string", "description": "Optional hint for text/textarea fields."},
+										"help":        map[string]interface{}{"type": "string", "description": "Optional one-line help shown under the field."},
+									},
+									"required": []string{"id", "label", "type"},
+								},
+							},
+						},
+						"required": []string{"title", "items"},
+					},
+				},
+			},
+			"required": []string{"topics"},
+		},
+		Execute: g.askUser,
+	})
 
 	// Register the agent-facing watcher tools (create_watcher/list_watchers/...)
 	// only when the experimental feature is on (issue #329 Phase 3).

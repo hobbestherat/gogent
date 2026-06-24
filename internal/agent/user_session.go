@@ -837,7 +837,12 @@ func (s *UserSession) ExecuteTaskLoop(ctx context.Context, agentID string, initi
 // child inherits read/grep/glob/list/diagnostics but not write/edit/multi_edit/
 // apply_patch/shell. The fan-out stays bounded by the shared SubAgentLimiter and
 // the per-parent max-sub-agents cap, exactly as outside plan mode.
-var planKeptTools = []string{"todo", "structured_output", "spawn_subagent"}
+// ask_user is also retained: asking the user a structured question is a
+// plan-mode-appropriate, read-only-of-the-workspace capability (it only reads the
+// human), so plan mode keeps it to gather scope/constraints before proposing a
+// plan (issue #406). CloneForPlanMode strips it otherwise because it is
+// non-ReadOnly (it blocks on the serial path).
+var planKeptTools = []string{"todo", "structured_output", "spawn_subagent", "ask_user"}
 
 // recordPlan captures the final answer of a plan-mode turn as the plan awaiting
 // approval and emits SessionEventPlan so the UI can offer to approve it. An

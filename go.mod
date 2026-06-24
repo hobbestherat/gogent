@@ -5,7 +5,7 @@ go 1.25.11
 require (
 	github.com/alecthomas/chroma/v2 v2.27.0
 	github.com/expr-lang/expr v1.17.8
-	github.com/hobbestherat/turbotui v0.3.1-0.20260624090004-fb43116c789f
+	github.com/hobbestherat/turbotui v0.3.1-0.20260624105607-52604ee61507
 	github.com/hobbestherat/webapi v0.1.0
 	github.com/yuin/goldmark v1.8.2
 	golang.org/x/oauth2 v0.36.0
