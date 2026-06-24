@@ -86,6 +86,11 @@ type RemoteClient struct {
 	// retryNow collapses the current backoff wait when the user clicks "Retry now".
 	// Buffered (cap 1) so a poke is never lost and RetryNow never blocks.
 	retryNow chan struct{}
+	// approvalKick forces an immediate /approvals re-fetch out of band of the poll
+	// ticker. Reconnect signals it so pending approvals are re-fetched as part of
+	// the jump-to-present (issue #358 §7) instead of waiting for the next tick.
+	// Buffered (cap 1) so a kick is coalesced and never blocks.
+	approvalKick chan struct{}
 	// backoff returns the wait before the Nth (1-based) reconnect attempt. It is a
 	// field so tests can shorten the schedule; production uses backoffFor.
 	backoff func(attempt int) time.Duration
@@ -110,14 +115,15 @@ type RemoteClient struct {
 func NewRemoteClient(client *APIClient, sink EventSink, approver Approver) *RemoteClient {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &RemoteClient{
-		client:    client,
-		sink:      sink,
-		approver:  approver,
-		ctx:       ctx,
-		cancel:    cancel,
-		pollEvery: approvalPollInterval,
-		retryNow:  make(chan struct{}, 1),
-		backoff:   backoffFor,
+		client:       client,
+		sink:         sink,
+		approver:     approver,
+		ctx:          ctx,
+		cancel:       cancel,
+		pollEvery:    approvalPollInterval,
+		retryNow:     make(chan struct{}, 1),
+		approvalKick: make(chan struct{}, 1),
+		backoff:      backoffFor,
 	}
 }
 
@@ -290,7 +296,11 @@ func (rc *RemoteClient) reconnect() <-chan GlobalEventDTO {
 		}
 		next, err := rc.openStream()
 		if err == nil {
+			// Jump-to-present: re-fetch full state. notifyRestored drives the
+			// Workbench's /sessions + transcript refresh; kickApprovals re-fetches
+			// /approvals now rather than on the next poll tick (issue #358 §7).
 			rc.notifyRestored()
+			rc.kickApprovals()
 			return next
 		}
 		if rc.ctx.Err() != nil {
@@ -385,27 +395,49 @@ func (rc *RemoteClient) pollApprovals() {
 		case <-rc.ctx.Done():
 			return
 		case <-ticker.C:
+		case <-rc.approvalKick:
+			// Forced re-fetch (reconnect jump-to-present): scan now rather than
+			// waiting for the next tick.
 		}
-		pending, err := rc.client.ListApprovals()
-		if err != nil {
-			continue // transient; try again next tick
+		rc.scanApprovals(seen)
+	}
+}
+
+// scanApprovals fetches the daemon's pending gates once and presents any not yet
+// seen, pruning resolved/timed-out ids from seen. It is the body shared by the
+// poll ticker and the reconnect kick; the poller goroutine is the sole owner of
+// seen, so this is only ever called from that one goroutine (no shared-state race).
+func (rc *RemoteClient) scanApprovals(seen map[string]bool) {
+	pending, err := rc.client.ListApprovals()
+	if err != nil {
+		return // transient; try again next tick/kick
+	}
+	present := make(map[string]bool, len(pending))
+	for _, ap := range pending {
+		present[ap.ID] = true
+		if seen[ap.ID] {
+			continue
 		}
-		present := make(map[string]bool, len(pending))
-		for _, ap := range pending {
-			present[ap.ID] = true
-			if seen[ap.ID] {
-				continue
-			}
-			seen[ap.ID] = true
-			go rc.handleApproval(ap)
+		seen[ap.ID] = true
+		go rc.handleApproval(ap)
+	}
+	// Forget approvals that are gone (resolved or timed out) so a future approval
+	// that happens to reuse an id is still presented.
+	for id := range seen {
+		if !present[id] {
+			delete(seen, id)
 		}
-		// Forget approvals that are gone (resolved or timed out) so a future
-		// approval that happens to reuse an id is still presented.
-		for id := range seen {
-			if !present[id] {
-				delete(seen, id)
-			}
-		}
+	}
+}
+
+// kickApprovals forces an immediate /approvals re-fetch by the poller. Reconnect
+// calls it so pending approvals re-surface as part of the jump-to-present (issue
+// #358 §7) instead of waiting for the poll ticker. Non-blocking and coalesced; a
+// kick when no poller is running (no approver) is simply buffered and ignored.
+func (rc *RemoteClient) kickApprovals() {
+	select {
+	case rc.approvalKick <- struct{}{}:
+	default:
 	}
 }
 
