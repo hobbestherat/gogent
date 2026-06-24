@@ -258,3 +258,57 @@ curl -b cookies.txt -N -X POST \
 The `stream` endpoint emits server-sent events as the agent thinks, calls
 tools, and produces its final answer — ideal for piping into another program
 or a custom UI.
+
+## Remote access over SSH (Tier 1)
+
+You can run the TUI on one machine (**A**) and drive a daemon on another
+(**B**) with nothing more than an SSH tunnel — no extra gogent features
+required. SSH carries the transport and authenticates the user; the daemon's
+existing TCP auth (token *or* password — see [Authentication
+modes](#authentication-modes)) handles the rest. This works today with the
+daemon and the remote TUI client as shipped.
+
+**On the daemon host B** — start the daemon with its TCP transport bound to
+loopback, and set a bearer token:
+
+```bash
+export GOGENT_HTTP_TOKEN="$(head -c 32 /dev/urandom | base64)"
+gogent daemon start --tcp --http-host 127.0.0.1 --http-port 8080
+```
+
+The `--tcp` flag is required to expose the HTTP API over TCP; `--http-host`
+and `--http-port` (defaults `127.0.0.1` / `8080`) only take effect with it.
+The Unix socket remains the primary local transport — `--tcp` adds the TCP
+endpoint alongside it. Binding to loopback keeps the API off the network: only
+processes on B (including the far end of an SSH tunnel) can reach it.
+
+The daemon reads the token from the `GOGENT_HTTP_TOKEN` environment variable.
+A loopback bind does not *require* a token (see [Loopback binding
+gate](#loopback-binding-gate)), but setting one is recommended as
+defense-in-depth and is mandatory if you ever bind a non-loopback host.
+
+**On the client machine A** — copy the token you set on B, forward a local
+port to B's loopback endpoint over SSH, then attach:
+
+```bash
+TOKEN="<the GOGENT_HTTP_TOKEN value from B>"
+ssh -L 8080:127.0.0.1:8080 machineB        # in one terminal (or use -fN)
+gogent --connect http://localhost:8080 --token "$TOKEN"
+```
+
+The token lives on B; it is not present on A until you copy it there (above),
+or export `GOGENT_HTTP_TOKEN` on A instead of passing `--token`. The `ssh -L`
+forward makes A's `localhost:8080` reach B's `127.0.0.1:8080` through the
+encrypted SSH connection. `gogent --connect` accepts a `http://`/`https://`
+address (or `unix://` for a local socket); the `--token` flag (or
+`GOGENT_HTTP_TOKEN` in A's environment) supplies the bearer token for the TCP
+attach.
+
+File and shell tools run on **B**, where the daemon owns the workspace — the
+TUI on A is a thin client over the API.
+
+> **Native `ssh://` transport (Tier 2) is a separate planned follow-up.**
+> A future `gogent --connect ssh://user@machineB` would open the SSH session
+> and tunnel the API automatically — no manual `ssh -L`, SSH-key auth, host-key
+> verification. That is not part of this release; the manual port-forward above
+> is the supported remote path today.
