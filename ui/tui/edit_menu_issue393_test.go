@@ -133,7 +133,6 @@ func TestIssue393CopyCutAcceleratorsDoNotSwallowUnconsumedCtrlCOrCtrlX(t *testin
 	w.rebuildMenu()
 	w.desktop.SetFocus(nil)
 
-	bar := issue393MenuBar(t, w)
 	for _, tt := range []struct {
 		name string
 		ev   tui.TypeEvent
@@ -141,7 +140,7 @@ func TestIssue393CopyCutAcceleratorsDoNotSwallowUnconsumedCtrlCOrCtrlX(t *testin
 		{"Copy", tui.TypeEvent{Key: tui.KeyRune, Rune: 'c', Ctrl: true}},
 		{"Cut", tui.TypeEvent{Key: tui.KeyRune, Rune: 'x', Ctrl: true}},
 	} {
-		if bar.HandleAccelerator(tt.ev) {
+		if w.desktop.Bindings().Dispatch(tt.ev) {
 			t.Fatalf("%s accelerator was consumed with no focus; Ctrl+C/Ctrl+X must fall through when copy/cut do not handle", tt.name)
 		}
 	}
