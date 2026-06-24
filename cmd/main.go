@@ -175,7 +175,10 @@ func main() {
 		apiServer.InstallApprovalGates()
 	}
 	fmt.Printf("\nStarting HTTP server on http://%s:%d\n", *httpHost, *httpPort)
-	go startHTTPServer(*httpHost, *httpPort, g, apiServer, httpPassword)
+	// Capture the server handle so the daemon handoff can shut this in-process
+	// listener down when migrating to the daemon (issue #358 §6), rather than
+	// leaving it serving the stale source core.
+	httpSrv := startHTTPServer(*httpHost, *httpPort, g, apiServer, httpPassword)
 
 	// Create and start the multi-session TUI if enabled. (apiServer is declared
 	// above alongside the HTTP server startup.)
@@ -204,7 +207,9 @@ func main() {
 		// Daemon attach lifecycle (issue #358 §6): the controller owns the embedded
 		// <-> daemon handoff. In embedded mode it offers "Start daemon"; its menu
 		// handlers are merged onto the in-process Handlers before they are installed.
-		dc := newEmbeddedController(wb, homeDir, *noColor, g, apiServer, embeddedHandlers)
+		dc := newEmbeddedController(wb, homeDir, *noColor, g, apiServer, embeddedHTTP{
+			srv: httpSrv, host: *httpHost, port: *httpPort, password: httpPassword,
+		}, embeddedHandlers)
 		handlers := embeddedHandlers(g)
 		dc.installMenuHandlers(&handlers)
 		wb.SetHandlers(handlers)
@@ -741,18 +746,40 @@ func tcpListener(host string, port int, password string) (net.Listener, error) {
 	return ln, nil
 }
 
-func startHTTPServer(host string, port int, g *gogent.Gogent, apiServer *server.Server, password string) {
+// serveHTTPAPI binds the embedded TCP HTTP API and serves it in a background
+// goroutine, returning the *http.Server handle so a caller can later shut it down.
+// It prints nothing — diagnostics go to the log — so it is safe to call while the
+// TUI owns the screen, which the daemon->embedded handoff does when it brings the
+// in-process listener back up (issue #358 §6). A bind failure is returned, not
+// printed.
+func serveHTTPAPI(host string, port int, g *gogent.Gogent, apiServer *server.Server, password string) (*http.Server, error) {
 	ln, err := tcpListener(host, port, password)
 	if err != nil {
-		fmt.Printf("HTTP server not started: %v\n", err)
-		return
+		return nil, err
 	}
-
 	srv := &http.Server{
 		Handler:           buildRootHandler(g, apiServer),
 		ReadHeaderTimeout: httpReadHeaderTimeout,
 		ReadTimeout:       httpReadTimeout,
 		IdleTimeout:       httpIdleTimeout,
+	}
+	go func() {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			log.Printf("HTTP server error: %v", err)
+		}
+	}()
+	return srv, nil
+}
+
+// startHTTPServer is the process-startup entry: it serves the embedded TCP HTTP API
+// and prints the listening banner, returning the *http.Server handle (or nil when
+// the bind failed) so the daemon handoff can shut this source listener down when
+// migrating to the daemon (issue #358 §6).
+func startHTTPServer(host string, port int, g *gogent.Gogent, apiServer *server.Server, password string) *http.Server {
+	srv, err := serveHTTPAPI(host, port, g, apiServer, password)
+	if err != nil {
+		fmt.Printf("HTTP server not started: %v\n", err)
+		return nil
 	}
 
 	fmt.Printf("HTTP server listening on http://%s:%d\n", host, port)
@@ -762,10 +789,7 @@ func startHTTPServer(host string, port int, g *gogent.Gogent, apiServer *server.
 	fmt.Println("  POST /message - Send message (form-data: message=...)  [legacy; prefer POST /api/sessions/:id/messages]")
 	fmt.Println("  GET  /status  - Tool logs + stats  [legacy; prefer GET /api/sessions/:id/stats]")
 	fmt.Println("  POST /exit    - Exit server (local-only, or X-Gogent-Token)")
-
-	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-		log.Printf("HTTP server error: %v", err)
-	}
+	return srv
 }
 
 // isLoopbackHost reports whether a bind host names the loopback interface

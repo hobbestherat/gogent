@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -51,15 +54,28 @@ type daemonController struct {
 	mode      tuipkg.DaemonMode
 	connect   string               // connect address when attached, else ""
 	g         *gogent.Gogent       // embedded/presentation core (never nil)
-	apiServer *server.Server       // embedded in-process server (embedded mode only)
+	apiServer *server.Server       // embedded in-process API surface (embedded mode)
+	http      embeddedHTTP         // embedded TCP HTTP server handle + rebuild params
 	client    *tuipkg.APIClient    // daemon API client (attached modes)
 	rc        *tuipkg.RemoteClient // daemon remote client (attached modes)
+}
+
+// embeddedHTTP bundles the in-process TCP HTTP API server handle and the params
+// needed to rebuild it, so the handoff can shut the source listener down when
+// migrating embedded->daemon and bring a fresh one up when migrating back (issue
+// #358 §6). srv is nil when the bind failed or when the process started attached
+// (it has no embedded server until a Stop handoff creates one).
+type embeddedHTTP struct {
+	srv      *http.Server
+	host     string
+	port     int
+	password string
 }
 
 // newEmbeddedController builds the controller for a process that started embedded
 // (the default `gogent` with no live daemon). g/apiServer are the in-process core
 // and server; embeddedHandlers rebuilds the in-process Handlers for a core.
-func newEmbeddedController(wb *tuipkg.Workbench, homeDir string, noColor bool, g *gogent.Gogent, apiServer *server.Server, embeddedHandlers func(*gogent.Gogent) tuipkg.Handlers) *daemonController {
+func newEmbeddedController(wb *tuipkg.Workbench, homeDir string, noColor bool, g *gogent.Gogent, apiServer *server.Server, httpInfo embeddedHTTP, embeddedHandlers func(*gogent.Gogent) tuipkg.Handlers) *daemonController {
 	return &daemonController{
 		wb:               wb,
 		homeDir:          homeDir,
@@ -69,6 +85,7 @@ func newEmbeddedController(wb *tuipkg.Workbench, homeDir string, noColor bool, g
 		mode:             tuipkg.DaemonModeEmbedded,
 		g:                g,
 		apiServer:        apiServer,
+		http:             httpInfo,
 	}
 }
 
@@ -77,7 +94,7 @@ func newEmbeddedController(wb *tuipkg.Workbench, homeDir string, noColor bool, g
 // layout, keybindings) the attach path builds; client/rc drive the daemon. local
 // selects attached-local (the Unix socket, "Stop daemon" applies) vs attached-
 // remote (a --connect address, where Start/Stop are inapplicable).
-func newAttachedController(wb *tuipkg.Workbench, homeDir string, noColor bool, g *gogent.Gogent, client *tuipkg.APIClient, rc *tuipkg.RemoteClient, addr string, local bool) *daemonController {
+func newAttachedController(wb *tuipkg.Workbench, homeDir string, noColor bool, g *gogent.Gogent, client *tuipkg.APIClient, rc *tuipkg.RemoteClient, addr string, local bool, httpInfo embeddedHTTP) *daemonController {
 	mode := tuipkg.DaemonModeAttachedRemote
 	if local {
 		mode = tuipkg.DaemonModeAttachedLocal
@@ -98,6 +115,9 @@ func newAttachedController(wb *tuipkg.Workbench, homeDir string, noColor bool, g
 		g:       g,
 		client:  client,
 		rc:      rc,
+		// No embedded server runs yet (the attach path started none); httpInfo
+		// carries the bind params so a Stop handoff can bring one up for the new core.
+		http: httpInfo,
 	}
 }
 
@@ -176,11 +196,13 @@ func (dc *daemonController) Start() error {
 		return err
 	}
 
-	// 4. Shut the source down now that the target owns the work (the in-process API
-	//    server stays as a harmless idle listener; the daemon serves the TUI over
-	//    the socket from here on).
+	// 4. Shut the source down now that the target owns the work: stop its watchers
+	//    and MCP, and close the in-process HTTP API server so the stale source core
+	//    is no longer addressable (no split-brain — the daemon owns the state and
+	//    serves the TUI over the socket from here on). §6's "shut down source".
 	g.StopWatchers()
 	g.CloseMCPServers()
+	dc.stopEmbeddedHTTP()
 
 	// 5. Commit the new attached-local state.
 	dc.mu.Lock()
@@ -226,6 +248,37 @@ func (dc *daemonController) rollbackSpawn(spawned bool) {
 	}
 }
 
+// stopEmbeddedHTTP shuts the in-process TCP HTTP API server down so the stale
+// source core is no longer reachable after an embedded->daemon handoff (issue #358
+// §6). Idempotent: a nil handle (bind failed, or already stopped) is a no-op.
+func (dc *daemonController) stopEmbeddedHTTP() {
+	if dc.http.srv != nil {
+		_ = dc.http.srv.Close()
+		dc.http.srv = nil
+		dc.apiServer = nil
+	}
+}
+
+// startEmbeddedHTTP brings the in-process TCP HTTP API server up for core g on a
+// daemon->embedded handoff, restoring embedded mode's "always expose the API"
+// behaviour. It builds a fresh API surface bound to g and serves quietly (no
+// stdout banner, so it never corrupts the TUI screen). A bind failure is logged
+// and degrades gracefully — the embedded TUI still works without the HTTP API.
+func (dc *daemonController) startEmbeddedHTTP(g *gogent.Gogent) {
+	apiServer := server.NewServer(g, server.Options{
+		Password:        dc.http.password,
+		Token:           os.Getenv("GOGENT_HTTP_TOKEN"),
+		ApprovalTimeout: 5 * time.Minute,
+	})
+	srv, err := serveHTTPAPI(dc.http.host, dc.http.port, g, apiServer, dc.http.password)
+	if err != nil {
+		log.Printf("daemon handoff: embedded HTTP server not restarted: %v", err)
+		return
+	}
+	dc.apiServer = apiServer
+	dc.http.srv = srv
+}
+
 // Stop performs the daemon->embedded handoff. It is invoked on a background
 // goroutine by the menu. Only valid when attached to the LOCAL daemon.
 func (dc *daemonController) Stop() error {
@@ -265,11 +318,15 @@ func (dc *daemonController) Stop() error {
 	for _, id := range dc.wb.SessionIDs() {
 		bindWindowSession(g, dc.wb, id)
 	}
-	// 5. Restart MCP + watchers in-process (mirrors the embedded startup order).
+	// 5. Restart MCP + watchers in-process (mirrors the embedded startup order) and
+	//    bring the in-process HTTP API server back up for the new core, so embedded
+	//    mode again "always" exposes the API (the symmetric inverse of the source
+	//    shutdown in Start).
 	g.GetPermissionService().SetPrompter(dc.wb)
 	g.SetReviewer(dc.wb)
 	g.StartMCPServers()
 	g.StartWatchers()
+	dc.startEmbeddedHTTP(g)
 
 	// 6. Switch the Handlers back to the in-process implementation on the UI thread,
 	//    re-seeding the live notifier/budget/keybindings as the embedded startup does.

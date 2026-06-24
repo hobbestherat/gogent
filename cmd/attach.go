@@ -101,7 +101,11 @@ func runAttached(homeDir, addr, token string, noColorFlag bool) error {
 	// Daemon menu (issue #358 §6): a controller tracks the attachment mode so the
 	// menu offers "Stop daemon" (local) or just "Daemon status" (remote --connect).
 	local := strings.HasPrefix(addr, "unix://")
-	dc := newAttachedController(wb, homeDir, noColorFlag, g, client, rc, addr, local)
+	// Carry the embedded HTTP bind params so a "Stop daemon" handoff can bring the
+	// in-process API server up for the rebuilt embedded core (issue #358 §6). No
+	// server runs yet in attach mode, so the handle is nil.
+	httpInfo := embeddedHTTP{host: *httpHost, port: *httpPort, password: resolveHTTPPassword(*httpPassword)}
+	dc := newAttachedController(wb, homeDir, noColorFlag, g, client, rc, addr, local, httpInfo)
 	dc.installMenuHandlers(&handlers)
 	wb.SetHandlers(handlers)
 
