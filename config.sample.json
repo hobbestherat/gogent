@@ -157,6 +157,13 @@
     "no_shadow": false,
     "overrides": {}
   },
+  "keybindings": {
+    "overrides": {
+      "session.new": "Ctrl+T",
+      "transcript.toggle.thinking": "i",
+      "transcript.find": "none"
+    }
+  },
   "experimental": {
     "supervisor": false,
     "stream_thinking": false,

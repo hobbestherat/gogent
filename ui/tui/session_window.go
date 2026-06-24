@@ -2494,7 +2494,7 @@ func (sw *SessionWindow) registerTranscriptBindings() {
 	// The chord comes from chordFor (override-or-catalog-default, issue #269) so a
 	// persisted rebind is applied the moment this window registers; with no override
 	// each is its catalog default (the historical letter/Esc/'/'). The actionID and
-	// scope must match the keybindActions() catalog so the customizer can find, rebind
+	// scope must match the actions() catalog so the customizer can find, rebind
 	// and reset each one.
 	focus := func(id tv.ActionID, handler func() bool) {
 		chord := sw.wb.chordFor(id)

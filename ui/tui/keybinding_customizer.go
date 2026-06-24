@@ -16,32 +16,32 @@ const keybindCustomizerIdleHint = "Enter: rebind · Reset / Reset All · ↑↓ 
 // at its catalog default, one the user has overridden, and one the user has cleared
 // (issue #269). The columns line up so the bindings and tags read as tidy columns,
 // mirroring the command palette's rows.
-func (w *Workbench) keybindRowText(a keybindAction) string {
+func (w *Workbench) keybindRowText(a action) string {
 	tag := "default"
 	switch {
-	case w.isUnbound(a.id):
+	case w.isUnbound(a.actionID):
 		tag = "unbound"
-	case w.isOverridden(a.id):
+	case w.isOverridden(a.actionID):
 		tag = "custom"
 	}
-	return "  " + padName(a.name, 26) + "  " + padName(chordLabel(w.chordFor(a.id)), 10) + " (" + tag + ")"
+	return "  " + padName(a.name, 26) + "  " + padName(chordLabel(w.chordFor(a.actionID)), 10) + " (" + tag + ")"
 }
 
 // capturePrompt is the status line shown while waiting for the user to press the new
 // chord for an action (issue #269's capture mode).
-func capturePrompt(a keybindAction) string {
+func capturePrompt(a action) string {
 	return fmt.Sprintf("Press a key for %q…  (Esc cancel · Backspace clear)", a.name)
 }
 
 // selectedKeybindAction returns the catalog action under the list's current selection,
 // or nil when the selection is on a category header (a non-action row) or the list is
 // empty. It is how the capture and reset gestures resolve which action they act on.
-func selectedKeybindAction(list *tv.Tree) *keybindAction {
+func selectedKeybindAction(list *tv.Tree) *action {
 	n := list.Selected()
 	if n == nil {
 		return nil
 	}
-	a, ok := n.Data.(keybindAction)
+	a, ok := n.Data.(action)
 	if !ok {
 		return nil
 	}
@@ -57,7 +57,7 @@ func selectedKeybindAction(list *tv.Tree) *keybindAction {
 // SetKeybindings handler. "Reset" restores the selected action's default; "Reset All"
 // restores every default.
 func (w *Workbench) showKeybindingCustomizer() {
-	actions := keybindActions()
+	actions := w.rebindable()
 	categories := 0
 	seen := map[string]bool{}
 	for _, a := range actions {
@@ -101,7 +101,7 @@ func (w *Workbench) showKeybindingCustomizer() {
 
 	// render rebuilds the grouped list from the live bindings, so it reflects every
 	// committed rebind/reset. Category headers are non-selectable rows (nil Data) drawn
-	// at the left margin; action rows are indented and carry their keybindAction in Data.
+	// at the left margin; action rows are indented and carry their action in Data.
 	render := func() {
 		var nodes []*tv.TreeNode
 		cur := ""
@@ -120,14 +120,14 @@ func (w *Workbench) showKeybindingCustomizer() {
 
 	// capturing names the action awaiting a new chord, or nil while browsing. It is the
 	// single piece of mode state the list's key handler branches on.
-	var capturing *keybindAction
+	var capturing *action
 
 	// commit runs the full validation/confirm pipeline for a captured chord and, on
 	// success, applies it live and persists it. The order is: deliverability + scope
 	// (refuse outright), then the self-lockout confirm (a path to the customizer), then
 	// the same-scope conflict confirm (reassign via a lossless swap), then the plain
 	// apply.
-	commit := func(a keybindAction, chord tv.Chord) {
+	commit := func(a action, chord tv.Chord) {
 		if ok, reason := w.validateCapture(a, chord); !ok {
 			setStatus("✗ " + reason)
 			return
@@ -136,7 +136,7 @@ func (w *Workbench) showKeybindingCustomizer() {
 			if holder, ok := w.conflictHolder(a, chord); ok {
 				w.showConfirm("Keybinding conflict",
 					fmt.Sprintf("⚠ %s is already bound to %q.\n\nReassign it to %q (and give %q its old key)?",
-						displayChord(chord), keybindActionName(holder), a.name, keybindActionName(holder)),
+						displayChord(chord), w.keybindActionName(holder), a.name, w.keybindActionName(holder)),
 					func(yes bool) {
 						if !yes {
 							setStatus("Reassign cancelled.")
@@ -145,18 +145,18 @@ func (w *Workbench) showKeybindingCustomizer() {
 						w.swapBindings(a, holder, chord)
 						w.persistKeybindings()
 						render()
-						setStatus(fmt.Sprintf("%s → %s (swapped with %q).", a.name, displayChord(chord), keybindActionName(holder)))
+						setStatus(fmt.Sprintf("%s → %s (swapped with %q).", a.name, displayChord(chord), w.keybindActionName(holder)))
 					})
 				return
 			}
 			// No conflict (checked above): a plain force-set applies it live in every
 			// open window and records the override.
-			w.applyBinding(a.id, chord)
+			w.applyBinding(a.actionID, chord)
 			w.persistKeybindings()
 			render()
 			setStatus(fmt.Sprintf("%s → %s.", a.name, displayChord(chord)))
 		}
-		if isEscapeHatch(a.id) {
+		if isEscapeHatch(a.actionID) {
 			w.showConfirm("Self-lockout warning",
 				fmt.Sprintf("%q is a keyboard path to this customizer.\n\nRebinding it to %s could make the customizer harder to reach.\nContinue?",
 					a.name, displayChord(chord)),
@@ -175,18 +175,18 @@ func (w *Workbench) showKeybindingCustomizer() {
 	// clearBinding unbinds an action from capture mode (Backspace). Clearing an
 	// escape-hatch action (the '?'/':' paths to this customizer) is confirmed first, so
 	// the user can't silently remove their only keyboard route back here (self-lockout).
-	clearBinding := func(a keybindAction) {
+	clearBinding := func(a action) {
 		do := func() {
-			if w.isUnbound(a.id) {
+			if w.isUnbound(a.actionID) {
 				setStatus(fmt.Sprintf("%q is already unbound.", a.name))
 				return
 			}
-			w.clearBinding(a.id)
+			w.clearBinding(a.actionID)
 			w.persistKeybindings()
 			render()
 			setStatus(fmt.Sprintf("%q cleared (unbound).", a.name))
 		}
-		if isEscapeHatch(a.id) {
+		if isEscapeHatch(a.actionID) {
 			w.showConfirm("Self-lockout warning",
 				fmt.Sprintf("%q is a keyboard path to this customizer.\n\nClearing it removes that path. Continue?", a.name),
 				func(yes bool) {
@@ -264,13 +264,13 @@ func (w *Workbench) showKeybindingCustomizer() {
 		if a == nil {
 			return
 		}
-		if !w.isOverridden(a.id) {
+		if !w.isOverridden(a.actionID) {
 			setStatus(fmt.Sprintf("%s is already at its default (%s).", a.name, displayChord(a.deflt)))
 			return
 		}
-		if !w.resetBinding(a.id) {
+		if !w.resetBinding(a.actionID) {
 			holder, _ := w.conflictHolder(*a, a.deflt)
-			setStatus(fmt.Sprintf("Can't reset %s: default %s is in use by %q.", a.name, displayChord(a.deflt), keybindActionName(holder)))
+			setStatus(fmt.Sprintf("Can't reset %s: default %s is in use by %q.", a.name, displayChord(a.deflt), w.keybindActionName(holder)))
 			return
 		}
 		w.persistKeybindings()
