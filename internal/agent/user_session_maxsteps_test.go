@@ -28,16 +28,16 @@ func makeToolCallResponses(t *testing.T, n int, final string) []map[string]inter
 	return out
 }
 
-// TestNewUserSessionDefaultsMaxStepsToHistoricalBound verifies an unwired
-// session keeps gogent's historical fixed cap (issue #249: preserve current
-// behaviour when the value is not configured).
+// TestNewUserSessionDefaultsMaxStepsToHistoricalBound verifies an unwired session
+// inherits the built-in step cap (issue #249). #449 raised that default from the
+// historical 25 to 100, so an unwired session now keeps the 100-step backstop.
 func TestNewUserSessionDefaultsMaxStepsToHistoricalBound(t *testing.T) {
 	us, _ := newLoopSession(t, "http://unused.test")
 	if got := us.MaxSteps(); got != config.DefaultMaxSteps {
 		t.Errorf("new session MaxSteps = %d, want default %d", got, config.DefaultMaxSteps)
 	}
-	if got := us.MaxSteps(); got != 25 {
-		t.Errorf("historical bound must be 25, got %d", got)
+	if got := us.MaxSteps(); got != 100 {
+		t.Errorf("built-in cap must be 100 (raised from 25 in #449), got %d", got)
 	}
 }
 
@@ -54,31 +54,45 @@ func TestSetMaxStepsRoundTripsThroughAccessors(t *testing.T) {
 	}
 }
 
-// TestDefaultMaxStepsCapsLoopAtHistoricalBound is the behaviour-preservation
-// test: with the default cap (25) untouched, a model that keeps requesting tools
-// is still interrupted after 25 tool rounds — exactly as before #249.
+// TestDefaultMaxStepsCapsLoopAtHistoricalBound is the cap-fires test: with the
+// default cap (100) untouched, a model that keeps requesting tools is interrupted
+// after 100 tool rounds. The canned responses carry more than 100 tool-call turns
+// so the loop hits the cap before reaching the final answer, and — per #449 — the
+// exit surfaces a visible STEP_LIMIT_REACHED notice rather than the orphaned turn.
 func TestDefaultMaxStepsCapsLoopAtHistoricalBound(t *testing.T) {
-	fs := &fakeServer{responses: makeToolCallResponses(t, 40, "FINAL-ANSWER")}
+	// More tool-call turns than the default cap so the cap fires on a tool-call
+	// turn (the orphaned round-trip), not on a final answer.
+	fs := &fakeServer{responses: makeToolCallResponses(t, config.DefaultMaxSteps+20, "FINAL-ANSWER")}
 	server := httptest.NewServer(http.HandlerFunc(fs.handler))
 	defer server.Close()
 
-	us, _ := newLoopSession(t, server.URL) // default maxSteps == 25, untouched
+	us, _ := newLoopSession(t, server.URL) // default maxSteps == DefaultMaxSteps (100)
 
 	responses, err := us.ExecuteTaskLoop(context.Background(), "root", "go")
 	if err != nil {
 		t.Fatalf("loop returned error: %v", err)
 	}
-	// One initial round-trip + 25 capped tool rounds == 26 model requests.
-	const want = 26
+	// One initial round-trip + DefaultMaxSteps capped tool rounds == DefaultMaxSteps+1 requests.
+	want := config.DefaultMaxSteps + 1
 	if got := fs.calls; got != want {
-		t.Errorf("model requests = %d, want %d (default 25-step cap)", got, want)
+		t.Errorf("model requests = %d, want %d (default %d-step cap)", got, want, config.DefaultMaxSteps)
 	}
 	if len(responses) != want {
 		t.Errorf("responses = %d, want %d", len(responses), want)
 	}
+	last := responses[len(responses)-1].Content
 	// The cap fired before the model could emit its final answer.
-	if last := responses[len(responses)-1].Content; strings.Contains(last, "FINAL-ANSWER") {
+	if strings.Contains(last, "FINAL-ANSWER") {
 		t.Errorf("loop reached the final answer despite the default cap; last content = %q", last)
+	}
+	// #449: a cap exit whose final round-trip carried unexecuted tool calls must
+	// surface a visible STEP_LIMIT_REACHED notice (naming the cap) instead of the
+	// orphaned content, so the stop is explainable rather than silent.
+	if !strings.Contains(last, stepLimitReachedMarker) {
+		t.Errorf("cap-exit final content = %q, want it to surface %q", last, stepLimitReachedMarker)
+	}
+	if !strings.Contains(last, fmt.Sprintf("(%d)", config.DefaultMaxSteps)) {
+		t.Errorf("cap-exit final content = %q, want it to name the cap value (%d)", last, config.DefaultMaxSteps)
 	}
 }
 

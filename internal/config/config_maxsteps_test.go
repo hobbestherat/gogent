@@ -10,12 +10,17 @@ import (
 // intPtr is unexported; a local alias keeps the expectations readable).
 func ptr(v int) *int { return &v }
 
-// TestDefaultMaxStepsMatchesHistoricalBound guards the issue #249 invariant that
-// an unset max_steps reproduces gogent's prior fixed cap exactly, so older
-// config.json files behave as before.
-func TestDefaultMaxStepsMatchesHistoricalBound(t *testing.T) {
-	if DefaultMaxSteps != 25 {
-		t.Errorf("DefaultMaxSteps = %d, want 25 (the historical hardcoded bound)", DefaultMaxSteps)
+// TestDefaultMaxStepsMatchesDocumentedDefault pins the literal built-in step cap.
+// Issue #249 originally pegged it to the historical hardcoded bound of 25 so older
+// config.json files behaved as before; #449 intentionally relaxed that
+// behaviour-preservation invariant and raised the cap to 100 — real multi-step
+// tasks (deep research, large refactors) routinely need >25 model round-trips in a
+// single user turn, and the cap is now a runaway-loop backstop that is surfaced
+// (stopForStepLimit) rather than silent, not a 25-forever constant. This guard
+// keeps the literal honest so a future change is a conscious decision, not drift.
+func TestDefaultMaxStepsMatchesDocumentedDefault(t *testing.T) {
+	if DefaultMaxSteps != 100 {
+		t.Errorf("DefaultMaxSteps = %d, want 100 (the documented built-in step cap; raised from 25 in #449)", DefaultMaxSteps)
 	}
 }
 
@@ -154,8 +159,8 @@ func TestGetDefaultConfigRoundTripsMaxSteps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal default: %v", err)
 	}
-	if !strings.Contains(string(raw), `"max_steps":25`) {
-		t.Errorf("default config JSON missing \"max_steps\":25; got %s", raw)
+	if !strings.Contains(string(raw), `"max_steps":100`) {
+		t.Errorf("default config JSON missing \"max_steps\":100; got %s", raw)
 	}
 	var loaded Config
 	if err := json.Unmarshal(raw, &loaded); err != nil {

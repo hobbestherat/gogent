@@ -141,20 +141,23 @@ func TestSubAgentLoopHonoursUnlimited(t *testing.T) {
 }
 
 // TestSubAgentLoopUsesHistoricalDefaultWhenUnwired guards the behaviour-preservation
-// invariant for sub-agents: a session that never calls SetMaxSteps keeps the
-// historical 25-step bound on its sub-agent loops too (mirroring pre-#249).
+// invariant for sub-agents: a session that never calls SetMaxSteps inherits the
+// built-in step cap on its sub-agent loops too. The canned responses carry more
+// than DefaultMaxSteps tool-call turns so the sub-agent loop hits the cap before
+// reaching the canned final — otherwise (with the #449 default of 100) it would
+// simply finish at the final answer and never exercise the cap.
 func TestSubAgentLoopUsesHistoricalDefaultWhenUnwired(t *testing.T) {
-	fs := &fakeServer{responses: makeToolCallResponses(t, 40, "SUCCESS: done")}
+	fs := &fakeServer{responses: makeToolCallResponses(t, config.DefaultMaxSteps+20, "SUCCESS: done")}
 	server := httptest.NewServer(http.HandlerFunc(fs.handler))
 	defer server.Close()
 
-	us, _ := newLoopSession(t, server.URL) // maxSteps left at the default (25)
+	us, _ := newLoopSession(t, server.URL) // maxSteps left at the built-in default (100)
 
 	if _, err := us.SpawnSubAgent(context.Background(), "root", "child", "do it", true); err != nil {
 		t.Fatalf("SpawnSubAgent error: %v", err)
 	}
 	if got, want := fs.calls, config.DefaultMaxSteps+1; got != want {
-		t.Errorf("unwired sub-agent model requests = %d, want %d (historical default %d + 1)",
+		t.Errorf("unwired sub-agent model requests = %d, want %d (built-in default %d + 1)",
 			got, want, config.DefaultMaxSteps)
 	}
 }

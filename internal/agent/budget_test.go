@@ -64,7 +64,7 @@ func TestSubAgentOutcomeBudget(t *testing.T) {
 
 // TestRunLoopStopsAtTokenBudget drives a model that never stops asking for a tool
 // (a runaway loop). With a token budget set, the loop must stop gracefully with a
-// BUDGET_EXCEEDED final long before the 25-step cap, bounding cost (issue #28).
+// BUDGET_EXCEEDED final long before the step cap, bounding cost (issue #28).
 func TestRunLoopStopsAtTokenBudget(t *testing.T) {
 	// The server always returns a tool call, so without a budget the loop would
 	// run to maxSteps. Each round-trip reports 15 tokens of usage.
@@ -87,7 +87,7 @@ func TestRunLoopStopsAtTokenBudget(t *testing.T) {
 		t.Errorf("final answer should start with %s, got %q", budgetExceededMarker, final)
 	}
 
-	// It must have stopped well short of the 25-step cap: the budget trips after
+	// It must have stopped well short of the step cap: the budget trips after
 	// the second round-trip, so only a few model calls happen.
 	if fs.calls > 4 {
 		t.Errorf("expected the budget to bound the loop to a few calls, got %d", fs.calls)

@@ -35,15 +35,16 @@ func newMaxStepsGogent(t *testing.T, maxSteps *int) *Gogent {
 
 // TestCreateUserSessionWiresMaxStepsFromConfig verifies the gogent.go wiring
 // line: CreateUserSession applies config.MaxStepsOrDefault() to the new session
-// (issue #249). A nil/absent setting resolves to the default 25; an explicit 0
-// (unlimited) and a positive N are passed through verbatim.
+// (issue #249). A nil/absent setting resolves to the built-in default
+// (DefaultMaxSteps, raised to 100 in #449); an explicit 0 (unlimited) and a
+// positive N are passed through verbatim.
 func TestCreateUserSessionWiresMaxStepsFromConfig(t *testing.T) {
 	cases := []struct {
 		name string
 		cfg  *int
 		want int
 	}{
-		{"nil resolves to default 25", nil, config.DefaultMaxSteps},
+		{"nil resolves to built-in default", nil, config.DefaultMaxSteps},
 		{"explicit 0 wires as unlimited", intptr(0), 0},
 		{"explicit 13 wires verbatim", intptr(13), 13},
 		{"explicit 1 wires verbatim", intptr(1), 1},
@@ -64,8 +65,9 @@ func TestCreateUserSessionWiresMaxStepsFromConfig(t *testing.T) {
 }
 
 // TestCreateUserSessionDefaultConfigKeepsHistoricalBound confirms the full
-// GetDefaultConfig -> CreateUserSession path yields the historical 25-step cap,
-// so a user who never sets max_steps sees no behaviour change from before #249.
+// GetDefaultConfig -> CreateUserSession path yields the built-in step cap
+// (DefaultMaxSteps), so a user who never sets max_steps sees the documented
+// backstop. #449 raised that backstop from the historical 25 to 100.
 func TestCreateUserSessionDefaultConfigKeepsHistoricalBound(t *testing.T) {
 	g := NewGogentWithWorkspace(t.TempDir(), t.TempDir())
 	g.config = config.GetDefaultConfig()
@@ -79,8 +81,9 @@ func TestCreateUserSessionDefaultConfigKeepsHistoricalBound(t *testing.T) {
 	}}
 
 	us := g.NewSession("default-cfg")
-	if got := us.MaxSteps(); got != 25 {
-		t.Errorf("default-config session MaxSteps = %d, want 25 (historical bound)", got)
+	if got := us.MaxSteps(); got != config.DefaultMaxSteps {
+		t.Errorf("default-config session MaxSteps = %d, want %d (built-in default; raised to 100 in #449)",
+			got, config.DefaultMaxSteps)
 	}
 }
 
