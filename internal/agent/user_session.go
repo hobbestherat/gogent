@@ -160,7 +160,7 @@ type UserSession struct {
 	// root task loop and every one-shot / interactive sub-agent loop spawned from
 	// it (which all run against this same receiver), so the cap applies uniformly,
 	// just as the historical fixed bound did. Defaults to config.DefaultMaxSteps so
-	// an unwired session keeps gogent's historical fixed bound.
+	// an unwired session inherits the built-in cap (issue #249; raised to 100 in #449).
 	maxSteps int
 	// subAgentTimeoutMs bounds how long a spawned sub-agent may run. Zero leaves
 	// the agent's built-in default in place.
@@ -924,6 +924,14 @@ out — present it as your final answer.`
 // classify the run as failed (the task did not finish) (issue #28).
 const budgetExceededMarker = "BUDGET_EXCEEDED"
 
+// stepLimitReachedMarker prefixes a final response folded by stopForStepLimit when
+// runLoop exhausted its per-turn step cap (maxSteps) while the model's final turn
+// still carried unexecuted tool calls (issue #449). It mirrors budgetExceededMarker
+// and truncationNoticeMarker: a deterministic, user-visible signal that the stop was
+// the step cap interrupting the task mid-action, not a natural completion — so the
+// cap-exit is explainable at any cap value, not just the default.
+const stepLimitReachedMarker = "STEP_LIMIT_REACHED"
+
 // waitRateLimit blocks until the session's rate limiter grants a permit (or ctx
 // is cancelled). It is a no-op when no limiter is installed.
 func (s *UserSession) waitRateLimit(ctx context.Context) error {
@@ -1101,6 +1109,28 @@ func stopForTruncation(resp *model.CompletionResponse) *model.CompletionResponse
 		" or lower its reasoning_effort, then try again."
 	if partial := strings.TrimSpace(resp.Content); partial != "" {
 		note += "\n\nPartial output before truncation:\n" + partial
+	}
+	resp.Content = note
+	return resp
+}
+
+// stopForStepLimit folds a visible STEP_LIMIT_REACHED notice into the agent's last
+// response when runLoop exhausted its per-turn step cap (maxSteps) while the model's
+// final turn still carried unexecuted tool calls (issue #449). Without it the loop
+// fell out of its for-condition and surfaced the orphaned turn's content as a plain
+// SessionEventFinal — indistinguishable from a normal completion — while the tool
+// calls the model asked for were never run. Mirroring stopForBudget/stopForTruncation,
+// any partial output the model produced is preserved beneath the notice. The caller
+// additionally balances the orphaned tool_calls via finalizeTranscriptToolCalls so a
+// resumed session's next user turn is a valid request and no work is silently dropped.
+func stopForStepLimit(resp *model.CompletionResponse, maxSteps int) *model.CompletionResponse {
+	if resp == nil {
+		resp = &model.CompletionResponse{}
+	}
+	note := fmt.Sprintf("%s: reached the per-turn step cap (%d); the task was interrupted. Type a message to continue.",
+		stepLimitReachedMarker, maxSteps)
+	if partial := strings.TrimSpace(resp.Content); partial != "" {
+		note += "\n\nPartial progress before stopping:\n" + partial
 	}
 	resp.Content = note
 	return resp
@@ -1286,6 +1316,14 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 	// uninterrupted stretch of tool-free turns.
 	truncationRetries := 0
 	raisedBudget := 0
+	// stoppedInLoop records whether the loop exited via an in-body break — a real
+	// final answer, a folded structured_output{final}, or a graceful budget/
+	// truncation stop — rather than by exhausting the step cap (issue #449). When it
+	// is still false after the loop, the for-condition itself failed: the loop ran
+	// step up to maxSteps and `resp` holds the just-advanced round-trip the next
+	// iteration would have processed but never did. An unlimited loop (maxSteps <= 0)
+	// never falls out the bottom, so a cap exit is exactly !stoppedInLoop && maxSteps > 0.
+	stoppedInLoop := false
 	for step := 0; maxSteps <= 0 || step < maxSteps; step++ {
 		// Bail out promptly if the loop was stopped or the session closed; the
 		// in-flight request (if any) has already been cancelled via ctx.
@@ -1300,6 +1338,7 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 		// dropping the work done so far (issue #28).
 		if agent.BudgetExceeded() {
 			resp = stopForBudget(agent, resp)
+			stoppedInLoop = true
 			break
 		}
 
@@ -1424,6 +1463,7 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 				// turn, so without this the transcript would still end on a silent empty
 				// assistant message on reopen (issue #402, B5).
 				sess.FoldLastAssistantContent(resp.Content)
+				stoppedInLoop = true
 				break
 			}
 
@@ -1459,6 +1499,7 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 			// tool_calls unanswered in the persisted transcript; balance them so a
 			// reused session's next user turn is a valid transcript (issue #390).
 			s.finalizeTranscriptToolCalls(sess, resp, nil)
+			stoppedInLoop = true
 			break
 		}
 		// A real tool call this turn: reset the continuation-nudge budget so the bound
@@ -1508,6 +1549,7 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 			// siblings and the terminal call) unanswered in the persisted transcript.
 			// Balance them so a reused session's next user turn stays valid (#390).
 			s.finalizeTranscriptToolCalls(sess, resp, toolMsgs)
+			stoppedInLoop = true
 			break
 		}
 
@@ -1548,6 +1590,23 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 	}
 
 	if resp != nil {
+		// Step-cap exit (issue #449): the loop fell out of its for-condition because
+		// step reached maxSteps, NOT because a real stop broke out of the body
+		// (stoppedInLoop stays false only here; an unlimited loop never reaches this).
+		// `resp` is the final round-trip that the next iteration would have run through
+		// collectToolCalls but never did. If it carries unexecuted tool calls, the
+		// model's last turn was abandoned mid-action: its tool_calls are orphaned in the
+		// persisted transcript (already appended by sendCtx) with no results. Surface a
+		// visible STEP_LIMIT_REACHED notice in place of the orphaned content and balance
+		// the dangling tool_calls via finalizeTranscriptToolCalls, so the cap-exit is
+		// explainable and a resumed session's next user turn is a valid request rather
+		// than a 400 on unanswered tool calls.
+		if !stoppedInLoop && maxSteps > 0 {
+			if calls, _ := s.collectToolCalls(resp); len(calls) > 0 {
+				resp = stopForStepLimit(resp, maxSteps)
+				s.finalizeTranscriptToolCalls(sess, resp, nil)
+			}
+		}
 		finalText := strings.TrimSpace(resp.Content)
 		if finalText == "" {
 			// The terminal turn carried no text — recover the most recent

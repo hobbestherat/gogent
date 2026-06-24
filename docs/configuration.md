@@ -35,7 +35,7 @@ inherit the built-in default for that key.
 | `theme` | ThemeConfig | zero (`"default"` palette, color on) | TUI color palette. |
 | `experimental` | ExperimentalConfig | zero (all off) | Opt-in, not-yet-default behaviors. |
 | `supervisor` | SupervisorConfig | zero (defaults via `*OrDefault`) | Harness idle-watchdog tuning; only active when `experimental.supervisor` is on. |
-| `max_steps` | *int | `25` (`DefaultMaxSteps`) | Per-turn model round-trip cap for every loop in a session. `nil` ⇒ 25; `0` ⇒ unlimited; `N>0` ⇒ cap N. See [max_steps](#max_steps) below. |
+| `max_steps` | *int | `100` (`DefaultMaxSteps`) | Per-turn model round-trip cap for every loop in a session. `nil` ⇒ 100; `0` ⇒ unlimited; `N>0` ⇒ cap N. See [max_steps](#max_steps) below. |
 
 ---
 
@@ -336,12 +336,15 @@ Only active when `experimental.supervisor` is on.
 
 | Value | Meaning |
 |---|---|
-| `nil` (unset) | `25` (`DefaultMaxSteps`) |
+| `nil` (unset) | `100` (`DefaultMaxSteps`) |
 | `0` | **Unlimited** — bounded only by the final answer, token budget, or cancellation |
 | `N > 0` | Cap at N round-trips |
 
 It governs the root task loop **and** every sub-agent / interactive loop in the
-session.
+session. When a turn hits the cap with the model's final round-trip still carrying
+unexecuted tool calls, the loop stops with a visible `STEP_LIMIT_REACHED` notice
+(rather than silently abandoning the work) and balances the orphaned tool calls so
+the session stays valid for a follow-up message (issue #449).
 
 ```json
 "max_steps": 40

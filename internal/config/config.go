@@ -582,8 +582,7 @@ type Config struct {
 	// unbounded too, matching the pre-#249 behaviour where the same fixed cap applied
 	// everywhere. It is a pointer so an absent "max_steps" key is distinguishable
 	// from an explicit 0:
-	//   nil (unset) -> the built-in default (DefaultMaxSteps, 25), preserving prior
-	//                  behaviour;
+	//   nil (unset) -> the built-in default (DefaultMaxSteps, 100);
 	//   0           -> UNLIMITED ("yolo") — the loop is bounded only by its other
 	//                  stop conditions (final answer, token budget, cancellation);
 	//   N > 0       -> cap at N steps.
@@ -609,10 +608,15 @@ type Config struct {
 }
 
 // DefaultMaxSteps is the built-in per-turn step (model round-trip) cap applied
-// when Config.MaxSteps is left unset (nil). It matches gogent's historical fixed
-// limit so an older config.json without a "max_steps" key behaves exactly as
-// before (issue #249).
-const DefaultMaxSteps = 25
+// when Config.MaxSteps is left unset (nil). It was raised from gogent's historical
+// fixed limit of 25 to 100 (issue #449) because real multi-step tasks (deep
+// research, large refactors) routinely need more than 25 model round-trips in a
+// single user turn, and the old bound silently abandoned such tasks at the cap.
+// The #249 "historical bound" invariant is therefore intentionally relaxed; the cap
+// still exists purely as a runaway-loop backstop (set max_steps:0 for unlimited).
+// The step-cap stop is now surfaced rather than silent (see stopForStepLimit), so
+// hitting the cap is explainable at any value, not just this default.
+const DefaultMaxSteps = 100
 
 // intPtr returns a pointer to v. It exists because Go does not allow taking the
 // address of a constant/literal inline, so GetDefaultConfig cannot spell
@@ -1014,7 +1018,7 @@ func GetDefaultConfig() *Config {
 		Notify:       notifyPtr(DefaultNotifyConfig()),
 		// Round-trip the default step cap explicitly so a freshly written
 		// config.json documents the setting (issue #249); 0 here would mean
-		// unlimited, so the default is the historical fixed bound.
+		// unlimited, so the default is the runaway-loop backstop (DefaultMaxSteps).
 		MaxSteps: intPtr(DefaultMaxSteps),
 		// Show the welcome/onboarding dialog by default (issue #339); the "Don't show
 		// again" checkbox persists false to opt out.
