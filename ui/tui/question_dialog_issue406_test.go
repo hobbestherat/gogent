@@ -143,6 +143,30 @@ func TestIssue406QuestionDialogEscapeCancels(t *testing.T) {
 	}
 }
 
+func TestIssue406QuestionDialogRendersTextPlaceholders(t *testing.T) {
+	app := tui.NewWithSize(90, 26, &bytes.Buffer{})
+	desktop := tv.NewDesktop(app)
+	req := agent.QuestionRequest{
+		Title: "Placeholders",
+		Topics: []agent.QuestionTopic{{
+			Title: "Details",
+			Items: []agent.QuestionItem{
+				{ID: "name", Label: "Name", Type: agent.QuestionText, Placeholder: "Ada Lovelace"},
+				{ID: "notes", Label: "Notes", Type: agent.QuestionTextarea, Placeholder: "Optional notes"},
+			},
+		}},
+	}
+
+	showQuestionDialog(desktop, req, func(agent.QuestionResponse) {})
+	desktop.Redraw()
+	screen := issue406ScreenText(app)
+	for _, want := range []string{"Ada Lovelace", "Optional notes"} {
+		if !strings.Contains(screen, want) {
+			t.Fatalf("placeholder %q was not rendered in question dialog:\n%s", want, screen)
+		}
+	}
+}
+
 func issue406Dispatch(t *testing.T, app *tui.App, ev tui.TypeEvent) {
 	t.Helper()
 	handlers := append([]func(tui.TypeEvent){}, *exportedField[[]func(tui.TypeEvent)](t, app, "typeHandlers")...)
