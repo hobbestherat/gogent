@@ -1,11 +1,47 @@
 package agent
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"gogent/internal/model"
 )
+
+func requestMessages(t *testing.T, body string) []map[string]any {
+	t.Helper()
+	var req struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatalf("unmarshal request body: %v\nbody: %s", err, body)
+	}
+	return req.Messages
+}
+
+func assertNoUnmatchedToolCalls(t *testing.T, messages []map[string]any) {
+	t.Helper()
+	for i := 0; i < len(messages); i++ {
+		if messages[i]["role"] != "assistant" {
+			continue
+		}
+		rawCalls, ok := messages[i]["tool_calls"].([]any)
+		if !ok || len(rawCalls) == 0 {
+			continue
+		}
+		for j := 0; j < len(rawCalls); j++ {
+			next := i + 1 + j
+			if next >= len(messages) {
+				t.Fatalf("assistant tool_calls at message %d are not followed by %d tool results: %#v", i, len(rawCalls), messages)
+			}
+			if messages[next]["role"] != "tool" {
+				t.Fatalf("assistant tool_calls at message %d are followed by role %q at message %d, want tool; messages=%#v",
+					i, messages[next]["role"], next, messages)
+			}
+		}
+		i += len(rawCalls)
+	}
+}
 
 func respToolCallWithFinish(name, arguments, finishReason string) string {
 	return marshalCompletion(map[string]any{
@@ -104,6 +140,48 @@ func TestCollectToolCallsDoesNotSalvageWithoutFinalMarkerIssue390(t *testing.T) 
 	}
 }
 
+func TestCollectToolCallsKeepsEarlierCallsBeforeTruncatedStructuredFinalIssue390(t *testing.T) {
+	s := &UserSession{}
+	resp := &model.CompletionResponse{
+		FinishReason: "length",
+		ToolCalls: []model.ToolCall{
+			{
+				ID:       "call_calc",
+				Function: model.FunctionCall{Name: "calc", Arguments: `{"expression":"1+1"}`},
+			},
+			{
+				ID: "call_final",
+				Function: model.FunctionCall{
+					Name:      "structured_output",
+					Arguments: `{"final": true, "response":"partial final`,
+				},
+				Truncated: true,
+			},
+		},
+	}
+
+	calls, explicitFinal := s.collectToolCalls(resp)
+
+	if explicitFinal {
+		t.Fatal("explicitFinal short-circuited a mixed batch; preceding calls would be dropped")
+	}
+	if len(calls) != 2 {
+		t.Fatalf("calls = %d, want calc plus terminal structured_output call", len(calls))
+	}
+	if calls[0].Tool != "calc" {
+		t.Fatalf("first call = %q, want calc", calls[0].Tool)
+	}
+	if calls[1].Tool != "structured_output" {
+		t.Fatalf("second call = %q, want structured_output", calls[1].Tool)
+	}
+	if final, _ := calls[1].Args["final"].(bool); !final {
+		t.Fatalf("terminal call args = %#v, want final:true", calls[1].Args)
+	}
+	if got, _ := calls[1].Args["response"].(string); got != "partial final" {
+		t.Fatalf("terminal response = %q, want recovered partial final", got)
+	}
+}
+
 func TestRunLoopTruncatedStructuredOutputFinalDoesNotExecuteInvalidArgsIssue390(t *testing.T) {
 	b := &scriptedBackend{seq: []string{
 		respToolCallWithFinish("structured_output", `{"final": true, "response":"partial final`, "length"),
@@ -133,6 +211,29 @@ func TestRunLoopTruncatedStructuredOutputFinalDoesNotExecuteInvalidArgsIssue390(
 	if final != "partial final" {
 		t.Fatalf("final text = %q, want recovered partial final", final)
 	}
+}
+
+func TestRunLoopTruncatedStructuredOutputFinalDoesNotPoisonNextTurnIssue390(t *testing.T) {
+	b := &scriptedBackend{seq: []string{
+		respToolCallWithFinish("structured_output", `{"final": true, "response":"partial final`, "length"),
+		respText("Follow-up answer."),
+	}}
+	us, id, _ := newLoopHarness(t, b)
+	ctx, cancel := runLoopCtx(t)
+	defer cancel()
+
+	if _, err := us.ExecuteTaskLoop(ctx, id, "produce final"); err != nil {
+		t.Fatalf("first ExecuteTaskLoop: %v", err)
+	}
+	if _, err := us.ExecuteTaskLoop(ctx, id, "follow up"); err != nil {
+		t.Fatalf("second ExecuteTaskLoop: %v", err)
+	}
+
+	bodies := b.requestBodies()
+	if len(bodies) != 2 {
+		t.Fatalf("request count = %d, want 2", len(bodies))
+	}
+	assertNoUnmatchedToolCalls(t, requestMessages(t, bodies[1]))
 }
 
 func TestRunLoopTruncatedToolCallGetsOneContinuationIssue390(t *testing.T) {
@@ -175,4 +276,29 @@ func TestRunLoopTruncatedToolCallGetsOneContinuationIssue390(t *testing.T) {
 	if final != "The answer is 2." {
 		t.Fatalf("final text = %q, want completed answer", final)
 	}
+}
+
+func TestRunLoopTruncatedToolCallContinuationRequestIsProtocolValidIssue390(t *testing.T) {
+	b := &scriptedBackend{seq: []string{
+		respToolCallWithFinish("calc", `{"expression":"1+`, "length"),
+		respToolCall("calc", `{"expression":"1+1"}`),
+		respText("The answer is 2."),
+	}}
+	us, id, _ := newLoopHarness(t, b)
+	ctx, cancel := runLoopCtx(t)
+	defer cancel()
+
+	if _, err := us.ExecuteTaskLoop(ctx, id, "add one and one"); err != nil {
+		t.Fatalf("ExecuteTaskLoop: %v", err)
+	}
+
+	bodies := b.requestBodies()
+	if len(bodies) < 2 {
+		t.Fatalf("request count = %d, want at least 2", len(bodies))
+	}
+	messages := requestMessages(t, bodies[1])
+	if !strings.Contains(bodies[1], truncatedToolCallNote) {
+		t.Fatalf("second request missing continuation note: %s", bodies[1])
+	}
+	assertNoUnmatchedToolCalls(t, messages)
 }
