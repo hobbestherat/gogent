@@ -992,24 +992,37 @@ func (w *Workbench) RefreshTheme() {
 	w.desktop.Redraw()
 }
 
-// viewItems builds the View submenu: find-in-transcript, the event-type filter
-// toggles, fold/unfold and yank-to-clipboard — all acting on the active
-// session's transcript — plus the sidebar pin toggle. The transcript operations
-// are also available from the keyboard while the transcript is focused ('/',
-// a/t/r/e, f/u, y, Esc); the menu makes them discoverable.
+// viewItems builds the View submenu: the event-type filter toggles, fold/unfold
+// and yank-to-clipboard — all acting on the active session's transcript — plus
+// the sidebar pin toggle. Find moved to the &Edit menu (issue #393). The
+// transcript operations are also available from the keyboard while the transcript
+// is focused ('/' for find, a/t/r/e, f/u, y, Esc); the menu makes them discoverable.
 // editItems builds the &Edit submenu (issue #393): the clipboard operations
 // (Copy/Cut/Paste) and transcript search (Find), giving them a discoverable home
-// in the menu bar. The accelerators mirror the real key bindings — Ctrl+C/Ctrl+X
-// are handled by the desktop's copy/cut key path, Ctrl+V by its paste path, and
-// Ctrl+F (and `/`) open the in-transcript search. Copy/Cut/Paste are routed to
-// the focused widget by the desktop and are graceful no-ops when nothing is
-// focused or selectable.
+// in the menu bar. Each item invokes the matching focused-widget path when
+// selected (by click or accelerator).
+//
+// Only Paste and Find carry a menu accelerator; Copy and Cut deliberately do not.
+// A menu accelerator (MenuBar.HandleAccelerator) runs ahead of the desktop's
+// native key handling and always consumes the key once its item fires. That is
+// only safe when it matches the native behaviour:
+//
+//   - Ctrl+V / Ctrl+F: safe. The native paste path (isPasteKey) already consumes
+//     Ctrl+V unconditionally and routes through the same Paste(), and Find has no
+//     native key handler at all (it was the former View→Find accelerator), so the
+//     accelerator is the canonical binding.
+//   - Ctrl+C / Ctrl+X: NOT safe to bind here. The native copy/cut paths
+//     (isCopyKey → copyFocused, isCutKey → cutFocused) consume the key only when
+//     something was copyable/cuttable, and otherwise let it fall through — Ctrl+C
+//     to the SetUnhandledKeyFn quit tail (confirmQuit, see Run), Ctrl+X to the
+//     focused widget. An always-consuming menu accelerator would swallow those
+//     fall-throughs and break the "Ctrl+C/Ctrl+X behaviour unchanged" contract
+//     (notably quit-only-when-unconsumed). So Copy/Cut are wired for click/menu
+//     use only; their live Ctrl+C/Ctrl+X bindings stay on the native path.
 func (w *Workbench) editItems() []*tv.MenuItem {
 	return []*tv.MenuItem{
-		tv.NewMenuItem("&Copy", func() { w.copySelection() }).
-			WithShortcut("Ctrl+C", tui.KeyRune, 'c', true),
-		tv.NewMenuItem("Cu&t", func() { w.cutSelection() }).
-			WithShortcut("Ctrl+X", tui.KeyRune, 'x', true),
+		tv.NewMenuItem("&Copy", func() { w.copySelection() }),
+		tv.NewMenuItem("Cu&t", func() { w.cutSelection() }),
 		tv.NewMenuItem("&Paste", func() { w.pasteClipboard() }).
 			WithShortcut("Ctrl+V", tui.KeyRune, 'v', true),
 		tv.NewMenuItem("----------", nil),
