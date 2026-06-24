@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -103,6 +104,65 @@ func transcriptToolResultContent(transcript []model.Message, id string) string {
 		}
 	}
 	return ""
+}
+
+// transcriptAssistantContentForCall returns the (persisted) content of the assistant
+// message that issued the given tool_call id — used to check whether a folded notice
+// or answer was persisted onto the terminal assistant message (FoldLastAssistantContent).
+func transcriptAssistantContentForCall(transcript []model.Message, callID string) (string, bool) {
+	for _, m := range transcript {
+		if m.Role != model.RoleAssistant {
+			continue
+		}
+		for _, tc := range m.ToolCalls {
+			if tc.ID == callID {
+				return m.Content, true
+			}
+		}
+	}
+	return "", false
+}
+
+// nativeStructuredOutputFinalResponse builds a round-trip carrying a single completed
+// NATIVE structured_output{final:true} call (finish_reason "tool_calls") — the
+// sub-agent/plan-mode final-answer tool. collectToolCalls returns it as an ordinary
+// call (explicitFinal=false); only containsTerminalFinal detects it as a final.
+func nativeStructuredOutputFinalResponse(id, response string) map[string]interface{} {
+	args, _ := json.Marshal(map[string]interface{}{"final": true, "response": response})
+	return map[string]interface{}{
+		"choices": []map[string]interface{}{{
+			"index": 0,
+			"message": map[string]interface{}{
+				"role": "assistant",
+				"tool_calls": []map[string]interface{}{{
+					"id":   id,
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":      "structured_output",
+						"arguments": string(args),
+					},
+				}},
+			},
+			"finish_reason": "tool_calls",
+		}},
+		"usage": map[string]interface{}{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+	}
+}
+
+// embeddedFinalResponse builds a round-trip whose visible content IS a JSON
+// {"response":...,"final":true} object with no native tool_calls — the fallback
+// final-answer shape some models emit as text. collectToolCalls folds its response
+// into resp.Content and reports explicitFinal=true.
+func embeddedFinalResponse(response string) map[string]interface{} {
+	obj, _ := json.Marshal(map[string]interface{}{"final": true, "response": response})
+	return map[string]interface{}{
+		"choices": []map[string]interface{}{{
+			"index":         0,
+			"message":       map[string]interface{}{"role": "assistant", "content": string(obj)},
+			"finish_reason": "stop",
+		}},
+		"usage": map[string]interface{}{"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28},
+	}
 }
 
 // TestStepCapExitSurfacesNoticeBalancesOrphansAndStaysResumableIssue449 is the
@@ -453,7 +513,8 @@ func TestBudgetStopDoesNotShowStepLimitNoticeIssue449(t *testing.T) {
 // TestSubAgentStepCapExitSurfacesNoticeIssue449 confirms the shared runLoop surfaces
 // the step-cap notice for a one-shot sub-agent too: a sub-agent that exhausts its
 // step cap returns the STEP_LIMIT_REACHED notice as its final result (rather than a
-// silent, incomplete answer), because the cap-exit fix lives in the common loop.
+// silent, incomplete answer), and — per the #449 sub-agent-boundary fix — is reported
+// StatusFailed (it did not finish), not Completed.
 func TestSubAgentStepCapExitSurfacesNoticeIssue449(t *testing.T) {
 	const capN = 3
 	fs := &fakeServer{responses: makeToolCallResponses(t, capN+10, "SUCCESS: done")}
@@ -462,6 +523,13 @@ func TestSubAgentStepCapExitSurfacesNoticeIssue449(t *testing.T) {
 
 	us, _ := newLoopSession(t, server.URL)
 	us.SetMaxSteps(capN)
+
+	var subAgentEvents []SessionEvent
+	us.SetObserver(func(ev SessionEvent) {
+		if ev.Type == SessionEventSubAgent {
+			subAgentEvents = append(subAgentEvents, ev)
+		}
+	})
 
 	final, err := us.SpawnSubAgent(context.Background(), "root", "child", "do it", true)
 	if err != nil {
@@ -473,19 +541,269 @@ func TestSubAgentStepCapExitSurfacesNoticeIssue449(t *testing.T) {
 	if !strings.Contains(final, stepLimitReachedMarker) {
 		t.Errorf("sub-agent final = %q, want it to surface %q (the shared loop folds the cap notice)", final, stepLimitReachedMarker)
 	}
+	// The terminal SessionEventSubAgent carries the child's classified status; a
+	// step-capped sub-agent did not finish, so it must be StatusFailed.
+	if len(subAgentEvents) == 0 {
+		t.Fatal("no SessionEventSubAgent events captured")
+	}
+	terminal := subAgentEvents[len(subAgentEvents)-1]
+	if terminal.Status != StatusFailed {
+		t.Errorf("step-capped sub-agent terminal status = %v, want StatusFailed (the task was interrupted, not completed)", terminal.Status)
+	}
 }
 
-// TestSubAgentOutcomeClassifiesBudgetButNotStepLimitIssue449 documents a known
-// asymmetry surfaced by #449: subAgentOutcome treats a BUDGET_EXCEEDED sub-agent as
-// StatusFailed (the task did not finish) but a STEP_LIMIT_REACHED sub-agent as
-// StatusCompleted, even though the latter also did not finish. This pins the
-// current behaviour so the gap is visible; if step-cap stops are later classified
-// as incomplete, flip the expectation here.
-func TestSubAgentOutcomeClassifiesBudgetButNotStepLimitIssue449(t *testing.T) {
-	if got := subAgentOutcome(budgetExceededMarker + ": token budget reached (40/40)"); got != StatusFailed {
-		t.Errorf("subAgentOutcome(BUDGET_EXCEEDED) = %v, want StatusFailed", got)
+// TestSubAgentOutcomeClassifiesBudgetAndStepLimitAsFailedIssue449 pins the fix for
+// the sub-agent-boundary counterpart of #449: a sub-agent whose result carries the
+// BUDGET_EXCEEDED OR STEP_LIMIT_REACHED marker did NOT finish its task, so
+// subAgentOutcome must classify both as StatusFailed — otherwise a coordinator would
+// receive the cap/budget stop notice as if it were a successful answer. (Previously
+// only BUDGET_EXCEEDED was failed; STEP_LIMIT_REACHED fell through to Completed.)
+func TestSubAgentOutcomeClassifiesBudgetAndStepLimitAsFailedIssue449(t *testing.T) {
+	cases := []struct {
+		name  string
+		final string
+	}{
+		{"budget exceeded", budgetExceededMarker + ": token budget reached (40/40)"},
+		{"step limit reached", fmt.Sprintf("%s: reached the per-turn step cap (3)", stepLimitReachedMarker)},
+		{"step limit reached with partial beneath", stepLimitReachedMarker + ": reached the per-turn step cap (100); the task was interrupted.\n\nPartial progress before stopping:\nfoo"},
 	}
-	if got := subAgentOutcome(fmt.Sprintf("%s: reached the per-turn step cap (3)", stepLimitReachedMarker)); got != StatusCompleted {
-		t.Errorf("subAgentOutcome(STEP_LIMIT_REACHED) = %v, want StatusCompleted (current behaviour — a step-capped sub-agent is NOT yet classified as incomplete; see #449)", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := subAgentOutcome(tc.final); got != StatusFailed {
+				t.Errorf("subAgentOutcome(%q) = %v, want StatusFailed (an interrupted sub-agent must not be reported completed)", tc.final, got)
+			}
+		})
+	}
+	// A genuine SUCCESS final is still completed (the new markers must not over-fire).
+	if got := subAgentOutcome("SUCCESS: the task is done"); got != StatusCompleted {
+		t.Errorf("subAgentOutcome(SUCCESS) = %v, want StatusCompleted", got)
+	}
+}
+
+// --- native/embedded finals landing on the cap-orphaned turn (#449 round 2) --
+//
+// The first review round found that a deliberate final answer emitted on the turn
+// the cap orphans was overwritten by STEP_LIMIT_REACHED. The fix added a 3-way
+// switch in the cap-exit branch: explicitFinal (embedded/salvaged) and
+// containsTerminalFinal (native structured_output{final}) deliver the answer; only a
+// genuine orphan surfaces the notice. These pin each branch.
+
+// TestStepCapExitDeliversNativeStructuredOutputFinalIssue449: the orphaned turn is a
+// completed NATIVE structured_output{final:true}. The model finished at the cap
+// boundary, so its answer must be delivered — NOT clobbered by STEP_LIMIT_REACHED —
+// and the never-executed final call balanced.
+func TestStepCapExitDeliversNativeStructuredOutputFinalIssue449(t *testing.T) {
+	const capN = 3
+	const answer = "THE-REAL-FINAL-ANSWER"
+	responses := make([]map[string]interface{}, 0, capN+1)
+	for i := 0; i < capN; i++ {
+		responses = append(responses, toolCallResponse(fmt.Sprintf("call_%d", i), "calc", `{"expression":"1+1"}`))
+	}
+	responses = append(responses, nativeStructuredOutputFinalResponse("final_call", answer))
+
+	fs := &fakeServer{responses: responses}
+	server := httptest.NewServer(http.HandlerFunc(fs.handler))
+	defer server.Close()
+
+	us, _ := newLoopSession(t, server.URL)
+	us.SetMaxSteps(capN)
+
+	var finalText string
+	us.SetObserver(func(ev SessionEvent) {
+		if ev.Type == SessionEventFinal {
+			finalText = ev.Text
+		}
+	})
+
+	if _, err := us.ExecuteTaskLoop(context.Background(), "root", "go"); err != nil {
+		t.Fatalf("loop returned error: %v", err)
+	}
+	if got, want := fs.calls, capN+1; got != want {
+		t.Fatalf("model requests = %d, want %d", got, want)
+	}
+	if finalText != answer {
+		t.Errorf("final event = %q, want the native structured_output final %q delivered", finalText, answer)
+	}
+	if strings.Contains(finalText, stepLimitReachedMarker) {
+		t.Errorf("final event = %q; a completed final answer must not be reported as a step-limit interruption", finalText)
+	}
+	transcript := us.RootAgent.ThoughtTrain.GetTranscript()
+	assertTranscriptToolCallsBalanced(t, transcript)
+	if !transcriptHasAssistantToolCall(transcript, "final_call") {
+		t.Error("the native structured_output final call was not persisted")
+	}
+}
+
+// TestStepCapExitDeliversEmbeddedStructuredOutputFinalIssue449: the orphaned turn is
+// a JSON-text {"response":...,"final":true} (no native tool_calls). collectToolCalls
+// folds it and reports explicitFinal, so the answer is delivered, not the notice.
+func TestStepCapExitDeliversEmbeddedStructuredOutputFinalIssue449(t *testing.T) {
+	const capN = 3
+	const answer = "EMBEDDED-ANSWER"
+	responses := make([]map[string]interface{}, 0, capN+1)
+	for i := 0; i < capN; i++ {
+		responses = append(responses, toolCallResponse(fmt.Sprintf("call_%d", i), "calc", `{"expression":"1+1"}`))
+	}
+	responses = append(responses, embeddedFinalResponse(answer))
+
+	fs := &fakeServer{responses: responses}
+	server := httptest.NewServer(http.HandlerFunc(fs.handler))
+	defer server.Close()
+
+	us, _ := newLoopSession(t, server.URL)
+	us.SetMaxSteps(capN)
+
+	var finalText string
+	us.SetObserver(func(ev SessionEvent) {
+		if ev.Type == SessionEventFinal {
+			finalText = ev.Text
+		}
+	})
+
+	if _, err := us.ExecuteTaskLoop(context.Background(), "root", "go"); err != nil {
+		t.Fatalf("loop returned error: %v", err)
+	}
+	if got, want := fs.calls, capN+1; got != want {
+		t.Fatalf("model requests = %d, want %d", got, want)
+	}
+	if finalText != answer {
+		t.Errorf("final event = %q, want the embedded final %q delivered", finalText, answer)
+	}
+	if strings.Contains(finalText, stepLimitReachedMarker) {
+		t.Errorf("final event = %q; a completed embedded final must not be reported as a step-limit interruption", finalText)
+	}
+}
+
+// TestStepCapExitMixedBatchWithTerminalFinalIssue449: the orphaned turn carries a
+// real tool call AND a native structured_output{final:true}. The final answer is
+// delivered; BOTH calls are balanced (neither can execute on an orphaned turn), and
+// the batch is NOT reported as a step-limit interruption.
+func TestStepCapExitMixedBatchWithTerminalFinalIssue449(t *testing.T) {
+	const capN = 2
+	const answer = "MIXED-ANSWER"
+	responses := make([]map[string]interface{}, 0, capN+1)
+	for i := 0; i < capN; i++ {
+		responses = append(responses, toolCallResponse(fmt.Sprintf("call_%d", i), "calc", `{"expression":"1+1"}`))
+	}
+	responses = append(responses, multiToolCallResponse(
+		[3]string{"mixed_calc", "calc", `{"expression":"1+1"}`},
+		[3]string{"mixed_final", "structured_output", fmt.Sprintf(`{"final":true,"response":%q}`, answer)},
+	))
+
+	fs := &fakeServer{responses: responses}
+	server := httptest.NewServer(http.HandlerFunc(fs.handler))
+	defer server.Close()
+
+	us, _ := newLoopSession(t, server.URL)
+	us.SetMaxSteps(capN)
+
+	var finalText string
+	var events []SessionEvent
+	us.SetObserver(func(ev SessionEvent) {
+		events = append(events, ev)
+		if ev.Type == SessionEventFinal {
+			finalText = ev.Text
+		}
+	})
+
+	if _, err := us.ExecuteTaskLoop(context.Background(), "root", "go"); err != nil {
+		t.Fatalf("loop returned error: %v", err)
+	}
+	if got, want := fs.calls, capN+1; got != want {
+		t.Fatalf("model requests = %d, want %d", got, want)
+	}
+	if finalText != answer {
+		t.Errorf("final event = %q, want the mixed-batch final %q delivered", finalText, answer)
+	}
+	if strings.Contains(finalText, stepLimitReachedMarker) {
+		t.Errorf("final event = %q; a batch containing a terminal final must not be reported as a step-limit interruption", finalText)
+	}
+	// Both orphaned calls are balanced; neither was executed (only the capN earlier
+	// calc turns ran, so exactly capN tool-result events).
+	transcript := us.RootAgent.ThoughtTrain.GetTranscript()
+	for _, id := range []string{"mixed_calc", "mixed_final"} {
+		if !transcriptHasAssistantToolCall(transcript, id) {
+			t.Errorf("orphaned call %q was not persisted", id)
+		}
+	}
+	assertTranscriptToolCallsBalanced(t, transcript)
+	if got, want := countEvents(events, SessionEventToolResult), capN; got != want {
+		t.Errorf("tool result events = %d, want %d (the orphaned batch must be balanced, not executed)", got, want)
+	}
+}
+
+// TestStepCapExitPersistsNoticeOnTerminalAssistantMessageIssue449 verifies the notice
+// is folded onto the PERSISTED terminal assistant message (FoldLastAssistantContent),
+// so reopening the session shows the step-cap explanation rather than the orphaned
+// turn's empty/partial content. This was added in the round-2 fix (mirroring the
+// truncation stop).
+func TestStepCapExitPersistsNoticeOnTerminalAssistantMessageIssue449(t *testing.T) {
+	const capN = 3
+	fs := &fakeServer{responses: makeToolCallResponses(t, capN+10, "FINAL-ANSWER")}
+	server := httptest.NewServer(http.HandlerFunc(fs.handler))
+	defer server.Close()
+
+	us, _ := newLoopSession(t, server.URL)
+	us.SetMaxSteps(capN)
+
+	if _, err := us.ExecuteTaskLoop(context.Background(), "root", "go"); err != nil {
+		t.Fatalf("loop returned error: %v", err)
+	}
+	transcript := us.RootAgent.ThoughtTrain.GetTranscript()
+	orphanedID := fmt.Sprintf("call_%d", capN)
+	content, ok := transcriptAssistantContentForCall(transcript, orphanedID)
+	if !ok {
+		t.Fatalf("orphaned call %q was not persisted as an assistant tool_call", orphanedID)
+	}
+	if !strings.Contains(content, stepLimitReachedMarker) {
+		t.Errorf("terminal assistant message content = %q, want the %q notice persisted via FoldLastAssistantContent",
+			content, stepLimitReachedMarker)
+	}
+}
+
+// TestSubAgentStepCapNativeFinalDeliveredIssue449: a one-shot sub-agent whose
+// cap-orphaned turn is a native structured_output{final:true} returns its real answer
+// (not the step-cap notice) and is reported StatusCompleted — the model finished at
+// the cap boundary. This is the primary structured_output path (sub-agent finalize).
+func TestSubAgentStepCapNativeFinalDeliveredIssue449(t *testing.T) {
+	const capN = 3
+	const answer = "SUB-FINAL-ANSWER"
+	responses := make([]map[string]interface{}, 0, capN+1)
+	for i := 0; i < capN; i++ {
+		responses = append(responses, toolCallResponse(fmt.Sprintf("call_%d", i), "calc", `{"expression":"1+1"}`))
+	}
+	responses = append(responses, nativeStructuredOutputFinalResponse("sub_final", answer))
+
+	fs := &fakeServer{responses: responses}
+	server := httptest.NewServer(http.HandlerFunc(fs.handler))
+	defer server.Close()
+
+	us, _ := newLoopSession(t, server.URL)
+	us.SetMaxSteps(capN)
+
+	var subAgentEvents []SessionEvent
+	us.SetObserver(func(ev SessionEvent) {
+		if ev.Type == SessionEventSubAgent {
+			subAgentEvents = append(subAgentEvents, ev)
+		}
+	})
+
+	final, err := us.SpawnSubAgent(context.Background(), "root", "child", "do it", true)
+	if err != nil {
+		t.Fatalf("SpawnSubAgent error: %v", err)
+	}
+	if final != answer {
+		t.Errorf("sub-agent final = %q, want the native final %q delivered (not the step-cap notice)", final, answer)
+	}
+	if strings.Contains(final, stepLimitReachedMarker) {
+		t.Errorf("sub-agent final = %q; a completed final must not be reported as a step-limit interruption", final)
+	}
+	// The model finished, so the sub-agent is completed (not failed).
+	if len(subAgentEvents) == 0 {
+		t.Fatal("no SessionEventSubAgent events captured")
+	}
+	terminal := subAgentEvents[len(subAgentEvents)-1]
+	if terminal.Status != StatusCompleted {
+		t.Errorf("sub-agent terminal status = %v, want StatusCompleted (the model emitted a final at the cap boundary)", terminal.Status)
 	}
 }
