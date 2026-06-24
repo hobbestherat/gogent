@@ -39,7 +39,7 @@ func trailingUserMsgContains(req []map[string]interface{}, sub string) bool {
 // #263/#404: a checklist that already exists when a turn begins must be rendered
 // into that turn's first model request, but as the trailing volatile user
 // message, not in the cacheable system prompt.
-func TestVolatileChecklistInjectedAtTurnStart(t *testing.T) {
+func TestVolatileChecklistInjectedAtTurnStartIssue404(t *testing.T) {
 	fs := &fakeServer{responses: []map[string]interface{}{finalResponse("done")}}
 	server := httptest.NewServer(http.HandlerFunc(fs.handler))
 	defer server.Close()
@@ -62,6 +62,37 @@ func TestVolatileChecklistInjectedAtTurnStart(t *testing.T) {
 	}
 }
 
+func TestRunLoopSplitsStableSystemAndTrailingVolatileContextIssue404(t *testing.T) {
+	fs := &fakeServer{responses: []map[string]interface{}{finalResponse("done")}}
+	server := httptest.NewServer(http.HandlerFunc(fs.handler))
+	defer server.Close()
+
+	us, _ := newLoopSession(t, server.URL)
+	us.SetSystemContextProvider(func(string) (string, string) {
+		return "STABLE-CONTEXT-MARKER", "VOLATILE-CONTEXT-MARKER"
+	})
+
+	if _, err := us.ExecuteTaskLoop(context.Background(), "root", "go"); err != nil {
+		t.Fatalf("loop error: %v", err)
+	}
+	if len(fs.requests) == 0 {
+		t.Fatal("no request captured")
+	}
+	req := fs.requests[0]
+	if !systemMsgContains(req, "STABLE-CONTEXT-MARKER") {
+		t.Fatalf("stable context missing from system prompt: %v", req)
+	}
+	if systemMsgContains(req, "VOLATILE-CONTEXT-MARKER") {
+		t.Fatalf("volatile context leaked into system prompt: %v", req)
+	}
+	if !trailingUserMsgContains(req, "VOLATILE-CONTEXT-MARKER") {
+		t.Fatalf("volatile context missing from trailing user message: %v", req)
+	}
+	if len(req) < 3 || req[len(req)-2]["content"] != "go" {
+		t.Fatalf("volatile context was not appended after the user transcript message: %v", req)
+	}
+}
+
 // TestVolatileChecklistRefreshedWithinTurn is the regression test for the core
 // acceptance criterion of issue #263/#404: the checklist is re-evaluated every
 // turn and survives compaction, while staying outside the cacheable prefix.
@@ -79,7 +110,7 @@ func TestVolatileChecklistInjectedAtTurnStart(t *testing.T) {
 // then asserts the checklist appears in the trailing volatile message of the
 // next request in the SAME turn. If the provider is only evaluated once at
 // runLoop start, the second request is stale and the checklist is absent.
-func TestVolatileChecklistRefreshedWithinTurn(t *testing.T) {
+func TestVolatileChecklistRefreshedWithinTurnIssue404(t *testing.T) {
 	fs := &fakeServer{responses: []map[string]interface{}{
 		toolCallResponse("c1", "calc", `{"expression":"1+1"}`),
 		finalResponse("done"),

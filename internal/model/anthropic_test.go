@@ -200,7 +200,7 @@ func TestAnthropicParseResponse(t *testing.T) {
 	}
 }
 
-func TestAnthropicUsageCacheReadInputTokensFlowToCachedTokens(t *testing.T) {
+func TestAnthropicUsageCacheReadInputTokensFlowToCachedTokensIssue404(t *testing.T) {
 	got := (anthropicUsage{
 		InputTokens:              11,
 		CacheReadInputTokens:     7,

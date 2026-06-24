@@ -58,7 +58,7 @@ func TestModelSessionRemoveCallback(t *testing.T) {
 	}
 }
 
-func TestModelSessionVolatileContextAppendedAfterTranscriptAndNotPersisted(t *testing.T) {
+func TestModelSessionVolatileContextAppendedAfterTranscriptAndNotPersistedIssue404(t *testing.T) {
 	conn := &captureConnector{}
 	s := NewModelSession("volatile", conn)
 	s.SetSystemPrompt("stable-system")
@@ -100,7 +100,7 @@ func TestModelSessionVolatileContextAppendedAfterTranscriptAndNotPersisted(t *te
 	}
 }
 
-func TestModelSessionVolatileContextNotPersistedOnModelError(t *testing.T) {
+func TestModelSessionVolatileContextNotPersistedOnModelErrorIssue404(t *testing.T) {
 	conn := &captureConnector{err: errors.New("backend down")}
 	s := NewModelSession("volatile-error", conn)
 	s.SetSystemPrompt("stable-system")

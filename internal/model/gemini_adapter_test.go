@@ -284,7 +284,7 @@ func TestGeminiAdapterBuildBodyFunctionResponseObjectHandling(t *testing.T) {
 	}
 }
 
-func TestGeminiAdapterVolatileTailMergesAfterToolResult(t *testing.T) {
+func TestGeminiAdapterVolatileTailMergesAfterToolResultIssue404(t *testing.T) {
 	raw, err := buildBodyBytes(geminiAdapter{}, CompletionRequest{
 		Messages: []Message{
 			{Role: RoleSystem, Content: "stable system"},

@@ -291,7 +291,7 @@ func TestVertexAnthropicThinkingBlockReplayedBeforeToolUse(t *testing.T) {
 	}
 }
 
-func TestDirectAnthropicBodyEmitsPromptCacheBreakpoints(t *testing.T) {
+func TestDirectAnthropicBodyEmitsPromptCacheBreakpointsIssue404(t *testing.T) {
 	// Direct Anthropic keeps the direct-only fields (model present, no
 	// anthropic_version body field, sampling params present) while also emitting
 	// the same prompt-cache breakpoints as vertex-anthropic (issue #404).
@@ -339,7 +339,7 @@ func TestDirectAnthropicBodyEmitsPromptCacheBreakpoints(t *testing.T) {
 	}
 }
 
-func TestVertexAnthropicVolatileTailMergesAfterToolResultButBreakpointStaysOnTranscript(t *testing.T) {
+func TestVertexAnthropicVolatileTailMergesAfterToolResultButBreakpointStaysOnTranscriptIssue404(t *testing.T) {
 	body, _ := buildVertexAnthropicBody(t, CompletionRequest{
 		Model:     "claude-opus-4-8",
 		MaxTokens: intp(100),

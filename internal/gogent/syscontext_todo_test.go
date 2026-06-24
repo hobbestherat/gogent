@@ -137,7 +137,7 @@ func TestBuildSystemContextTodoWiredThroughTool(t *testing.T) {
 	}
 }
 
-func TestBuildSystemContextSplitsStableAndVolatileBuckets(t *testing.T) {
+func TestBuildSystemContextSplitsStableAndVolatileBucketsIssue404(t *testing.T) {
 	if !vcs.Available() {
 		t.Skip("git not installed")
 	}
