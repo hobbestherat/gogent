@@ -264,8 +264,9 @@ or a custom UI.
 You can run the TUI on one machine (**A**) and drive a daemon on another
 (**B**) with nothing more than an SSH tunnel — no extra gogent features
 required. SSH carries the transport and authenticates the user; the daemon's
-existing TCP + token auth handles the rest. This works today with the daemon
-and the remote TUI client as shipped.
+existing TCP auth (token *or* password — see [Authentication
+modes](#authentication-modes)) handles the rest. This works today with the
+daemon and the remote TUI client as shipped.
 
 **On the daemon host B** — start the daemon with its TCP transport bound to
 loopback, and set a bearer token:
@@ -286,18 +287,21 @@ A loopback bind does not *require* a token (see [Loopback binding
 gate](#loopback-binding-gate)), but setting one is recommended as
 defense-in-depth and is mandatory if you ever bind a non-loopback host.
 
-**On the client machine A** — forward a local port to B's loopback endpoint
-over SSH, then attach with the same token:
+**On the client machine A** — copy the token you set on B, forward a local
+port to B's loopback endpoint over SSH, then attach:
 
 ```bash
+TOKEN="<the GOGENT_HTTP_TOKEN value from B>"
 ssh -L 8080:127.0.0.1:8080 machineB        # in one terminal (or use -fN)
-gogent --connect http://localhost:8080 --token "$GOGENT_HTTP_TOKEN"
+gogent --connect http://localhost:8080 --token "$TOKEN"
 ```
 
-The `ssh -L` forward makes A's `localhost:8080` reach B's `127.0.0.1:8080`
-through the encrypted SSH connection. `gogent --connect` accepts a
-`http://`/`https://` address (or `unix://` for a local socket); the `--token`
-flag (or `GOGENT_HTTP_TOKEN` on A) supplies the bearer token for the TCP
+The token lives on B; it is not present on A until you copy it there (above),
+or export `GOGENT_HTTP_TOKEN` on A instead of passing `--token`. The `ssh -L`
+forward makes A's `localhost:8080` reach B's `127.0.0.1:8080` through the
+encrypted SSH connection. `gogent --connect` accepts a `http://`/`https://`
+address (or `unix://` for a local socket); the `--token` flag (or
+`GOGENT_HTTP_TOKEN` in A's environment) supplies the bearer token for the TCP
 attach.
 
 File and shell tools run on **B**, where the daemon owns the workspace — the
