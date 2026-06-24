@@ -208,6 +208,98 @@ func TestAgentCompletionIssue358EmitsNotificationForReplay(t *testing.T) {
 	}
 }
 
+func TestAgentCompletionIssue358ConnectedClientGetsNotificationFrame(t *testing.T) {
+	srv := testNotificationServerIssue358()
+	sub, unsub := srv.hub.subscribeGlobal()
+	defer unsub()
+	obs := srv.hub.sessionObserver("sess-1")
+
+	obs(agent.SessionEvent{Type: agent.SessionEventFinal, Text: "done"})
+
+	seenSessionEvent := false
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case te := <-sub:
+			if te.notif != nil {
+				if te.notif.Reason != string(notify.ReasonComplete) || te.notif.SessionID != "sess-1" {
+					t.Fatalf("notification = %+v, want complete notification for sess-1", *te.notif)
+				}
+				if !seenSessionEvent {
+					t.Fatal("notification frame arrived before the normal final session event")
+				}
+				return
+			}
+			if te.sessionID == "sess-1" && te.ev.Type == agent.SessionEventFinal {
+				seenSessionEvent = true
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for connected agent-completion notification frame")
+		}
+	}
+}
+
+func TestAgentCompletionIssue358FallbackAndReplayRespectDisabledReason(t *testing.T) {
+	srv := testNotificationServerIssue358()
+	var localCalls int
+	srv.EnableAgentNotificationFallback(func(reason string) bool {
+		return reason != string(notify.ReasonComplete)
+	}, func(title, body string) {
+		localCalls++
+	})
+	obs := srv.hub.sessionObserver("sess-1")
+
+	obs(agent.SessionEvent{Type: agent.SessionEventFinal, Text: "done"})
+
+	if localCalls != 0 {
+		t.Fatalf("local fallback calls = %d, want 0 for disabled complete reason", localCalls)
+	}
+	sub, unsub := srv.hub.subscribeGlobal()
+	defer unsub()
+	select {
+	case te := <-sub:
+		t.Fatalf("disabled agent-completion notification was buffered for replay: %+v", te)
+	case <-time.After(25 * time.Millisecond):
+	}
+}
+
+func TestAgentCompletionIssue358FallbackRunsWhenUnattended(t *testing.T) {
+	srv := testNotificationServerIssue358()
+	var mu sync.Mutex
+	var local []string
+	srv.EnableAgentNotificationFallback(func(reason string) bool {
+		return reason == string(notify.ReasonComplete)
+	}, func(title, body string) {
+		mu.Lock()
+		defer mu.Unlock()
+		local = append(local, title+": "+body)
+	})
+	obs := srv.hub.sessionObserver("sess-1")
+
+	obs(agent.SessionEvent{Type: agent.SessionEventFinal, Text: "done"})
+
+	mu.Lock()
+	if len(local) != 1 || local[0] != "Task complete: done" {
+		t.Fatalf("local fallback calls = %#v, want one task-complete fallback", local)
+	}
+	mu.Unlock()
+}
+
+func TestAgentCompletionIssue358WatcherSessionDoesNotDoubleNotify(t *testing.T) {
+	srv := testNotificationServerIssue358()
+	obs := srv.hub.sessionObserver(watcherSessionIDPrefix + "manual")
+
+	obs(agent.SessionEvent{Type: agent.SessionEventFinal, Text: "watcher result"})
+
+	sub, unsub := srv.hub.subscribeGlobal()
+	defer unsub()
+	select {
+	case te := <-sub:
+		t.Fatalf("watcher session final should not add a second agent notification: %+v", te)
+	case <-time.After(25 * time.Millisecond):
+	}
+}
+
 func TestNotificationSinkIssue358NilGateAllowsAndNilLocalDoesNotPanic(t *testing.T) {
 	srv := testNotificationServerIssue358()
 
@@ -225,8 +317,10 @@ func TestNotificationSinkIssue358NilGateAllowsAndNilLocalDoesNotPanic(t *testing
 
 func testNotificationServerIssue358() *Server {
 	fixed := time.Date(2026, 6, 24, 12, 34, 56, 0, time.UTC)
+	h := newHub()
+	h.now = func() time.Time { return fixed }
 	return &Server{
-		hub: newHub(),
+		hub: h,
 		now: func() time.Time { return fixed },
 	}
 }
