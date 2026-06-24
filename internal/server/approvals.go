@@ -39,12 +39,13 @@ type decision struct {
 // endpoint, then blocks until a client POSTs a decision (or the timeout fires,
 // in which case it denies — the safe default that matches headless behavior).
 //
-// The wait bound is chosen per prompt from the live connected-client count
-// (issue #358 §8): with a client connected, a stalled prompt auto-denies after
-// connectedTimeout (the connected-but-unresponsive default); with no client
-// connected it waits up to the longer unattendedTimeout so a transient TUI
-// disconnect does not kill a daemon's long watcher turns. On reconnect a client
-// picks the prompt up via GET /approvals and a delivered decision wins.
+// The wait bound tracks the live connected-client count continuously
+// (issue #358 §8): connectedTimeout auto-denies a prompt only after a client has
+// been connected-but-unresponsive for that long (it resets on disconnect), while
+// unattendedTimeout is an absolute safety cap on total pending time. So a daemon
+// whose TUI blips offline keeps its long watcher turns alive, and on reconnect a
+// client picks the prompt up via GET /approvals with a fresh grace window — a
+// delivered decision always wins. See wait for the exact accrual rules.
 type approvalBridge struct {
 	hub *hub
 	// connectedTimeout bounds the wait when a human client IS connected (it could
@@ -111,9 +112,9 @@ func (b *approvalBridge) ReviewEdit(req gogent.EditReviewRequest) gogent.EditRev
 
 // --- internals --------------------------------------------------------------
 
-// alloc registers a new pending approval, announces it on the hub and returns
-// its id. The announcement is delivered as a synthetic SessionEvent whose Args
-// field carries the serialized approvalView.
+// alloc registers a new pending approval and returns its id. Clients discover it
+// by polling GET /approvals (there is no SSE push for approvals); the blocked
+// tool goroutine then waits in wait until a decision arrives or a bound fires.
 func (b *approvalBridge) alloc(kind, sessionID, agentID string, perm *permissionDetail, edit *editReviewDetail) string {
 	b.mu.Lock()
 	b.nextSeq++
@@ -133,8 +134,24 @@ func (b *approvalBridge) alloc(kind, sessionID, agentID string, perm *permission
 	return id
 }
 
-// wait blocks until a decision arrives or the timeout fires, applying the given
+// wait blocks until a decision arrives or a timeout fires, applying the given
 // default on timeout/abort. It always removes the pending entry before returning.
+//
+// The timeout is evaluated continuously against the live connected-client count
+// (issue #358 §8), not snapshotted once, so a transient disconnect mid-prompt is
+// handled correctly:
+//
+//   - connectedTimeout bounds the *continuous* wall-time a client is connected
+//     while the prompt is unanswered — the connected-but-unresponsive auto-deny
+//     (default 5 min). It accrues only while a client is connected and RESETS on
+//     disconnect, so a TUI that blips offline does not get the prompt denied, and
+//     a client that reconnects gets a fresh grace window to answer it.
+//   - unattendedTimeout is the absolute safety cap on total pending time (default
+//     1h), regardless of connection state, so a forever-unattended daemon prompt
+//     still resolves to the safe default eventually.
+//
+// A non-positive bound disables that limit; with both disabled the prompt blocks
+// until a decision arrives (the historical "0 = block forever" behavior).
 func (b *approvalBridge) wait(id, sessionID string, def decision) decision {
 	ap := b.get(id)
 	if ap == nil {
@@ -142,38 +159,60 @@ func (b *approvalBridge) wait(id, sessionID string, def decision) decision {
 	}
 	defer b.remove(id)
 
-	var timerCh <-chan time.Time
-	if timeout := b.effectiveTimeout(); timeout > 0 {
-		t := time.NewTimer(timeout)
-		defer t.Stop()
-		timerCh = t.C
+	// Fast path: no bounds means block forever on a decision (no polling needed).
+	if b.connectedTimeout <= 0 && b.unattendedTimeout <= 0 {
+		return <-ap.decided
 	}
 
-	select {
-	case d := <-ap.decided:
-		return d
-	case <-timerCh:
-		// Timed out: apply the safe default (deny/reject). Which bound elapsed
-		// depends on whether a client was connected when the wait began.
-		return def
+	start := time.Now()
+	lastTick := start
+	var connectedFor time.Duration // continuous connected wall-time so far
+
+	ticker := time.NewTicker(b.pollInterval())
+	defer ticker.Stop()
+
+	for {
+		select {
+		case d := <-ap.decided:
+			return d
+		case now := <-ticker.C:
+			// Absolute safety cap on total pending time.
+			if b.unattendedTimeout > 0 && now.Sub(start) >= b.unattendedTimeout {
+				return def
+			}
+			// Connected-but-unresponsive auto-deny: accrue only while a client is
+			// connected, reset to zero whenever none is.
+			if b.hub != nil && b.hub.clientCount() > 0 {
+				connectedFor += now.Sub(lastTick)
+				if b.connectedTimeout > 0 && connectedFor >= b.connectedTimeout {
+					return def
+				}
+			} else {
+				connectedFor = 0
+			}
+			lastTick = now
+		}
 	}
 }
 
-// effectiveTimeout picks the wait bound for a pending approval from the live
-// connected-client count (issue #358 §8). With a client connected (an SSE
-// subscriber is present on the hub) the prompt could be answered, so a stalled
-// one is auto-denied after connectedTimeout — the existing 5-min safety default
-// for an unresponsive human. With no client connected it waits up to
-// unattendedTimeout (default 1h) so a transient disconnect does not kill a long
-// watcher turn; a client that reconnects meanwhile still answers it via
-// GET /approvals. The choice is made once, at wait() entry: a prompt that starts
-// unattended keeps the longer bound even if a client connects later (it stays
-// answerable up to that bound). A non-positive bound means "never time out".
-func (b *approvalBridge) effectiveTimeout() time.Duration {
-	if b.hub != nil && b.hub.clientCount() > 0 {
-		return b.connectedTimeout
+// pollInterval is how often wait() re-checks the connected-client count and the
+// elapsed bounds. It is a quarter of the smaller active bound (so the bound is
+// honored responsively) but capped at 1s so a long unattended wait does not
+// busy-spin, and floored at 1ms so a tiny test bound stays well-behaved.
+func (b *approvalBridge) pollInterval() time.Duration {
+	const maxPoll = time.Second
+	const minPoll = time.Millisecond
+	cand := maxPoll
+	if b.connectedTimeout > 0 && b.connectedTimeout/4 < cand {
+		cand = b.connectedTimeout / 4
 	}
-	return b.unattendedTimeout
+	if b.unattendedTimeout > 0 && b.unattendedTimeout/4 < cand {
+		cand = b.unattendedTimeout / 4
+	}
+	if cand < minPoll {
+		cand = minPoll
+	}
+	return cand
 }
 
 func (b *approvalBridge) get(id string) *pendingApproval {

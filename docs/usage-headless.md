@@ -189,9 +189,9 @@ In headless mode, the approval bridge (`internal/server/approvals.go`) is
 installed as **both** the permission prompter *and* the edit reviewer. When
 the agent hits a permission prompt or an edit-review gate, it:
 
-1. registers a pending approval,
-2. emits an approval SSE event, and
-3. **blocks** until a client `POST`s a decision to
+1. registers a pending approval (discovered by clients polling
+   `GET /api/approvals` — there is no SSE push for approvals), and
+2. **blocks** until a client `POST`s a decision to
    `/api/approvals/:aid/decision`.
 
 Decisions:
@@ -201,10 +201,19 @@ Decisions:
 - **Edit review**: `approve` / `approve_all` / `reject`
   (unknown → `reject`).
 
-**Safe default.** If no client answers within the approval timeout
-(**5 minutes**; `0` = block forever), the prompt is **denied** (permission)
-or **rejected** (edit review) — matching the headless deny-by-default
-posture.
+**Safe default.** When a prompt goes unanswered, it is **denied** (permission)
+or **rejected** (edit review) — matching the headless deny-by-default posture.
+The wait before that safe default depends on whether a client is connected
+(issue #358 §8):
+
+- **A client is connected but unresponsive** → denied after the approval
+  timeout (**5 minutes** by default; `0` = block forever). The clock counts
+  only continuous connected time and resets if the client disconnects.
+- **No client is connected** → the prompt **waits** up to the longer
+  `unattended_approval_timeout` safety cap (**1 hour** by default; `0` = wait
+  forever), so a daemon whose TUI briefly drops does not get its long watcher
+  turns killed. A client that reconnects sees the prompt via
+  `GET /api/approvals` and can still answer it.
 
 > In TUI mode the bridge is **not** installed; the workbench modals remain
 > the prompter/reviewer. The `/approvals` endpoints still exist, however.
