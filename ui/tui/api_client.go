@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"gogent/internal/config"
@@ -22,8 +23,8 @@ import (
 // client") TUI uses to drive a running daemon: every Handlers call the remote
 // TUI makes maps to one request here, and the live event stream is consumed
 // from the global SSE endpoint. It is stdlib-only (net/http) and safe for
-// concurrent use — the underlying http.Client is, and the client holds no
-// mutable state of its own.
+// concurrent use — the underlying http.Client is, and its only mutable state is
+// the notification handler, guarded by a mutex.
 //
 // Two transports are supported, selected by the connect address scheme:
 //   - unix:///path/to/daemon.sock — the local daemon socket (default). The
@@ -36,6 +37,30 @@ type APIClient struct {
 	http  *http.Client
 	base  string // request base, e.g. "http://unix" or "http://host:port"
 	token string // optional bearer token (TCP auth); empty for the local socket
+
+	// notifyMu guards onNotification, the callback for "notification" SSE frames on
+	// the global stream (issue #358 §9). It is the client's only mutable state.
+	notifyMu       sync.Mutex
+	onNotification func(NotificationDTO)
+}
+
+// SetNotificationHandler installs the callback invoked for each "notification"
+// SSE frame on the global stream (issue #358 §9). The attached TUI points it at
+// its desktop notifier so a daemon-side watcher completion surfaces on the TUI's
+// machine. A nil handler drops notification frames. Safe to call from any
+// goroutine and at any time.
+func (c *APIClient) SetNotificationHandler(h func(NotificationDTO)) {
+	c.notifyMu.Lock()
+	c.onNotification = h
+	c.notifyMu.Unlock()
+}
+
+// notificationHandler returns the currently-installed notification callback (nil
+// if none), read under the lock so it never races SetNotificationHandler.
+func (c *APIClient) notificationHandler() func(NotificationDTO) {
+	c.notifyMu.Lock()
+	defer c.notifyMu.Unlock()
+	return c.onNotification
 }
 
 // quickTimeout bounds the short request/response calls (create, stop, settings,
@@ -203,6 +228,23 @@ type GlobalEventDTO struct {
 	SessionID string   `json:"session_id"`
 	Event     EventDTO `json:"event"`
 }
+
+// NotificationDTO mirrors the server's NotificationEvent: a backend notification
+// (a watcher/agent completion) carried on the global SSE stream as an event named
+// "notification" (issue #358 §9). The attached TUI raises an OS desktop
+// notification on its own machine from it.
+type NotificationDTO struct {
+	Title     string `json:"title"`
+	Body      string `json:"body"`
+	Reason    string `json:"reason"`
+	SessionID string `json:"session_id"`
+	Timestamp string `json:"timestamp"`
+}
+
+// notificationEventName is the SSE event: name the server uses for a backend
+// notification on the global stream (issue #358 §9); every other frame there is a
+// GlobalEventDTO.
+const notificationEventName = "notification"
 
 // ApprovalDTO mirrors the server's approvalView (a pending interactive gate).
 type ApprovalDTO struct {
@@ -620,6 +662,17 @@ func (c *APIClient) StreamEvents(ctx context.Context) (<-chan GlobalEventDTO, er
 		defer close(out)
 		defer func() { _ = resp.Body.Close() }()
 		for ev := range parseSSE(ctx, resp.Body) {
+			if ev.name == notificationEventName {
+				// A backend notification (issue #358 §9): hand it to the notification
+				// handler (the TUI's desktop notifier) rather than the session-event sink.
+				if h := c.notificationHandler(); h != nil {
+					var n NotificationDTO
+					if err := json.Unmarshal([]byte(ev.data), &n); err == nil {
+						h(n)
+					}
+				}
+				continue
+			}
 			var ge GlobalEventDTO
 			if err := json.Unmarshal([]byte(ev.data), &ge); err != nil {
 				continue // skip a malformed frame rather than tearing down the stream

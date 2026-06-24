@@ -62,9 +62,21 @@ func sessionSSE(ev agent.SessionEvent, sessionID string) webapi.SSEvent {
 	return webapi.SSEvent{Name: string(ev.Type), Data: marshalJSON(eventToView(ev, sessionID))}
 }
 
-// globalSSE builds an SSE event for the global subscriber, tagged with the
+// notificationEventName is the SSE event: name carried by a backend notification
+// on the global stream (issue #358 §9). It is distinct from every agent
+// SessionEvent type so a client can tell a notification from a session event by
+// the event name alone (a notification frame's data is a NotificationEvent, not a
+// globalEventView).
+const notificationEventName = "notification"
+
+// globalSSE builds an SSE event for the global subscriber. A notification frame
+// (te.notif set) is emitted under notificationEventName with the NotificationEvent
+// as its payload; every other frame is a session event tagged with its
 // originating session id.
 func globalSSE(te taggedEvent) webapi.SSEvent {
+	if te.notif != nil {
+		return webapi.SSEvent{Name: notificationEventName, Data: marshalJSON(*te.notif)}
+	}
 	return webapi.SSEvent{
 		Name: string(te.ev.Type),
 		Data: marshalJSON(newGlobalEventView(te.ev, te.sessionID)),

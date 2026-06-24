@@ -13,7 +13,18 @@ import (
 type taggedEvent struct {
 	sessionID string
 	ev        agent.SessionEvent
+	// notif, when non-nil, marks this frame as a backend notification (issue #358
+	// §9) rather than a session event. It rides the same global subscriber
+	// channels (no separate channel) and is emitted as an SSE event named
+	// "notification"; per-session subscribers never receive it.
+	notif *NotificationEvent
 }
+
+// notificationRingSize bounds the missed-notification ring (issue #358 Open
+// Decision #5): while no client is connected the daemon buffers at most this many
+// recent notifications, dropping the oldest past the bound; a reconnecting client
+// drains them. Kept small — it is a catch-up convenience, not a durable log.
+const notificationRingSize = 50
 
 // hub fans live agent.SessionEvents out to SSE subscribers. Each session has its
 // own set of subscribers (for /sessions/:id/events), and there is one global set
@@ -28,6 +39,10 @@ type hub struct {
 	session map[string]map[chan taggedEvent]struct{}
 	// global subscribers receive every event (tagged with its session id).
 	global map[chan taggedEvent]struct{}
+	// ring buffers notifications that fired while no client was connected, bounded
+	// to notificationRingSize (oldest dropped). A reconnecting global subscriber
+	// drains it (issue #358 §9). Guarded by mu like the subscriber maps.
+	ring []NotificationEvent
 }
 
 func newHub() *hub {
@@ -84,6 +99,35 @@ func (h *hub) deliver(sessionID string, ev agent.SessionEvent) {
 	}
 }
 
+// deliverNotification routes a backend notification onto the global SSE stream
+// when at least one client is connected, or buffers it in the bounded missed-
+// notification ring when none is (issue #358 §9). The connected check and the
+// send/buffer happen together under the hub lock, so a notification racing a
+// (dis)connect is atomically either broadcast or buffered — never both, never
+// lost. It returns true when broadcast live (>=1 connected client), false when
+// buffered for replay. Sends are non-blocking: a notification is best-effort live
+// (a full subscriber buffer drops it), matching the hub's non-terminal policy.
+func (h *hub) deliverNotification(nev NotificationEvent) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.global) == 0 {
+		h.ring = append(h.ring, nev)
+		if len(h.ring) > notificationRingSize {
+			h.ring = h.ring[len(h.ring)-notificationRingSize:]
+		}
+		return false
+	}
+	n := nev
+	te := taggedEvent{notif: &n}
+	for ch := range h.global {
+		select {
+		case ch <- te:
+		default:
+		}
+	}
+	return true
+}
+
 // cloneSubs returns a snapshot of a subscriber map's channels under the lock so
 // delivery can happen without holding it.
 func (h *hub) cloneSubs(m map[chan taggedEvent]struct{}) []chan taggedEvent {
@@ -126,10 +170,24 @@ func (h *hub) subscribeSession(sessionID string) (<-chan taggedEvent, func()) {
 	return ch, func() { h.unsubscribe(sessionID, ch) }
 }
 
-// subscribeGlobal adds a buffered channel as a global subscriber.
+// subscribeGlobal adds a buffered channel as a global subscriber. Before the
+// channel goes live it is preloaded with the missed-notification ring (the
+// notifications buffered while no client was connected) and the ring is cleared —
+// the reconnect replay (issue #358 §9). Draining and subscribing happen under one
+// lock so a notification arriving mid-(re)subscribe is never both replayed and
+// re-buffered. The replayed frames sit ahead of any live event in the buffer, so
+// the client sees its backlog first.
 func (h *hub) subscribeGlobal() (<-chan taggedEvent, func()) {
 	ch := make(chan taggedEvent, 128)
 	h.mu.Lock()
+	for i := range h.ring {
+		n := h.ring[i]
+		select {
+		case ch <- taggedEvent{notif: &n}:
+		default:
+		}
+	}
+	h.ring = nil
 	h.global[ch] = struct{}{}
 	h.mu.Unlock()
 	return ch, func() { h.unsubscribe("", ch) }

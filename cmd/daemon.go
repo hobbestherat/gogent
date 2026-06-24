@@ -288,6 +288,12 @@ func runDaemonForeground(p daemon.Paths, opts daemonStartOpts) error {
 		UnattendedApprovalTimeout: g.GetConfig().UnattendedApprovalTimeoutOrDefault(),
 	})
 	apiServer.InstallApprovalGates()
+	// Route backend notifications (watcher completions) over the wire: when a
+	// client is subscribed to the global SSE stream they are delivered as a
+	// notification event the connected TUI surfaces on its own machine; when none
+	// is connected they fall back to the daemon's local notifier and are buffered
+	// for replay on reconnect (issue #358 §9).
+	g.SetNotifySink(apiServer.NotificationSink(g.ShouldNotifyReason, g.NotifyLocalFallback))
 	root := buildRootHandler(g, apiServer)
 
 	unixSrv := &http.Server{

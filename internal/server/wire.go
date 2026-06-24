@@ -189,6 +189,27 @@ type todoItemView struct {
 	Status  string `json:"status"`
 }
 
+// --- Notifications ----------------------------------------------------------
+
+// NotificationEvent is a backend-originated notification (a watcher/agent
+// completion) delivered to a connected client over the global SSE stream
+// (/api/events) as an SSE event named "notification" (issue #358 §9). A
+// connected TUI raises an OS desktop notification on ITS machine from it; when
+// no client is connected the daemon falls back to its local notify.Notifier and
+// buffers the event in a bounded ring for replay on reconnect.
+//
+// Reason is the notify.Reason token ("watcher", "complete", …). SessionID is the
+// originating session when known and empty for free-running watcher completions
+// (which have no owning user session). Timestamp is RFC3339 (UTC), stamped by
+// the daemon when the notification fires.
+type NotificationEvent struct {
+	Title     string `json:"title"`
+	Body      string `json:"body"`
+	Reason    string `json:"reason"`
+	SessionID string `json:"session_id,omitempty"`
+	Timestamp string `json:"timestamp,omitempty"`
+}
+
 // --- Approvals --------------------------------------------------------------
 
 // approvalView is a pending interactive gate (permission prompt or edit review).

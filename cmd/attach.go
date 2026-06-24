@@ -90,6 +90,12 @@ func runAttached(homeDir, addr, token string, noColorFlag bool) error {
 	// The RemoteClient feeds the daemon's global SSE stream into the workbench and
 	// drives its permission/edit-review modals for remote approvals.
 	rc := tuipkg.NewRemoteClient(client, wb.EmitSessionEvent, wb)
+	// Surface daemon-side notifications (watcher completions) on THIS machine: a
+	// "notification" SSE frame raises the TUI's desktop notifier here — the point
+	// of over-the-wire notifications for a remote daemon (issue #358 §9).
+	client.SetNotificationHandler(func(n tuipkg.NotificationDTO) {
+		wb.NotifyFromBackend(n.Reason, n.Title, n.Body)
+	})
 	// Install the disconnect/reconnect observer + controls (issue #358 §7): a
 	// dropped stream raises the blocking modal and reconnects with backoff; "Retry
 	// now" pokes the client's backoff.

@@ -56,6 +56,9 @@ type Server struct {
 	// used to report uptime on GET /daemon/status (issue #358). It is set from the
 	// injectable clock at construction.
 	startedAt time.Time
+	// now is the injectable clock (opts.now), used to stamp notification events
+	// (issue #358 §9) and reused wherever the server needs the current time.
+	now func() time.Time
 
 	api *webapi.API
 }
@@ -105,6 +108,7 @@ func NewServer(g *gogent.Gogent, opts Options) *Server {
 		approvals: newApprovalBridge(h, opts.ApprovalTimeout, opts.UnattendedApprovalTimeout, opts.now),
 		busy:      make(map[string]struct{}),
 		startedAt: opts.now(),
+		now:       opts.now,
 	}
 
 	// Re-wire every already-live session's observer through the hub (sessions
