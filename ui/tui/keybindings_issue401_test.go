@@ -248,6 +248,75 @@ func TestIssue401DesktopBindingsAndScopedBindingsAreSameRegistry(t *testing.T) {
 	}
 }
 
+func TestIssue401FixedCtrlKAndCtrlFConvenienceAccelerators(t *testing.T) {
+	w := newTestWorkbench(t)
+	sw := w.openWindow("s", "S")
+	reg := w.desktop.Bindings()
+
+	ctrlK := tui.TypeEvent{Key: tui.KeyRune, Rune: 'k', Ctrl: true}
+	ctrlF := tui.TypeEvent{Key: tui.KeyRune, Rune: 'f', Ctrl: true}
+	for _, tt := range []struct {
+		name string
+		ev   tui.TypeEvent
+	}{
+		{"Ctrl+K", ctrlK},
+		{"Ctrl+F", ctrlF},
+	} {
+		if _, ok := reg.MatchFallthrough(tt.ev); !ok {
+			t.Fatalf("%s missing from Fallthrough registry", tt.name)
+		}
+		if _, ok := reg.Match(tt.ev); ok {
+			t.Fatalf("%s leaked into Global registry", tt.name)
+		}
+		if _, ok := reg.MatchFocus(tt.ev, sw.history.Component); ok {
+			t.Fatalf("%s leaked into Focus registry", tt.name)
+		}
+	}
+
+	if !reg.DispatchFallthrough(ctrlK) {
+		t.Fatal("Ctrl+K did not dispatch")
+	}
+	if top := w.desktop.TopLayer(); top == nil || top.Name != "command-palette" {
+		t.Fatalf("top layer after Ctrl+K = %v, want command-palette", top)
+	}
+
+	if !reg.DispatchFallthrough(ctrlF) {
+		t.Fatal("Ctrl+F did not dispatch")
+	}
+	if top := w.desktop.TopLayer(); top == nil || top.Name != "input-dialog" {
+		t.Fatalf("top layer after Ctrl+F = %v, want input-dialog", top)
+	}
+}
+
+func TestIssue401FixedConvenienceAcceleratorsSurviveRebindAndMenuRebuild(t *testing.T) {
+	w := newTestWorkbench(t)
+	w.openWindow("s", "S")
+	w.applyBinding(actionCommandPalette, tv.Chord{Key: tui.KeyF9})
+	w.applyBinding(actionTranscriptFind, tv.Chord{Key: tui.KeyF10})
+	w.rebuildMenu()
+
+	reg := w.desktop.Bindings()
+	if !reg.DispatchFallthrough(tui.TypeEvent{Key: tui.KeyF9}) {
+		t.Fatal("rebound command palette F9 did not dispatch")
+	}
+	if top := w.desktop.TopLayer(); top == nil || top.Name != "command-palette" {
+		t.Fatalf("top layer after F9 = %v, want command-palette", top)
+	}
+	if !reg.DispatchFallthrough(tui.TypeEvent{Key: tui.KeyRune, Rune: 'k', Ctrl: true}) {
+		t.Fatal("fixed Ctrl+K stopped dispatching after command-palette rebind/rebuild")
+	}
+
+	if !reg.DispatchFocus(tui.TypeEvent{Key: tui.KeyF10}, w.sessions["s"].history.Component) {
+		t.Fatal("rebound transcript find F10 did not dispatch via Focus")
+	}
+	if top := w.desktop.TopLayer(); top == nil || top.Name != "input-dialog" {
+		t.Fatalf("top layer after F10 = %v, want input-dialog", top)
+	}
+	if !reg.DispatchFallthrough(tui.TypeEvent{Key: tui.KeyRune, Rune: 'f', Ctrl: true}) {
+		t.Fatal("fixed Ctrl+F stopped dispatching after transcript-find rebind/rebuild")
+	}
+}
+
 func TestIssue401GlobalRebindDispatchPersistsThroughMenuRebuild(t *testing.T) {
 	w := newTestWorkbench(t)
 	var persisted config.KeybindingsConfig
