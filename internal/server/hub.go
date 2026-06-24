@@ -1,6 +1,7 @@
 package server
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -43,12 +44,23 @@ type hub struct {
 	// to notificationRingSize (oldest dropped). A reconnecting global subscriber
 	// drains it (issue #358 §9). Guarded by mu like the subscriber maps.
 	ring []NotificationEvent
+	// now stamps notification timestamps. Defaults to time.Now (newHub) and is
+	// replaced with the server's injectable clock in NewServer.
+	now func() time.Time
+	// onAgentBuffered, when set, is the daemon-local fallback for an agent-
+	// completion notification buffered while no client was connected (issue #358
+	// §9). Only the daemon wires it (via Server.EnableAgentNotificationFallback);
+	// embedded mode leaves it nil so the in-process TUI's own notifier surfaces
+	// completions and no background terminal escapes are written to os.Stdout.
+	// Guarded by mu.
+	onAgentBuffered func(NotificationEvent)
 }
 
 func newHub() *hub {
 	return &hub{
 		session: make(map[string]map[chan taggedEvent]struct{}),
 		global:  make(map[chan taggedEvent]struct{}),
+		now:     time.Now,
 	}
 }
 
@@ -97,6 +109,41 @@ func (h *hub) deliver(sessionID string, ev agent.SessionEvent) {
 	for _, ch := range glob {
 		send(ch)
 	}
+
+	// Backend notification (issue #358 §9): a completion/attention event (final,
+	// error, sub-agent CLARIFY) also raises a NotificationEvent. While a client is
+	// connected the live event above already reaches it — and the connected TUI's
+	// own notifier surfaces the completion — so emitting a notification frame too
+	// would double up; bufferAgentNotification therefore only buffers it for replay
+	// (and triggers the daemon-local fallback) when NO client is connected. Watcher-
+	// session completions are excluded: the watcher manager raises its own "watcher"
+	// notification for those.
+	if !strings.HasPrefix(sessionID, watcherSessionIDPrefix) {
+		if nev, ok := notificationForEvent(sessionID, ev, h.now); ok {
+			if cb, buffered := h.bufferAgentNotification(nev); buffered && cb != nil {
+				cb(nev)
+			}
+		}
+	}
+}
+
+// bufferAgentNotification buffers an agent-completion notification in the missed-
+// notification ring for replay, but only while no client is connected (issue #358
+// §9): when a client IS connected the live session event already reaches it, so a
+// notification frame would double up and is skipped. It returns the daemon-local
+// fallback callback (to invoke outside the lock) and true when it buffered; nil,
+// false when a client was connected and nothing was done.
+func (h *hub) bufferAgentNotification(nev NotificationEvent) (func(NotificationEvent), bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.global) > 0 {
+		return nil, false
+	}
+	h.ring = append(h.ring, nev)
+	if len(h.ring) > notificationRingSize {
+		h.ring = h.ring[len(h.ring)-notificationRingSize:]
+	}
+	return h.onAgentBuffered, true
 }
 
 // deliverNotification routes a backend notification onto the global SSE stream

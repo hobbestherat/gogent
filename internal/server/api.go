@@ -93,6 +93,7 @@ func NewServer(g *gogent.Gogent, opts Options) *Server {
 		opts.UnattendedApprovalTimeout = config.DefaultUnattendedApprovalTimeout
 	}
 	h := newHub()
+	h.now = opts.now
 	provider := &composingProvider{
 		cfg: authConfig{
 			password: opts.Password,

@@ -294,6 +294,10 @@ func runDaemonForeground(p daemon.Paths, opts daemonStartOpts) error {
 	// is connected they fall back to the daemon's local notifier and are buffered
 	// for replay on reconnect (issue #358 §9).
 	g.SetNotifySink(apiServer.NotificationSink(g.ShouldNotifyReason, g.NotifyLocalFallback))
+	// Agent/session completions that finish while no client is connected are
+	// buffered for replay and notified on the daemon's host too (issue #358 §9);
+	// when a client is connected the live event already reaches it.
+	apiServer.EnableAgentNotificationFallback(g.ShouldNotifyReason, g.NotifyLocalFallback)
 	root := buildRootHandler(g, apiServer)
 
 	unixSrv := &http.Server{
