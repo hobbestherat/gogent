@@ -76,6 +76,24 @@ func TestIssue389SessionStorePersistsFrozenModelSnapshot(t *testing.T) {
 		t.Fatalf("LoadedSession model fields = (%q,%q,%q), want (primary,Original Label,provider-original)",
 			loaded.Model, loaded.ModelLabel, loaded.ModelID)
 	}
+
+	us.RootAgent.ThoughtTrain.AppendMessages(model.Message{Role: model.RoleAssistant, Content: "saved after rename"})
+	if err := store.Save(us, "Issue 389 after rename"); err != nil {
+		t.Fatalf("Save after rename: %v", err)
+	}
+	metas, err = store.ListSessions()
+	if err != nil {
+		t.Fatalf("ListSessions after saved rename: %v", err)
+	}
+	if len(metas) != 1 {
+		t.Fatalf("ListSessions after saved rename returned %d sessions, want 1", len(metas))
+	}
+	if got := metas[0].ModelLabel; got != "Renamed Later" {
+		t.Fatalf("saved-after-rename ModelLabel = %q, want Renamed Later", got)
+	}
+	if got := metas[0].ModelID; got != "provider-renamed" {
+		t.Fatalf("saved-after-rename ModelID = %q, want provider-renamed", got)
+	}
 }
 
 func TestIssue389SessionStoreLeavesSnapshotEmptyWhenModelCannotResolve(t *testing.T) {
