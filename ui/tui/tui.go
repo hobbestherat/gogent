@@ -711,18 +711,17 @@ func (w *Workbench) longestModelNameWidth() int {
 	return max
 }
 
-// modelByDisplayName returns the model config matching a select label.
-func (w *Workbench) modelByDisplayName(name string) *config.ModelConfig {
-	for _, m := range w.models {
-		display := m.DisplayName
-		if display == "" {
-			display = m.Name
-		}
-		if display == name {
-			return m
-		}
+// modelByIndex returns the model config at the given header-dropdown index, or
+// nil when the index is out of range. The dropdown's option list is built
+// positionally from w.models (option i labels models[i]), so the selected index
+// is the unambiguous identity of the chosen model — selectedModelConfig resolves
+// through this rather than the display label, keeping two models that share a
+// DisplayName individually selectable (issue #389).
+func (w *Workbench) modelByIndex(i int) *config.ModelConfig {
+	if i < 0 || i >= len(w.models) {
+		return nil
 	}
-	return nil
+	return w.models[i]
 }
 
 // SetHandlers registers the backend callbacks.
@@ -1291,16 +1290,18 @@ func (w *Workbench) AdoptSession(rs RestoredSession) *SessionWindow {
 	return sw
 }
 
-// modelIndexByName returns the model dropdown index whose backing config has the
-// given config name, or -1 when name is empty or unmatched. It compares against
-// the resolved config (via modelByDisplayName) rather than re-deriving display
-// labels, so duplicate-display-name disambiguation can't desync the lookup.
+// modelIndexByName returns the header-dropdown index whose backing config has the
+// given stable config Name, or -1 when name is empty or unmatched. It matches on
+// Name against w.models directly — which is positional with the dropdown options
+// — so the lookup is unambiguous even when two models share a DisplayName.
+// Re-deriving the index from the display label would collapse such duplicates
+// onto the first match, dropping the user's actual model (issue #389).
 func (w *Workbench) modelIndexByName(name string) int {
 	if name == "" {
 		return -1
 	}
-	for i, label := range w.modelNames {
-		if cfg := w.modelByDisplayName(label); cfg != nil && cfg.Name == name {
+	for i, m := range w.models {
+		if m != nil && m.Name == name {
 			return i
 		}
 	}

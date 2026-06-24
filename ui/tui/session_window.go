@@ -718,8 +718,19 @@ func (sw *SessionWindow) selectedModelName() string {
 	}
 	return ""
 }
+
+// selectedModelConfig resolves the chosen model from the header dropdown's
+// SELECTED INDEX, not its display label (issue #389). The dropdown's option list
+// is built positionally from Workbench.models (option i labels models[i]), so the
+// index is the model's unambiguous identity: two configs sharing a DisplayName
+// stay individually selectable, and the value sent to the backend can't collapse
+// onto the first config with a matching label. Returns nil for a window with no
+// model selector or an out-of-range selection.
 func (sw *SessionWindow) selectedModelConfig() *config.ModelConfig {
-	return sw.wb.modelByDisplayName(sw.modelSelect.Value())
+	if sw.modelSelect == nil {
+		return nil
+	}
+	return sw.wb.modelByIndex(sw.modelSelect.GetSelected())
 }
 
 // effortDefaultOption is the always-present first option of the effort selector
