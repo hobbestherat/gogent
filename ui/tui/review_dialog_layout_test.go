@@ -69,13 +69,18 @@ func TestReviewButtonRowGapAtFloorAndWideWidth(t *testing.T) {
 }
 
 func TestReviewButtonRowBelowFloorClampsInsteadOfEscaping(t *testing.T) {
-	const width = 37
-	_, _, reject := reviewButtonRow(width, 9)
-	rightX := width - 3
-	if reject.X < 2 || reject.X+reject.W-1 > rightX {
-		t.Fatalf("below floor reject rect %+v escaped [2,%d]", reject, rightX)
-	}
-	if reject.W >= tv.ButtonLabelWidth("&Reject") {
-		t.Fatalf("below floor reject width = %d, want clipped below full width %d", reject.W, tv.ButtonLabelWidth("&Reject"))
+	for _, width := range []int{37, 24} {
+		t.Run("", func(t *testing.T) {
+			accept, acceptAll, reject := reviewButtonRow(width, 9)
+			rightX := width - 3
+			for i, r := range []tv.Rect{accept, acceptAll, reject} {
+				if r.X < 2 || r.X+r.W-1 > rightX {
+					t.Fatalf("width=%d: rect %d %+v escaped [2,%d]", width, i, r, rightX)
+				}
+			}
+			if width == 37 && reject.W >= tv.ButtonLabelWidth("&Reject") {
+				t.Fatalf("width=%d: reject width = %d, want clipped below full width %d", width, reject.W, tv.ButtonLabelWidth("&Reject"))
+			}
+		})
 	}
 }
