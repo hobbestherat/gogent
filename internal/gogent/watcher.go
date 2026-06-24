@@ -788,6 +788,35 @@ func (g *Gogent) SetNotifySink(fn func(reason, title, body string)) {
 	g.mu.Unlock()
 }
 
+// ShouldNotifyReason reports whether a backend notification of reason is enabled
+// under the live notify config — the master switch plus the per-event toggle.
+// Backend notifications are never focused, so focus suppression does not apply.
+// The daemon's notification router (issue #358 §9) uses it to gate both the
+// over-the-wire (SSE) and local-fallback delivery paths the same way the
+// in-process Notify fallback is gated, so disabling a reason in config suppresses
+// the notification everywhere. It is false when no notifier exists.
+func (g *Gogent) ShouldNotifyReason(reason string) bool {
+	g.mu.RLock()
+	notifier := g.notifier
+	g.mu.RUnlock()
+	return notifier != nil && notifier.ShouldNotify(notify.Reason(reason), false)
+}
+
+// NotifyLocalFallback delivers title/body through the in-process notifier
+// (terminal/desktop/native on the daemon's own host), bypassing any installed
+// notify sink. It is the daemon's unattended fallback (issue #358 §9): the
+// notification router calls it when no remote client is connected to receive the
+// notification over SSE, so a headless/remote daemon still notifies locally on
+// its host. The caller gates delivery (ShouldNotifyReason); this only delivers.
+func (g *Gogent) NotifyLocalFallback(title, body string) {
+	g.mu.RLock()
+	notifier := g.notifier
+	g.mu.RUnlock()
+	if notifier != nil {
+		notifier.Notify(title, body)
+	}
+}
+
 // suppressWatcherNotify maps a watcher's on_complete config to the manager's
 // SuppressNotify flag (issue #329). A nil Output keeps the default-on
 // notification ("nil = notify on"); a non-nil Output honours its Notify field, so

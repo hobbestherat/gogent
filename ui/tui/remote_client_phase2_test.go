@@ -216,6 +216,74 @@ func TestAPIClientStreamEventsReportsOpenFailureAndSkipsMalformedFrames(t *testi
 	})
 }
 
+func TestAPIClientStreamEventsIssue358RoutesNotificationsToHandlerOnly(t *testing.T) {
+	started := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/events" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		close(started)
+		fmt.Fprint(w, "event: notification\n")
+		fmt.Fprint(w, `data: {"title":"Watcher finished","body":"nightly check passed","reason":"watcher","session_id":"sess-1","timestamp":"2026-06-24T12:34:56Z"}`+"\n\n")
+		fmt.Fprint(w, "event: final\n")
+		fmt.Fprint(w, `data: {"session_id":"sess-1","event":{"type":"final","text":"done"}}`+"\n\n")
+		flusher.Flush()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	client, err := NewAPIClient(srv.URL, "")
+	if err != nil {
+		t.Fatalf("NewAPIClient: %v", err)
+	}
+	notifications := make(chan NotificationDTO, 1)
+	client.SetNotificationHandler(func(n NotificationDTO) {
+		notifications <- n
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events, err := client.StreamEvents(ctx)
+	if err != nil {
+		t.Fatalf("StreamEvents: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("event stream did not start")
+	}
+
+	select {
+	case n := <-notifications:
+		if n.Title != "Watcher finished" || n.Body != "nightly check passed" || n.Reason != "watcher" || n.SessionID != "sess-1" {
+			t.Fatalf("notification = %+v, want decoded notification payload", n)
+		}
+		if n.Timestamp != "2026-06-24T12:34:56Z" {
+			t.Fatalf("timestamp = %q, want server timestamp", n.Timestamp)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for notification handler")
+	}
+
+	select {
+	case ev := <-events:
+		if ev.SessionID != "sess-1" || ev.Event.Type != string(agent.SessionEventFinal) || ev.Event.Text != "done" {
+			t.Fatalf("session event = %+v, want final event after notification", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for session event after notification")
+	}
+
+	select {
+	case n := <-notifications:
+		t.Fatalf("notification was delivered more than once or a session event was misrouted: %+v", n)
+	case <-time.After(25 * time.Millisecond):
+	}
+}
+
 func TestAPIClientUnixSocketTransportHealth(t *testing.T) {
 	dir := t.TempDir()
 	sock := filepath.Join(dir, "daemon.sock")
