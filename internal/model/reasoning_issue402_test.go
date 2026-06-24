@@ -3,6 +3,9 @@ package model
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -149,5 +152,31 @@ func TestMessageJSONRoundTripsReasoningIssue402(t *testing.T) {
 	}
 	if got.Reasoning != orig.Reasoning {
 		t.Fatalf("Reasoning = %q, want %q", got.Reasoning, orig.Reasoning)
+	}
+}
+
+func TestOpenAIRequestDoesNotReplayPersistedReasoningIssue402(t *testing.T) {
+	var gotBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	conn := NewModelConnection()
+	conn.SetURL(server.URL)
+	sess := NewModelSession("reasoning-replay", conn)
+	sess.ReplaceTranscript([]Message{
+		{Role: RoleUser, Content: "previous"},
+		{Role: RoleAssistant, Content: "", Reasoning: "persisted side channel"},
+	})
+
+	if _, err := sess.SendWithToolsCtx(context.Background(), []Message{{Role: RoleUser, Content: "next"}}, nil); err != nil {
+		t.Fatalf("SendWithToolsCtx: %v", err)
+	}
+	if strings.Contains(gotBody, `"reasoning"`) || strings.Contains(gotBody, "persisted side channel") {
+		t.Fatalf("retained reasoning was replayed to OpenAI-compatible request body:\n%s", gotBody)
 	}
 }

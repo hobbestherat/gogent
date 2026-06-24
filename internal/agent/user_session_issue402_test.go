@@ -2,9 +2,13 @@ package agent
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
+	"gogent/internal/config"
 	"gogent/internal/model"
 )
 
@@ -55,6 +59,14 @@ func terminalAssistantIssue402(t *testing.T, us *UserSession) model.Message {
 	}
 	t.Fatalf("no assistant message in transcript: %+v", transcript)
 	return model.Message{}
+}
+
+func streamRequestBodiesIssue402(s *seqServer) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.requests))
+	copy(out, s.requests)
+	return out
 }
 
 func TestRunLoopEmptyLengthRaisesBudgetIssue402(t *testing.T) {
@@ -198,5 +210,155 @@ func TestRunLoopLengthAtTokenCeilingSurfacesErrorIssue402(t *testing.T) {
 	}
 	if !strings.Contains(terminal.Content, truncationNoticeMarker) {
 		t.Fatalf("terminal content missing truncation marker: %q", terminal.Content)
+	}
+}
+
+func TestRunLoopEmptyLengthAtProviderCeilingErrorsWithoutRetryIssue402(t *testing.T) {
+	b := &scriptedBackend{def: respLengthIssue402("", "", "")}
+	server := httptest.NewServer(b)
+	defer server.Close()
+
+	conn := model.NewModelConnectionFromConfig(&config.ModelConfig{
+		APIType:   "zai",
+		Model:     "glm-5.2",
+		MaxTokens: 131072,
+	})
+	conn.SetURL(server.URL)
+	sess := model.NewModelSession("m", conn)
+	agent := NewAgent("root", sess)
+	us := NewUserSession("s", agent)
+
+	var mu sync.Mutex
+	var events []SessionEvent
+	us.SetObserver(func(ev SessionEvent) {
+		mu.Lock()
+		events = append(events, ev)
+		mu.Unlock()
+	})
+	ctx, cancel := runLoopCtx(t)
+	defer cancel()
+
+	if _, err := us.ExecuteTaskLoop(ctx, "root", "finish"); err != nil {
+		t.Fatalf("ExecuteTaskLoop: %v", err)
+	}
+	if got := b.requestCount(); got != 1 {
+		t.Fatalf("round-trips = %d, want 1 because configured max_tokens is already at provider ceiling", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if countEvents(events, SessionEventError) != 1 {
+		t.Fatalf("error events = %d, want 1: %+v", countEvents(events, SessionEventError), events)
+	}
+	final, ok := finalText(events)
+	if !ok || !strings.Contains(final, truncationNoticeMarker) {
+		t.Fatalf("final event = (%q,%v), want truncation notice", final, ok)
+	}
+	terminal := terminalAssistantIssue402(t, us)
+	if !strings.Contains(terminal.Content, truncationNoticeMarker) {
+		t.Fatalf("terminal content missing truncation marker: %q", terminal.Content)
+	}
+}
+
+func TestRunLoopStreamingEmptyLengthRaisesBudgetIssue402(t *testing.T) {
+	srv := &seqServer{bodies: []string{
+		streamSSE(nil, "", "length", ""),
+		streamSSE(nil, "stream final after larger budget", "stop", ""),
+	}}
+	server := httptest.NewServer(http.HandlerFunc(srv.handler))
+	defer server.Close()
+
+	us, _ := newStreamLoopSession(t, server.URL)
+	us.SetStreamThinking(true)
+	ctx, cancel := runLoopCtx(t)
+	defer cancel()
+
+	if _, err := us.ExecuteTaskLoop(ctx, "root", "finish"); err != nil {
+		t.Fatalf("ExecuteTaskLoop: %v", err)
+	}
+	if got := srv.callCount(); got != 2 {
+		t.Fatalf("round-trips = %d, want 2", got)
+	}
+	if !srv.requestHadStream(0) || !srv.requestHadStream(1) {
+		t.Fatalf("streaming retry did not use stream:true for both requests: %v", streamRequestBodiesIssue402(srv))
+	}
+	bodies := streamRequestBodiesIssue402(srv)
+	firstMax := requestMaxTokensIssue402(t, bodies[0])
+	secondMax := requestMaxTokensIssue402(t, bodies[1])
+	if secondMax <= firstMax {
+		t.Fatalf("streaming empty length retry did not raise max tokens: first=%d second=%d", firstMax, secondMax)
+	}
+	terminal := terminalAssistantIssue402(t, us)
+	if terminal.Content != "stream final after larger budget" {
+		t.Fatalf("terminal content = %q, want stream final after larger budget", terminal.Content)
+	}
+}
+
+func TestRunLoopStreamingPartialLengthContinuesIssue402(t *testing.T) {
+	srv := &seqServer{bodies: []string{
+		streamSSE(nil, "partial stream answer", "length", ""),
+		streamSSE(nil, "stream completed answer", "stop", ""),
+	}}
+	server := httptest.NewServer(http.HandlerFunc(srv.handler))
+	defer server.Close()
+
+	us, _ := newStreamLoopSession(t, server.URL)
+	us.SetStreamThinking(true)
+	ctx, cancel := runLoopCtx(t)
+	defer cancel()
+
+	if _, err := us.ExecuteTaskLoop(ctx, "root", "finish"); err != nil {
+		t.Fatalf("ExecuteTaskLoop: %v", err)
+	}
+	if got := srv.callCount(); got != 2 {
+		t.Fatalf("round-trips = %d, want 2", got)
+	}
+	bodies := streamRequestBodiesIssue402(srv)
+	if !strings.Contains(bodies[1], truncationContinueNote) {
+		t.Fatalf("streaming partial continuation missing truncation note: %s", bodies[1])
+	}
+	if secondMax, firstMax := requestMaxTokensIssue402(t, bodies[1]), requestMaxTokensIssue402(t, bodies[0]); secondMax != firstMax {
+		t.Fatalf("streaming partial continuation should not raise max tokens: first=%d second=%d", firstMax, secondMax)
+	}
+	terminal := terminalAssistantIssue402(t, us)
+	if terminal.Content != "stream completed answer" {
+		t.Fatalf("terminal content = %q, want stream completed answer", terminal.Content)
+	}
+}
+
+func TestRunLoopStreamingReasoningOnlyLengthContinuesIssue402(t *testing.T) {
+	srv := &seqServer{bodies: []string{
+		streamSSE([]string{"stream reasoning only"}, "", "length", ""),
+		streamSSE(nil, "stream answer after reasoning", "stop", ""),
+	}}
+	server := httptest.NewServer(http.HandlerFunc(srv.handler))
+	defer server.Close()
+
+	us, _ := newStreamLoopSession(t, server.URL)
+	us.SetStreamThinking(true)
+
+	var mu sync.Mutex
+	events := collectEventsWith(&mu, us)
+	ctx, cancel := runLoopCtx(t)
+	defer cancel()
+
+	if _, err := us.ExecuteTaskLoop(ctx, "root", "finish"); err != nil {
+		t.Fatalf("ExecuteTaskLoop: %v", err)
+	}
+	if got := srv.callCount(); got != 2 {
+		t.Fatalf("round-trips = %d, want 2", got)
+	}
+	if got := joinDeltas(eventsOf(events, &mu, SessionEventThinkingDelta)); got != "stream reasoning only" {
+		t.Fatalf("thinking deltas = %q, want stream reasoning only", got)
+	}
+	bodies := streamRequestBodiesIssue402(srv)
+	if !strings.Contains(bodies[1], truncationContinueNote) {
+		t.Fatalf("streaming reasoning-only continuation missing truncation note: %s", bodies[1])
+	}
+	if secondMax, firstMax := requestMaxTokensIssue402(t, bodies[1]), requestMaxTokensIssue402(t, bodies[0]); secondMax != firstMax {
+		t.Fatalf("streaming reasoning-only continuation should not raise max tokens: first=%d second=%d", firstMax, secondMax)
+	}
+	terminal := terminalAssistantIssue402(t, us)
+	if terminal.Content != "stream answer after reasoning" {
+		t.Fatalf("terminal content = %q, want stream answer after reasoning", terminal.Content)
 	}
 }
