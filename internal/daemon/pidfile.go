@@ -6,7 +6,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 // WritePidfile atomically writes pid to path. It writes a temp sibling and
@@ -53,16 +52,9 @@ func RemovePidfile(path string) error {
 }
 
 // ProcessAlive reports whether a process with the given pid currently exists.
-// On Unix it sends signal 0, which performs the permission/existence check
-// without delivering a signal: nil or EPERM (exists, not ours) ⇒ alive; ESRCH
-// ⇒ gone. A non-positive pid is never alive.
-func ProcessAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	err := syscall.Kill(pid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
-}
+// Its implementation is OS-specific (signal 0 on Unix, OpenProcess on Windows)
+// and lives in the per-platform files; the contract is identical: a non-positive
+// pid is never alive.
 
 // dirOf returns the directory component of a lifecycle-file path, used to derive
 // the daemon root so WritePidfile can create it on demand.

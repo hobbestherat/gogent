@@ -237,11 +237,14 @@ func runDaemonForeground(p daemon.Paths, opts daemonStartOpts) error {
 		return fmt.Errorf("resolve home directory: %w", err)
 	}
 
-	// Acquire the single-instance lock and bind the listeners BEFORE building the
-	// core. daemon.Listen takes the exclusive flock, so a losing concurrent start
-	// fails right here — without running buildDaemonCore/RestoreSessions or
-	// touching any session state before ownership is established (issue #358).
-	ln, err := daemon.Listen(p.Sock)
+	// Bind the primary local transport and take the single-instance guard BEFORE
+	// building the core, so a losing concurrent start fails right here — without
+	// running buildDaemonCore/RestoreSessions or touching any session state before
+	// ownership is established (issue #358). The transport is OS-specific: a
+	// flock-guarded Unix socket on Unix, a loopback TCP listener on Windows;
+	// ListenLocal hands back the listener and the scheme-qualified discovery
+	// address to record ("unix://…" or "http://127.0.0.1:port").
+	ln, baseAddr, err := daemon.ListenLocal(p)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
@@ -261,10 +264,11 @@ func runDaemonForeground(p daemon.Paths, opts daemonStartOpts) error {
 		}
 	}
 
-	// Record the discovery address. The Unix socket is always the primary local
-	// transport; when --tcp is bound, append the TCP endpoint so daemon.addr (and
-	// `daemon status`) reflect the HTTP/curl endpoint too, not just the socket.
-	addr := "unix://" + p.Sock
+	// Record the discovery address. baseAddr is the primary local transport
+	// (Unix socket, or the Windows loopback TCP endpoint); when an extra --tcp
+	// listener is bound, append its endpoint so daemon.addr (and `daemon status`)
+	// reflect the HTTP/curl endpoint too, not just the primary.
+	addr := baseAddr
 	if tcpLn != nil {
 		addr += " " + fmt.Sprintf("http://%s:%d", opts.httpHost, opts.httpPort)
 	}

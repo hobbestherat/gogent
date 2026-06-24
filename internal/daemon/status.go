@@ -26,8 +26,11 @@ type Status struct {
 
 // Query inspects the lifecycle files and reports whether a daemon is live. It
 // never mutates state, so it is safe to call from status, start (pre-flight) and
-// stop. Liveness is the conjunction of pid-alive and socket-answers; either one
-// alone with the other dead marks the instance Stale.
+// stop. Liveness is the conjunction of pid-alive and transport-answers; either
+// one alone with the other dead marks the instance Stale. The OS-specific
+// liveness probe (Unix socket / Windows TCP) and residue check are supplied by
+// probeLive/transportResidue; the running/stale decision itself is the
+// OS-independent ClassifyStatus.
 func Query(p Paths) Status {
 	st := Status{Addr: readAddr(p)}
 
@@ -37,16 +40,8 @@ func Query(p Paths) Status {
 		st.PID = pid
 	}
 	pidAlive := pidPresent && ProcessAlive(pid)
-	sockLive := Probe(p.Sock)
 
-	switch {
-	case pidAlive && sockLive:
-		st.Running = true
-	case pidPresent || socketFilePresent(p.Sock):
-		// Some residue exists (a pidfile, or a socket file) but nothing is fully
-		// live behind it: a crashed or half-torn-down instance.
-		st.Stale = true
-	}
+	st.Running, st.Stale = ClassifyStatus(pidPresent, pidAlive, transportResidue(p), probeLive(p))
 	return st
 }
 

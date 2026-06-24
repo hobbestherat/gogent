@@ -1,3 +1,5 @@
+//go:build !windows
+
 package daemon
 
 import (
@@ -9,31 +11,13 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
-	"time"
 )
-
-// ErrAlreadyRunning is returned when a live daemon already holds the lock, so the
-// caller refuses a double-start instead of clobbering a running instance.
-var ErrAlreadyRunning = errors.New("daemon already running")
-
-// ErrNotRunning is returned by operations (e.g. Stop) that need a live daemon
-// when none is found.
-var ErrNotRunning = errors.New("daemon not running")
-
-// healthPath is the unauthenticated endpoint the daemon's HTTP handler serves;
-// a successful response over the socket proves a live daemon (not merely a
-// leftover socket file). exitPath asks a live daemon to shut itself down.
-const (
-	healthPath = "/health"
-	exitPath   = "/exit"
-)
-
-// probeTimeout bounds a single liveness dial+request so Probe never blocks a
-// status/start command on a wedged peer.
-const probeTimeout = 2 * time.Second
 
 // Listen binds the daemon's Unix-domain socket and returns a listener that also
-// holds the single-instance lock for the daemon's lifetime.
+// holds the single-instance lock for the daemon's lifetime. It is the Unix
+// transport; the Windows build binds loopback TCP instead (see
+// platform_windows.go) and enforces single-instance via the pidfile + a TCP
+// liveness probe rather than flock.
 //
 // Single-instance is enforced by an exclusive, non-blocking flock on a sibling
 // daemon.lock file — a kernel-level guard that is race-free across concurrent
@@ -142,16 +126,7 @@ func Probe(sockPath string) bool {
 	}
 	// The host in the URL is ignored by the unix DialContext but required for a
 	// well-formed request; "unix" is a conventional placeholder.
-	req, err := http.NewRequest(http.MethodGet, "http://unix"+healthPath, nil)
-	if err != nil {
-		return false
-	}
-	resp, err := unixHTTPClient(sockPath).Do(req)
-	if err != nil {
-		return false
-	}
-	defer func() { _ = resp.Body.Close() }()
-	return resp.StatusCode >= 200 && resp.StatusCode < 300
+	return httpHealthOK(unixHTTPClient(sockPath), "http://unix")
 }
 
 // exitViaSocket asks a live daemon to shut itself down through its own /exit
@@ -160,16 +135,7 @@ func Probe(sockPath string) bool {
 // or corrupt — the basis for Stop's safe graceful path. It reports whether the
 // daemon accepted the request (2xx); any transport error or non-2xx is false.
 func exitViaSocket(sockPath string) bool {
-	req, err := http.NewRequest(http.MethodPost, "http://unix"+exitPath, nil)
-	if err != nil {
-		return false
-	}
-	resp, err := unixHTTPClient(sockPath).Do(req)
-	if err != nil {
-		return false
-	}
-	defer func() { _ = resp.Body.Close() }()
-	return resp.StatusCode >= 200 && resp.StatusCode < 300
+	return httpExitOK(unixHTTPClient(sockPath), "http://unix")
 }
 
 // unixHTTPClient builds an HTTP/1.1 client that dials the given Unix socket,
@@ -184,13 +150,4 @@ func unixHTTPClient(sockPath string) *http.Client {
 			},
 		},
 	}
-}
-
-// removeSocket deletes the socket file, ignoring absence, for graceful-shutdown
-// and stale-reclamation cleanup.
-func removeSocket(sockPath string) error {
-	if err := os.Remove(sockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove socket %s: %w", sockPath, err)
-	}
-	return nil
 }
