@@ -13,7 +13,6 @@ import (
 	"context"
 	"fmt"
 	"gogent/internal/agent"
-	"gogent/internal/clipboard"
 	"gogent/internal/config"
 	"gogent/internal/gogent"
 	"gogent/internal/notify"
@@ -567,10 +566,6 @@ type Workbench struct {
 	// (surfaced via NotifyFromWire), so also notifying off the normal final/error
 	// session events would double up. Embedded mode leaves it false. Guarded by mu.
 	suppressEventNotify bool
-	// clipboard copies yanked text to the system clipboard (OSC 52 plus a native
-	// fallback), writing the OSC sequence to os.Stdout like the notifier (issue
-	// #62).
-	clipboard *clipboard.Board
 	// statsRefresh coalesces Overall-panel recomputations: a burst of session
 	// events arms it once and rapid follow-ups Reset it, so the panel refreshes
 	// at most ~250ms after the burst settles instead of once per event (issues
@@ -640,9 +635,6 @@ func NewWorkbench(models []*config.ModelConfig) *Workbench {
 		// terminal the TUI renders to. Defaults are used until the backend pushes
 		// the persisted config in via SetNotifyConfig.
 		notify: notify.New(config.DefaultNotifyConfig(), os.Stdout),
-		// Clipboard writes OSC 52 to the same terminal (SSH-safe) and pipes to a
-		// native utility when one is available.
-		clipboard: clipboard.New(os.Stdout),
 		// Process-lifetime accumulator for the Overall panel (issue #232).
 		overallLifetime: newLifetimeStats(),
 	}
@@ -1250,11 +1242,16 @@ func (w *Workbench) transcriptDo(fn func(*transcriptModel)) {
 	})
 }
 
-// copyToClipboard writes text to the system clipboard via the workbench's board
-// (OSC 52 plus a native utility fallback). No-op when no board is configured.
+// copyToClipboard writes text to the system clipboard through turbotui's App,
+// the single owner of the terminal output stream. Routing the yank path (the 'y'
+// key, Copy Last Answer/Code) through App.CopyToClipboard serializes its OSC 52
+// write under the same lock that guards frame flushes, so it can no longer
+// interleave with rendering and corrupt the stream (issue #453). App.CopyToClipboard
+// is SSH-aware (it skips the native fallback over SSH, which would target the
+// remote host) and best-effort. No-op when the app is not configured.
 func (w *Workbench) copyToClipboard(text string) {
-	if w.clipboard != nil {
-		w.clipboard.Copy(text)
+	if w.app != nil {
+		w.app.CopyToClipboard(text)
 	}
 }
 
