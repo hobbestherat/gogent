@@ -51,6 +51,14 @@ Replace the local `labels := []string{"&Reset", "Reset &All", "Close"}` (line 29
 with a reference to this var. The three `newButton` calls keep indexing
 `keybindFooterLabels[0..2]` exactly as today, so footer behaviour is unchanged.
 
+Also align the gap (D4): the layout call at `keybinding_customizer.go:292` currently
+hardcodes the gap — `footerButtonRects(labels, 2, width-3, height-2, 2)`. Change the
+trailing `2` to `tv.DefaultButtonGap` so the **layout** uses the same gap the **floor**
+(`footerRowMinWidth(keybindFooterLabels, tv.DefaultButtonGap)`) measures with. They
+are equal today (`DefaultButtonGap == 2`), so this is behaviour-neutral now, but it
+keeps the floor invariant and the layout in lockstep if the toolkit default ever
+changes — matching how `commands_dialog.go:487` already passes `tv.DefaultButtonGap`.
+
 ### 2. `ui/tui/dialog_sizing.go` — content-driven spec helper
 
 Add `keybindingsDialogSpec()` next to the other `*DialogSpec` helpers, in the same
@@ -61,7 +69,7 @@ footer width):
 func (w *Workbench) keybindingsDialogSpec() tv.DialogSpec {
 	spec := tv.DialogSpec{
 		MinW: 58, MaxW: 76, PreferredW: 62,
-		MinH: 16, MaxH: 40, PrefH: 24,
+		MinH: 16, MaxH: 40, PrefH: 34,
 	}
 	if need := footerRowMinWidth(keybindFooterLabels, tv.DefaultButtonGap); spec.MinW < need {
 		spec.MinW = need
@@ -70,19 +78,36 @@ func (w *Workbench) keybindingsDialogSpec() tv.DialogSpec {
 }
 ```
 
-Rationale, matching the issue's measured table:
-- `PreferredW: 62` — content size (row inner width ~55 + chrome), well under the
-  80% cap so it is honoured as the size, not the balloon.
-- `MaxW: 76` — hard ceiling so it never sprawls on an ultrawide terminal, with
-  headroom above 62 for the widened chord column (change 3) and longer/translated
-  action names.
-- `MinW: 58`, raised to `footerRowMinWidth(keybindFooterLabels, …)` if larger — the
-  three buttons can never overlap. The customizer footer measures **41 cells**
-  (well under 58), so `MinW` stays 58 today; the floor expresses the invariant so a
-  future label change is picked up automatically (same as `commandsDialogSpec`).
-- `PrefH: 24` default height (~16 visible rows), `MaxH: 40` caps growth — replaces
-  the current `MaxH: rows + 9` which, with ~50 actions + ~5 category headers,
-  resolves to ~64 and then balloons to the 85% height.
+**How `resolveDimension` actually resolves this** (re-read from
+`$HOME/work/turbotui/turbotv/dialog_spec.go:79-103`, correcting an earlier misread):
+the *preferred* value is the settling size; `Max*` is an upper cap that only ever
+pulls the value **down** (it binds only when `preferred > cap`); `Min*` is the only
+thing that pushes the value **up**. So with `PreferredW < MaxW` and `PrefH < MaxH`,
+the dialog settles at **`PreferredW`/`PrefH`** on any roomy terminal — `MaxW`/`MaxH`
+are inert ceilings there, biting only to stop sprawl if a future change raises the
+preferred above them. This is exactly what `commands_dialog_issue448_test.go:139,173`
+pins for the commands dialog (`200×50 → 112×34`, with `gotH >= 40` an explicit
+failure because `PrefH 34`, not `MaxH 40`, is the bound).
+
+Rationale per field:
+- `PreferredW: 62` — the settling width: row inner width ~54 (see change 3) + chrome,
+  well under the 80% cap. The dialog settles here, **not** at `MaxW`.
+- `MaxW: 76` — inert ceiling at the default catalog; it only binds if the content
+  ever needs > 76 (it won't), preventing sprawl on an ultrawide terminal. Kept for
+  house-style consistency and as a guard.
+- `MinW: 58`, raised to `footerRowMinWidth(keybindFooterLabels, tv.DefaultButtonGap)`
+  if larger — the three buttons can never overlap. The footer measures **41 cells**
+  (`&Reset`=10 + `Reset &All`=13 + `Close`=10, +2 gaps of 2, +4 edge — `ButtonLabelWidth`
+  clamps each to `minButtonWidth` 10), well under 58, so `MinW` stays 58 today; the
+  floor expresses the invariant so a future label change is picked up automatically
+  (same as `commandsDialogSpec`).
+- `PrefH: 34` — the settling height (was 24 in the earlier draft, which would have
+  shown only `listH = 34−3−4 = … ` → with 24 only ~17 of ~55 rows, a visibility
+  regression vs the current dialog's ~35). At 34 the list shows **`listH = 34 − 3 − 4
+  = 27` rows** — a deliberate compact height that keeps most of a typical screenful
+  visible while killing the 85% balloon. Mirrors `commandsDialogSpec`'s `PrefH 34`.
+- `MaxH: 40` — inert ceiling (`PrefH 34 < 40`), kept as the house-style sprawl guard;
+  it does **not** make the dialog 40 tall.
 
 The spec is **static** (no terminal-share term), so the existing `dialog.Fit(spec)`
 resize path stays correct — like `sessionsDialogSpec`/`commandsDialogSpec`, and
@@ -115,53 +140,61 @@ with no edits.
 > feeding `MaxH: rows + 9` into the spec for short catalogs is **not** adopted —
 > a static helper that returns the same spec regardless of catalog size is the
 > cleaner mirror of the other dialogs and is what the sizing tests below lock. With
-> ~55 content rows the catalog always exceeds `PrefH: 24`/`MaxH: 40` anyway, so
+> ~55 content rows the catalog always exceeds `PrefH: 34`/`MaxH: 40` anyway, so
 > `rows + 9` would never bite; dropping it removes a moving part.
 
 ### 4. `ui/tui/keybindings.go` — stop truncating the chord column
 
-`keybindRowText` currently hardcodes a 10-cell chord column. Widen it so the
-longest **real** chord fits. Two options:
+`keybindRowText` currently hardcodes a 10-cell chord column, and `padName`
+truncates before padding (`resources_dialog.go:360-367`), so any chord wider than 10
+is cut. Widen the column to **14** via a named constant:
 
-**(a) Minimal — hardcoded 14** (exactly the issue's proposal):
 ```go
+// keybindChordColWidth is the chord column width in the customizer list. 14 holds
+// the widest chord the catalog ships — Ctrl+Shift+V/H/G/D/M (12 cells) — with slack,
+// so no default binding is clipped (issue #461).
 const keybindChordColWidth = 14
 ...
-padName(chordLabel(w.chordFor(a.actionID)), keybindChordColWidth)
+return "  " + padName(a.name, 26) + "  " +
+	padName(chordLabel(w.chordFor(a.actionID)), keybindChordColWidth) + " (" + tag + ")"
 ```
-14 holds `Ctrl+Shift+V` (12 cells) with breathing room; row inner width goes 51→55,
-still inside `PreferredW: 62`.
 
-**(b) Recommended — runtime-derived, floored at 14:**
-```go
-// keybindChordColWidth is the chord column width: wide enough for the widest chord
-// currently bound across the catalog (so no label is ever truncated, including a
-// user override longer than any default), floored so short catalogs still align.
-func (w *Workbench) keybindChordColWidth() int {
-	width := 14
-	for _, a := range w.rebindable() {
-		if n := tv.StringWidth(chordLabel(w.chordFor(a.actionID))); n > width {
-			width = n
-		}
-	}
-	return width
-}
-```
-then `padName(chordLabel(w.chordFor(a.actionID)), w.keybindChordColWidth())`.
+14 holds `Ctrl+Shift+V` (12 cells) with breathing room. Row inner width becomes
+`2 + 26 + 2 + 14 + len(" (default)")` = `2+26+2+14+10` = **54 cols**, which fits the
+Tree's inner width of `width − 4 = 58` at `PreferredW: 62` with 4 cols to spare — so
+the row is clipped by neither `padName` nor the Tree.
 
-I recommend **(b)**. The hardcoded 14 fixes the shipped defaults but a *user* can
-bind a named-key chord longer than 14 (e.g. `Ctrl+Shift+PageDown` = 19,
-`Ctrl+Alt+Shift+Backspace` = 24), which would silently reintroduce the very
-truncation we are fixing — a regression risk under criterion (3). Option (b)
-eliminates truncation for every binding including overrides, keeps
-`keybindRowText`'s single-argument signature (so the existing test call
-`w.keybindRowText(a)` and the new truncation test both compile unchanged), and the
-worst-case widths above (24 → inner 65 + 4 chrome = 69) still fit under `MaxW: 76`.
-Cost is an O(n) scan per row, O(n²) per render (~2500 `StringWidth` calls for ~50
-actions) — trivial for a one-shot modal render. `tv.StringWidth` is the same
-display-width measure `ButtonLabelWidth`/`footerRowMinWidth` already use, so it is
-consistent with `chordLabel`'s rendered width (handles the `—` unbound sentinel
-correctly too).
+**Why the hardcoded 14, not a runtime-derived width (resolving the earlier
+contradiction).** The earlier draft recommended a runtime
+`keybindChordColWidth()` scanning every binding for the widest chord, claiming it
+"eliminates truncation for every binding including overrides." Against a *static*
+`PreferredW: 62` that is false: widening the column past 13 cells pushes the row past
+the 58-cell Tree inner width, so the Tree clips the row's **tail** — the
+`(default)`/`(custom)`/`(unbound)` tag, which is *more* informative than the chord the
+user just pressed. So the runtime column alone is the worst of both: an O(n²)
+`StringWidth` scan per render *and* it still truncates (just the tag) for a user chord
+like `Ctrl+Shift+PageDown` (19). The two honest, self-consistent options are:
+
+- **(a) hardcoded 14 + static `PreferredW: 62`** — the chosen fix. Fixes every shipped
+  default and every chord ≤ 14 cells (which covers Expected #3's named examples
+  `Ctrl+Shift+V`/`Ctrl+Shift+M`, both 12). A *user*-bound chord wider than 14 cells
+  (rare; the catalog ships none) still clips the chord — the same failure mode as
+  today, just at a higher threshold and outside the bug the issue reports.
+- **(b) runtime column + content-derived `PreferredW`** — the only way "never truncated"
+  holds for arbitrary user chords: `PreferredW = max(62, 4 + 2+26+2 + chordCol + 10)`,
+  capped by `MaxW: 76`. Still terminal-independent (it depends on bindings, not screen
+  size), so `dialog.Fit` stays valid. **Not chosen**: it trades the simple, exactly
+  pinnable static spec (and the issue's stated "minimal fix") for an edge case the
+  issue does not report, and it makes the sizing tests compute expected sizes from the
+  catalog rather than asserting constants.
+
+The chosen (a) keeps `keybindRowText`'s single-argument signature, so existing tests
+(`keybinding_customizer_phase4b_test.go:184-196`) compile and pass unchanged.
+
+> Honest scope note on Expected #3 ("render in full, never truncated"): the fix
+> guarantees this for all **shipped** bindings and the issue's named examples. An
+> arbitrary user override exceeding 14 cells is out of the reported scope; option (b)
+> above is the documented path if the maintainer wants the literal "never" to hold.
 
 ---
 
@@ -169,9 +202,9 @@ correctly too).
 
 | File | Change |
 |------|--------|
-| `ui/tui/dialog_sizing.go` | Add `keybindingsDialogSpec()` (content-driven, `MaxW` cap, footer-floored `MinW`). |
-| `ui/tui/keybinding_customizer.go` | Add `keybindFooterLabels` var; use it for the three footer buttons; replace the inline spec with `w.keybindingsDialogSpec()`; drop the now-dead `rows`/`categories` computation. |
-| `ui/tui/keybindings.go` | Widen the chord column in `keybindRowText` via `keybindChordColWidth()` (runtime-derived, floor 14). |
+| `ui/tui/dialog_sizing.go` | Add `keybindingsDialogSpec()` (content-driven `PreferredW 62`/`PrefH 34`, `MaxW`/`MaxH` ceilings, footer-floored `MinW`). |
+| `ui/tui/keybinding_customizer.go` | Add `keybindFooterLabels` var; use it for the three footer buttons; change the footer gap arg to `tv.DefaultButtonGap`; replace the inline spec with `w.keybindingsDialogSpec()`; drop the now-dead `rows`/`categories`/`seen` computation. |
+| `ui/tui/keybindings.go` | Widen the chord column in `keybindRowText` from 10 → `keybindChordColWidth` (const 14). |
 
 No other files. No turbotui files.
 
@@ -179,20 +212,29 @@ No other files. No turbotui files.
 
 ## User-facing behavior (before → after)
 
-| Terminal | Before | After (resolved via `ResolveDialogRect`) |
-|----------|--------|-------------------------------------------|
-| 80×24    | 64×20 (80%) | 58×20 (floor) |
-| 120×40   | 96×34 (80%) | 62×34 |
-| 200×50   | **160×42** | 62×42 |
-| 300×80   | **240×68** | 62×68 (wait: width 62, height capped at MaxH 40) → **62×40** |
+Resolved sizes computed by hand-tracing `resolveDimension` for the chosen spec
+(`PreferredW 62, MaxW 76, MinW 58 / PrefH 34, MaxH 40, MinH 16`, margin 2):
 
-(Width settles at `PreferredW` 62 once above the 58 floor; height grows to `MaxH`
-40 then stops — no 85% balloon.) The dialog is compact and centred on every
-terminal, resize-aware via `dialog.Fit`. Chord labels render in full —
-`Ctrl+Shift+V`, `Ctrl+Shift+M`, and any user-bound long chord — never clipped. The
-list, status hint, idle-hint, capture flow, conflict/swap/self-lockout confirms,
-Reset / Reset All / Close buttons, and persistence are all visually and behaviorally
-identical, just inside a right-sized frame.
+| Terminal | Before | After | Notes |
+|----------|--------|-------|-------|
+| 40×16    | 32×13 (80/85%) | **58×16** | both floors win past the screen edge |
+| 80×24    | 64×20 (80%)    | **62×20** | width = `PreferredW` 62 (≤ 80%·80=64, floor 58 doesn't bind); height = 85%·24 = 20 caps `PrefH` 34 down |
+| 120×40   | 96×34 (80%)    | **62×34** | width 62; height = `PrefH` 34 (< 85%·40=34 cap, < `MaxH` 40) |
+| 200×50   | **160×42**     | **62×34** | width 62 (not 160); height 34 (not 42) |
+| 300×80   | **240×68**     | **62×34** | settles at `PreferredW`/`PrefH`; `MaxW`/`MaxH` never bind |
+
+Key correction over the earlier draft: the height settles at **`PrefH` 34**, not
+`MaxH` 40 — `MaxH` is an inert ceiling here. At height 34 the list shows
+`listH = 34 − 3 − 4 = 27` rows (`keybinding_customizer.go:83`). That is fewer than the
+old over-tall balloon's ~35 but is a deliberate compact choice that still shows most
+of a screenful; it is the conscious cost of not ballooning, and it matches
+`commandsDialogSpec`'s height. The dialog is compact and centred on every terminal,
+resize-aware via `dialog.Fit`. Chord labels for every shipped binding —
+`Ctrl+Shift+V`, `Ctrl+Shift+M` and the rest of the `Ctrl+Shift+*` tiling set — render
+in full, never clipped. The list, status hint, idle-hint, capture flow,
+conflict/swap/self-lockout confirms, Reset / Reset All / Close buttons, and
+persistence are all visually and behaviorally identical, just inside a right-sized
+frame.
 
 ---
 
@@ -205,12 +247,16 @@ column. No new dialog, command, flow, or capability. No scope creep into the
 category grouping, capture pipeline, conflict/swap logic, or persistence — all
 explicitly out of scope and untouched.
 
-**(2) Usability.** The dialog now occupies a natural share (~58–62 cols) instead of
+**(2) Usability.** The dialog now occupies a natural width (62 cols) instead of
 sprawling across a wide terminal — the single-column list no longer floats in empty
-space. The user still drives every input identically (Enter to rebind, Reset / Reset
-All / Close, ↑↓, Esc). The previously-silent truncation that mis-showed
-`Ctrl+Shift+V` as `Ctrl+Shift` is surfaced in full, so what the dialog displays now
-matches what the key actually is — the right thing is surfaced, not hidden. Footer
+space. Height settles at 34 (27 visible rows), a deliberate compact size: fewer than
+the old balloon's ~35 rows but enough to show most of a typical catalog screenful,
+and the list scrolls for the rest exactly as it does today. The user still drives
+every input identically (Enter to rebind, Reset / Reset All / Close, ↑↓, Esc). The
+previously-silent truncation that mis-showed `Ctrl+Shift+V` as `Ctrl+Shift` is
+surfaced in full, so what the dialog displays matches the actual key — the right
+thing is surfaced, not hidden. (Honest edge: a user override wider than 14 cells —
+none ship — still clips the chord; see change 4's scope note and option (b).) Footer
 buttons are guaranteed to fit (floor on `footerRowMinWidth`). Small terminals keep a
 usable 58×16 floor and stay centred.
 
@@ -223,19 +269,24 @@ is safe — those locals fed only the old `MaxH`. The chord-column change keeps
 `keybindRowText`’s signature, so existing tests
 (`TestKeybindingCustomizerDiscoverabilityAndRows` etc.) compile and still pass
 (they assert *substring* presence — `"a"`, `"(default)"`, `"(custom)"` — which wider
-padding preserves). Option (b) specifically avoids re-introducing truncation for
-user overrides. Persistence/round-trip, conflict-swap, self-lockout and
+padding preserves). The hardcoded 14-cell column (change 4, option a) keeps the row
+inner width at 54 ≤ the 58-cell Tree inner width, so no row's tag is clipped for any
+shipped binding. The footer-gap alignment (D4) is behaviour-neutral today
+(`DefaultButtonGap == 2`). Persistence/round-trip, conflict-swap, self-lockout and
 LoadKeybindings paths are not touched.
 
 **(4) Holistic design across both repos.** The fix lives entirely on the correct
 side of the seam: gogent owns *what this dialog wants* (the spec + row text);
 turbotui owns *how a spec resolves* and *how a button measures*. We reuse turbotui's
 existing primitives (`ResolveDialogRect`, `ButtonLabelWidth` via `footerRowMinWidth`,
-`StringWidth`) rather than duplicating or extending them — confirmed sufficient by
-reading `$HOME/work/turbotui/turbotv/dialog_spec.go`. No downstream effect on
-turbotui; no new coupling. The change is consistent with the four sibling dialogs
-already converted, so the codebase converges on one pattern rather than adding a
-variant.
+`DefaultButtonGap`) rather than duplicating or extending them. Sufficiency was
+re-verified against the read-only clone for **both** axes of `resolveDimension`
+(`$HOME/work/turbotui/turbotv/dialog_spec.go:79-103`): width *and* height settle at
+the preferred value, with `Max*` a downward-only ceiling and `Min*` the only upward
+force — the height half of this is what the earlier draft misread, now corrected in
+the spec, the behavior table, and the tests. No downstream effect on turbotui; no new
+coupling. The change is consistent with the four sibling dialogs already converted,
+so the codebase converges on one pattern rather than adding a variant.
 
 ---
 
@@ -243,17 +294,22 @@ variant.
 
 1. **`TestKeybindingsDialogSpecShape`** (in `dialog_sizing_test.go` or a new
    `keybinding_customizer_issue461_test.go`) — lock the spec shape: `PreferredW: 62`,
-   `MaxW: 76`, `MinW: 58`, `PrefH: 24`, `MaxH: 40`; ordering `MinW ≤ PreferredW ≤
+   `MaxW: 76`, `MinW: 58`, **`PrefH: 34`**, `MaxH: 40`; ordering `MinW ≤ PreferredW ≤
    MaxW` and `MinH ≤ PrefH ≤ MaxH`; caps under the balloon (`MaxW < 160`, `MaxH <
    42`); and `MinW ≥ footerRowMinWidth(keybindFooterLabels, tv.DefaultButtonGap)`.
 2. **`TestKeybindingsDialogSpecIsTerminalIndependent`** — resolve the spec at
    80×24 / 120×30 / 200×50 / 300×80; assert the *spec* is identical across sizes
    (static → `dialog.Fit` is valid), as `TestCommandsDialogSpecIsTerminalIndependent`
    does.
-3. **`TestKeybindingsDialogSizeIsContentDriven`** — drive the real spec through
-   `tv.ResolveDialogRect` on 80×24 / 200×50 / 300×80; assert width ≤ `MaxW` (62 on
-   the wide terminals, not 160/240) and height ≤ 40, never the 80%/85% balloon, and
-   never below the floor.
+3. **`TestKeybindingsDialogSize`** — mirror `TestCommandsDialogSize` exactly: drive the
+   real spec through `tv.ResolveDialogRect` and assert **exact** resolved sizes per
+   terminal, not loose bounds (the loose `height ≤ 40` of the earlier draft would have
+   masked the `PrefH`-vs-`MaxH` misread). Cases: `40×16 → 58×16`, `80×24 → 62×20`,
+   `120×40 → 62×34`, `200×50 → 62×34`, `300×80 → 62×34`. Plus two guard assertions
+   that document the policy: at 200×50, `gotW >= 160 || gotH >= 42` fails ("the
+   percentage balloon is back"), and `gotH >= spec.MaxH` fails ("PrefH 34, not MaxH
+   40, should bound the height") — the direct analogue of
+   `commands_dialog_issue448_test.go:173`.
 4. **`TestKeybindingsDialogFooterFitsAtMinWidth`** — at the resolved floor width,
    assert `footerButtonRects(keybindFooterLabels, 2, width-3, y, tv.DefaultButtonGap)`
    yields three non-overlapping, non-clamped rects (mirror
@@ -261,9 +317,11 @@ variant.
 5. **`TestKeybindRowTextDoesNotTruncateLongChord`** — `applyBinding` an action to
    `tv.Chord{Rune: 'v', Ctrl: true, Shift: true}` (or use the shipped
    `actionWindowTileVertical` default), then assert `w.keybindRowText(a)` contains
-   the full `"Ctrl+Shift+V"`, not `"Ctrl+Shift"` followed by a column boundary.
-   (Optionally also assert a user-bound longer chord, e.g. `Ctrl+Shift+PageDown`,
-   renders in full — the case option (b) covers and option (a) would fail.)
+   the full `"Ctrl+Shift+V"`, not `"Ctrl+Shift"` followed by a column boundary. Also
+   assert the rendered row's display width ≤ the Tree inner width (`62 − 4 = 58`), so
+   the tag is never Tree-clipped for a shipped binding. (No `Ctrl+Shift+PageDown`
+   sub-assertion — that case is option (b)'s territory and is out of scope for the
+   chosen option (a).)
 
 All use the existing `newTestWorkbench(t)` helper. Run the dev gate from
 [[dev-gate]] (build / vet / gofmt / golangci-lint v2 / `go test` **without** `-race`
@@ -273,17 +331,20 @@ on the Pi5).
 
 ## Open questions
 
-1. **Chord column width — option (a) vs (b).** I recommend (b) (runtime-derived,
-   floor 14) because it also covers user-bound long chords and matches the
-   issue's "optional refinement"; (a) is the strict minimal fix the issue's body
-   shows. If the maintainer prefers the literal minimal diff, (a) is a one-line
-   change and test 5 still passes for the shipped defaults — but drop the
-   `Ctrl+Shift+PageDown` sub-assertion. **Defaulting to (b)** unless told otherwise.
-2. **`PreferredW: 62` vs the issue's headroom.** 62 reproduces the issue's measured
-   table exactly. With the runtime-derived column the *content* may momentarily want
-   a hair more than 62 only when a user binds an unusually long chord; `MaxW: 76`
-   absorbs that. I am keeping `PreferredW: 62` as specified (the dialog will simply
-   not grow past 62 for the default catalog, which is the desired compact size). No
-   action needed unless the maintainer wants the dialog to auto-widen to the widest
-   row — that would mean a content-derived `PreferredW`, a larger change I am not
-   proposing.
+1. **Chord column — confirm option (a) is acceptable.** I am **defaulting to (a)**
+   (hardcoded `keybindChordColWidth = 14` + static `PreferredW: 62`): the minimal,
+   house-style fix that resolves the reported bug (all shipped `Ctrl+Shift+*` defaults)
+   and keeps the spec exactly testable. Its one edge is a *user* override wider than 14
+   cells — none ship — which still clips the chord. If the maintainer wants Expected
+   #3's literal "never truncated" to hold for arbitrary user chords, switch to
+   **option (b)** (runtime column + content-derived `PreferredW = max(62, 4 + 30 +
+   chordCol + len(tag)+3)`, capped at `MaxW 76`); that is a larger change with
+   catalog-derived test expectations. Default (a) unless told otherwise.
+2. **`PrefH: 34` vs a shorter `24`.** I chose 34 (27 visible rows) to avoid a
+   list-visibility regression vs the current dialog's ~35 rows. A shorter `PrefH: 24`
+   (17 rows, matching `watchersDialogSpec`) is a defensible alternative if the
+   maintainer prefers a tighter modal and is comfortable relying on scroll. Either is
+   correct; the choice is purely the intended visible-row count. Width (`PreferredW:
+   62`) is not in question — it reproduces the issue's measured table and is the
+   desired compact size; the dialog does not auto-widen to the catalog (that is
+   option (b)'s content-derived `PreferredW`).
