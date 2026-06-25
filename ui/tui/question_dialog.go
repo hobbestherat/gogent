@@ -214,15 +214,21 @@ func showQuestionDialog(desktop *tv.Desktop, req agent.QuestionRequest, onResult
 				continue
 			}
 			if _, ok := f.answer(); !ok {
+				if f.focus == nil {
+					// A required item with no input widget — e.g. a choice/multiselect the
+					// model sent with no Options — can never be answered or focused.
+					// Blocking on it would deadlock Submit forever, so skip it: criterion 3
+					// requires that a field the user cannot reach never permanently blocks
+					// Submit. The malformed item is simply omitted from the answers.
+					continue
+				}
 				// Switch first (its OnTabChange clears any prior error), then scroll the
 				// offending field into view and focus it, and set the message — so it
 				// survives the auto-switch and the user is placed on a visible, focused
 				// field even when it was below the topic's scroll fold.
 				tabs.SetActive(f.tabIndex)
-				if f.focus != nil {
-					panels[f.tabIndex].ensureVisible(f.focus)
-					desktop.SetFocus(f.focus)
-				}
+				panels[f.tabIndex].ensureVisible(f.focus)
+				desktop.SetFocus(f.focus)
 				errLabel.SetText(fmt.Sprintf("✗ %s is required", f.item.Label))
 				desktop.Redraw()
 				return
@@ -420,7 +426,11 @@ func buildTopicPanel(desktop *tv.Desktop, topic agent.QuestionTopic, tabIndex, w
 	if itemW < 1 {
 		itemW = 1
 	}
-	barX := width - 1
+	// The panel fills the Tabs widget, which sits at the dialog's content col 1, so the
+	// panel's last *visible* column is width-2 (col width-1 maps to the window's right
+	// border, which the Inset(1) content clip drops). The scrollbar lives there; items
+	// end at width-3 (margin + itemW - 1), one column short, so nothing overlaps it.
+	barX := width - 2
 
 	// scrollRow couples a child to its logical row (its build-time Y) and row span, so
 	// reflow can reposition it as the viewport scrolls and re-width it on resize.
@@ -661,7 +671,7 @@ func buildTopicPanel(desktop *tv.Desktop, topic agent.QuestionTopic, tabIndex, w
 			if itemW < 1 {
 				itemW = 1
 			}
-			barX = b.W - 1
+			barX = b.W - 2
 		}
 		bar.SetBounds(tv.Rect{X: barX, Y: 0, W: 1, H: visibleRows})
 		scrollY = clampScroll(scrollY)
