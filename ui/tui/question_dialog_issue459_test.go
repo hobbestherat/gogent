@@ -767,3 +767,262 @@ func TestQ459TinyTerminalRendersButtons(t *testing.T) {
 		t.Fatalf("Submit not visible after tiny→normal resize:\n%s", q459Screen(app))
 	}
 }
+
+// ===========================================================================
+// Round-2 coverage: thumb tracking, scroll×resize interaction, realistic forms,
+// cross-tab required reachability, empty-options edges, wheel-over-textarea.
+// ===========================================================================
+
+// q459ThumbRow returns the screen row of the scrollbar thumb (█), or -1. █ is
+// unique to the scrollbar — borders use box-drawing glyphs and the shadow is ░.
+func q459ThumbRow(app *tui.App) int {
+	for y := 0; y < app.Height(); y++ {
+		for x := 0; x < app.Width(); x++ {
+			if app.ReadCell(x, y).Ch == '█' {
+				return y
+			}
+		}
+	}
+	return -1
+}
+
+// TestQ459ScrollbarThumbTracksScroll verifies the thumb actually moves with the
+// offset (the round-1 test only checked the bar's presence). At the top the thumb
+// sits near the ▲ cap; scrolled to the bottom it sits near the ▼ cap.
+func TestQ459ScrollbarThumbTracksScroll(t *testing.T) {
+	app, desktop, _ := q459SmallTerminal(t)
+	topThumb := q459ThumbRow(app)
+	if topThumb < 0 {
+		t.Fatalf("no scrollbar thumb rendered at scroll top:\n%s", q459Screen(app))
+	}
+
+	for i := 0; i < 40; i++ {
+		q459Dispatch(t, app, tui.TypeEvent{Key: tui.KeyPageDown})
+	}
+	desktop.Redraw()
+	bottomThumb := q459ThumbRow(app)
+	if bottomThumb < 0 {
+		t.Fatalf("no scrollbar thumb rendered at scroll bottom:\n%s", q459Screen(app))
+	}
+	if bottomThumb <= topThumb {
+		t.Fatalf("scrollbar thumb did not move down with scroll (top=%d bottom=%d):\n%s",
+			topThumb, bottomThumb, q459Screen(app))
+	}
+}
+
+// TestQ459ScrollThenResizeLargerClampsToTop: after scrolling down, a resize that
+// makes the content fit must re-clamp scrollY to 0 (LayoutFn runs clampScroll),
+// reveal the top field again, and hide the bar. Guards a stale scroll offset
+// leaving the dialog looking empty after a grow.
+func TestQ459ScrollThenResizeLargerClampsToTop(t *testing.T) {
+	app, desktop, _ := q459SmallTerminal(t)
+	for i := 0; i < 40; i++ {
+		q459Dispatch(t, app, tui.TypeEvent{Key: tui.KeyPageDown})
+	}
+	desktop.Redraw()
+	if strings.Contains(q459Screen(app), "Q01") {
+		t.Fatalf("precondition: Q01 should be scrolled off the top:\n%s", q459Screen(app))
+	}
+
+	app.Resize(120, 40) // content now fits the taller panel
+	desktop.Redraw()
+	screen := q459Screen(app)
+	if !strings.Contains(screen, "Q01") {
+		t.Fatalf("scroll offset was not re-clamped to the top after a grow (Q01 still hidden):\n%s", screen)
+	}
+	if q459HasScrollbar(app) {
+		t.Fatalf("scrollbar still present after a grow that fits the content:\n%s", screen)
+	}
+}
+
+// TestQ459RealisticOverflowingFormAllReachable mirrors the issue's actual repro: a
+// single topic mixing a text+placeholder, a textarea+placeholder, a multiselect, a
+// choice, a text+help and a textarea — exactly the combo that overflows quickly. No
+// field may be permanently hidden; the last one must be reachable by scrolling.
+func TestQ459RealisticOverflowingFormAllReachable(t *testing.T) {
+	app := tui.NewWithSize(60, 16, &strings.Builder{})
+	desktop := tv.NewDesktop(app)
+	req := agent.QuestionRequest{Title: "Real", Topics: []agent.QuestionTopic{{
+		Title: "Form",
+		Items: []agent.QuestionItem{
+			{ID: "name", Label: "NAMEFIELD", Type: agent.QuestionText, Placeholder: "your name"},
+			{ID: "bio", Label: "BIOFIELD", Type: agent.QuestionTextarea, Placeholder: "about you"},
+			{ID: "skills", Label: "SKILLS", Type: agent.QuestionMultiSelect, Options: []string{"go", "python", "rust"}},
+			{ID: "level", Label: "LEVEL", Type: agent.QuestionChoice, Options: []string{"junior", "mid", "senior"}},
+			{ID: "loc", Label: "LOCFIELD", Type: agent.QuestionText, Help: "city only"},
+			{ID: "last", Label: "LASTFIELD", Type: agent.QuestionTextarea},
+		},
+	}}}
+	showQuestionDialog(desktop, req, func(agent.QuestionResponse) {})
+	desktop.Redraw()
+
+	if !strings.Contains(q459Screen(app), "NAMEFIELD") {
+		t.Fatalf("first field not visible at top:\n%s", q459Screen(app))
+	}
+	if strings.Contains(q459Screen(app), "LASTFIELD") {
+		t.Fatalf("precondition: LASTFIELD should be below the fold:\n%s", q459Screen(app))
+	}
+	// Scroll to the bottom; the last field must be reachable (not clipped away).
+	for i := 0; i < 60; i++ {
+		q459Dispatch(t, app, tui.TypeEvent{Key: tui.KeyPageDown})
+	}
+	desktop.Redraw()
+	if !strings.Contains(q459Screen(app), "LASTFIELD") {
+		t.Fatalf("LASTFIELD unreachable in a realistic overflowing form:\n%s", q459Screen(app))
+	}
+}
+
+// TestQ459RequiredInNonActiveScrolledTab: a required field that lives in a
+// non-active topic AND sits below that topic's fold must still be revealed, focused
+// and error-tagged on submit (criterion 3 across tabs + scroll).
+func TestQ459RequiredInNonActiveScrolledTab(t *testing.T) {
+	app := tui.NewWithSize(60, 16, &strings.Builder{})
+	desktop := tv.NewDesktop(app)
+	tab1 := make([]agent.QuestionItem, 0, 5)
+	for i := 0; i < 4; i++ {
+		tab1 = append(tab1, agent.QuestionItem{ID: fmt.Sprintf("p%d", i), Label: fmt.Sprintf("Pad%02d", i), Type: agent.QuestionText})
+	}
+	tab1 = append(tab1, agent.QuestionItem{ID: "must", Label: "MUSTFILL", Type: agent.QuestionText, Required: true})
+	showQuestionDialog(desktop, agent.QuestionRequest{Title: "Two", Topics: []agent.QuestionTopic{
+		{Title: "First", Items: []agent.QuestionItem{{ID: "a", Label: "A0", Type: agent.QuestionText}}},
+		{Title: "Second", Items: tab1},
+	}}, func(agent.QuestionResponse) {})
+	desktop.Redraw()
+
+	// Active tab is First; MUSTFILL is in Second and below its fold.
+	if strings.Contains(q459Screen(app), "MUSTFILL") {
+		t.Fatalf("precondition: MUSTFILL should not be visible initially:\n%s", q459Screen(app))
+	}
+
+	issue406SubmitViaDialogRoot(t, desktop)
+	desktop.Redraw()
+	screen := q459Screen(app)
+	if !strings.Contains(screen, "MUSTFILL is required") {
+		t.Fatalf("required error not shown for the non-active tab's field:\n%s", screen)
+	}
+	if !strings.Contains(screen, "MUSTFILL") {
+		t.Fatalf("MUSTFILL (in a non-active, scrolled topic) was not revealed on submit:\n%s", screen)
+	}
+	if !strings.Contains(screen, "Topic 2/2") {
+		t.Fatalf("dialog did not switch to the offending topic:\n%s", screen)
+	}
+}
+
+// TestQ459EmptyOptionsChoiceAndMultiSelectNoPanic: choice/multiselect with no
+// Options build zero checkboxes. They must not panic, and submit must handle the
+// (always-unanswered) item without deadlocking — optional ones are omitted.
+func TestQ459EmptyOptionsChoiceAndMultiSelectNoPanic(t *testing.T) {
+	app := tui.NewWithSize(60, 16, &strings.Builder{})
+	desktop := tv.NewDesktop(app)
+	res := make(chan agent.QuestionResponse, 1)
+	showQuestionDialog(desktop, agent.QuestionRequest{Title: "Empty", Topics: []agent.QuestionTopic{{
+		Title: "E",
+		Items: []agent.QuestionItem{
+			{ID: "c", Label: "EmptyChoice", Type: agent.QuestionChoice, Options: nil},
+			{ID: "m", Label: "EmptyMulti", Type: agent.QuestionMultiSelect, Options: nil},
+			{ID: "ok", Label: "OK", Type: agent.QuestionText},
+		},
+	}}}, func(r agent.QuestionResponse) { res <- r })
+	desktop.Redraw()
+
+	// Scrolling and submitting must not panic on the option-less items.
+	for i := 0; i < 10; i++ {
+		q459Dispatch(t, app, tui.TypeEvent{Key: tui.KeyPageDown})
+	}
+	desktop.Redraw()
+	q459Dispatch(t, app, tui.TypeEvent{Key: tui.KeyPageUp})
+	desktop.Redraw()
+	issue406SubmitViaDialogRoot(t, desktop)
+	select {
+	case got := <-res:
+		// The empty choice/multiselect are unanswered → omitted; the text field is blank
+		// → omitted too. Submit succeeds with an empty (but non-cancelled) answer set.
+		if got.Cancelled {
+			t.Fatalf("submit cancelled unexpectedly: %+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out: submit did not resolve for option-less choice/multiselect")
+	}
+}
+
+// q459WalkVisible runs fn over root and its visible descendants.
+func q459WalkVisible(root *tv.VisualComponent, fn func(*tv.VisualComponent)) {
+	if root == nil || !root.Visible {
+		return
+	}
+	fn(root)
+	for _, c := range root.Children() {
+		q459WalkVisible(c, fn)
+	}
+}
+
+// q459FindVisibleByHeight returns the absolute bounds of the first visible leaf
+// with the given Bounds.H (3 ⇒ a MultiLineInput textarea, since labels/textboxes are
+// H=1), so a test can target a specific widget without hard-coding coordinates.
+func q459FindVisibleByHeight(desktop *tv.Desktop, h int) (tv.Rect, bool) {
+	top := desktop.TopLayer()
+	if top == nil {
+		return tv.Rect{}, false
+	}
+	var found tv.Rect
+	hit := false
+	q459WalkVisible(top.Root, func(c *tv.VisualComponent) {
+		if !hit && c.Bounds.H == h {
+			found = c.AbsoluteBounds()
+			hit = true
+		}
+	})
+	return found, hit
+}
+
+// TestQ459WheelOverTextareaDoesNotScrollPanel documents an interaction limitation
+// the design's prose claimed was solved ("mouse wheel … always works, including
+// inside a textarea"). It is NOT: MultiLineInput.handleScroll consumes every wheel
+// event (returns true), so BubbleScroll never reaches the panel's OnScrollFn while
+// the pointer is over a textarea. An empty textarea has nothing to scroll either, so
+// the wheel is a pure no-op there. The panel is still scrollable via PageDown and via
+// the wheel when it is over a label/textbox/spacer. This test pins the actual
+// behaviour so a regression (in either direction) is caught.
+func TestQ459WheelOverTextareaDoesNotScrollPanel(t *testing.T) {
+	app := tui.NewWithSize(60, 16, &strings.Builder{})
+	desktop := tv.NewDesktop(app)
+	// A textarea as the first item (visible at the top) plus more fields so the topic
+	// overflows and is scrollable.
+	showQuestionDialog(desktop, agent.QuestionRequest{Title: "TA", Topics: []agent.QuestionTopic{{
+		Title: "T",
+		Items: []agent.QuestionItem{
+			{ID: "ta", Label: "TOPAREA", Type: agent.QuestionTextarea},
+			{ID: "x1", Label: "XTWO", Type: agent.QuestionText},
+			{ID: "x2", Label: "XTHREE", Type: agent.QuestionText},
+			{ID: "x3", Label: "XFOUR", Type: agent.QuestionText},
+			{ID: "x4", Label: "XFIVE", Type: agent.QuestionText},
+		},
+	}}}, func(agent.QuestionResponse) {})
+	desktop.Redraw()
+
+	ta, ok := q459FindVisibleByHeight(desktop, 3)
+	if !ok {
+		t.Fatalf("no visible textarea (H=3) found to wheel over:\n%s", q459Screen(app))
+	}
+	cx := ta.X + ta.W/2
+	cy := ta.Y + ta.H/2
+
+	// Wheel straight down while over the textarea.
+	for i := 0; i < 5; i++ {
+		q459Scroll(t, app, tui.ScrollEvent{X: cx, Y: cy, Delta: -1})
+	}
+	desktop.Redraw()
+	// The panel must NOT have scrolled: the first field is still on screen because
+	// the textarea swallowed the wheel. (If this assertion fails, the panel now
+	// captures the wheel over a textarea — update the documented behaviour.)
+	if !strings.Contains(q459Screen(app), "TOPAREA") {
+		t.Fatalf("wheel over a textarea scrolled the panel (textarea did not consume it) — behaviour changed:\n%s", q459Screen(app))
+	}
+
+	// …yet PageDown still scrolls the panel from the same focus, so reachability holds.
+	q459Dispatch(t, app, tui.TypeEvent{Key: tui.KeyPageDown})
+	desktop.Redraw()
+	if strings.Contains(q459Screen(app), "TOPAREA") {
+		t.Fatalf("PageDown did not scroll the panel (reachability regression):\n%s", q459Screen(app))
+	}
+}
