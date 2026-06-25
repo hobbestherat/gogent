@@ -136,7 +136,7 @@ Structural limits compose multiplicatively (`MaxSubAgents^MaxDepth`), so `SubAge
 ## Token budgets & rate limiting
 
 - **Token budget.** `Agent.TokenBudget` is cumulative prompt+completion; `AddTokensUsed` accumulates per round-trip. When `BudgetExceeded()` is true, `stopForBudget` folds a `BUDGET_EXCEEDED` notice (preserving partial progress) and breaks the loop. `subAgentOutcome` classifies `BUDGET_EXCEEDED` as `StatusFailed`.
-- **Step cap.** Per-task `maxSteps` (`DefaultMaxSteps=25`; `≤0` = unlimited), shared by the root agent and all sub-agent/interactive loops.
+- **Step cap.** Per-task `maxSteps` (`DefaultMaxSteps=100`; `≤0` = unlimited), shared by the root agent and all sub-agent/interactive loops. When the cap fires with the just-completed turn still carrying unexecuted tool calls, the exit path folds a visible `STEP_LIMIT_REACHED` notice (preserving partial progress) as the final answer and balances the orphaned `tool_calls` (synthetic "not executed" results) so the session resumes valid; a genuine `structured_output{final}` landing at the cap is surfaced as its real answer instead. `subAgentOutcome` classifies `STEP_LIMIT_REACHED` as `StatusFailed`.
 - **Rate limiter.** A token bucket that refills continuously at a rate-per-second with `burst=capacity`. `Wait` blocks until a permit is available or the context is cancelled. It is process-wide and shared across sessions; `modelRoundTrip` calls `waitRateLimit` before every send.
 
 ## Plan mode
