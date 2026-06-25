@@ -525,8 +525,8 @@ func TestCommandsDialogSpecSizing(t *testing.T) {
 	spec := w.commandsDialogSpec()
 
 	// Content footprint, not the old PreferredW-only inline spec.
-	if spec.PreferredW != 112 || spec.PrefH != 28 {
-		t.Errorf("preferred = %dx%d, want 112x28", spec.PreferredW, spec.PrefH)
+	if spec.PreferredW != 112 || spec.PrefH != 34 {
+		t.Errorf("preferred = %dx%d, want 112x34", spec.PreferredW, spec.PrefH)
 	}
 	// The footer never forces a clamp/overlap: MinW covers the action row's real width.
 	if need := footerRowMinWidth(commandsFooterLabels, tv.DefaultButtonGap); spec.MinW < need {
@@ -539,13 +539,13 @@ func TestCommandsDialogSpecSizing(t *testing.T) {
 		wantW, wantH     int
 	}{
 		// #448 acceptance: 200×50 → 112×28 (was the 96×42 balloon).
-		{"roomy terminal is content size not the balloon", 200, 50, 112, 28},
+		{"roomy terminal is content size not the balloon", 200, 50, 112, 34},
 		// #448 acceptance: 120×30 shrinks toward the 84×26 floor (height hits 26).
 		{"120x30 shrinks toward the floor", 120, 30, 96, 26},
-		// Width capped at the 80% default (96) below the 112 preferred; height keeps PrefH 28.
-		{"120x40 width capped at 80 percent", 120, 40, 96, 28},
+		// Width capped at the 80% default (96) below the 112 preferred; height keeps PrefH 34.
+		{"120x40 width capped at 80 percent", 120, 40, 96, 34},
 		// Ultrawide: PreferredW (112) is below the cap, so it does not sprawl.
-		{"ultrawide stays at content size", 300, 80, 112, 28},
+		{"ultrawide stays at content size", 300, 80, 112, 34},
 		// Tiny terminal: both floors win even past the screen edge.
 		{"tiny terminal floors both dimensions", 40, 16, 84, 26},
 	} {

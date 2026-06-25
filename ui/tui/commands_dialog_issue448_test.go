@@ -52,14 +52,14 @@ func TestCommandsDialogSpecShape(t *testing.T) {
 
 	// The footprint the fix moved to: a content-driven preferred size with caps and
 	// a floor, NOT the old PreferredW-only inline spec.
-	if spec.PreferredW != 112 || spec.PrefH != 28 {
-		t.Errorf("preferred = %dx%d, want 112x28 (content footprint)", spec.PreferredW, spec.PrefH)
+	if spec.PreferredW != 112 || spec.PrefH != 34 {
+		t.Errorf("preferred = %dx%d, want 112x34 (content footprint)", spec.PreferredW, spec.PrefH)
 	}
 	if spec.MinW != 84 || spec.MinH != 26 {
 		t.Errorf("floors = %dx%d, want 84x26", spec.MinW, spec.MinH)
 	}
-	if spec.MaxW != 140 || spec.MaxH != 34 {
-		t.Errorf("caps = %dx%d, want 140x34", spec.MaxW, spec.MaxH)
+	if spec.MaxW != 140 || spec.MaxH != 40 {
+		t.Errorf("caps = %dx%d, want 140x40", spec.MaxW, spec.MaxH)
 	}
 
 	// Structural sanity: floors below preferred below caps on each axis. If a floor
@@ -136,13 +136,13 @@ func TestCommandsDialogSize(t *testing.T) {
 		wantW, wantH     int
 	}{
 		// #448 acceptance: 200×50 → 112×28 (was 96×42).
-		{"roomy terminal sizes to content not the balloon", 200, 50, 112, 28},
+		{"roomy terminal sizes to content not the balloon", 200, 50, 112, 34},
 		// #448 acceptance: 120×30 shrinks toward the 84×26 floor (height hits 26).
 		{"120x30 shrinks toward the floor", 120, 30, 96, 26},
-		// Width capped at the 80% default (96) below the 112 preferred; height keeps PrefH 28.
-		{"120x40 width capped at 80 percent", 120, 40, 96, 28},
+		// Width capped at the 80% default (96) below the 112 preferred; height keeps PrefH 34.
+		{"120x40 width capped at 80 percent", 120, 40, 96, 34},
 		// Ultrawide: PreferredW (112) is below the cap, so the dialog does NOT sprawl.
-		{"ultrawide stays at content size", 300, 80, 112, 28},
+		{"ultrawide stays at content size", 300, 80, 112, 34},
 		// Below-floor terminal: both Min floors win (84×26) even past the screen edge.
 		{"tiny terminal floors both dimensions", 40, 16, 84, 26},
 	} {
@@ -170,8 +170,8 @@ func TestCommandsDialogSize(t *testing.T) {
 	if gotW <= 96 {
 		t.Errorf("width %d did not grow past the old pinned 96", gotW)
 	}
-	if gotH >= 34 {
-		t.Errorf("height %d reached the MaxH cap — PrefH 28 should bound it well under the balloon", gotH)
+	if gotH >= 40 {
+		t.Errorf("height %d reached the MaxH cap — PrefH 34 should bound it well under the balloon", gotH)
 	}
 }
 
@@ -192,8 +192,8 @@ func TestCommandsDialogOpensContentDriven(t *testing.T) {
 		commands         int
 		wantW, wantH     int
 	}{
-		{"roomy terminal not the balloon", 200, 50, 3, 112, 28},
-		{"roomy terminal empty list", 200, 50, 0, 112, 28},
+		{"roomy terminal not the balloon", 200, 50, 3, 112, 34},
+		{"roomy terminal empty list", 200, 50, 0, 112, 34},
 		{"120x30 shrinks toward floor", 120, 30, 2, 96, 26},
 		{"tiny terminal floors", 48, 14, 0, 84, 26},
 	} {
@@ -256,8 +256,8 @@ func TestCommandsDialogResizePathIndependent(t *testing.T) {
 		t.Fatalf("after resize = %dx%d, want fresh-open %dx%d (spec must re-resolve, not pin the open-time size)",
 			got.W, got.H, want.W, want.H)
 	}
-	if got.W != 112 || got.H != 28 {
-		t.Fatalf("after resize to 200x50 = %dx%d, want 112x28", got.W, got.H)
+	if got.W != 112 || got.H != 34 {
+		t.Fatalf("after resize to 200x50 = %dx%d, want 112x34", got.W, got.H)
 	}
 	if got.X != (200-got.W)/2 || got.Y != (50-got.H)/2 {
 		t.Errorf("not re-centered after resize: origin (%d,%d)", got.X, got.Y)
