@@ -144,7 +144,7 @@ func TestSubAgentLoopHonoursUnlimited(t *testing.T) {
 // invariant for sub-agents: a session that never calls SetMaxSteps keeps the
 // historical 25-step bound on its sub-agent loops too (mirroring pre-#249).
 func TestSubAgentLoopUsesHistoricalDefaultWhenUnwired(t *testing.T) {
-	fs := &fakeServer{responses: makeToolCallResponses(t, 40, "SUCCESS: done")}
+	fs := &fakeServer{responses: makeToolCallResponses(t, 120, "SUCCESS: done")}
 	server := httptest.NewServer(http.HandlerFunc(fs.handler))
 	defer server.Close()
 

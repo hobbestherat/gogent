@@ -64,7 +64,7 @@ func TestCreateUserSessionWiresMaxStepsFromConfig(t *testing.T) {
 }
 
 // TestCreateUserSessionDefaultConfigKeepsHistoricalBound confirms the full
-// GetDefaultConfig -> CreateUserSession path yields the historical 25-step cap,
+// GetDefaultConfig -> CreateUserSession path yields the default 100-step cap (raised from 25 per #449),
 // so a user who never sets max_steps sees no behaviour change from before #249.
 func TestCreateUserSessionDefaultConfigKeepsHistoricalBound(t *testing.T) {
 	g := NewGogentWithWorkspace(t.TempDir(), t.TempDir())
@@ -79,8 +79,8 @@ func TestCreateUserSessionDefaultConfigKeepsHistoricalBound(t *testing.T) {
 	}}
 
 	us := g.NewSession("default-cfg")
-	if got := us.MaxSteps(); got != 25 {
-		t.Errorf("default-config session MaxSteps = %d, want 25 (historical bound)", got)
+	if got := us.MaxSteps(); got != 100 {
+		t.Errorf("default-config session MaxSteps = %d, want 100 (raised per #449)", got)
 	}
 }
 
