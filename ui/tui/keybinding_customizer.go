@@ -47,6 +47,22 @@ func capturePrompt(a action) string {
 	return fmt.Sprintf("Press a key for %q…  (Esc cancel · Backspace clear)", a.name)
 }
 
+// captureRefusalMessage turns validateCapture's raw reason into the status line shown
+// after a refused capture (issue #464). For the capability-gated Ctrl+Shift+<letter>
+// case — which Deliverable() refuses on a terminal that can't tell it apart from
+// Ctrl+<letter> — it returns a chord-specific, actionable line that fits the customizer's
+// single-row status Label: "<chord> unavailable here — pick another key." is ≤52 cells,
+// so with the caller's "✗ " prefix it stays within the dialog's floored ~54-cell status
+// width and is never wrapped onto an unrendered second row. ("here" = this terminal
+// can't deliver it; "pick another key" is the action without leaving the dialog.) Every
+// other reason is turbotui's own string, surfaced unchanged.
+func captureRefusalMessage(chord tv.Chord, reason string) string {
+	if isCapabilityGated(chord) {
+		return fmt.Sprintf("%s unavailable here — pick another key.", displayChord(chord))
+	}
+	return reason
+}
+
 // selectedKeybindAction returns the catalog action under the list's current selection,
 // or nil when the selection is on a category header (a non-action row) or the list is
 // empty. It is how the capture and reset gestures resolve which action they act on.
@@ -135,7 +151,7 @@ func (w *Workbench) showKeybindingCustomizer() {
 	// apply.
 	commit := func(a action, chord tv.Chord) {
 		if ok, reason := w.validateCapture(a, chord); !ok {
-			setStatus("✗ " + reason)
+			setStatus("✗ " + captureRefusalMessage(chord, reason))
 			return
 		}
 		apply := func() {
