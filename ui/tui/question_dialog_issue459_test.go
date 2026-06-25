@@ -523,7 +523,7 @@ func TestQ459HorizontalResizeReflowsFieldWidth(t *testing.T) {
 	desktop := tv.NewDesktop(app)
 	// A wide, distinctive label so truncation/overflow is detectable.
 	req := agent.QuestionRequest{
-		Title:  "Width",
+		Title: "Width",
 		Topics: []agent.QuestionTopic{{Title: "W", Items: []agent.QuestionItem{
 			{ID: "x", Label: "LABELSTAYSVISIBLE", Type: agent.QuestionText},
 		}}},
