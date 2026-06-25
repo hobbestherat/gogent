@@ -219,16 +219,40 @@ On confirm with a non-empty (trimmed) name:
 
 **Delete** (new button, included): enabled only when a **saved** entry is selected
 (disabled/no-op for built-ins). Confirm via `showConfirm`, then remove the entry,
-`SetSavedThemes(saved)`, `rebuildPresetOptions()`. If the deleted entry was the live
-**active** theme (`cur.SavedName == deleted name`, or it is the one currently selected),
-reset the active theme to its parent built-in so no dangling `SavedName` survives:
-`base := buildThemeConfig(entry.parent, …); base.SavedName = ""; SetTheme(base)`, and
-select that built-in in the dropdown; otherwise just rebuild and keep the current
-selection. Built-ins are non-deletable by construction (no `savedIndex`).
+`SetSavedThemes(saved)`, `rebuildPresetOptions()`.
+
+Then decide whether the deletion orphaned the **live active** theme — and *only* then
+reset it. **The detection must read the live active theme, not the dropdown selection
+and not the stale open-time `cur`:**
+```
+live := w.handlers.GetTheme()          // re-read NOW, not the open-time cur
+if live.SavedName == deletedName {     // sole criterion — keyed on SavedName equality
+    base := buildThemeConfig(entry.parent, …); base.SavedName = ""
+    w.handlers.SetTheme(base)          // re-point active → parent built-in, no dangle
+    // select that built-in in the dropdown + seedFromEntry it
+}
+// otherwise: just rebuild the dropdown; do NOT touch the active theme or live colours.
+```
+This avoids two traps the prior draft fell into:
+- **"currently selected" ≠ "active".** A user can browse the dropdown to `★B` (selection)
+  while `★A` is still the live active theme (nothing persisted on mere selection).
+  Deleting `★B` must not reset the `★A` binding. Keying solely on `SavedName` equality —
+  never on the dropdown highlight — prevents wiping the wrong theme.
+- **Stale `cur`.** `cur` is captured once at open (`theme_editor.go:583`); a mid-session
+  Save As calls `SetTheme` and changes the live active theme without updating `cur`.
+  Re-reading `w.handlers.GetTheme()` at delete time is the only reliable source.
+
+Built-ins are non-deletable by construction (no `savedIndex`).
 
 **Rename** (optional / stretch): `showInputDialog(..., withSelectAll())` seeded with the
-current name; on confirm update `saved[i].Name` and rebuild. Documented as optional in
-the issue; include if time permits, otherwise Delete + re-Save-As covers the need.
+current name; on confirm update `saved[i].Name`, then **re-point the active back-link if
+the renamed theme is the live active one** — `live := GetTheme(); if live.SavedName ==
+oldName { live.SavedName = newName; SetTheme(live) }` — otherwise the active theme would
+keep pointing at a name that no longer exists and reopen would silently drop the
+association (degrading to the parent built-in). Then `rebuildPresetOptions()` and
+re-select. Apply the same case-insensitive duplicate-name confirm as Save As. Documented
+as optional in the issue; include if time permits, otherwise Delete + re-Save-As covers
+the need.
 
 **On open** (replaces the current `preset.SetSelected(presetIndex(cur.Name))` +
 `loadFields(editedTheme(cur))` seed, ≈ lines 898–901): if `cur.SavedName != ""` and a
@@ -241,13 +265,13 @@ routes back to that saved entry instead of the built-in.
 
 #### Button layout
 Bottom row currently: `Reset(x=2,w=9)`, `Save(x=width-24,w=9)`, `Cancel(x=width-13,w=10)`.
-Add on the left, clear of the right cluster (at the 80 floor the left group ends ≈ x=46,
-Save starts at x=56):
+Add on the left, clear of the right cluster (at the 80 floor the left group ends ≈ x=33,
+well short of Save at x=56):
 ```
-Reset   x=2,  w=9
-Save As x=12, w=11   ("Save As…")
-Delete  x=24, w=10
-(Save / Cancel unchanged on the right)
+Reset   x=2,  w=9    (ends x=10)
+Save As x=12, w=11   (ends x=22, "Save As…")
+Delete  x=24, w=10   (ends x=33)
+(Save / Cancel unchanged on the right: Save x=width-24, Cancel x=width-13)
 ```
 `relayout()` must reposition the two new buttons on resize (left-anchored, so their X is
 constant; only add them to the relayout button block for completeness).
@@ -293,6 +317,11 @@ and applied live through the existing `SetTheme` handler →
 - **Consistent destructiveness (resolved C2.2).** Both destructive paths confirm:
   Delete via `showConfirm`, and Save-As-onto-an-existing-name via `showConfirm` before
   overwriting. No silent data loss.
+- **Delete targets the right theme (resolved C2.2a/2b).** Delete only resets the active
+  theme when the **live** active theme (`GetTheme()` re-read at delete time, not the
+  open-time `cur`, not the dropdown highlight) has `SavedName == deletedName`. So
+  browsing the dropdown to `★B` and deleting it never disturbs an active `★A`; and a
+  mid-session Save As that changed the active theme is still detected correctly.
 - **Symmetric state seeding (resolved C2.3).** `seedFromEntry` seeds colours **and** the
   `noColor`/`noShadow` checkboxes for *every* selection (built-in ⇒ `false`/`false`), so
   switching presets never leaves a stale toggle the user didn't set.
@@ -339,6 +368,11 @@ and applied live through the existing `SetTheme` handler →
     entry falls back to the parent built-in on open.
   - Add **`SavedName` isolation** test: configs in `SavedThemes` carry no `SavedName`;
     only the active `Config.Theme` does.
+  - Add **browse-then-delete** test (the C2.2a fix): active = `★A`; select `★B` in the
+    dropdown; Delete `★B`; assert the active theme is still `★A` (untouched). And a
+    delete-the-active test: deleting the live active `★A` resets the active theme to the
+    parent built-in with `SavedName == ""`. If Rename ships, a rename-the-active test:
+    the active `SavedName` follows the new name.
 
 ## Criterion 4 — HOLISTIC DESIGN across both repos
 - **Right place / seam respected.** All logic lives in gogent: config model + persistence
@@ -385,10 +419,14 @@ and applied live through the existing `SetTheme` handler →
    explicitly.
 5. **Test buffer width.** The headless test app is 80-wide; the two new bottom buttons
    must fit left of `Save` at the floor (they do: left group ends ≈ x=34, Save at x=56).
-6. **Dangling `SavedName`.** A `SavedName` pointing at a deleted/renamed entry must not
-   strand the editor. Mitigation: open-time selection and Delete both fall back to the
-   parent built-in when no matching saved entry is found; Delete of the active theme
-   resets `SavedName` to `""`.
+6. **Dangling `SavedName` / wrong-target reset.** A `SavedName` pointing at a
+   deleted/renamed entry must not strand the editor, and Delete/Rename must act on the
+   *active* theme — not the dropdown selection or stale open-time `cur`. Mitigations:
+   open-time selection falls back to the parent built-in when no matching saved entry
+   exists; Delete re-reads `GetTheme()` and resets `SavedName` to `""` **only** when the
+   live active theme's `SavedName == deletedName`; Rename re-points the active
+   `SavedName` (`old→new`) when the renamed theme is the live active one. Keying solely
+   on `SavedName` equality (never the dropdown highlight) is the invariant.
 7. **`SavedName` must not leak into the saved list.** The configs stored in
    `SavedThemes` are built without `SavedName` (only the active `Config.Theme` carries
    it); a saved entry is identified by its `NamedTheme.Name`. Mitigation: set `SavedName`
