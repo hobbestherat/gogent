@@ -1,8 +1,48 @@
 package ui
 
 import (
+	tui "github.com/hobbestherat/turbotui"
 	tv "github.com/hobbestherat/turbotui/turbotv"
 )
+
+// drawDialogVScrollbar paints a 1-column vertical scrollbar over track: a full-height
+// │ line with ▲/▼ caps and a single █ thumb whose position reflects offset within
+// [0, total-visible]. It mirrors turbotui's shared (but unexported) text-view/tree
+// scrollbar so a hand-rolled scroll viewport's affordance looks and behaves like the
+// rest of the UI. It is shared by the theme editor (showThemeEditor) and the question
+// dialog (buildTopicPanel), both of which host interactive child widgets inside a
+// scrolling tv.Component and so cannot reuse the read-only TextView's internal bar.
+// With nothing to scroll (total <= visible) only the track and caps are drawn.
+func drawDialogVScrollbar(surface tv.Surface, track tv.Rect, total, visible, offset int, fg, bg tui.Color) {
+	if track.H < 1 {
+		return
+	}
+	x := track.X
+	for row := 0; row < track.H; row++ {
+		surface.SetCell(x, track.Y+row, tui.Cell{Ch: '│', FG: fg, BG: bg})
+	}
+	surface.SetCell(x, track.Y, tui.Cell{Ch: '▲', FG: fg, BG: bg})
+	surface.SetCell(x, track.Bottom(), tui.Cell{Ch: '▼', FG: fg, BG: bg})
+	span := total - visible
+	inner := track.H - 2 // rows between the two arrow caps
+	if span <= 0 || inner <= 0 {
+		return
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > span {
+		offset = span
+	}
+	thumb := offset * (inner - 1) / span
+	if thumb < 0 {
+		thumb = 0
+	}
+	if thumb > inner-1 {
+		thumb = inner - 1
+	}
+	surface.SetCell(x, track.Y+1+thumb, tui.Cell{Ch: '█', FG: fg, BG: bg})
+}
 
 // buttonChrome is the number of columns turbotui draws around a button's label:
 // the "[ " prefix and " ]" suffix (see turbotui/turbotv/widget_button.go). A
