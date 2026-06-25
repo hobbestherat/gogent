@@ -98,6 +98,11 @@ wrapLive(tmplInput.Component)
 wrapLive(argsBox.Component)
 ```
 
+Both base handlers are non-nil (`TextBox` and `MultiLineInput` each wire
+`OnTypeFn` *and* `OnPasteFn` in their constructors — `widget_textbox.go:37-38`,
+`widget_multiline_input.go:87-88`), so the wrapper always delegates the actual edit
+before refreshing; it never swallows a keystroke or a paste.
+
 `refreshPreview()` (line 164) is reframed so it never echoes the template verbatim:
 
 ```go
@@ -105,7 +110,7 @@ def := currentDef()
 args := strings.Fields(argsBox.GetText())
 if len(args) == 0 && !templateHasRefs(def.Template) {
     preview.FG = colorDialogDetail            // dim hint, not body colour
-    preview.SetText("enter sample args to preview the expanded prompt")
+    preview.SetText("enter sample args (positional or name=value) to preview the expanded prompt")
 } else {
     preview.FG = tv.DefaultTheme.DialogFG
     out, err := expandTemplate(def, args)
@@ -149,14 +154,29 @@ the user is not prompted for a no-op.
 Tab/Shift-Tab already cycles all focusable widgets via the desktop (see finding
 above) — **no dialog-root Tab handler is added**. We add only the Enter-advance
 convenience, mirroring `question_dialog.go:387-396`: each single-line `TextBox`
-(`name → desc → model → agent`) gets an `OnSubmit` that
-`w.desktop.SetFocus(next)`. The template `MultiLineInput` keeps `OnSubmit == nil`
-so Enter inserts a newline. Suggested Enter chain:
-`name→desc→template`, `model→agent→model` (a short wrap among the remaining
-single-liners), with Tab as the universal traversal. Build the focus list after
-all widgets exist (closure over the slice), exactly as `question_dialog.go` does.
+gets an `OnSubmit` that `w.desktop.SetFocus(next)`, following the natural visual
+(top-to-bottom) order:
 
-The dialog-root `OnTypeFn` keeps **only** its existing Escape handler (line 399).
+```
+name  --Enter-->  desc  --Enter-->  template (focus the editor)
+model --Enter-->  agent --Enter-->  subtask
+```
+
+The template `MultiLineInput` keeps `OnSubmit == nil` so Enter inserts a newline;
+the user leaves it with Tab (or by clicking). `argsBox.OnSubmit` re-runs
+`refreshPreview` (Enter on the sample-args box previews — useful, since Args has no
+"next field" worth jumping to). Tab remains the universal forward/back traversal
+for the widgets Enter does not chain (paramList, the param buttons, footer).
+
+Focus order is correct **without** assigning any `TabIndex`: `sortFocusOrder`
+(`desktop.go:636`) falls back to reading order (Y then X) for equal TabIndex, and
+every widget defaults to TabIndex 0, so the resolved Tab cycle is
+`list → name → desc → template → model → agent → subtask → paramList → insert →
++Add → Edit → Del → args → Preview → New → History → Delete → Save → Cancel` — the
+expected order. We rely on this rather than hand-numbering.
+
+The dialog-root `OnTypeFn` keeps **only** its existing Escape handler (line 399)
+(plus the optional dirty-guard reroute in §7).
 
 ### 5. Layout polish (P5)
 
@@ -221,6 +241,16 @@ insertSel.OnChange = func(index int) {
 }
 ```
 
+Caveat: directly editing `Lines`/`CursorX` does not touch the widget's private
+selection anchor. If a selection were active when Insert fired, that anchor would
+be stale — but `Insert` is driven from the dropdown (not a keystroke in the
+editor), the caret is placed inside the inserted text, and the *next* click or
+keystroke re-derives/clears selection (`handleClick`/`extendOrClear`), so no
+corruption is observable. This is the same public-field path the issue sanctions
+("`MultiLineInput` exposes `CursorX`/`CursorY`; insertion should happen at the
+caret"). A turbotui `MultiLineInput.Insert(string)` would be the clean long-term
+home, but we deliberately keep all changes in gogent (see criterion 4).
+
 ### 7. Optional: dirty flag + unsaved-changes guard (P6 / criterion 7)
 
 Recommended but isolable. Keep a `baseline CommandDef` snapshot set in
@@ -261,6 +291,15 @@ backend, expansion, history dialog, and the param sub-editor flow
 touched, which P5 explicitly permits. Nothing in `internal/` or `turbotui/`
 changes.
 
+**Deferred, matching the issue's own stated priority** (P6's two "Lower
+priority"/"Low priority" sub-bullets): the structured per-param "sample args"
+editor is *not* built — instead the `name=value` syntax is documented in the
+preview's dim hint (the issue's stated fallback: "or at least document the
+`name=value` syntax"), and the single-line `argsBox` is kept. The status row stays
+single-line (the issue marks multi-line status "Low priority"); long errors still
+truncate as today — no regression, just not improved here. Both are called out so
+they are explicitly scoped out, not overlooked.
+
 ### (2) USABILITY
 - Multi-line templates become authorable through the UI for the first time
   (typing newlines via Enter, multi-line paste via `handlePaste`) — the user can
@@ -288,15 +327,41 @@ changes.
 - **Expansion/back-end unchanged:** `expandTemplate`/`templateWarnings` are called
   exactly as before; multi-line templates already round-trip through them
   (`command_history_dialog.go`'s `lineDiff` is already line-oriented).
-- **Tests that must be updated (numbers, not invariants):**
-  `TestCommandsDialogSpecShape` (PrefH 28→34, MaxH 34→40),
-  `TestCommandsDialogSize` / `TestCommandsDialogOpensContentDriven` /
-  `TestCommandsDialogResizePathIndependent` (roomy height 28→34; 120×40 height
-  28→34; the 120×30 floor stays 26 since MinH is unchanged),
-  `TestCommandsDialogInnerGeometryFitsAtFloorAndRoomy` (the field row math and
-  `previewH` formula change to the table in §5). The structural invariants the
-  tests encode — floors < preferred < caps, `MaxH < 42`, footer fits at MinW,
-  preview bottom above the hint row — are all preserved by construction.
+- **Tests that must be updated — exact numbers (invariants preserved):**
+  - `TestCommandsDialogSpecShape`: `PrefH 28→34`, `MaxH 34→40`. Ordering
+    (`MinH 26 < PrefH 34 < MaxH 40`) and the anti-balloon `MaxH < 42` (40 < 42)
+    both still hold.
+  - `TestCommandsDialogSize`: roomy `200×50` `28→34` (= new PrefH, since the 42-row
+    share exceeds it); `120×40` `28→34`; `120×30` **stays `26`** (85%·30 ≈ 25 <
+    MinH, floored — MinH unchanged); `300×80` `28→34`; tiny `40×16` stays `84×26`.
+    **The guard at line 173 flips:** it currently asserts `gotH >= 34` is an error
+    ("PrefH 28 bounds it under the cap"); with PrefH 34 the dialog now resolves to
+    exactly 34, so this must become `gotH >= 40` (the new MaxH). The `gotH >= 42`
+    balloon guard (line 165) is unaffected.
+  - `TestCommandsDialogOpensContentDriven`: the two `200×50` rows `28→34`;
+    `120×30`→`96×26` and `48×14`→`84×26` unchanged.
+  - `TestCommandsDialogResizePathIndependent`: post-resize expectation `112×28 →
+    112×34` (two assertions); the `80×24 → 84×26` open-floor is unchanged.
+  - `TestCommandsDialogInnerGeometryFitsAtFloorAndRoomy`: the `labelW` constant
+    `7→10`, the `row` decomposition, and the `previewH` formula change. New
+    expected values:
+
+    | metric | formula | floor `84×26` | roomy `112×34` |
+    |--------|---------|---------------|----------------|
+    | detailW | width−28 | 56 | 84 |
+    | boxW | detailW−labelW(10) | 46 | 74 |
+    | paneH | height−7 | 19 | 27 |
+    | preview Y (`row`) | 2+2+6+2+1+1+4+1+1 | 20 | 20 |
+    | previewH | height−24 | 2 | 10 |
+    | previewBottom | row+previewH−1 | 21 | 29 |
+    | hint row | height−4 | 22 | 30 |
+
+    `previewBottom < hint row` holds in both columns, and every region clears its
+    collapse guard (`detailW≥30`, `boxW≥12`, `paneH≥6`, `previewH≥2`) — at the
+    floor `previewH` is exactly its 2-row minimum.
+  - Footer tests (`TestCommandsDialogFooterFitsAtMinWidth`,
+    `…FooterRendersFullWidth`, `…SpecFloorsAboveFooterNeed`): **no change** —
+    `commandsFooterLabels`, width, and `MinW 84` are untouched.
 - **Footer unchanged:** labels and `commandsFooterLabels` are untouched, so the
   footer-width tests (`TestCommandsDialogFooterFitsAtMinWidth`,
   `…FooterRendersFullWidth`) keep passing.
