@@ -59,21 +59,33 @@ the only hard-coded turbotui pin in gogent — `grep -rn "v0.3.1-0" --include=*.
 only this file.)
 
 ### 3. `ui/tui/keybinding_customizer.go` — actionable refusal message (REQUIRED, the #464 ask)
-Today `commit` surfaces the raw toolkit reason. The issue wants a clear, *chord-specific,
-actionable* message. Add a small pure helper and route the refusal through it:
+
+**Hard constraint discovered in review: the status line is one row.** `status` is a
+`H:1` `Label` with `Wrap=true` (keybinding_customizer.go:101); turbotui's label
+word-wraps then draws **only row 0** — anything that wraps past the first line is
+**invisible**. The dialog spec is `MinW:58, PreferredW:62` (dialog_sizing.go:92), so the
+status inner width (`width-4`) is **58 cells at preferred size and floors at 54** (MinW
+58; the footer floor doesn't raise it). Any refusal copy therefore **must fit ≤54 cells
+including the `"✗ "` prefix**, i.e. the helper body must be **≤52 cells**. (My first
+draft's ~113-char copy clipped the entire actionable remedy — corrected here. Open
+question 3's "length is acceptable" claim was wrong and is withdrawn.)
+
+The issue names the existing `✗ <reason>` status-line channel, and that is also the
+right UX: capture is a tight retry loop, so a terse non-modal line beats popping a modal
+on every failed keypress. So: keep the status-line channel, but make the capability-gated
+message a **chord-specific, actionable, one-line** string that fits. Add a pure helper:
 
 ```go
 // captureRefusalMessage turns validateCapture's raw reason into a user-facing,
-// chord-specific line. For the capability-gated Ctrl+Shift+<letter> case it names
-// the exact chord and the Ctrl+<letter> it would collapse to, and points at the
-// remedy; every other reason passes through unchanged.
+// chord-specific status line. For the capability-gated Ctrl+Shift+<letter> case it
+// names the exact chord and gives the actionable remedy in ONE line that fits the
+// 1-row status label (≤52 cells of body); every other reason passes through unchanged.
 func captureRefusalMessage(chord tv.Chord, reason string) string {
-    if chord.Ctrl && chord.Shift && isLetterRune(chord.Rune) {
-        degraded := chord
-        degraded.Shift = false
-        return fmt.Sprintf("This terminal can't tell %s apart from %s. "+
-            "Pick a different key, or use a terminal with extended-keyboard support.",
-            displayChord(chord), displayChord(degraded))
+    if isCapabilityGated(chord) { // Ctrl+Shift+<letter>; see keybindings.go
+        // e.g. "Ctrl+Shift+G unavailable here — pick another key." (49 cells;
+        // +"✗ " = 51 ≤ 54 floor). "here" = this terminal can't deliver it;
+        // "pick another key" is the action the user takes without leaving the dialog.
+        return fmt.Sprintf("%s unavailable here — pick another key.", displayChord(chord))
     }
     return reason
 }
@@ -88,16 +100,24 @@ if ok, reason := w.validateCapture(a, chord); !ok {
 ```
 
 `validateCapture` stays pure and keeps returning turbotui's reason (single source of
-truth); the customizer owns presentation. `isLetterRune` is a one-line local helper
-(`r >= 'a' && r <= 'z'` after `lowerRune`). No other commit-path behaviour changes —
-the early `return` already prevents any `applyBinding`, so a Shift-dropped chord can
-never be silently bound as Ctrl+<letter>.
+truth); the customizer owns presentation. No other commit-path behaviour changes — the
+early `return` already prevents any `applyBinding`, so a Shift-dropped chord can never be
+silently bound as Ctrl+<letter>.
+
+**Pre-existing, out of #464 scope (noted, not fixed here):** non-capability turbotui
+reasons (Ctrl+S/M/[/H/…) are passed through raw and a couple run ~58-72 chars, so they
+too clip at row 0 — but they are front-loaded (the chord + cause lead), they predate this
+change, and the worst offender (the 72-char Ctrl+Shift+letter reason) is exactly the one
+this helper replaces with a fitting line. A general "shorten every reason" pass would
+re-duplicate turbotui's reason table in gogent (the coupling §4 warns against) and is left
+as a possible follow-up.
 
 ### 4. `ui/tui/keybindings.go` — `LoadKeybindings` reload regression (REQUIRED for goal-match)
-**The subtle one.** `cmd/main.go:238` calls `wb.LoadKeybindings(...)` *before*
-`wb.Run()` (line 242) sets up the terminal — so `extendedKeyboardActive` is still
-`false` at load time, even on a capable terminal. `LoadKeybindings` (line 437-440)
-drops any override whose `chord.Deliverable()` is false:
+**The subtle one.** `LoadKeybindings` runs **before** `Run`/`setupTerminal` at **all
+three** entry points — `cmd/main.go:238` (then `Run` at 242), `cmd/handoff.go:342`, and
+`cmd/attach.go:129` — so `extendedKeyboardActive` is still `false` at load time on every
+launch path, even on a capable terminal. `LoadKeybindings` (line 437-440) drops any
+override whose `chord.Deliverable()` is false:
 
 ```go
 if deliverable, _ := chord.Deliverable(); !deliverable {
@@ -135,8 +155,13 @@ are untouched. On a legacy terminal the kept Ctrl+Shift+G simply never matches (
 wire delivers `^G`, and `Matches` is Shift-exact), so it is harmless; on a capable
 terminal it fires. The binding survives the round-trip either way.
 
-`isCapabilityGated` / `isLetterRune` live in keybindings.go next to `isPlainRune`,
-shared with the customizer helper above.
+`isCapabilityGated` / `isLetterRune` (one-liner: `r >= 'a' && r <= 'z'`) live in
+keybindings.go next to `isPlainRune`, shared with the customizer helper in §3. Because
+this predicate **duplicates** turbotui's single source of truth (the Ctrl+Shift+letter
+branch at `app.go:1248`), its doc comment must point at that line so a future turbotui
+change to the gated set is flagged to keep gogent in sync — see §(4) below for why the
+duplication is accepted (turbotui is read-only/merged and exposes no "is this verdict
+terminal-dependent?" query).
 
 ### 5. `ui/tui/keybinding_customizer.go` — optional "extended keyboard" affordance (OPTIONAL, low-risk)
 gogent has no direct view of `extendedKeyboardActive` (package-private, no accessor),
@@ -150,16 +175,23 @@ func extendedKeyboardAvailable() bool {
 }
 ```
 
-When true, append a hint to the capture prompt (e.g. `… · Ctrl+Shift+ available`) so
-users know the chord class is bindable. Read-only, no state, no new API — safe to ship.
-If it adds noise, drop it; it is not required for goal-match.
+**Same 1-row clip constraint applies.** `capturePrompt` already runs to ~63 cells for a
+long action name (`Press a key for "Rename session"…  (Esc cancel · Backspace clear)`),
+so **appending** to it would push the tail off row 0. So do **not** append. If shipped,
+put the indicator in the **idle hint** instead (a `H:1` line shown while browsing, not
+during capture), and only when it fits — e.g. swap `keybindCustomizerIdleHint`
+(47 cells) for a variant ending `· Ctrl+Shift+ ok` (~64 cells > 54 floor → still risky),
+so realistically it belongs as a one-cell **glyph** (e.g. a leading `⌨ `) rather than
+prose. Read-only probe, no new API. **Recommendation: drop §5 for this PR** — it is not
+required for goal-match and every place to put it is width-constrained; revisit as a
+sized follow-up if users ask "is Ctrl+Shift available?".
 
 ## User-facing behaviour
 
 | Terminal | User presses Ctrl+Shift+G in capture | Result |
 |---|---|---|
 | Capable (Kitty/modifyOtherKeys) | event carries Shift; `Deliverable`=true | binds **Ctrl+Shift+G**, Shift intact; persists & reloads |
-| Legacy, event carries Shift but flag off* | `Deliverable`=false | status: **"✗ This terminal can't tell Ctrl+Shift+G apart from Ctrl+G. Pick a different key, or use a terminal with extended-keyboard support."** — nothing bound |
+| Legacy, event carries Shift but flag off* | `Deliverable`=false | status (one line, fits ≤54): **"✗ Ctrl+Shift+G unavailable here — pick another key."** — nothing bound |
 | Legacy, wire delivers bare `^G` | event is Ctrl+G (no Shift; gogent cannot know Shift was pressed) | binds Ctrl+G — the honest best-effort; gogent never *fabricates* a downgrade, it just receives Ctrl+G |
 
 \* The reachable real-world refusal case: a terminal that emits the Shift modifier but
@@ -174,12 +206,14 @@ silently downgraded. The `LoadKeybindings` fix is in-scope because without it th
 ("bindable") fails across a restart. No scope creep — no new key features, no catalog
 changes.
 
-**(2) Usability.** The refusal names the *actual* chord and the *actual* collapse
-target and states the remedy, via the existing `✗ <reason>` status line the user
-already reads. The optional affordance tells the user up front when Ctrl+Shift+ is
-available. The user still drives every capture; normal chords (Ctrl+N, F-keys, plain
-letters) are unaffected. Nothing is silent: success → `"name → chord."`, failure →
-`"✗ …"`.
+**(2) Usability.** The refusal names the *actual* chord and states the remedy ("pick
+another key") in a single line that **provably fits the 1-row status label** (49-cell
+body + `"✗ "` = 51 ≤ the 54-cell floor), so nothing the user needs is clipped — the
+review-caught defect that the longer copy buried its remedy on an unrendered row 2 is
+resolved by fitting the line, not by a heavier surface. The non-modal status line suits
+the rapid retry loop better than a per-keypress dialog. The user still drives every
+capture; normal chords (Ctrl+N, F-keys, plain letters) are unaffected. Nothing is silent:
+success → `"name → chord."`, failure → `"✗ …"`.
 
 **(3) No regressions.** Capture/commit gains only message text; the existing early
 `return` already blocked silent binds. `validateCapture` stays pure (existing callers —
@@ -198,7 +232,12 @@ re-deriving terminal knowledge. The one cross-repo hazard capability-awareness c
 — a runtime-dependent verdict consulted at pre-terminal config-load time — is handled
 on the gogent side (where the load-ordering lives) rather than asking turbotui to change.
 turbotui's own `binding_deliverable_capability_test.go` already pins the seam and the
-active-mode behaviour gogent can't exercise.
+active-mode behaviour gogent can't exercise. The one accepted coupling is §4's
+`isCapabilityGated` predicate, which re-derives turbotui's gated set (`Ctrl && Shift &&
+a-z`, `app.go:1248`); it is duplicated only because turbotui is read-only/merged and
+exposes no "is this verdict terminal-dependent?" query, and its doc comment links
+`app.go:1248` so a future turbotui change to the gated set is caught. If turbotui later
+adds an accessor, this predicate is the line to delete.
 
 ## Tests to add (gogent) — `ui/tui/keybindings_issue464_test.go`
 
@@ -218,10 +257,14 @@ is exactly what lets us assert the refusal path deterministically:
    gogent pipeline never drops Shift on the success path. (The true capable
    Ctrl+Shift+G bind is covered by turbotui's in-package capability tests — the seam.)
 3. **Reload survives the capability boundary.** `LoadKeybindings` with a persisted
-   `{"window.tileGrid":"Ctrl+Shift+G"}` (or any Ctrl+Shift+letter) keeps the override in
-   `w.keybindings` even though the test-binary verdict is `false` — guarding the
-   regression in §4. Pair with a permanently-undeliverable spec (e.g. `"Ctrl+S"`) that
-   is still correctly dropped, to show the narrowing is precise.
+   `{"session.new":"Ctrl+Shift+G"}` keeps the override in `w.keybindings` even though the
+   test-binary verdict is `false` — guarding the regression in §4. **Must use an action
+   whose default is NOT a Ctrl+Shift+letter** (session.new defaults to Ctrl+N): a chord
+   equal to the action's own default is stored implicitly (`sameChord(cur,default)` skips
+   it at keybindings.go:467), so `window.tileGrid:"Ctrl+Shift+G"` — its existing default —
+   would never land in `w.keybindings` and would not exercise §4 at all. Pair with a
+   permanently-undeliverable spec (e.g. `session.new:"Ctrl+S"`) that is still correctly
+   dropped, to show the narrowing is precise.
 4. **Pin guard** already covered by the updated `keybindings_issue401_test.go`.
 
 ## Open questions
@@ -231,10 +274,13 @@ is exactly what lets us assert the refusal path deterministically:
    strictly to the capture flow, this becomes a follow-up and the reload-drop behaviour
    stands — but then a Ctrl+Shift+G bound on a capable terminal is lost on next launch.
    Recommend including it.
-2. **Optional affordance (§5) — ship it?** It is a read-only probe with zero new API.
-   I lean to shipping a terse hint; happy to drop if the prompt line is considered
-   crowded.
-3. **Message wording.** Proposed copy is *"This terminal can't tell Ctrl+Shift+G apart
-   from Ctrl+G. Pick a different key, or use a terminal with extended-keyboard
-   support."* — open to a shorter form to fit narrow status lines (it is single-line and
-   the dialog floors its width, so length is acceptable, but worth a glance).
+2. **Optional affordance (§5) — ship it?** Every place to put it is width-constrained
+   (capture prompt and idle hint are both 1-row and already near the 54-cell floor), so I
+   now **recommend dropping it** for this PR and revisiting as a sized glyph follow-up.
+3. **Message wording.** Settled on the fitting one-liner *"Ctrl+Shift+G unavailable here
+   — pick another key."* (the earlier longer copy is withdrawn — it clipped). If the
+   maintainer wants the fuller "indistinct from Ctrl+G / use a capable terminal"
+   explanation, the clip-proof channel is `showConfirm(title, msg, nil)` — the existing
+   multi-line informational dialog (single OK, wraps + scrolls) — but that trades the
+   non-modal status line for a modal on each failed keypress, which I judge worse for the
+   retry loop. Flagging the choice rather than deciding it unilaterally.
