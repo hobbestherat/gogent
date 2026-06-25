@@ -13,7 +13,10 @@ Scope: **Gogent only.** No turbotui change required (confirmed below).
 2. **Goal 2 (feature).** Add named, persisted custom themes. A "Save As…" action
    copies the current editor state into a `NamedTheme`, leaving the source untouched.
    Saved themes appear in the preset dropdown (prefixed `★`), are editable in place,
-   persist to `config.json`, and never mutate the read-only built-ins.
+   persist to `config.json`, and never mutate the read-only built-ins. The **active**
+   theme records *which* saved theme it is a copy of (`ThemeConfig.SavedName`), so on
+   reopen the editor re-selects that `★` entry and a later Save writes back to it —
+   not to the parent built-in.
 
 Both reuse the existing override/resolve/apply pipeline — no new colour machinery.
 
@@ -102,6 +105,25 @@ change. A saved theme's `Theme.Name` points at its parent built-in (so
 `paletteByName`/`ResolveTheme` still resolve a base palette); its `Overrides` carry the
 customisations. **Built-ins stay hardcoded and read-only.**
 
+**Active↔saved back-link (fixes the cross-reopen gap).** Add one field to
+`ThemeConfig` itself:
+```go
+// SavedName, when non-empty, records that this (active) theme is the user's saved
+// theme of that name (issue #462). It lets the editor re-select the matching ★ entry
+// on reopen so a later Save writes back to that saved entry rather than to the parent
+// built-in. It is empty for a plain built-in selection. It is metadata only —
+// ResolveTheme/applyOverrides ignore it — and is NOT stored inside a NamedTheme.Theme
+// (a saved theme does not point at itself; the entry's own Name is the identity).
+SavedName string `json:"saved_name,omitempty"`
+```
+**Why on `ThemeConfig`, not a new `Config` field:** `SetTheme(ThemeConfig)` already
+persists the active `ThemeConfig` wholesale via `SaveConfig()`, so the pointer rides
+along for free — no new handler, no `SetTheme` signature change, no extra wiring across
+`tui.go`/`attach.go`/`embedded_handlers.go`. `buildThemeConfig` does **not** set it
+(it stays `""`, so the existing `reflect.DeepEqual` tests are unaffected); only the
+editor sets it when constructing the *active* cfg it hands to `SetTheme` (see Save /
+Save As below). The configs stored in `SavedThemes` are built **without** `SavedName`.
+
 ### Persistence (`internal/gogent/gogent.go`)
 Add, mirroring `Theme()`/`SetTheme()` (≈ lines 3119–3140), under the same `g.mu` lock
 and `SaveConfig()` flush:
@@ -146,47 +168,76 @@ called after Save As / Delete / Rename. (`tv.Select.SetOptions` exists and prese
 selection by value / clamps — verified in turbotui `widget_select.go`; **no turbotui
 change needed**.)
 
-**Selecting an entry** (`preset.OnChange`): seed fields from the entry's source:
-- built-in: `loadFields(paletteByName(entry.parent))` (unchanged behaviour).
-- saved: `loadFields(editedTheme(saved[entry.savedIndex].Theme))`, and set the
-  `noColor`/`noShadow` checkboxes from that saved config so the whole state seeds, not
-  just colours.
+**Selecting an entry** — a single `seedFromEntry(entry)` helper used by both
+`preset.OnChange` *and* the programmatic re-selects after Save As / Delete (necessary
+because `tv.Select.SetSelected` does **not** fire `OnChange` — verified in
+`widget_select.go:72-77`). It seeds the whole state uniformly so there is no asymmetry
+(fixes C2.3):
+- colours:
+  - built-in: `loadFields(paletteByName(entry.parent))`
+  - saved: `loadFields(editedTheme(saved[entry.savedIndex].Theme))`
+- checkboxes: `noColor`/`noShadow` are seeded from the entry's config for **every**
+  selection — `false`/`false` for a built-in (built-ins carry no Colour/Shadow flags),
+  the saved config's values for a saved entry. So selecting Default after a
+  colours-disabled custom theme resets the toggles instead of silently leaving them on.
+- `seedOverrides` (the carry source for `carryUnexposedOverrides`, see Save): set per
+  selection — `saved[entry.savedIndex].Theme.Overrides` for a saved entry, else
+  `cur.Overrides` for a built-in (preserving today's behaviour of carrying the
+  active-at-open theme's unexposed focus-pair overrides).
 
-**Save** (`save` closure, ≈ line 906): build `cfg` from the **parent** name of the
-selected entry (not its display label) via
-`buildThemeConfig(entry.parent, noColor, noShadow, specs)` then
-`carryUnexposedOverrides(cfg, cur.Overrides)` exactly as today. Then:
+**Save** (`save` closure, ≈ line 906): build the **entry config**
+`entryCfg = carryUnexposedOverrides(buildThemeConfig(entry.parent, noColor, noShadow,
+specs), seedOverrides)` (note `entry.parent`, the built-in name, never the `★` display
+label; and `seedOverrides` from the current selection, not always `cur.Overrides`).
+Then route:
 - selected entry is a **saved** theme: update only that entry —
-  `saved[savedIndex].Theme = cfg; SetSavedThemes(saved)` — **and** make it the active
-  theme so the live UI reflects it and it survives restart: `w.handlers.SetTheme(cfg)`.
+  `saved[savedIndex].Theme = entryCfg; SetSavedThemes(saved)`. Then make it the active
+  theme so the live UI reflects it and it survives restart, **with the back-link set**:
+  `activeCfg := entryCfg; activeCfg.SavedName = entry.name; w.handlers.SetTheme(activeCfg)`.
   Built-ins are never written.
-- selected entry is a **built-in**: `w.handlers.SetTheme(cfg)` exactly as today.
-
-  Note: `cur.Overrides` (the source for `carryUnexposedOverrides`) is the *active*
-  theme's overrides read at open time. When editing a saved theme we instead carry the
-  *saved entry's* own overrides — capture `seedOverrides` per selection (the overrides
-  of whatever entry is currently selected) and feed that to `carryUnexposedOverrides`,
-  so unexposed roles (the #265 focus pairs) are preserved per-theme rather than bleeding
-  the active theme's unexposed keys onto a saved one.
+- selected entry is a **built-in**: apply with the back-link cleared so a reopen selects
+  the built-in: `activeCfg := entryCfg; activeCfg.SavedName = ""; SetTheme(activeCfg)`
+  — i.e. exactly today's behaviour plus an explicit empty `SavedName`.
 
 **Save As…** (new button): `showInputDialog("Save Theme As", "&Name:", "", onResult)`.
-On confirm with a non-empty name:
-- build `cfg` from the current fields + the selected entry's `parent`.
-- append `NamedTheme{Name: name, Theme: cfg}` to the saved slice, `SetSavedThemes(...)`.
-- `rebuildPresetOptions()`, select the new entry, and `SetTheme(cfg)` so the copy is
-  applied live (a "Save As" that didn't apply would feel inert). Source theme untouched.
-- Duplicate-name handling: if the name already exists (case-insensitive trim), reuse
-  that slot (overwrite) rather than create a second identical label — keeps the dropdown
-  unambiguous. (Open question: overwrite vs. auto-suffix — see below.)
+On confirm with a non-empty (trimmed) name:
+- build `entryCfg` from the current fields + the selected entry's `parent` (same
+  `buildThemeConfig`+`carryUnexposedOverrides` as Save).
+- **Duplicate-name handling (fixes C2.2 — consistent destructiveness):** if a saved
+  theme of that name already exists (case-insensitive trim), do **not** silently
+  overwrite. Show `showConfirm("Save Theme As", "A theme named \"X\" already exists.
+  Overwrite it?", …)`; on decline, abort (the user can re-Save-As with a new name). This
+  matches Delete's confirm-before-destroy. Auto-suffixing (`X (2)`) is the rejected
+  alternative — overwrite-with-confirm keeps the dropdown unambiguous and matches the
+  "edit a copy" mental model. A brand-new name appends `NamedTheme{Name, Theme: entryCfg}`.
+- `SetSavedThemes(saved)`, `rebuildPresetOptions()`, then `seedFromEntry(newEntry)` and
+  `preset.SetSelected(newIndex)` (manual seed because `SetSelected` won't fire
+  `OnChange`), and `SetTheme(activeCfg)` with `activeCfg.SavedName = name` so the copy is
+  applied live (a "Save As" that didn't apply would feel inert) **and** reopen re-selects
+  it. The source theme is untouched (built-ins are never written; an existing saved
+  source is only touched if the user confirmed an overwrite of that same name).
 
 **Delete** (new button, included): enabled only when a **saved** entry is selected
 (disabled/no-op for built-ins). Confirm via `showConfirm`, then remove the entry,
-`SetSavedThemes(...)`, `rebuildPresetOptions()`, and select the Default built-in.
-Built-ins are non-deletable by construction (no `savedIndex`).
+`SetSavedThemes(saved)`, `rebuildPresetOptions()`. If the deleted entry was the live
+**active** theme (`cur.SavedName == deleted name`, or it is the one currently selected),
+reset the active theme to its parent built-in so no dangling `SavedName` survives:
+`base := buildThemeConfig(entry.parent, …); base.SavedName = ""; SetTheme(base)`, and
+select that built-in in the dropdown; otherwise just rebuild and keep the current
+selection. Built-ins are non-deletable by construction (no `savedIndex`).
 
 **Rename** (optional / stretch): `showInputDialog(..., withSelectAll())` seeded with the
 current name; on confirm update `saved[i].Name` and rebuild. Documented as optional in
 the issue; include if time permits, otherwise Delete + re-Save-As covers the need.
+
+**On open** (replaces the current `preset.SetSelected(presetIndex(cur.Name))` +
+`loadFields(editedTheme(cur))` seed, ≈ lines 898–901): if `cur.SavedName != ""` and a
+saved entry of that name exists, select that `★` entry and `seedFromEntry` it; otherwise
+fall back to the built-in via `presetIndex(cur.Name)` and seed from `cur` (today's
+behaviour). A `cur.SavedName` pointing at a now-deleted/renamed entry degrades
+gracefully to the parent built-in. This is the fix for the cross-reopen gap: after a
+Save As (or editing a saved theme), reopening shows `★ MyCopy` selected, so a later Save
+routes back to that saved entry instead of the built-in.
 
 #### Button layout
 Bottom row currently: `Reset(x=2,w=9)`, `Save(x=width-24,w=9)`, `Cancel(x=width-13,w=10)`.
@@ -234,7 +285,17 @@ and applied live through the existing `SetTheme` handler →
 - The colour now anchors each line and sections are spaced — directly the reported pain.
 - The user drives every input: `showInputDialog` for naming/renaming (free text, the
   same primitive used elsewhere), the dropdown for selection, real buttons for
-  Save As / Delete with a confirm on the destructive Delete.
+  Save As / Delete.
+- **Identity survives across sessions (resolved C2.1).** `ThemeConfig.SavedName` links
+  the active theme to its saved entry; the editor re-selects that `★` entry on open, so
+  "edit a copy across restarts" — the core of the issue — works: a Save after reopen
+  writes back to the saved entry, not the parent built-in.
+- **Consistent destructiveness (resolved C2.2).** Both destructive paths confirm:
+  Delete via `showConfirm`, and Save-As-onto-an-existing-name via `showConfirm` before
+  overwriting. No silent data loss.
+- **Symmetric state seeding (resolved C2.3).** `seedFromEntry` seeds colours **and** the
+  `noColor`/`noShadow` checkboxes for *every* selection (built-in ⇒ `false`/`false`), so
+  switching presets never leaves a stale toggle the user didn't set.
 - The right thing is surfaced, not silent: "Save As…" creates a *visible* new entry and
   applies it; editing a saved theme writes to that entry; built-ins visibly cannot be
   deleted (Delete is inert on them). Saved themes are visually distinguished by the `★`
@@ -255,16 +316,29 @@ and applied live through the existing `SetTheme` handler →
 - **`SetTheme` wholesale-replace** semantics preserved; `carryUnexposedOverrides` still
   runs on every Save (now sourced from the *selected entry's* overrides for saved
   themes, so unexposed keys are preserved per theme — covered by a new test).
-- **Config backward-compat**: `saved_themes` is `omitempty`; absent key ⇒ nil slice ⇒
-  no behaviour change. `Theme` field and all existing config round-trips are untouched.
+- **Config backward-compat**: `saved_themes` and `saved_name` are both `omitempty`;
+  absent keys ⇒ nil slice / empty string ⇒ no behaviour change. `LoadConfig` is a plain
+  `json.Unmarshal` with no version gate, so old files load untouched.
+  `buildThemeConfig` never sets `SavedName`, so the existing `reflect.DeepEqual`
+  assertions in `TestBuildThemeConfig`/`…RoundTrip` still pass unchanged.
+- **`seedOverrides` is pinned** (was underspecified): saved entry ⇒ that entry's
+  overrides; built-in ⇒ `cur.Overrides`. So `carryUnexposedOverrides` preserves the
+  #265 focus pairs per-theme and never bleeds the active theme's unexposed keys onto a
+  saved one.
 - **Tests to update/add**:
   - Update `TestIssue267*` row-count / placement expectations for the separator rows and
     swatch-left order; add an assertion that the swatch column precedes the label column.
     (`TestIssue267FieldsSeededInPlacementOrder` still works: the field remains the first
     token *after* the label cell.)
-  - Add config round-trip test: old JSON without `saved_themes` loads; save/select/edit/
-    persist of a custom theme; built-in immutability after editing a saved copy;
-    `carryUnexposedOverrides` across a saved-theme Save.
+  - Add config round-trip test: old JSON without `saved_themes`/`saved_name` loads;
+    save/select/edit/persist of a custom theme; built-in immutability after editing a
+    saved copy; `carryUnexposedOverrides` across a saved-theme Save.
+  - Add **back-link reopen** test (the C2.1 fix): Save As → reopen the editor → assert
+    the `★` entry is selected (not the parent built-in) → edit + Save → assert the saved
+    entry updated and the built-in unchanged. And: `SavedName` pointing at a deleted
+    entry falls back to the parent built-in on open.
+  - Add **`SavedName` isolation** test: configs in `SavedThemes` carry no `SavedName`;
+    only the active `Config.Theme` does.
 
 ## Criterion 4 — HOLISTIC DESIGN across both repos
 - **Right place / seam respected.** All logic lives in gogent: config model + persistence
@@ -276,9 +350,18 @@ and applied live through the existing `SetTheme` handler →
   `SetOptions` (preserves selection by value, clamps, closes popup) — verified in
   `$HOME/work/turbotui/turbotv/widget_select.go` — so the dropdown can be repopulated
   after Save As/Delete with no upstream work. No paired turbotui issue is opened.
-- **Downstream effects considered.** `SetOptions` is already covered by turbotui tests;
-  the live-apply path (`ApplyTheme`/`RefreshTheme`/`reseedSelect`) is reused unchanged,
-  so a saved theme recolours the same way a built-in does.
+- **Downstream effects considered.** `SetOptions` is already covered by turbotui tests
+  (preserves selection by value, clamps, closes the popup); `SetSelected` does **not**
+  fire `OnChange`, which is why the editor seeds fields manually after a programmatic
+  re-select. The live-apply path (`ApplyTheme`/`RefreshTheme`/`reseedSelect`) is reused
+  unchanged, so a saved theme recolours the same way a built-in does.
+- **Tab order follows the new visual order — safe, but note the dependency.** turbotui's
+  `sortFocusOrder` (`desktop.go:633-647`) orders focus by TabIndex then reading order
+  (Y, then X). All theme-editor widgets share the default TabIndex, so after the swatch
+  moves to the left of the field, Tab traverses swatch→field by ascending X automatically
+  — no zig-zag, no gogent change. This relies on turbotui's spatial tiebreak; if upstream
+  ever switched to explicit-TabIndex ordering, gogent would need to assign TabIndex to
+  preserve order. Documented so the dependency is visible.
 
 ---
 
@@ -302,17 +385,25 @@ and applied live through the existing `SetTheme` handler →
    explicitly.
 5. **Test buffer width.** The headless test app is 80-wide; the two new bottom buttons
    must fit left of `Save` at the floor (they do: left group ends ≈ x=34, Save at x=56).
+6. **Dangling `SavedName`.** A `SavedName` pointing at a deleted/renamed entry must not
+   strand the editor. Mitigation: open-time selection and Delete both fall back to the
+   parent built-in when no matching saved entry is found; Delete of the active theme
+   resets `SavedName` to `""`.
+7. **`SavedName` must not leak into the saved list.** The configs stored in
+   `SavedThemes` are built without `SavedName` (only the active `Config.Theme` carries
+   it); a saved entry is identified by its `NamedTheme.Name`. Mitigation: set `SavedName`
+   only on the `activeCfg` handed to `SetTheme`, never on `entryCfg`.
 
 ---
 
-## Open questions
-1. **Save As applies live?** Design assumes yes (a copy you just named becomes active),
-   matching the "live UI applies it correctly" acceptance note. If the maintainer prefers
-   Save As to only store-without-applying, drop the `SetTheme(cfg)` call in that path.
-2. **Duplicate custom name policy.** Design overwrites an existing same-name slot
-   (case-insensitive). Alternative: auto-suffix `name (2)`. Overwrite keeps the dropdown
-   unambiguous and matches "edit a copy" mental model; confirm acceptable.
-3. **Rename inclusion.** Included as optional/stretch. Confirm whether it should ship in
-   this cut or be deferred (Delete + Save-As already cover the core need).
-4. **`★` prefix glyph.** Using `★` to mark saved themes; if a plain-ASCII marker is
-   preferred for narrow/legacy terminals, swap to e.g. `* ` — purely cosmetic.
+## Open questions (non-blocking; sensible defaults chosen)
+1. **Rename inclusion.** Included as optional/stretch (via `showInputDialog` +
+   `withSelectAll`, updating `NamedTheme.Name` + `rebuildPresetOptions`). Confirm whether
+   it ships in this cut or is deferred — Delete + Save-As already cover the core need.
+2. **`★` prefix glyph.** Using `★` to mark saved themes; if a plain-ASCII marker is
+   preferred for narrow/legacy terminals, swap to e.g. `* ` — purely cosmetic, no design
+   impact.
+
+(Previously-open items now **resolved** in the design: Save As applies live *and* sets
+the `SavedName` back-link so the association survives reopen; duplicate Save-As name
+confirms-before-overwrite rather than silently overwriting.)
