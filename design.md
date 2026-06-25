@@ -221,28 +221,49 @@ On confirm with a non-empty (trimmed) name:
 (disabled/no-op for built-ins). Confirm via `showConfirm`, then remove the entry,
 `SetSavedThemes(saved)`, `rebuildPresetOptions()`.
 
-Then decide whether the deletion orphaned the **live active** theme — and *only* then
-reset it. **The detection must read the live active theme, not the dropdown selection
-and not the stale open-time `cur`:**
+Then reconcile in two steps. **(1) If the deletion orphaned the live active theme, reset
+it** — detection reads the *live* active theme, never the dropdown selection and never
+the stale open-time `cur`:
 ```
-live := w.handlers.GetTheme()          // re-read NOW, not the open-time cur
-if live.SavedName == deletedName {     // sole criterion — keyed on SavedName equality
-    base := buildThemeConfig(entry.parent, …); base.SavedName = ""
-    w.handlers.SetTheme(base)          // re-point active → parent built-in, no dangle
-    // select that built-in in the dropdown + seedFromEntry it
+live := w.handlers.GetTheme()                 // re-read NOW, not the open-time cur
+if live.SavedName == deletedName {            // sole criterion — keyed on SavedName equality
+    w.handlers.SetTheme(config.ThemeConfig{Name: entry.parent})  // pristine parent, SavedName=""
 }
-// otherwise: just rebuild the dropdown; do NOT touch the active theme or live colours.
 ```
-This avoids two traps the prior draft fell into:
-- **"currently selected" ≠ "active".** A user can browse the dropdown to `★B` (selection)
-  while `★A` is still the live active theme (nothing persisted on mere selection).
-  Deleting `★B` must not reset the `★A` binding. Keying solely on `SavedName` equality —
-  never on the dropdown highlight — prevents wiping the wrong theme.
-- **Stale `cur`.** `cur` is captured once at open (`theme_editor.go:583`); a mid-session
-  Save As calls `SetTheme` and changes the live active theme without updating `cur`.
-  Re-reading `w.handlers.GetTheme()` at delete time is the only reliable source.
+The reset is to the **pristine parent built-in** (no overrides): deleting a theme removes
+its colours too, so the live UI falls back to the base palette — the least-surprising
+"delete = gone" semantics. (We deliberately do *not* keep the deleted theme's colours as
+an unnamed Default override.)
 
-Built-ins are non-deletable by construction (no `savedIndex`).
+**(2) Re-establish a consistent editor state in *both* sub-paths** by re-reading the
+post-reset live active theme and routing it through the shared helper:
+```
+rebuildPresetOptions()
+selectActive(w.handlers.GetTheme())           // re-select + seed the post-delete active
+```
+This is the missing piece the prior draft lacked, and it fixes both inconsistencies:
+- **Delete non-active (browse case).** active=`★A`, user selected `★B`, deletes `★B`.
+  Step 1 is skipped (live is `★A`). `rebuildPresetOptions()`→`SetOptions` drops the `★B`
+  label and clamps the *dropdown* to index 0, but `selectActive(★A)` then re-selects `★A`
+  and seeds its colours — so dropdown=`★A`, fields=`★A`, live=`★A` all agree. A later
+  Save reads the `★A` selection and writes back to `★A`. (Without step 2, `SetOptions`
+  would silently leave Default selected while the fields still showed `★B` — the
+  three-way mismatch that caused a Save to persist `★B`'s colours under Default.)
+- **Delete active.** active=selected=`★A`, delete `★A`. Step 1 resets live to the
+  pristine parent; `selectActive(parent)` selects that built-in and `loadFields(
+  editedTheme({Name:parent}))` loads the pristine palette — so live, fields, and dropdown
+  all show the pristine parent. A later Save persists the pristine parent, matching what
+  the user sees. (Without this, `base` kept colours while a stray pristine reseed wiped
+  the fields — the contradiction the prior draft had.)
+
+Why detection must key on `live.SavedName` only: a user can browse to `★B` (selection)
+while `★A` is still active (nothing is persisted on mere selection), and a mid-session
+Save As changes the live active theme without updating `cur` (`theme_editor.go:583`).
+Re-reading `GetTheme()` and comparing `SavedName` is the only reliable target test.
+
+Built-ins are non-deletable by construction (no `savedIndex`). This mirrors the
+re-select+seed pattern Save As and Rename already use, so all three mutation paths leave
+the editor self-consistent.
 
 **Rename** (optional / stretch): `showInputDialog(..., withSelectAll())` seeded with the
 current name; on confirm update `saved[i].Name`, then **re-point the active back-link if
@@ -254,14 +275,30 @@ re-select. Apply the same case-insensitive duplicate-name confirm as Save As. Do
 as optional in the issue; include if time permits, otherwise Delete + re-Save-As covers
 the need.
 
+**`selectActive(active config.ThemeConfig)` — the shared "make the editor reflect this
+active theme" helper.** It is the single routine that re-establishes a consistent
+dropdown↔fields↔toggles↔`seedOverrides` state for a given *active* `ThemeConfig`, and is
+reused by both the on-open seed and the post-Delete reconcile so the two can never drift:
+```
+if active.SavedName != "" && savedEntryExists(active.SavedName):
+    preset.SetSelected(★-entry index for that name)
+    seedFromEntry(that saved entry)        // editedTheme(saved.Theme) + its toggles + its overrides
+else:                                       // built-in, or a dangling SavedName
+    preset.SetSelected(presetIndex(active.Name))
+    loadFields(editedTheme(active))         // parent palette + active's own overrides (today's seed)
+    seed noColor/noShadow from active; seedOverrides = active.Overrides
+```
+Note the built-in branch seeds from the **active config itself** (so an active
+customised built-in keeps its overrides), which is deliberately *not* the same as
+`seedFromEntry(builtin)` (which loads the pristine palette for a fresh *switch to* a
+built-in). `SetSelected` does not fire `OnChange`, so the seed call is explicit.
+
 **On open** (replaces the current `preset.SetSelected(presetIndex(cur.Name))` +
-`loadFields(editedTheme(cur))` seed, ≈ lines 898–901): if `cur.SavedName != ""` and a
-saved entry of that name exists, select that `★` entry and `seedFromEntry` it; otherwise
-fall back to the built-in via `presetIndex(cur.Name)` and seed from `cur` (today's
-behaviour). A `cur.SavedName` pointing at a now-deleted/renamed entry degrades
-gracefully to the parent built-in. This is the fix for the cross-reopen gap: after a
-Save As (or editing a saved theme), reopening shows `★ MyCopy` selected, so a later Save
-routes back to that saved entry instead of the built-in.
+`loadFields(editedTheme(cur))` seed, ≈ lines 898–901): call `selectActive(cur)`. So if
+`cur.SavedName != ""` and a saved entry of that name exists, the `★` entry is selected
+and a later Save routes back to it; otherwise it degrades gracefully to the parent
+built-in. This is the fix for the cross-reopen gap: after a Save As (or editing a saved
+theme), reopening shows `★ MyCopy` selected.
 
 #### Button layout
 Bottom row currently: `Reset(x=2,w=9)`, `Save(x=width-24,w=9)`, `Cancel(x=width-13,w=10)`.
@@ -322,6 +359,14 @@ and applied live through the existing `SetTheme` handler →
   open-time `cur`, not the dropdown highlight) has `SavedName == deletedName`. So
   browsing the dropdown to `★B` and deleting it never disturbs an active `★A`; and a
   mid-session Save As that changed the active theme is still detected correctly.
+- **Delete leaves a consistent editor (resolved C2 round-3).** Both Delete sub-paths end
+  by re-running the shared `selectActive(GetTheme())`, so the dropdown selection, the
+  spec fields, the toggles, and the live theme always agree afterwards — closing the
+  three-way mismatch where `SetOptions` clamped the dropdown to Default while the fields
+  still showed the deleted theme (a later Save would have persisted those colours under
+  Default). The active-deleted reset goes to the **pristine parent built-in** so live and
+  fields match exactly. All three mutation paths (Save As, Rename, Delete) reconcile the
+  editor the same way.
 - **Symmetric state seeding (resolved C2.3).** `seedFromEntry` seeds colours **and** the
   `noColor`/`noShadow` checkboxes for *every* selection (built-in ⇒ `false`/`false`), so
   switching presets never leaves a stale toggle the user didn't set.
@@ -369,10 +414,14 @@ and applied live through the existing `SetTheme` handler →
   - Add **`SavedName` isolation** test: configs in `SavedThemes` carry no `SavedName`;
     only the active `Config.Theme` does.
   - Add **browse-then-delete** test (the C2.2a fix): active = `★A`; select `★B` in the
-    dropdown; Delete `★B`; assert the active theme is still `★A` (untouched). And a
-    delete-the-active test: deleting the live active `★A` resets the active theme to the
-    parent built-in with `SavedName == ""`. If Rename ships, a rename-the-active test:
-    the active `SavedName` follows the new name.
+    dropdown; Delete `★B`; assert the active theme is still `★A` (untouched) **and** that
+    after the delete the dropdown re-selects `★A` and the fields show `★A`'s colours
+    (dropdown/fields/live agree) — then a Save writes back to `★A`, not Default.
+  - Add **delete-the-active** test: deleting the live active `★A` resets the active theme
+    to the **pristine parent built-in** (`SavedName == ""`, no overrides), and the
+    dropdown + fields both show that pristine parent — then a Save persists the pristine
+    parent (it does not silently re-save `★A`'s old colours).
+  - If Rename ships, a rename-the-active test: the active `SavedName` follows the new name.
 
 ## Criterion 4 — HOLISTIC DESIGN across both repos
 - **Right place / seam respected.** All logic lives in gogent: config model + persistence
@@ -409,10 +458,15 @@ and applied live through the existing `SetTheme` handler →
 2. **`carryUnexposedOverrides` source.** Using the *active* theme's `cur.Overrides` when
    saving a *saved* theme would bleed unexposed keys across themes. Mitigation: carry the
    selected entry's own overrides; add a test.
-3. **Dropdown index ↔ entry mapping.** After Save As/Delete the entries list changes;
-   `save`/`OnChange` must read the freshly-rebuilt `entries`, not a stale capture.
-   Mitigation: `entries` is a closure variable rebuilt in place by
-   `rebuildPresetOptions()`; all closures read it live.
+3. **Dropdown index ↔ entry mapping, and post-mutation consistency.** After Save
+   As/Delete the entries list changes; `save`/`OnChange` must read the freshly-rebuilt
+   `entries`, not a stale capture. Worse, `SetOptions` silently **clamps** the selection
+   to index 0 when the previously-selected value (e.g. a just-deleted `★B`) is gone, and
+   does not fire `OnChange` — leaving dropdown/fields/live out of sync. Mitigation:
+   `entries` is rebuilt in place by `rebuildPresetOptions()` (all closures read it live),
+   and every mutation path ends with `selectActive(GetTheme())` (or an explicit
+   `SetSelected`+`seedFromEntry` for Save As/Rename) so the post-mutation selection,
+   fields, toggles and live theme always agree.
 4. **`buildThemeConfig` parent name.** Must pass the entry's `parent` (built-in), never
    the `★`-prefixed display label, or `canonicalThemeName` falls back to Default and the
    overrides are computed against the wrong base. Mitigation: entries carry `parent`
