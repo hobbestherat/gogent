@@ -379,6 +379,17 @@ they are explicitly scoped out, not overlooked.
 - **Footer unchanged:** labels and `commandsFooterLabels` are untouched, so the
   footer-width tests (`TestCommandsDialogFooterFitsAtMinWidth`,
   `…FooterRendersFullWidth`) keep passing.
+- **Intended behaviour change — arrow keys inside the template.** The old
+  single-line `TextBox` *declined* Up/Down (`widget_textbox.go:109-145` has no
+  Up/Down case → returns `false`), so those arrows fell through to the desktop's
+  spatial field-navigation (`moveFocusDirection`). The new `MultiLineInput`
+  *consumes* Up/Down to move the caret between rows
+  (`widget_multiline_input.go:242-249`). So arrow-key navigation no longer crosses
+  *through* the template field — which is the correct, expected behaviour for a
+  multi-line editor, and Tab/Shift-Tab (and the new Enter-advance) still traverse
+  every field. This is a deliberate consequence of P1, not a defect; called out so
+  it is not mistaken for an oversight. No other field's arrow behaviour changes
+  (the remaining single-line `TextBox`es still decline Up/Down).
 
 ### (4) HOLISTIC DESIGN across gogent + turbotui
 The seam is respected and the change sits in the right repo. `MultiLineInput`
