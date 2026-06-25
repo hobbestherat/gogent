@@ -88,6 +88,17 @@ The fix has two independent parts: **(1)** raise the default cap 25→100, and
     budget trips at ~3 requests, far under any cap; the `> 26` sanity bound
     (`:48`) stays valid at 100. **No change** (optionally relax the stale "26" in
     the message; not required).
+- `internal/gogent/maxsteps_wiring_test.go` — **🔴 build break the first pass
+  missed.** `TestCreateUserSessionDefaultConfigKeepsHistoricalBound` hard-asserts
+  `us.MaxSteps() != 25` (`:82`) → **`!= 100`**; its name + comment (`:67` "yields
+  the historical 25-step cap … no behaviour change") assert an invariant we are
+  *deliberately* breaking (#449), so rename to e.g.
+  `TestCreateUserSessionDefaultConfigUsesDefaultCap` and rewrite the rationale to
+  "the full GetDefaultConfig→CreateUserSession path yields `DefaultMaxSteps` (100)".
+  `TestCreateUserSessionWiresMaxStepsFromConfig`'s `"nil resolves to default 25"`
+  case *value* is symbolic (`config.DefaultMaxSteps`, ✅); only fix the case-name
+  string (`:46`) and header comment (`:38`). The explicit-0/9/negative cases are
+  unaffected.
 - `docs/configuration.md` — table row (`:38`) and the `max_steps` section table
   (`:339`): `25` → `100` (keep `nil ⇒ default`, `0 ⇒ unlimited`, `N>0 ⇒ cap N`).
 - `docs/architecture.md` — `DefaultMaxSteps=25` (`:139`) → `=100`; add one clause
@@ -121,39 +132,76 @@ The fix has two independent parts: **(1)** raise the default cap 25→100, and
      (the for-condition failed before the body ran, so a cancellation landing
      exactly at the boundary did not pre-empt the cap exit). Every other
      termination is a `break` that leaves `capExit == false`.
-  4. In the exit path (`:1550`), **before** the existing `SessionEventFinal`
-     emit:
+  4. **Add a step-limit-specific synthesized result note + parameterize the
+     balancer.** `finalToolCallResultNote = "[Final answer recorded and delivered
+     to the user.]"` (`:364`) is accurate for a *folded final* but actively
+     **wrong** for a tool call that was never executed — a resumed model re-reading
+     it would think the work was done. Add:
+     `stepLimitToolCallResultNote = "[Tool call not executed: the per-turn step cap
+     was reached before this call ran. Re-issue it if still needed.]"`. Generalize
+     the balancing loop into `balanceTranscriptToolCalls(sess, resp, executed, note)`
+     and make the existing `finalizeTranscriptToolCalls` a thin delegate that passes
+     `finalToolCallResultNote` (so its two current callers `:1461`/`:1510` are
+     **unchanged**). The step-limit path passes `stepLimitToolCallResultNote`.
+  5. In the exit path (`:1550`), **before** the existing `SessionEventFinal` emit,
+     handle the capped-but-unprocessed `resp`. The orphaned `resp` is exactly what
+     the top of `step=N` would have inspected, so we branch the *same* way that
+     iteration would have — distinguishing a genuine final that merely *landed* at
+     the cap from a tool round that was *interrupted* by it:
      ```go
      if capExit && resp != nil {
-         if calls, _ := s.collectToolCalls(resp); len(calls) > 0 {
-             resp = stopForStepLimit(resp, maxSteps)            // (a) visible notice
-             s.finalizeTranscriptToolCalls(sess, resp, nil)    // (b) balance orphans
+         calls, explicitFinal := s.collectToolCalls(resp)
+         switch {
+         case explicitFinal || containsTerminalFinal(calls):
+             // A GENUINE final answer landed exactly at the cap. collectToolCalls
+             // already folded the text-embedded / truncated-salvage forms into
+             // resp.Content; foldTerminalFinal folds a well-formed NATIVE
+             // structured_output{final} the serial runner never reached. Surface it
+             // as the normal final — NOT a step-limit stop — and balance its
+             // sibling/terminal calls with the (accurate) "recorded and delivered" note.
+             foldTerminalFinal(resp, calls)               // no-op unless a native final needs folding
+             s.finalizeTranscriptToolCalls(sess, resp, nil)
+         case len(calls) > 0:
+             // Real, non-final tool calls orphaned mid-action: surface the stop and
+             // balance them with the "not executed" note.
+             resp = stopForStepLimit(resp, maxSteps)       // (a) visible notice
+             s.balanceTranscriptToolCalls(sess, resp, nil, stepLimitToolCallResultNote) // (b)
          }
+         // default: plain-text cap (no calls) → fall through to the normal final.
      }
      ```
-     The existing block then reads `resp.Content` (now the notice, partial beneath)
-     as `finalText` and emits it as the `SessionEventFinal` — no second emit needed.
-     - `collectToolCalls` is the *same* inspection the top of `step=N` would have
-       done. When it returns `len(calls) > 0` (native or JSON-fallback calls), the
-       turn was mid-action → fold + balance. When it returns `explicitFinal`
-       (a `structured_output{final}` that happened to land on the cap) it yields
-       `len(calls)==0`, so we **don't** mark a step-limit stop — that genuine final
-       answer surfaces normally. Plain-text caps (no calls) likewise fall through
-       to the normal final, matching the issue's scope ("the stuck turn had real
-       tool calls"; `looksLikePreamble` explicitly out of scope).
-     - `finalizeTranscriptToolCalls(sess, resp, nil)` synthesizes a
-       `finalToolCallResultNote` tool-result for every unanswered native
-       `tool_call_id` (it is a no-op for JSON-fallback "calls", which are plain
-       text and need no balancing). The transcript becomes a balanced
-       `assistant{tool_calls} → tool-results` sequence → a resumed session's next
-       user turn is valid.
-  5. `subAgentOutcome` (`:2550`): add `|| strings.HasPrefix(up, stepLimitReachedMarker)`
+     The existing block then reads `resp.Content` (the folded answer, or the notice
+     with partial beneath) as `finalText` and emits the `SessionEventFinal` — no
+     second emit.
+     - **Why the terminal-final branch is required (critic correctness fix).** A
+       *well-formed native* `structured_output{final}` returns from
+       `collectToolCalls` as an ordinary call with **`explicitFinal == false`**
+       (`:1806`/`:1812`; the `explicitFinal=true` salvage at `:1791` fires only for
+       a *truncated* sole call, and the text-embedded branch `:1828` only for JSON
+       text). So a gate of `len(calls) > 0` alone would mis-stamp a real final
+       answer — landing on the cap turn — as "interrupted" and overwrite it with the
+       notice, dropping the model's answer. This is reachable whenever a turn ends
+       on a native `structured_output{final}` at the cap, and is the **standard**
+       sub-agent finish path (sub-agents end via `structured_output`). Adding
+       `containsTerminalFinal(calls)` (the loop's own existing predicate) plus a
+       tiny `foldTerminalFinal(resp, calls)` helper — mirroring the serial runner's
+       fold at `:1718-1722` (`resp.Content = call.Args["response"]`) — folds and
+       surfaces it correctly.
+     - `balanceTranscriptToolCalls`/`finalizeTranscriptToolCalls` synthesize a
+       tool-result for every unanswered native `tool_call_id` (no-op for plain-text
+       / JSON-fallback turns, which carry no native `tool_calls`). The transcript
+       becomes a balanced `assistant{tool_calls} → tool-results` sequence → a
+       resumed session's next user turn is valid, and (with the step-limit note) the
+       resume context now *accurately* says the calls were not executed.
+  6. `subAgentOutcome` (`:2550`): add `|| strings.HasPrefix(up, stepLimitReachedMarker)`
      beside the `budgetExceededMarker` check. **Required for consistency, not scope
-     creep:** `runLoop` is shared, so a sub-agent that hits the cap now returns a
-     final prefixed `STEP_LIMIT_REACHED`. Without this, that sub-agent would report
-     `StatusCompleted` while carrying an "interrupted" notice — exactly the
-     "looks finished, was abandoned" bug, one level down. A capped sub-agent did
-     not finish its task, so it is a failure, identically to `BUDGET_EXCEEDED`.
+     creep:** `runLoop` is shared, so a sub-agent that hits the cap mid-action now
+     returns a final prefixed `STEP_LIMIT_REACHED`. Without this it would report
+     `StatusCompleted` while carrying an "interrupted" notice — the "looks finished,
+     was abandoned" bug one level down. A capped sub-agent did not finish, so it is
+     a failure, identically to `BUDGET_EXCEEDED`. (A sub-agent that *did* finish via
+     `structured_output{final}` at the cap takes the terminal-final branch above, so
+     its `SUCCESS:`/answer is preserved and it is **not** mis-marked failed.)
 
 ### turbotui (github.com/hobbestherat/turbotui) — **no change**
 
@@ -201,31 +249,47 @@ data size. It is a FIX: it reuses the established `stopForBudget` /
 **(2) Usability.** The stop is now a first-class, visible `SessionEventFinal`
 carrying an actionable notice (mirrors BUDGET/TRUNCATION). The dialog/seam needs
 no extra share: it is the ordinary final bubble. The user can drive — "type a
-message to continue" resumes on a valid transcript. The right thing is surfaced,
-not silent, and partial progress is preserved beneath the notice.
+message to continue" resumes on a valid transcript. **Resume context is now
+accurate** (critic fix): orphaned calls are balanced with the dedicated
+`stepLimitToolCallResultNote` ("Tool call not executed … re-issue if needed")
+instead of the misleading "Final answer recorded and delivered" — a resumed model
+reads the truth that the calls did not run. A genuine final answer that merely
+*landed* at the cap is surfaced verbatim (not mis-stamped "interrupted"). Partial
+progress is preserved beneath the notice.
 
 **(3) No regressions.** Loop restructure is behaviour-identical (same
 `maxSteps<=0` unlimited semantics; same `N+1` request count; same break/return
-exits; cancellation precedence preserved). The new exit block is gated on
-`capExit && len(calls)>0`, so a clean final / budget / truncation / cancel /
-explicit-final-at-cap path is untouched. Transcript invariant is *strengthened*:
-the cap exit now satisfies the one-to-one `tool_calls↔results` balance that the
-two sibling tool-call exits already maintain (the cap exit was the lone hole).
-`collectToolCalls` is called once on the capped `resp` (no double-mutation; its
-only side effect is the truncated-`structured_output` salvage, irrelevant for a
-well-formed orphaned tool call). Test impact is enumerated in §2 and is mechanical
-(symbolic assertions hold; literal `25/26` pins and the response-count inputs that
-must clear 100 are listed). `subAgentOutcome` change breaks no existing assertion
-(the sub-agent cap tests assert request counts / log the final, not status).
+exits; cancellation precedence preserved). The new exit block runs **only** on a
+cap exit (`capExit`), and within it the `explicitFinal || containsTerminalFinal`
+branch protects a genuine final landing at the cap, the `len(calls)>0` branch
+handles real orphans, and a plain-text cap falls through to the normal final — so
+clean-final / budget / truncation / cancel paths are untouched. Transcript
+invariant is *strengthened*: the cap exit now satisfies the one-to-one
+`tool_calls↔results` balance the two sibling tool-call exits already maintain (the
+cap exit was the lone hole). `collectToolCalls` is called once on the capped `resp`
+(no double-mutation). `finalizeTranscriptToolCalls` keeps its signature and the
+two existing callers (`:1461`/`:1510`) are unchanged — only a new
+`balanceTranscriptToolCalls(…, note)` is factored out beneath it. **Test impact is
+now fully enumerated in §2**, including the previously-missed build break
+`internal/gogent/maxsteps_wiring_test.go:82` (`!= 25`), every literal `25/26` pin,
+and the response-count inputs (`makeToolCallResponses` n) that must clear 100 for
+their cap/`past-the-default` assertions to hold. The `subAgentOutcome` addition
+breaks no existing assertion and gains a direct table case (§5).
 
 **(4) Holistic across both repos.** The fix belongs entirely in gogent's
 `runLoop` — the seam where the cap, the transcript, and the `SessionEvent` stream
-all live. turbotui consumes only `SessionEvent` text and needs nothing (verified
-by grep). The downstream effect on the other repo is "the final bubble now shows a
-clear notice instead of an empty/odd turn" — strictly an improvement, requiring no
-client code. The marker convention (`STEP_LIMIT_REACHED`) matches the existing
-`BUDGET_EXCEEDED` / `OUTPUT_TRUNCATED` family, keeping the gogent→turbotui contract
-uniform.
+all live. **Correction to the first pass:** the `SessionEvent` *consumer* is
+gogent's own `ui/tui` (`tui.go` `case agent.SessionEventFinal` → plain bubble;
+`eventNotification` → `firstLine(ev.Text)`), **not** turbotui — turbotui is a
+generic TUI widget library (`module github.com/hobbestherat/turbotui`) that does
+not import gogent and has zero references to `SessionEventFinal` or any marker
+(grep-verified). gogent's `ui/tui` does **not** special-case the
+`BUDGET_EXCEEDED`/`OUTPUT_TRUNCATED` text prefixes (the `budgetExceeded` enum in
+`session_window.go` is the budget-*bar* status, unrelated to message markers), so
+`STEP_LIMIT_REACHED` renders correctly with **no client edit in either repo**. The
+downstream effect is "the final bubble shows a clear notice instead of an
+empty/odd turn" — strictly an improvement. The marker convention matches the
+existing `BUDGET_EXCEEDED`/`OUTPUT_TRUNCATED` family, keeping the contract uniform.
 
 ---
 
@@ -243,6 +307,20 @@ uniform.
   - (c) session is valid for resume: a second `ExecuteTaskLoop(...)` returns
     without error and the request it sends carries the synthesized tool results
     (no unanswered `tool_calls` from the prior turn).
+- **New `TestStepCapWithTerminalFinalSurfacesAnswerNotNotice` (critic regression):**
+  build a response sequence whose *capped* turn is a **well-formed native
+  `structured_output{final:true, response:"DONE-ANSWER"}`** (not a calc call) —
+  e.g. `SetMaxSteps(2)` with `[calc, calc, structured_output{final}]`. Assert the
+  `SessionEventFinal` text is `DONE-ANSWER` (the model's real answer), **not** the
+  `STEP_LIMIT_REACHED` notice, and that the transcript is balanced. This is the
+  direct guard for the `explicitFinal || containsTerminalFinal` branch — without it
+  the regression (dropping the answer, stamping "interrupted") is silent.
+- **New `subAgentOutcome` table row** in `internal/agent/budget_test.go` (`:51-54`,
+  the existing `SUCCESS`/`FAILURE`/`BUDGET_EXCEEDED`/plain table):
+  `{"step limit", stepLimitReachedMarker + ": reached the per-turn step cap (100); …", StatusFailed}`.
+  Directly pins the §2-step-6 classification rather than relying on indirect cap
+  tests. (Also refresh the stale "25-step cap" wording in that file's comments at
+  `:67`/`:90`; the assertions there — `fs.calls > 4` — are non-breaking.)
 - **Update `TestDefaultMaxStepsCapsLoopAtHistoricalBound`:** new counts
   (`120`/`want=101`) per §2, **and** add the Part-2 assertion that the cap-exit
   `SessionEventFinal` carries the `STEP_LIMIT_REACHED` notice (the capped turn is a
@@ -250,34 +328,34 @@ uniform.
   at the default cap.
 - The numeric bumps in `TestMaxStepsZeroIsUnlimitedRunsPastDefaultBound`,
   `TestMaxStepsNegativeIsAlsoUnlimited`, `TestSubAgentLoopHonoursUnlimited`,
-  `TestSubAgentLoopUsesHistoricalDefaultWhenUnwired`, and the config-test literal
-  flips, per §2.
+  `TestSubAgentLoopUsesHistoricalDefaultWhenUnwired`; the config-test literal flips;
+  and the `internal/gogent/maxsteps_wiring_test.go` rename + `!= 100` flip, per §2.
 
 **Dev gate (per memory):** build, vet, gofmt, golangci-lint v2, and `go test`
-**without `-race`** (Pi5).
+**without `-race`** (Pi5). The full package test run (not just the maxsteps files)
+is the backstop that catches any further hardcoded `25` the sweep missed.
 
 ---
 
 ## 6. Open questions
 
-1. **Synthetic result note wording.** `finalizeTranscriptToolCalls` answers the
-   orphaned calls with `finalToolCallResultNote = "[Final answer recorded and
-   delivered to the user.]"` — semantically off for an *interrupted* call a
-   resumed model may re-read. The issue explicitly says to reuse
-   `finalizeTranscriptToolCalls`, so the design does. **Proposed default:** keep
-   the reuse (minimal, transcript stays valid; the note is an internal balancing
-   artifact the model rarely re-reads). A cheap optional refinement is a
-   step-limit-specific result note (e.g. `"[Tool call not executed: the per-turn
-   step cap was reached before it ran. Re-issue it if still needed.]"`) via an
-   overload/param — flagging only; not doing it unless you want it.
-2. **Persist the notice into the transcript?** `stopForTruncation` additionally
-   folds its notice onto the persisted assistant message
-   (`FoldLastAssistantContent`) because that turn was otherwise empty. Here the
-   capped assistant turn has real `tool_calls` + balanced results, so the design
-   **deliberately does not** persist the notice (it lives only in the emitted
-   `SessionEventFinal`), leaving the resumed model the real partial content +
-   results rather than an injected marker. Confirm this is the intended resume
-   context (I believe it is the cleaner choice).
+1. **(RESOLVED — was OQ#1) Synthetic result note wording.** Now fixed per the
+   critic: orphaned calls are balanced with the dedicated
+   `stepLimitToolCallResultNote` ("Tool call not executed … re-issue if needed"),
+   added alongside `finalToolCallResultNote`, via a factored
+   `balanceTranscriptToolCalls(…, note)`. The folded-final branch still uses the
+   accurate `finalToolCallResultNote`. No remaining ambiguity; left here only to
+   record the decision. (The issue said "reuse `finalizeTranscriptToolCalls`"; we
+   honor that — `finalizeTranscriptToolCalls` is kept and delegates — while giving
+   the genuinely-unexecuted case truthful wording.)
+2. **(RESOLVED — was OQ#2) Persist the notice into the transcript?** Decision:
+   **do not.** `stopForTruncation` folds its notice onto the persisted assistant
+   message only because that turn was otherwise empty; here the capped assistant
+   turn has real `tool_calls` + (now truthfully-noted) balanced results, so the
+   STEP_LIMIT notice lives only in the emitted `SessionEventFinal`. The resumed
+   model sees the real partial content + accurate "not executed" results rather
+   than an injected marker. With OQ#1 resolved, the earlier misleading-resume
+   concern is gone. Flagging for maintainer awareness, not as a blocker.
 3. **`maxSteps` semantics labelling.** Code/comments call it a "per-task" /
    "per-turn" step cap interchangeably; the issue says "per-turn." Not changing
    the mechanism — just noting I'll keep the existing comments' wording except
