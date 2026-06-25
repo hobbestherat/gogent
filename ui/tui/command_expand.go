@@ -103,6 +103,14 @@ func templateWarnings(template string, params []CommandParam) []string {
 	return warnings
 }
 
+// templateHasRefs reports whether template contains any $name / ${name}
+// placeholder. The editor uses it to decide whether the expansion preview has
+// anything to show (issue #455): with no placeholders and no sample args there is
+// nothing to expand, so the preview shows a hint rather than echoing the template.
+func templateHasRefs(template string) bool {
+	return cmdBraceRefRe.MatchString(template) || cmdBareRefRe.MatchString(template)
+}
+
 func splitCommandArgs(args []string) (positionals []string, named map[string]string) {
 	named = make(map[string]string)
 	for _, a := range args {
