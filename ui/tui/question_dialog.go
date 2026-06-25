@@ -95,6 +95,11 @@ type questionField struct {
 // MultiSelect group of Checkbox). Submit collects the answers keyed by item id
 // (after required-validation, which blocks submit with an inline error and jumps
 // to the offending tab); Escape, Cancel, and a closed UI resolve as Cancelled.
+//
+// Each topic's items live inside a scrolling viewport (buildTopicPanel) so a long
+// form scrolls instead of clipping its overflow (issue #459). The action buttons sit
+// on the last interior row like every other modal — a row lower and they would clip
+// onto the bottom border and never render. The dialog reflows on terminal resize.
 func showQuestionDialog(desktop *tv.Desktop, req agent.QuestionRequest, onResult func(agent.QuestionResponse)) {
 	if desktop == nil {
 		onResult(agent.QuestionResponse{Cancelled: true})
@@ -112,18 +117,37 @@ func showQuestionDialog(desktop *tv.Desktop, req agent.QuestionRequest, onResult
 	applyWindowShadow(dialog.Window) // honour the NoShadow theme setting (issue #215)
 	dialog.Window.ShowClose = false
 
-	// Optional one-line context above the tabs.
-	tabsY := 1
+	// Optional one-line context, then an always-visible indicator row.
+	var summaryLabel *tv.Label
+	row := 1
 	if req.Summary != "" {
-		summary := dialogLabel(truncate(req.Summary, width-4), tv.Rect{X: 2, Y: 1, W: width - 4, H: 1})
-		summary.FG = colorDialogHeader
-		dialog.Window.AddContent(summary)
-		tabsY = 2
+		summaryLabel = dialogLabel(truncate(req.Summary, width-4), tv.Rect{X: 2, Y: row, W: width - 4, H: 1})
+		summaryLabel.FG = colorDialogHeader
+		dialog.Window.AddContent(summaryLabel)
+		row++
 	}
 
-	// Bottom chrome (content-relative): inline error row, then the button row.
-	errorY := height - 3
-	btnY := height - 2
+	// The indicator row names the active topic — so a tab strip that drops overflow
+	// labels (turbotui's Tabs has no horizontal label scroll) never hides which topic
+	// the user is on; Prev/Next and Alt+Left/Right already cycle every topic regardless
+	// of the strip — and carries the key hints the dialog needs now that the buttons
+	// render: Ctrl+Enter submits from anywhere, and PgUp/PgDn (or the mouse wheel)
+	// scroll an overflowing topic. Those are advertised because they are the only scroll
+	// keys that also work while a textarea (which keeps Up/Down for the caret) is
+	// focused.
+	indicatorY := row
+	indicator := dialogLabel("", tv.Rect{X: 2, Y: indicatorY, W: width - 4, H: 1})
+	indicator.FG = colorDialogDetail
+	dialog.Window.AddContent(indicator)
+	tabsY := row + 1
+
+	// Bottom chrome (content-relative): turbotui insets the window content by one, so
+	// the bottom border is window row height-1 and the last visible interior row is
+	// height-3. The buttons sit there (matching review/permission/message/disconnect
+	// modals); a row lower (height-2) would land them on the border and clip them away
+	// — the primary #459 defect. The inline error row sits just above the buttons.
+	errorY := height - 4
+	btnY := height - 3
 	tabsH := errorY - tabsY
 	if tabsH < 3 {
 		tabsH = 3
@@ -132,15 +156,29 @@ func showQuestionDialog(desktop *tv.Desktop, req agent.QuestionRequest, onResult
 	tabs := tv.NewTabs(desktop, tv.Rect{X: 1, Y: tabsY, W: width - 2, H: tabsH})
 	var fields []questionField
 	var firstFocus *tv.VisualComponent
+	var panels []topicPanel
 	for ti, topic := range req.Topics {
-		panel, tFields, first := buildTopicPanel(desktop, topic, ti, width-2, tabsH-1)
-		tabs.AddTab(topicTabTitle(topic, ti), panel)
-		fields = append(fields, tFields...)
+		panel := buildTopicPanel(desktop, topic, ti, width-2, tabsH-1)
+		tabs.AddTab(elideTabTitle(topicTabTitle(topic, ti)), panel.widget)
+		panels = append(panels, panel)
+		fields = append(fields, panel.fields...)
 		if firstFocus == nil {
-			firstFocus = first
+			firstFocus = panel.firstFocus
 		}
 	}
 	dialog.Window.AddContent(tabs)
+
+	updateIndicator := func() {
+		hints := "Ctrl+Enter submit · PgUp/PgDn or wheel scroll · Tab moves field"
+		text := hints
+		if n := len(req.Topics); n > 1 {
+			active := tabs.Active()
+			text = fmt.Sprintf("Topic %d/%d: %s  ·  %s",
+				active+1, n, topicTabTitle(req.Topics[active], active), hints)
+		}
+		indicator.SetText(truncate(text, width-4))
+	}
+	updateIndicator()
 
 	// Inline required-field error, hidden (empty) until a submit attempt fails.
 	errLabel := tv.NewLabel("", tv.Rect{X: 2, Y: errorY, W: width - 4, H: 1})
@@ -148,11 +186,14 @@ func showQuestionDialog(desktop *tv.Desktop, req agent.QuestionRequest, onResult
 	errLabel.BG = tv.DefaultTheme.DialogBG
 	dialog.Window.AddContent(errLabel)
 
-	// Clear a stale "X is required" once the user navigates to another tab, so the
-	// error does not linger after they move past it. The validation path below sets
-	// the error *after* switching tabs, so the auto-switch onto the offending tab
+	// On a tab switch, clear a stale "X is required" (so it does not linger after the
+	// user moves past it) and refresh the topic indicator. The validation path below
+	// sets the error *after* switching tabs, so the auto-switch onto the offending tab
 	// never wipes the message it just set.
-	tabs.OnTabChange = func(int) { errLabel.SetText("") }
+	tabs.OnTabChange = func(int) {
+		errLabel.SetText("")
+		updateIndicator()
+	}
 
 	var layer *tv.Layer
 	done := false
@@ -173,14 +214,21 @@ func showQuestionDialog(desktop *tv.Desktop, req agent.QuestionRequest, onResult
 				continue
 			}
 			if _, ok := f.answer(); !ok {
-				// Switch first (its OnTabChange clears any prior error), then land
-				// focus on the offending field and set the message — so it survives
-				// the auto-switch and the user is placed on the field to fix, whether
-				// or not it was already the active tab.
-				tabs.SetActive(f.tabIndex)
-				if f.focus != nil {
-					desktop.SetFocus(f.focus)
+				if f.focus == nil {
+					// A required item with no input widget — e.g. a choice/multiselect the
+					// model sent with no Options — can never be answered or focused.
+					// Blocking on it would deadlock Submit forever, so skip it: criterion 3
+					// requires that a field the user cannot reach never permanently blocks
+					// Submit. The malformed item is simply omitted from the answers.
+					continue
 				}
+				// Switch first (its OnTabChange clears any prior error), then scroll the
+				// offending field into view and focus it, and set the message — so it
+				// survives the auto-switch and the user is placed on a visible, focused
+				// field even when it was below the topic's scroll fold.
+				tabs.SetActive(f.tabIndex)
+				panels[f.tabIndex].ensureVisible(f.focus)
+				desktop.SetFocus(f.focus)
 				errLabel.SetText(fmt.Sprintf("✗ %s is required", f.item.Label))
 				desktop.Redraw()
 				return
@@ -197,32 +245,53 @@ func showQuestionDialog(desktop *tv.Desktop, req agent.QuestionRequest, onResult
 	cancel := func() { finish(agent.QuestionResponse{Cancelled: true}) }
 
 	// Buttons: Cancel (left), optional Prev/Next tab nav (only with >1 topic), and
-	// Submit (right-anchored). Left-packed so they never overlap on a narrow dialog.
-	bx := 2
-	cancelBtn := newButton("&Cancel", tv.Rect{X: bx, Y: btnY, W: tv.ButtonLabelWidth("Cancel"), H: 1}, cancel)
+	// Submit (right-anchored). Prev/Next wrap around the ends, matching Alt+Left/Right
+	// (tv.Tabs switches with wraparound), so neither is ever a dead-end at the
+	// first/last tab — and they reach every topic even when the strip drops its label.
+	cancelBtn := newButton("&Cancel", tv.Rect{X: 2, Y: btnY, W: tv.ButtonLabelWidth("Cancel"), H: 1}, cancel)
 	dialog.Window.AddContent(cancelBtn)
-	bx += cancelBtn.Root().Bounds.W + 2
+	var prevBtn, nextBtn *tv.Button
 	if n := len(req.Topics); n > 1 {
-		// Prev/Next wrap around the ends, matching the Alt+Left/Alt+Right keyboard
-		// nav (tv.Tabs switches with wraparound), so neither button is ever a
-		// dead-end no-op at the first/last tab.
-		prevBtn := newButton("&Prev", tv.Rect{X: bx, Y: btnY, W: tv.ButtonLabelWidth("Prev"), H: 1}, func() {
+		prevBtn = newButton("&Prev", tv.Rect{X: 0, Y: btnY, W: tv.ButtonLabelWidth("Prev"), H: 1}, func() {
 			tabs.SetActive((tabs.Active() - 1 + n) % n)
 			desktop.Redraw()
 		})
 		dialog.Window.AddContent(prevBtn)
-		bx += prevBtn.Root().Bounds.W + 2
-		nextBtn := newButton("&Next", tv.Rect{X: bx, Y: btnY, W: tv.ButtonLabelWidth("Next"), H: 1}, func() {
+		nextBtn = newButton("&Next", tv.Rect{X: 0, Y: btnY, W: tv.ButtonLabelWidth("Next"), H: 1}, func() {
 			tabs.SetActive((tabs.Active() + 1) % n)
 			desktop.Redraw()
 		})
 		dialog.Window.AddContent(nextBtn)
 	}
-	submitW := tv.ButtonLabelWidth("Submit")
-	submitBtn := newButton("&Submit", tv.Rect{X: width - 3 - submitW + 1, Y: btnY, W: submitW, H: 1}, submit)
+	submitBtn := newButton("&Submit", tv.Rect{X: 0, Y: btnY, W: tv.ButtonLabelWidth("Submit"), H: 1}, submit)
 	dialog.Window.AddContent(submitBtn)
 
-	// Escape cancels; Ctrl+Enter submits from anywhere in the form.
+	// placeButtons left-packs Cancel/Prev/Next from the content margin and right-anchors
+	// Submit, each clamped to [2, w-3] so a narrow dialog degrades to clipping rather
+	// than overlapping or crossing the border. Run at open time and re-run on resize so
+	// the row re-flows with the dialog width.
+	placeButtons := func(w, by int) {
+		leftX, rightX := 2, w-3
+		bx := leftX
+		place := func(b *tv.Button, lw int) {
+			b.Root().SetBounds(clampDialogRect(tv.Rect{X: bx, Y: by, W: lw, H: 1}, leftX, rightX))
+			bx = b.Root().Bounds.X + b.Root().Bounds.W + tv.DefaultButtonGap
+		}
+		place(cancelBtn, tv.ButtonLabelWidth("Cancel"))
+		if prevBtn != nil {
+			place(prevBtn, tv.ButtonLabelWidth("Prev"))
+			place(nextBtn, tv.ButtonLabelWidth("Next"))
+		}
+		submitW := tv.ButtonLabelWidth("Submit")
+		submitBtn.Root().SetBounds(clampDialogRect(tv.Rect{X: w - 3 - submitW + 1, Y: by, W: submitW, H: 1}, leftX, rightX))
+	}
+	placeButtons(width, btnY)
+
+	// Escape cancels; Ctrl+Enter submits from anywhere in the form; PgUp/PgDn and (when
+	// the focused field declines them) Up/Down scroll the active topic when it
+	// overflows. The scroll keys reach here by bubbling up from the focused field;
+	// they are only consumed when there is something to scroll, otherwise they fall
+	// through to the desktop's focus navigation so a short form behaves as before.
 	dialog.Root().OnTypeFn = func(_ *tv.VisualComponent, event tui.TypeEvent) bool {
 		switch {
 		case event.Key == tui.KeyEscape:
@@ -232,11 +301,60 @@ func showQuestionDialog(desktop *tv.Desktop, req agent.QuestionRequest, onResult
 			submit()
 			return true
 		}
-		return false
+		if len(panels) == 0 {
+			return false
+		}
+		p := panels[tabs.Active()]
+		if !p.canScroll() {
+			return false
+		}
+		switch event.Key {
+		case tui.KeyUp:
+			p.scrollBy(-1)
+		case tui.KeyDown:
+			p.scrollBy(1)
+		case tui.KeyPageUp:
+			p.pageBy(-1)
+		case tui.KeyPageDown:
+			p.pageBy(1)
+		default:
+			return false
+		}
+		return true
 	}
 
 	layer = tv.NewModalLayer("question-dialog", dialog)
 	desktop.AddLayer(layer)
+
+	// Reflow on terminal resize (issues #299/#459): re-resolve and re-centre the frame,
+	// recompute the bottom chrome and tab height, and resize the Tabs widget — which
+	// cascades (Tabs.layoutContent → panel.LayoutFn) so each topic viewport re-derives
+	// its visible height, field width and scrollbar and re-clamps its scroll offset on
+	// its own. Only focus needs help: a shrink can hide the focused field, so nudge it
+	// back into view on the active tab. The spec is pure Min/Max floors, so re-resolving
+	// each time matches a fresh open at the new size.
+	relayout := func() {
+		nx, ny, nw, nh := tv.ResolveDialogRect(spec, desktop.App().Width(), desktop.App().Height())
+		dialog.Window.Component.SetBounds(tv.Rect{X: nx, Y: ny, W: nw, H: nh})
+		if summaryLabel != nil {
+			summaryLabel.Root().SetBounds(tv.Rect{X: 2, Y: 1, W: nw - 4, H: 1})
+		}
+		indicator.Root().SetBounds(tv.Rect{X: 2, Y: indicatorY, W: nw - 4, H: 1})
+		nErrorY, nBtnY := nh-4, nh-3
+		nTabsH := nErrorY - tabsY
+		if nTabsH < 3 {
+			nTabsH = 3
+		}
+		tabs.Root().SetBounds(tv.Rect{X: 1, Y: tabsY, W: nw - 2, H: nTabsH})
+		errLabel.Root().SetBounds(tv.Rect{X: 2, Y: nErrorY, W: nw - 4, H: 1})
+		placeButtons(nw, nBtnY)
+		if len(panels) > 0 {
+			panels[tabs.Active()].keepFocusVisible()
+		}
+		desktop.Redraw()
+	}
+	layer.OnResize = func(tv.Rect) { relayout() }
+
 	// Land focus on the first field so the user can start typing/selecting at once;
 	// fall back to Submit when the form has no focusable items.
 	if firstFocus != nil {
@@ -255,36 +373,98 @@ func topicTabTitle(topic agent.QuestionTopic, index int) string {
 	return fmt.Sprintf("Topic %d", index+1)
 }
 
-// buildTopicPanel lays one topic's items into a fixed-position panel widget (the
-// content of a single tab) and returns it together with the answer bindings and
-// the first focusable widget in the panel. Items stack top to bottom: a label
-// line, the item's widget(s), then an optional dim help line. tabIndex is the
-// owning tab so required-validation can jump back to it. width/height are the tab
-// content area; children are placed at fixed offsets relative to the panel origin.
-// desktop is used to advance focus when Enter is pressed in a single-line field.
-func buildTopicPanel(desktop *tv.Desktop, topic agent.QuestionTopic, tabIndex, width, _ int) (tv.Widget, []questionField, *tv.VisualComponent) {
-	panel := tv.NewComponent(tv.Rect{X: 0, Y: 0, W: width, H: 1})
+// questionTabTitleMax caps a tab-strip label so more topics fit the strip before
+// turbotui's Tabs drops overflow labels (it has no horizontal label scroll). The full
+// title is still shown in the indicator row and every topic stays reachable via
+// Prev/Next and Alt+Left/Right, so this only trades a long on-strip label for more
+// visible tabs.
+const questionTabTitleMax = 16
+
+// elideTabTitle truncates an over-long tab label with an ellipsis so the strip holds
+// more topics. The untruncated title remains available in the indicator row.
+func elideTabTitle(title string) string {
+	return truncate(title, questionTabTitleMax)
+}
+
+// topicPanel is one topic's scrolling viewport plus the handles the dialog drives it
+// with. widget is the tv.Component handed to Tabs.AddTab; fields/firstFocus feed the
+// dialog's validation and initial focus. scrollBy (±rows) and pageBy (±visible pages)
+// are the keyboard-scroll entry points, gated by canScroll (false when the content
+// fits, so the dialog leaves the keys to focus navigation). ensureVisible scrolls a
+// focusable into the window before it is focused (required-field validation,
+// Enter-advance); keepFocusVisible re-homes focus off a field a resize just hid.
+type topicPanel struct {
+	widget           tv.Widget
+	fields           []questionField
+	firstFocus       *tv.VisualComponent
+	scrollBy         func(rows int)
+	pageBy           func(dir int)
+	canScroll        func() bool
+	ensureVisible    func(c *tv.VisualComponent)
+	keepFocusVisible func()
+}
+
+// buildTopicPanel lays one topic's items into a scrolling viewport (the content of a
+// single tab) and returns it as a topicPanel. Items stack top to bottom at fixed
+// *logical* rows — a label line, the item's widget(s), an optional placeholder hint
+// and help line, then a spacer. The panel hosts a hand-rolled scroll viewport (the
+// pattern proven in theme_editor.go for interactive children, since turbotui's Tabs
+// fills its content with no scroll and a read-only TextView cannot host input
+// widgets): a scrollY offset shifts every child to viewport-relative Y = logical -
+// scrollY and toggles its Visible flag, so off-window fields are neither drawn,
+// hit-tested nor focus-navigated, and a 1-column scrollbar marks overflow.
+//
+// tabIndex is the owning tab so required-validation can jump back to it. width is the
+// tab content width and visibleRows its height; both are re-derived live from the
+// panel's own bounds in LayoutFn, so the viewport self-heals when Tabs resizes it on a
+// terminal resize. desktop advances/keeps focus.
+func buildTopicPanel(desktop *tv.Desktop, topic agent.QuestionTopic, tabIndex, width, visibleRows int) topicPanel {
 	const margin = 2
+	panel := tv.NewComponent(tv.Rect{X: 0, Y: 0, W: width, H: visibleRows})
+
 	itemW := width - 2*margin
 	if itemW < 1 {
 		itemW = 1
 	}
+	// The panel fills the Tabs widget, which sits at the dialog's content col 1, so the
+	// panel's last *visible* column is width-2 (col width-1 maps to the window's right
+	// border, which the Inset(1) content clip drops). The scrollbar lives there; items
+	// end at width-3 (margin + itemW - 1), one column short, so nothing overlaps it.
+	barX := width - 2
+
+	// scrollRow couples a child to its logical row (its build-time Y) and row span, so
+	// reflow can reposition it as the viewport scrolls and re-width it on resize.
+	type scrollRow struct {
+		comp    *tv.VisualComponent
+		logical int
+		h       int
+	}
+	var rows []scrollRow
+	addRow := func(c *tv.VisualComponent, logical, h int) {
+		panel.AddChild(c)
+		rows = append(rows, scrollRow{comp: c, logical: logical, h: h})
+	}
 
 	var fields []questionField
 	// focusables is the panel's focusable widgets in tab order; it backs the
-	// Enter-advances-focus wiring below (the index captured per text box stays valid
-	// because the slice is only appended to).
+	// Enter-advances-focus wiring and keepFocusVisible. focusRows maps each focusable to
+	// its logical top row and span so ensureVisible can scroll the minimum amount to
+	// bring a field (e.g. a required one flagged at submit) into the window.
 	var focusables []*tv.VisualComponent
+	focusRows := map[*tv.VisualComponent]struct{ y, h int }{}
+	addFocusable := func(c *tv.VisualComponent, logical, h int) {
+		focusables = append(focusables, c)
+		focusRows[c] = struct{ y, h int }{logical, h}
+	}
 	var textBoxes []struct {
 		box *tv.TextBox
 		idx int
 	}
-	addFocusable := func(c *tv.VisualComponent) { focusables = append(focusables, c) }
 
 	y := 0
 	for _, item := range topic.Items {
 		label := dialogLabel(item.Label, tv.Rect{X: margin, Y: y, W: itemW, H: 1})
-		panel.AddChild(label)
+		addRow(label.Root(), y, 1)
 		y++
 
 		var answer func() (interface{}, bool)
@@ -294,9 +474,9 @@ func buildTopicPanel(desktop *tv.Desktop, topic agent.QuestionTopic, tabIndex, w
 			ms := tv.NewMultiSelect()
 			for _, opt := range item.Options {
 				cb := styleQuestionCheck(tv.NewCheckbox(opt, tv.Rect{X: margin, Y: y, W: itemW, H: 1}, nil))
-				panel.AddChild(cb)
+				addRow(cb.Root(), y, 1)
 				ms.Add(cb)
-				addFocusable(cb.Root())
+				addFocusable(cb.Root(), y, 1)
 				if itemFocus == nil {
 					itemFocus = cb.Root()
 				}
@@ -314,9 +494,9 @@ func buildTopicPanel(desktop *tv.Desktop, topic agent.QuestionTopic, tabIndex, w
 			rg := tv.NewRadioGroup()
 			for _, opt := range item.Options {
 				cb := styleQuestionCheck(tv.NewCheckbox(opt, tv.Rect{X: margin, Y: y, W: itemW, H: 1}, nil))
-				panel.AddChild(cb)
+				addRow(cb.Root(), y, 1)
 				rg.Add(cb)
-				addFocusable(cb.Root())
+				addFocusable(cb.Root(), y, 1)
 				if itemFocus == nil {
 					itemFocus = cb.Root()
 				}
@@ -331,8 +511,8 @@ func buildTopicPanel(desktop *tv.Desktop, topic agent.QuestionTopic, tabIndex, w
 
 		case agent.QuestionTextarea:
 			ml := tv.NewMultiLineInput("", tv.Rect{X: margin, Y: y, W: itemW, H: 3})
-			panel.AddChild(ml)
-			addFocusable(ml.Root())
+			addRow(ml.Root(), y, 3)
+			addFocusable(ml.Root(), y, 3)
 			itemFocus = ml.Root()
 			y += 3
 			answer = func() (interface{}, bool) {
@@ -344,12 +524,12 @@ func buildTopicPanel(desktop *tv.Desktop, topic agent.QuestionTopic, tabIndex, w
 
 		default: // QuestionText (and any unforeseen type degrades to a text field)
 			tb := tv.NewTextBox("", tv.Rect{X: margin, Y: y, W: itemW, H: 1})
-			panel.AddChild(tb)
+			addRow(tb.Root(), y, 1)
 			textBoxes = append(textBoxes, struct {
 				box *tv.TextBox
 				idx int
 			}{box: tb, idx: len(focusables)})
-			addFocusable(tb.Root())
+			addFocusable(tb.Root(), y, 1)
 			itemFocus = tb.Root()
 			y++
 			answer = func() (interface{}, bool) {
@@ -362,35 +542,165 @@ func buildTopicPanel(desktop *tv.Desktop, topic agent.QuestionTopic, tabIndex, w
 
 		// turbotui's TextBox/MultiLineInput have no ghost-placeholder API, so a
 		// text/textarea placeholder is surfaced as a dim "e.g. …" hint line beneath
-		// the field rather than dropped (issue #406).
+		// the field rather than dropped (issue #406). The extra row no longer costs
+		// usability now that the panel scrolls.
 		if item.Placeholder != "" && (item.Type == agent.QuestionText || item.Type == agent.QuestionTextarea) {
 			hint := dialogLabel("e.g. "+item.Placeholder, tv.Rect{X: margin, Y: y, W: itemW, H: 1})
 			hint.FG = colorDialogDetail
-			panel.AddChild(hint)
+			addRow(hint.Root(), y, 1)
 			y++
 		}
 		if item.Help != "" {
 			help := dialogLabel(item.Help, tv.Rect{X: margin, Y: y, W: itemW, H: 1})
 			help.FG = colorDialogDetail
-			panel.AddChild(help)
+			addRow(help.Root(), y, 1)
 			y++
 		}
 		y++ // blank spacer between items
 
 		fields = append(fields, questionField{item: item, tabIndex: tabIndex, focus: itemFocus, answer: answer})
 	}
+	contentH := y
 
-	// Enter in a single-line field advances focus to the next focusable in the tab
-	// (wrapping), matching the issue's interaction model. A textarea keeps Enter for
-	// newlines (its OnSubmit is left nil). Wired after the loop so the captured index
-	// resolves against the panel's complete focus order.
+	// --- scroll machinery (mirrors theme_editor.go's viewport) ---
+
+	maxScroll := func() int {
+		if m := contentH - visibleRows; m > 0 {
+			return m
+		}
+		return 0
+	}
+	clampScroll := func(v int) int {
+		if v < 0 {
+			return 0
+		}
+		if m := maxScroll(); v > m {
+			return m
+		}
+		return v
+	}
+	scrollY := 0
+	// reflow repositions every row to viewport-relative Y = logical - scrollY, sets its
+	// width from the live itemW (so a horizontal resize re-widens fields), and shows
+	// only rows that intersect the window — a partially-scrolled 3-row textarea stays
+	// visible/focusable (turbotui clips its off-window rows).
+	reflow := func() {
+		for _, r := range rows {
+			r.comp.SetBounds(tv.Rect{X: margin, Y: r.logical - scrollY, W: itemW, H: r.h})
+			r.comp.Visible = r.logical+r.h > scrollY && r.logical < scrollY+visibleRows
+		}
+	}
+	// keepFocusVisible re-homes focus off a field the latest scroll/resize hid: a hidden
+	// focused widget stops receiving keys (the desktop's visibleInTree guard), which
+	// would strand keyboard scrolling until a click. Moving focus to a still-visible
+	// field keeps the scroll keys bubbling to the dialog.
+	keepFocusVisible := func() {
+		hidden := false
+		for _, c := range focusables {
+			if c.Focused() && !c.Visible {
+				hidden = true
+				break
+			}
+		}
+		if !hidden {
+			return
+		}
+		for _, c := range focusables {
+			if c.Visible {
+				desktop.SetFocus(c)
+				return
+			}
+		}
+	}
+	scrollTo := func(v int) {
+		n := clampScroll(v)
+		if n == scrollY {
+			return
+		}
+		scrollY = n
+		reflow()
+		keepFocusVisible()
+		desktop.Redraw()
+	}
+	// ensureVisible scrolls the minimum amount to bring a focusable's [y, y+h) span into
+	// the window, used before focusing a field that may sit below the fold.
+	ensureVisible := func(c *tv.VisualComponent) {
+		fr, ok := focusRows[c]
+		if !ok {
+			return
+		}
+		switch {
+		case fr.y < scrollY:
+			scrollTo(fr.y)
+		case fr.y+fr.h > scrollY+visibleRows:
+			scrollTo(fr.y + fr.h - visibleRows)
+		}
+	}
+
+	// The 1-column scrollbar lives in the panel's last column (items end one column
+	// short of it). It draws nothing when the content fits, and reads the live scrollY
+	// each frame so the thumb tracks the offset.
+	bar := tv.NewComponent(tv.Rect{X: barX, Y: 0, W: 1, H: visibleRows})
+	bar.DrawFn = func(c *tv.VisualComponent, surface tv.Surface) {
+		if maxScroll() == 0 {
+			return
+		}
+		drawDialogVScrollbar(surface, c.AbsoluteBounds(), contentH, visibleRows, scrollY,
+			tv.DefaultTheme.DialogFG, tv.DefaultTheme.DialogBG)
+	}
+	panel.AddChild(bar)
+
+	// LayoutFn is the single place live geometry is re-derived. Tabs.layoutContent sizes
+	// each tab's content via SetBounds, which fires this; SetBounds also runs it on
+	// resize and Draw runs it each frame, so the viewport self-heals on both resize and
+	// redraw. The lastW/lastH guard makes a steady-state redraw a no-op (scroll changes
+	// go through scrollTo, which reflows directly). A zero/negative bound keeps the
+	// build-time seeds so nothing is hidden before the first real layout.
+	lastW, lastH := -1, -1
+	panel.LayoutFn = func(c *tv.VisualComponent) {
+		b := c.Bounds
+		if b.W == lastW && b.H == lastH {
+			return
+		}
+		lastW, lastH = b.W, b.H
+		if b.H > 0 {
+			visibleRows = b.H
+		}
+		if b.W > 0 {
+			itemW = b.W - 2*margin
+			if itemW < 1 {
+				itemW = 1
+			}
+			barX = b.W - 2
+		}
+		bar.SetBounds(tv.Rect{X: barX, Y: 0, W: 1, H: visibleRows})
+		scrollY = clampScroll(scrollY)
+		reflow()
+	}
+
+	// Mouse wheel scrolls the topic (Delta +1 up / -1 down, subtracted to scroll the
+	// natural way) — it works regardless of which field holds focus.
+	panel.OnScrollFn = func(_ *tv.VisualComponent, event tui.ScrollEvent) bool {
+		if maxScroll() == 0 {
+			return false
+		}
+		scrollTo(scrollY - event.Delta)
+		return true
+	}
+
+	// Enter in a single-line field advances focus to the next focusable (wrapping),
+	// scrolling it into view first so the new focus is never below the fold. A textarea
+	// keeps Enter for newlines (its OnSubmit is left nil). Wired after the loop so the
+	// captured index resolves against the panel's complete focus order.
 	for _, tb := range textBoxes {
 		tb := tb
 		tb.box.OnSubmit = func() {
 			if desktop == nil || len(focusables) == 0 {
 				return
 			}
-			desktop.SetFocus(focusables[(tb.idx+1)%len(focusables)])
+			next := focusables[(tb.idx+1)%len(focusables)]
+			ensureVisible(next)
+			desktop.SetFocus(next)
 			desktop.Redraw()
 		}
 	}
@@ -399,8 +709,17 @@ func buildTopicPanel(desktop *tv.Desktop, topic agent.QuestionTopic, tabIndex, w
 	if len(focusables) > 0 {
 		firstFocus = focusables[0]
 	}
-	panel.Bounds.H = y
-	return panel, fields, firstFocus
+
+	return topicPanel{
+		widget:           panel,
+		fields:           fields,
+		firstFocus:       firstFocus,
+		scrollBy:         func(n int) { scrollTo(scrollY + n) },
+		pageBy:           func(dir int) { scrollTo(scrollY + dir*visibleRows) },
+		canScroll:        func() bool { return maxScroll() > 0 },
+		ensureVisible:    ensureVisible,
+		keepFocusVisible: keepFocusVisible,
+	}
 }
 
 // styleQuestionCheck colours a checkbox for the dialog background, matching the

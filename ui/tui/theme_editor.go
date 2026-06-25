@@ -434,42 +434,6 @@ func themeSectionHeader(title string, r tv.Rect) *tv.Label {
 	return dialogLabel(text, r)
 }
 
-// drawThemeEditorScrollbar paints the editor's 1-column vertical scrollbar over track:
-// a full-height │ line with ▲/▼ caps and a single █ thumb whose position reflects offset
-// within [0, total-visible]. It mirrors turbotui's shared (but unexported) text-view/tree
-// scrollbar so the editor's scroll affordance looks and behaves like the rest of the UI.
-// With nothing to scroll (total <= visible) only the track and caps are drawn.
-func drawThemeEditorScrollbar(surface tv.Surface, track tv.Rect, total, visible, offset int, fg, bg tui.Color) {
-	if track.H < 1 {
-		return
-	}
-	x := track.X
-	for row := 0; row < track.H; row++ {
-		surface.SetCell(x, track.Y+row, tui.Cell{Ch: '│', FG: fg, BG: bg})
-	}
-	surface.SetCell(x, track.Y, tui.Cell{Ch: '▲', FG: fg, BG: bg})
-	surface.SetCell(x, track.Bottom(), tui.Cell{Ch: '▼', FG: fg, BG: bg})
-	span := total - visible
-	inner := track.H - 2 // rows between the two arrow caps
-	if span <= 0 || inner <= 0 {
-		return
-	}
-	if offset < 0 {
-		offset = 0
-	}
-	if offset > span {
-		offset = span
-	}
-	thumb := offset * (inner - 1) / span
-	if thumb < 0 {
-		thumb = 0
-	}
-	if thumb > inner-1 {
-		thumb = inner - 1
-	}
-	surface.SetCell(x, track.Y+1+thumb, tui.Cell{Ch: '█', FG: fg, BG: bg})
-}
-
 // swatchStyle computes a swatch's display from a spec field's current text and
 // the disable-colours toggle. It is the single source the live swatch is driven
 // from (issue #243): the editor recomputes it on every render from the field's
@@ -862,7 +826,7 @@ func (w *Workbench) showThemeEditor() {
 		if layout.maxScroll() == 0 {
 			return // content fits the viewport — no scrollbar to draw
 		}
-		drawThemeEditorScrollbar(surface, c.AbsoluteBounds(),
+		drawDialogVScrollbar(surface, c.AbsoluteBounds(),
 			themeEditorContentRows(), layout.visibleRows, scrollY,
 			tv.DefaultTheme.DialogFG, tv.DefaultTheme.DialogBG)
 	}
