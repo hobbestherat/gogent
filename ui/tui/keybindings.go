@@ -128,6 +128,28 @@ func isPlainRune(c tv.Chord) bool {
 	return c.Key == tui.KeyUnknown && c.Rune != 0 && !c.Ctrl && !c.Alt
 }
 
+// isLetterRune reports whether r is a canonical (lower-case) ASCII letter — the rune
+// class whose Ctrl+Shift deliverability is terminal-capability-dependent.
+func isLetterRune(r rune) bool {
+	return r >= 'a' && r <= 'z'
+}
+
+// isCapabilityGated reports whether c is a Ctrl+Shift+<letter> chord — the ONLY chord
+// class whose Deliverable() verdict depends on the terminal's extended-keyboard
+// capability (issue #464). turbotui returns true for it only while a Kitty/CSI-u
+// keyboard protocol is confirmed active and otherwise reports it as indistinguishable
+// from Ctrl+<letter>; see the Ctrl+Shift+letter branch in turbotui's Deliverability
+// (app.go:1248). gogent treats such a chord specially in two places: LoadKeybindings
+// keeps a persisted one even when the live verdict is false (config load runs before the
+// terminal handshake), and the customizer gives it a chord-specific refusal message.
+//
+// This predicate DUPLICATES turbotui's gated set because turbotui is read-only/merged
+// and exposes no "is this verdict terminal-dependent?" query — keep it in sync with
+// app.go:1248; if turbotui ever adds such an accessor, delete this in favour of it.
+func isCapabilityGated(c tv.Chord) bool {
+	return c.Ctrl && c.Shift && isLetterRune(lowerRune(c.Rune))
+}
+
 // validateCapture runs the non-interactive gate a captured chord must pass before it
 // can be committed (issue #269): the toolkit's terminal-deliverability check, then the
 // scope rule. ok is true when the chord may be committed (possibly after the
@@ -435,8 +457,18 @@ func (w *Workbench) LoadKeybindings(cfg config.KeybindingsConfig) {
 			continue // unparseable spec
 		}
 		if chord != unboundChord {
-			if deliverable, _ := chord.Deliverable(); !deliverable {
-				continue // a chord the terminal can't deliver
+			// Keep a persisted Ctrl+Shift+<letter> even when Deliverable() currently says
+			// no (issue #464): its verdict is terminal-capability-dependent (turbotui's
+			// extendedKeyboardActive), and config load runs BEFORE the terminal handshake
+			// (cmd/main.go, handoff.go and attach.go all LoadKeybindings before Run), so
+			// the flag is always false here. The chord was deliverable when the user saved
+			// it; dropping it would silently lose a valid binding on a capable terminal. On
+			// a legacy terminal it simply never matches (the wire delivers Ctrl+<letter>
+			// and Chord.Matches is Shift-exact), so keeping it is harmless. Permanently
+			// undeliverable chords (Ctrl+M/S/Q/Z/[/H/I/J) are NOT capability-gated and stay
+			// filtered.
+			if deliverable, _ := chord.Deliverable(); !deliverable && !isCapabilityGated(chord) {
+				continue // a chord no terminal can deliver
 			}
 			if allowed, _ := validateScopeRule(a.scope, chord); !allowed {
 				continue // breaks the scope rule
