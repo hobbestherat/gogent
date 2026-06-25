@@ -36,7 +36,7 @@ func TestSavedThemesReturnsDeepCopy(t *testing.T) {
 	got[0].Theme.Overrides["user"] = "#00FF00"
 	got[0].Theme.Overrides["injected"] = "#000000"
 	got[0].Name = "MUTATED"
-	got = append(got, config.NamedTheme{Name: "extra"})
+	_ = append(got, config.NamedTheme{Name: "extra"})
 
 	again := g.SavedThemes()
 	if len(again) != 1 {
