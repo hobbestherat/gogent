@@ -271,17 +271,17 @@ func (w *Workbench) showKeybindingCustomizer() {
 			return
 		}
 		if !w.isOverridden(a.actionID) {
-			setStatus(fmt.Sprintf("%s is already at its default (%s).", a.name, displayChord(a.deflt)))
+			setStatus(fmt.Sprintf("%s is already at its default (%s).", a.name, chordLabel(a.deflt)))
 			return
 		}
 		if !w.resetBinding(a.actionID) {
 			holder, _ := w.conflictHolder(*a, a.deflt)
-			setStatus(fmt.Sprintf("Can't reset %s: default %s is in use by %q.", a.name, displayChord(a.deflt), w.keybindActionName(holder)))
+			setStatus(fmt.Sprintf("Can't reset %s: default %s is in use by %q.", a.name, chordLabel(a.deflt), w.keybindActionName(holder)))
 			return
 		}
 		w.persistKeybindings()
 		render()
-		setStatus(fmt.Sprintf("%s reset to %s.", a.name, displayChord(a.deflt)))
+		setStatus(fmt.Sprintf("%s reset to %s.", a.name, chordLabel(a.deflt)))
 	}
 
 	resetAll := func() {
