@@ -11,6 +11,20 @@ import (
 // (issue #269): it names every gesture so the dialog is self-documenting.
 const keybindCustomizerIdleHint = "Enter: rebind · Reset / Reset All · ↑↓ move · Esc close"
 
+// keybindFooterLabels are the customizer's footer action captions in display order
+// (issue #461). Named so keybindingsDialogSpec can floor the dialog width on their
+// measured footerRowMinWidth (the buttons can then never overlap), mirroring
+// commandsFooterLabels.
+var keybindFooterLabels = []string{"&Reset", "Reset &All", "Close"}
+
+// keybindChordColWidth is the chord column width in the customizer list (issue #461).
+// 14 holds the widest chord the catalog ships — Ctrl+Shift+V/H/G/D/M (12 cells, the
+// Window tiling actions) — with slack, so no default binding is clipped by padName's
+// truncate-then-pad. The row inner width stays 2+26+2+14+len(" (default)") = 54 cells,
+// inside the keybindingsDialogSpec list's 58-cell inner width, so the (default)/(custom)
+// tag is never Tree-clipped either. (The prior 10 truncated Ctrl+Shift+V to Ctrl+Shift.)
+const keybindChordColWidth = 14
+
 // keybindRowText renders one action row for the customizer list: the action name, its
 // current binding, and a (default)/(custom)/(unbound) tag distinguishing a binding left
 // at its catalog default, one the user has overridden, and one the user has cleared
@@ -24,7 +38,7 @@ func (w *Workbench) keybindRowText(a action) string {
 	case w.isOverridden(a.actionID):
 		tag = "custom"
 	}
-	return "  " + padName(a.name, 26) + "  " + padName(chordLabel(w.chordFor(a.actionID)), 10) + " (" + tag + ")"
+	return "  " + padName(a.name, 26) + "  " + padName(chordLabel(w.chordFor(a.actionID)), keybindChordColWidth) + " (" + tag + ")"
 }
 
 // capturePrompt is the status line shown while waiting for the user to press the new
@@ -58,18 +72,10 @@ func selectedKeybindAction(list *tv.Tree) *action {
 // restores every default.
 func (w *Workbench) showKeybindingCustomizer() {
 	actions := w.rebindable()
-	categories := 0
-	seen := map[string]bool{}
-	for _, a := range actions {
-		if !seen[a.category] {
-			seen[a.category] = true
-			categories++
-		}
-	}
-	// Content-driven height: one row per action plus one per category header, capped so a
-	// short catalog does not balloon on a roomy terminal (mirrors the palette/help specs).
-	rows := len(actions) + categories
-	spec := tv.DialogSpec{MinW: 58, MinH: 16, MaxH: rows + 9}
+	// Content-driven, capped spec (issue #461): sizes to the ~54-cell row content
+	// instead of the old inline spec's 80%×85% balloon. Static, so dialog.Fit handles
+	// resize below.
+	spec := w.keybindingsDialogSpec()
 	x, y, width, height := w.dialogRect(spec)
 
 	var layer *tv.Layer
@@ -288,11 +294,10 @@ func (w *Workbench) showKeybindingCustomizer() {
 		setStatus("All keybindings reset to their defaults.")
 	}
 
-	labels := []string{"&Reset", "Reset &All", "Close"}
-	rects := footerButtonRects(labels, 2, width-3, height-2, 2)
-	dialog.Window.AddContent(newButton(labels[0], rects[0], resetSelected))
-	dialog.Window.AddContent(newButton(labels[1], rects[1], resetAll))
-	dialog.Window.AddContent(newButton(labels[2], rects[2], closeFn))
+	rects := footerButtonRects(keybindFooterLabels, 2, width-3, height-2, tv.DefaultButtonGap)
+	dialog.Window.AddContent(newButton(keybindFooterLabels[0], rects[0], resetSelected))
+	dialog.Window.AddContent(newButton(keybindFooterLabels[1], rects[1], resetAll))
+	dialog.Window.AddContent(newButton(keybindFooterLabels[2], rects[2], closeFn))
 
 	// Backup Esc handler for when focus rests on a footer button rather than the list;
 	// it never closes mid-capture (the list owns that).
