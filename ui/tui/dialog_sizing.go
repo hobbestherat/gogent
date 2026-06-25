@@ -75,6 +75,31 @@ func (w *Workbench) commandsDialogSpec() tv.DialogSpec {
 	return spec
 }
 
+// keybindingsDialogSpec is the content-driven size of the Customize Keybindings
+// modal (issue #461). Like sessionsDialogSpec/commandsDialogSpec it expresses a
+// content footprint rather than a share of the terminal: a single-column list of
+// "name  chord  (tag)" rows whose inner width is ~54 cells, so PreferredW 62 (54 +
+// dialog chrome, with headroom for the 14-cell chord column and longer/translated
+// action names) settles well under the 80% balloon the prior inline spec fell into
+// (it left PreferredW/MaxW/PrefH at 0, so ResolveDialogRect defaulted to 80%×85% —
+// 160 cols on a 200-wide terminal). MaxW 76 is an inert ceiling at the default
+// catalog that only bites to stop sprawl on an ultrawide terminal. PrefH 34 settles
+// the height (≈27 visible rows) and MaxH 40 caps it, replacing the old MaxH=rows+9
+// which ballooned to ~85% with the ~55-row catalog. MinW is floored at the footer's
+// measured width so the &Reset / Reset &All / Close buttons can never overlap
+// (mirroring commandsDialogSpec). The spec is static (no terminal-share term), so
+// the dialog uses dialog.Fit on resize.
+func (w *Workbench) keybindingsDialogSpec() tv.DialogSpec {
+	spec := tv.DialogSpec{
+		MinW: 58, MaxW: 76, PreferredW: 62,
+		MinH: 16, MaxH: 40, PrefH: 34,
+	}
+	if need := footerRowMinWidth(keybindFooterLabels, tv.DefaultButtonGap); spec.MinW < need {
+		spec.MinW = need
+	}
+	return spec
+}
+
 // statisticsDialogSpec is the content-driven size of the Statistics dialog (issue
 // #345). Unlike browserDialogSpec (shared with Resources, which renders arbitrarily
 // long SKILL.md / input-schema text and genuinely fills the screen), Statistics
