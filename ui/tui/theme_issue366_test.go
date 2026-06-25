@@ -49,11 +49,12 @@ func issue366RoleSwatch(t *testing.T, w *Workbench, key string) (x, y int, targe
 	if !ok {
 		t.Fatalf("role %q label vanished after scrolling into view", key)
 	}
-	labelW := themeEditorLeftLabelW
-	if issue267labelColumn(col) == "right" {
-		labelW = themeEditorLabelW
-	}
-	x = col + labelW + themeEditorFieldW + 2
+	// After issue #462 the swatch LEADS the row (swatch → label → field), so it sits
+	// swatchW+1 columns LEFT of the label text. Return its LEFT edge: it is inside the
+	// swatch for activation, and issue366ClickPopupPaletteCell uses it as the picker
+	// popup's origin (the popup opens at the picker's left edge). (Before #462 the swatch
+	// was at label+gap+field+2gaps, i.e. the far right of the row.)
+	x = col - themeEditorSwatchW - 1
 	y = row
 	top := w.desktop.TopLayer()
 	if top == nil {

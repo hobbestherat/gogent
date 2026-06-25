@@ -232,9 +232,11 @@ func TestFocusFollowsScrollOffHiddenField(t *testing.T) {
 		t.Fatalf("scrolling viewport not found")
 	}
 	// The first role's spec field (top of the left column, logical row 1) is on screen at
-	// scrollY=0 and is the first to scroll off when paging down.
+	// scrollY=0 and is the first to scroll off when paging down. After issue #462 the row
+	// order is swatch → label → field, so the field sits at swatch+gap+label+gap from the
+	// column origin (previously it was label+gap).
 	left := themeEditorColumns()[0]
-	fieldX := left.x + left.labelW + 1
+	fieldX := left.x + themeEditorSwatchW + 1 + left.labelW + 1
 	var topField *tv.VisualComponent
 	for _, ch := range vp.Children() {
 		b := ch.Bounds
