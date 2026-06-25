@@ -268,12 +268,26 @@ attemptClose := func() {
 }
 ```
 
-and wire it to: the Cancel footer button, the dialog-root Escape handler, and
-`dialog.Window.OnClose` (the title-bar ✕). `defsEqual` compares the scalar fields
-plus the param slice element-wise. Risk: every close path must go through
-`attemptClose`, or the guard is half-applied — called out as a regression risk
-below. If the maintainer prefers a smaller PR, this section can ship separately;
-P1–P6 core stand alone.
+and wire it to all three close paths:
+
+- **Cancel footer button** — replace `closeFn` (the last entry in the `actions`
+  slice, line 393) with `attemptClose`.
+- **Escape** — the dialog-root `OnTypeFn` (line 400) calls `attemptClose` instead
+  of `closeFn`.
+- **Title-bar ✕** — set `dialog.Window.OnClose = func(*tv.Window) { attemptClose() }`
+  (replacing the line-398 reassignment). This is **vetoable**: turbotui's
+  `closeButtonPressed` (`window.go:142-150`) routes the ✕ *through `OnClose` only*
+  and does **not** remove the layer itself when an `OnClose` is installed
+  ("a confirmation step can veto the close"). So `attemptClose` can pop the confirm
+  and leave the dialog open; the layer is removed only when `closeFn` finally runs.
+  Because `OnClose` is reassigned after the widgets exist, `attemptClose`'s closure
+  over `isDirty`/`currentDef` is valid (it is defined near the end, alongside the
+  footer wiring).
+
+`defsEqual` compares the scalar fields plus the param slice element-wise. The
+baseline is (re)set in `loadForm`/`clearForm` and after a successful Save/Delete,
+so a freshly-loaded or just-saved form reads as clean. If the maintainer prefers a
+smaller PR, this section can ship separately; the P1–P6 core stands alone.
 
 ---
 
@@ -390,7 +404,11 @@ public API surface, so it does not breach encapsulation.
    call sites (`tmplInput`, `argsBox`) are updated together.
 3. **Optional dirty guard must cover all three close paths** (Cancel, Escape,
    title-bar ✕) or it is half-applied; baseline must be reset after Save/Delete or
-   it will false-positive. Mitigated by routing all closes through `attemptClose`.
+   it will false-positive. Mitigated by routing all three through `attemptClose`
+   (the ✕ is interceptable because `window.go:142-150` fires `OnClose` *instead of*
+   self-removing the layer). If the guard ships, the footer-test helpers and the
+   "Escape closes" expectations are unaffected (Escape still closes a *clean*
+   form with no extra prompt).
 4. **Insert-at-caret touches public fields directly** — must clamp `CursorX` to
    the line length (done) to avoid a slice out-of-range if the caret state is
    stale.
