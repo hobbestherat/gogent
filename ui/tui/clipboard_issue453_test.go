@@ -127,8 +127,8 @@ func TestCopyLastAnswerNoAnswerYet(t *testing.T) {
 	sw.addUser("only a user message") // no assistant answer yet
 	sw.copyLastAnswer()
 
-	if buf.Len() != 0 {
-		t.Errorf("expected no clipboard write with no answer, got %q", buf.String())
+	if got := extractAllOSC52(t, buf.String()); len(got) != 0 {
+		t.Errorf("expected no clipboard write with no answer, got %q", got)
 	}
 	last := sw.transcript.records[len(sw.transcript.records)-1]
 	if joined := strings.Join(toTexts(last.lines), " "); !strings.Contains(joined, "no answer to copy yet") {
@@ -146,8 +146,8 @@ func TestCopyLastCodeNoAssistantRecord(t *testing.T) {
 
 	sw.copyLastCode() // no records at all
 
-	if buf.Len() != 0 {
-		t.Errorf("expected no clipboard write, got %q", buf.String())
+	if got := extractAllOSC52(t, buf.String()); len(got) != 0 {
+		t.Errorf("expected no clipboard write, got %q", got)
 	}
 	last := sw.transcript.records[len(sw.transcript.records)-1]
 	if joined := strings.Join(toTexts(last.lines), " "); !strings.Contains(joined, "no code block") {

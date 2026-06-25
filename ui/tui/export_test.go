@@ -217,8 +217,8 @@ func TestCopyLastAnswerAndCode(t *testing.T) {
 
 	// No assistant yet: yank reports nothing to copy and writes nothing.
 	sw.copyLastAnswer()
-	if buf.Len() != 0 {
-		t.Errorf("expected no clipboard write before an answer, got %q", decodeOSC52(t, buf.String()))
+	if got := extractAllOSC52(t, buf.String()); len(got) != 0 {
+		t.Errorf("expected no clipboard write before an answer, got %q", got)
 	}
 
 	sw.addUser("what?")
@@ -253,8 +253,8 @@ func TestCopyLastCodeNoFence(t *testing.T) {
 	sw.addAssistant("just words, no code at all")
 	sw.copyLastCode()
 
-	if buf.Len() != 0 {
-		t.Errorf("expected no clipboard write, got %q", decodeOSC52(t, buf.String()))
+	if got := extractAllOSC52(t, buf.String()); len(got) != 0 {
+		t.Errorf("expected no clipboard write, got %q", got)
 	}
 	last := sw.transcript.records[len(sw.transcript.records)-1]
 	joined := strings.Join(toTexts(last.lines), " ")
