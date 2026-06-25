@@ -95,6 +95,14 @@ type Handlers struct {
 	// is hidden.
 	GetTheme func() config.ThemeConfig
 	SetTheme func(config.ThemeConfig)
+	// GetSavedThemes / SetSavedThemes read and persist the user's named custom
+	// themes (issue #462) — copy-and-modify palettes saved alongside the read-only
+	// built-ins. GetSavedThemes returns a working copy the editor may mutate;
+	// SetSavedThemes only persists (the live palette is applied via SetTheme when a
+	// saved theme is made active). Both may be nil, in which case the editor shows
+	// the built-ins only and hides the Save As/Delete actions.
+	GetSavedThemes func() []config.NamedTheme
+	SetSavedThemes func([]config.NamedTheme)
 	// GetKeybindings / SetKeybindings read and persist the keyboard-shortcut
 	// overrides (issue #269). SetKeybindings only persists; the customizer applies
 	// each rebind to the live registry itself so the new key works without a

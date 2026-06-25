@@ -141,6 +141,15 @@ func embeddedHandlersFor(g *gogent.Gogent, wb *tuipkg.Workbench, noColor bool) t
 			tuipkg.ApplyTheme(tuipkg.ResolveTheme(t, os.Getenv, noColor))
 			wb.RefreshTheme()
 		},
+		// Named custom themes (issue #462): persisted alongside the active theme.
+		// The editor applies a saved theme live via SetTheme, so this only stores
+		// the list.
+		GetSavedThemes: func() []config.NamedTheme {
+			return g.SavedThemes()
+		},
+		SetSavedThemes: func(themes []config.NamedTheme) {
+			g.SetSavedThemes(themes)
+		},
 		// Keybinding overrides (issue #269): GetKeybindings seeds the live
 		// registry at startup; SetKeybindings only persists (the customizer
 		// applies each rebind to the registry itself, live).
