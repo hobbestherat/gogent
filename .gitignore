@@ -14,3 +14,6 @@ haiku.txt
 *.test
 *.out
 
+# Claude Code local data
+.claude/
+
