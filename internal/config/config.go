@@ -481,6 +481,26 @@ type ThemeConfig struct {
 	// Values are "#RRGGBB" hex, a decimal ANSI index ("0".."255"), or
 	// "default"/"none" for the terminal default. Unknown keys/values are ignored.
 	Overrides map[string]string `json:"overrides,omitempty"`
+	// SavedName, when non-empty, records that this (active) theme is the user's
+	// saved theme of that name (issue #462). It lets the theme editor re-select the
+	// matching saved entry on reopen so a later Save writes back to that saved entry
+	// rather than to the parent built-in. It is empty for a plain built-in
+	// selection. It is metadata only — ResolveTheme/applyOverrides ignore it — and
+	// is NOT stored inside a NamedTheme.Theme (a saved theme does not point at
+	// itself; the entry's own Name is the identity). Empty by default, so an older
+	// config.json without the key is unaffected.
+	SavedName string `json:"saved_name,omitempty"`
+}
+
+// NamedTheme is a user-saved theme (issue #462): a display name plus the theme
+// config it stores. The stored Theme.Name points at the built-in palette the saved
+// theme was cloned from (so paletteByName/ResolveTheme still resolve a base
+// palette) and Theme.Overrides carry the customisations. Built-in palettes stay
+// hardcoded and read-only; a NamedTheme is the only mutable, user-authored theme.
+// The stored Theme does not set SavedName — the entry's own Name is its identity.
+type NamedTheme struct {
+	Name  string      `json:"name"`
+	Theme ThemeConfig `json:"theme"`
 }
 
 // KeybindingsConfig holds the user's keyboard-shortcut overrides (issues #269, #401).
@@ -555,6 +575,12 @@ type Config struct {
 	// value is the coloured "default" palette, so an older config.json without the
 	// key is unaffected.
 	Theme ThemeConfig `json:"theme,omitempty"`
+	// SavedThemes lists the user's named custom themes (issue #462): copy-and-modify
+	// palettes saved alongside the read-only built-ins. Each is a parent built-in
+	// plus colour overrides; the editor lists them in its preset dropdown and Theme
+	// (above) may point at one via SavedName. Empty (the default) means no custom
+	// themes, so an older config.json without the key is unaffected.
+	SavedThemes []NamedTheme `json:"saved_themes,omitempty"`
 	// Keybindings customises the TUI keyboard shortcuts (issue #269). The zero
 	// value leaves every action at its built-in default, so an older config.json
 	// without the key behaves exactly as before.

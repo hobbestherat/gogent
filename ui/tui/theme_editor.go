@@ -132,6 +132,11 @@ var themePresets = []struct {
 	{"Dark (black background)", themeDark},
 }
 
+// savedThemePrefix marks a user-saved custom theme in the preset dropdown so it reads
+// as distinct from the three read-only built-ins (issue #462). The Gogent-only prefixed
+// label keeps the change contained to gogent — no turbotui Select grouping is needed.
+const savedThemePrefix = "★ "
+
 // colorSpec renders a colour as an editable spec string, the inverse of
 // parseColor: "default" for the terminal default, "#RRGGBB" for an RGB colour
 // and the decimal index for an ANSI colour.
@@ -322,11 +327,18 @@ func themeEditorColumns() []themeEditorColumn {
 }
 
 // themeEditorColumnRows is the number of on-screen rows a column occupies before
-// scrolling: one header row per group plus one row per role.
+// scrolling: one header row per group, one row per role, and one blank separator row
+// between adjacent sections (issue #462) for vertical breathing room. The separator
+// count MUST match the extra logical rows the row-building loop in showThemeEditor
+// inserts, or maxScroll/the scrollbar thumb desync; checkThemeEditorLayout's reveal
+// invariant catches a drift at init.
 func themeEditorColumnRows(col themeEditorColumn) int {
 	rows := 0
 	for _, g := range col.groups {
 		rows += 1 + len(g.roles)
+	}
+	if len(col.groups) > 1 {
+		rows += len(col.groups) - 1 // one separator between each pair of adjacent sections
 	}
 	return rows
 }
@@ -519,6 +531,20 @@ func carryUnexposedOverrides(cfg config.ThemeConfig, prior map[string]string) co
 	return cfg
 }
 
+// findSavedThemeByName returns the index of the saved theme whose Name matches name
+// (case-insensitive, trimmed), or -1 when none does. It is the duplicate-name check the
+// Save As path uses before overwriting and the identity match callers use to resolve a
+// saved theme by its display name (issue #462).
+func findSavedThemeByName(themes []config.NamedTheme, name string) int {
+	norm := strings.ToLower(strings.TrimSpace(name))
+	for i, nt := range themes {
+		if strings.ToLower(strings.TrimSpace(nt.Name)) == norm {
+			return i
+		}
+	}
+	return -1
+}
+
 // presetIndex returns the themePresets index for a canonical palette name,
 // defaulting to 0 (the default palette).
 func presetIndex(name string) int {
@@ -574,12 +600,65 @@ func (w *Workbench) showThemeEditor() {
 	// refresh is wired into the widgets below; it is assigned after they exist.
 	var refresh func()
 
-	dialog.Window.AddContent(dialogLabel("Preset:", tv.Rect{X: 2, Y: 1, W: 8, H: 1}))
-	presetLabels := make([]string, len(themePresets))
-	for i, p := range themePresets {
-		presetLabels[i] = p.label
+	// Named custom themes (issue #462): copy-and-modify palettes saved alongside the
+	// built-ins. savable gates the Save As/Delete actions — without both handlers the
+	// editor behaves exactly as before (built-ins only). saved is a working copy the
+	// editor mutates before flushing it back via SetSavedThemes.
+	savable := w.handlers.GetSavedThemes != nil && w.handlers.SetSavedThemes != nil
+	var saved []config.NamedTheme
+	if w.handlers.GetSavedThemes != nil {
+		saved = w.handlers.GetSavedThemes()
 	}
-	preset := newSelect(w.desktop, presetLabels, tv.Rect{X: 10, Y: 1, W: 30, H: 1})
+
+	// A presetEntry is one selectable row of the preset dropdown: a built-in palette or
+	// a saved custom theme. parent is the canonical built-in the entry resolves against
+	// (so buildThemeConfig/paletteByName work the same for both); savedIndex indexes into
+	// saved (or -1 for a built-in); name is the saved theme's display name ("" for a
+	// built-in). Built-ins come first, so a built-in's entry index equals its presetIndex.
+	type presetEntry struct {
+		label      string
+		parent     string
+		savedIndex int
+		name       string
+	}
+	buildEntries := func() []presetEntry {
+		es := make([]presetEntry, 0, len(themePresets)+len(saved))
+		for _, p := range themePresets {
+			es = append(es, presetEntry{label: p.label, parent: p.name, savedIndex: -1})
+		}
+		for i, nt := range saved {
+			es = append(es, presetEntry{
+				label:      savedThemePrefix + nt.Name,
+				parent:     canonicalThemeName(nt.Theme.Name),
+				savedIndex: i,
+				name:       nt.Name,
+			})
+		}
+		return es
+	}
+	entries := buildEntries()
+	entryLabels := func() []string {
+		labels := make([]string, len(entries))
+		for i, e := range entries {
+			labels[i] = e.label
+		}
+		return labels
+	}
+	// findSavedEntry returns the dropdown index of the saved entry with the given name
+	// (case-insensitive), or -1. Used to re-select a saved theme by name after a mutation
+	// and to resolve the active SavedName back-link on open.
+	findSavedEntry := func(name string) int {
+		norm := strings.ToLower(strings.TrimSpace(name))
+		for i, e := range entries {
+			if e.savedIndex >= 0 && strings.ToLower(strings.TrimSpace(e.name)) == norm {
+				return i
+			}
+		}
+		return -1
+	}
+
+	dialog.Window.AddContent(dialogLabel("Preset:", tv.Rect{X: 2, Y: 1, W: 8, H: 1}))
+	preset := newSelect(w.desktop, entryLabels(), tv.Rect{X: 10, Y: 1, W: 30, H: 1})
 	dialog.Window.AddContent(preset)
 
 	noColor := tv.NewCheckbox("Disable &colours", tv.Rect{X: 44, Y: 1, W: width - 48, H: 1}, func(bool) { refresh() })
@@ -639,17 +718,22 @@ func (w *Workbench) showThemeEditor() {
 	)
 	// cellRect is the x-origin and width of a row's cell within its column — the single place
 	// horizontal placement is computed, called when building the rows and again by relayout()
-	// when the dialog is resized.
+	// when the dialog is resized. The swatch LEADS each row (issue #462): swatch → label →
+	// field, so the colour visually anchors its line instead of being detached at the far
+	// right. The per-row total width (swatchW + 1 + labelW + 1 + fieldW == labelW + fieldW +
+	// swatchW + 2) is unchanged by the reorder, so resolveThemeEditorLayout's column geometry
+	// and checkThemeEditorLayout's collision invariants are untouched — only the cells'
+	// internal order moved.
 	cellRect := func(col themeEditorColumn, kind rowKind) (x, wdt int) {
 		switch kind {
 		case rowHeader:
 			return col.x, col.labelW + fieldW + swatchW + 2
-		case rowField:
-			return col.x + col.labelW + 1, fieldW
 		case rowSwatch:
-			return col.x + col.labelW + fieldW + 2, swatchW
+			return col.x, swatchW
+		case rowField:
+			return col.x + swatchW + 1 + col.labelW + 1, fieldW
 		default: // rowLabel
-			return col.x, col.labelW
+			return col.x + swatchW + 1, col.labelW
 		}
 	}
 
@@ -671,7 +755,14 @@ func (w *Workbench) showThemeEditor() {
 	i := 0
 	for colIdx, col := range layout.columns {
 		logical := 0 // column-local row; viewport-relative Y is logical-scrollY (set by reflow)
-		for _, g := range col.groups {
+		for gi, g := range col.groups {
+			// One blank separator row between adjacent sections (issue #462): advance the
+			// logical row before every group after the first so the section reads with
+			// vertical breathing room. themeEditorColumnRows counts these same separators so
+			// the scroll math stays consistent.
+			if gi > 0 {
+				logical++
+			}
 			hx, hw := cellRect(col, rowHeader)
 			addRow(themeSectionHeader(g.title, tv.Rect{X: hx, Y: logical, W: hw, H: 1}).Root(), logical, colIdx, rowHeader)
 			logical++
@@ -852,51 +943,236 @@ func (w *Workbench) showThemeEditor() {
 		w.desktop.Redraw()
 	}
 
-	preset.OnChange = func(index int) {
-		loadFields(paletteByName(themePresets[index].name))
+	// seedOverrides is the carry source for carryUnexposedOverrides at Save: the overrides
+	// of whatever entry is currently selected, so the #265 focus pairs are preserved
+	// per-theme rather than bleeding the active theme's unexposed keys onto a saved one
+	// (issue #462). Set on every selection by seedFromEntry/selectActive.
+	var seedOverrides map[string]string
+
+	// seedFromEntry makes the editor reflect a *fresh switch to* the given dropdown entry:
+	// it loads the colour fields and the toggles and sets seedOverrides. For a saved entry
+	// it seeds from that entry's stored config; for a built-in it loads the pristine palette
+	// with the toggles reset and carries the active-at-open theme's unexposed overrides
+	// (today's behaviour). It is the OnChange handler and the post-mutation re-seed used by
+	// Save As/Delete — SetSelected does not fire OnChange, so it is always called explicitly.
+	seedFromEntry := func(e presetEntry) {
+		if e.savedIndex >= 0 && e.savedIndex < len(saved) {
+			nt := saved[e.savedIndex]
+			loadFields(editedTheme(nt.Theme))
+			noColor.SetChecked(nt.Theme.NoColor)
+			noShadow.SetChecked(nt.Theme.NoShadow)
+			seedOverrides = nt.Theme.Overrides
+		} else {
+			loadFields(paletteByName(e.parent))
+			noColor.SetChecked(false)
+			noShadow.SetChecked(false)
+			seedOverrides = cur.Overrides
+		}
 		refresh()
 	}
 
-	// Seed from the current configuration: the selected preset palette with the
-	// saved overrides applied so the fields show the user's real colours.
-	preset.SetSelected(presetIndex(cur.Name))
-	noColor.SetChecked(cur.NoColor)
-	noShadow.SetChecked(cur.NoShadow)
-	loadFields(editedTheme(cur))
+	// selectActive re-establishes a consistent dropdown↔fields↔toggles↔seedOverrides state
+	// for a given *active* ThemeConfig (issue #462). It is the single routine the on-open
+	// seed and the post-Delete reconcile share, so the two can never drift. The built-in
+	// branch seeds from the active config itself (so an active customised built-in keeps its
+	// overrides) — deliberately not seedFromEntry(builtin), which loads the pristine palette.
+	selectActive := func(active config.ThemeConfig) {
+		if active.SavedName != "" {
+			if di := findSavedEntry(active.SavedName); di >= 0 {
+				preset.SetSelected(di)
+				seedFromEntry(entries[di])
+				return
+			}
+		}
+		// Built-in, or a dangling SavedName whose saved entry no longer exists.
+		preset.SetSelected(presetIndex(active.Name))
+		loadFields(editedTheme(active))
+		noColor.SetChecked(active.NoColor)
+		noShadow.SetChecked(active.NoShadow)
+		seedOverrides = active.Overrides
+		refresh()
+	}
+
+	// rebuildPresetOptions recomputes the entries from the (mutated) saved list and feeds
+	// the new labels to the dropdown after a Save As/Delete. SetOptions preserves the
+	// selection by value where it can and clamps otherwise; callers follow it with an
+	// explicit selectActive/seedFromEntry to re-establish a consistent state.
+	rebuildPresetOptions := func() {
+		entries = buildEntries()
+		preset.SetOptions(entryLabels())
+	}
+
+	preset.OnChange = func(index int) {
+		if index < 0 || index >= len(entries) {
+			return
+		}
+		seedFromEntry(entries[index])
+	}
+
+	// Seed from the current configuration: if the active theme points at a saved theme
+	// (SavedName), select that ★ entry so a later Save writes back to it; otherwise select
+	// the parent built-in seeded with the active overrides (today's behaviour).
+	selectActive(cur)
 	reflow() // position rows and hide those below the initial fold before the first paint
 	refresh()
 
 	var layer *tv.Layer
-	save := func() {
+
+	// currentSpecs reads every spec field into a role→spec map.
+	currentSpecs := func() map[string]string {
 		specs := make(map[string]string, len(themeRoles))
 		for i, role := range themeRoles {
 			specs[role.key] = fields[i].GetText()
 		}
+		return specs
+	}
+	// selectedEntry returns the currently selected dropdown entry, defaulting to the first
+	// built-in if the selection is somehow out of range.
+	selectedEntry := func() presetEntry {
 		idx := preset.GetSelected()
-		if idx < 0 || idx >= len(themePresets) {
+		if idx < 0 || idx >= len(entries) {
 			idx = 0
 		}
-		cfg := buildThemeConfig(themePresets[idx].name, noColor.IsChecked(), noShadow.IsChecked(), specs)
+		return entries[idx]
+	}
+	// buildEntryCfg assembles the ThemeConfig for the current editor state against a given
+	// parent built-in, carrying the unexposed-role overrides of the current selection. It
+	// never sets SavedName — that rides only on the active cfg handed to SetTheme, never on
+	// the config stored in the saved list (issue #462).
+	buildEntryCfg := func(parent string) config.ThemeConfig {
+		cfg := buildThemeConfig(parent, noColor.IsChecked(), noShadow.IsChecked(), currentSpecs())
 		// Don't let a Save erase overrides the editor has no field for (the #265 focus
-		// pairs): SetTheme replaces the config wholesale, so carry the unexposed keys.
-		cfg = carryUnexposedOverrides(cfg, cur.Overrides)
-		w.handlers.SetTheme(cfg) // persists + re-applies the live palette
+		// pairs): SetTheme replaces the config wholesale, so carry the unexposed keys of the
+		// selected theme.
+		return carryUnexposedOverrides(cfg, seedOverrides)
+	}
+
+	save := func() {
+		e := selectedEntry()
+		entryCfg := buildEntryCfg(e.parent)
+		if e.savedIndex >= 0 && e.savedIndex < len(saved) {
+			// Editing a saved theme: update only that saved entry, then make it the live
+			// active theme with the SavedName back-link so a reopen re-selects it. Built-ins
+			// are never written.
+			saved[e.savedIndex].Theme = entryCfg
+			if w.handlers.SetSavedThemes != nil {
+				w.handlers.SetSavedThemes(saved)
+			}
+			activeCfg := entryCfg
+			activeCfg.SavedName = e.name
+			w.handlers.SetTheme(activeCfg)
+		} else {
+			// Built-in: behave as today, with the back-link explicitly cleared.
+			activeCfg := entryCfg
+			activeCfg.SavedName = ""
+			w.handlers.SetTheme(activeCfg) // persists + re-applies the live palette
+		}
 		w.desktop.RemoveLayer(layer)
 		w.rebuildMenu()
 	}
 	reset := func() {
 		preset.SetSelected(0)
-		noColor.SetChecked(false)
-		noShadow.SetChecked(false)
-		loadFields(paletteByName(themeDefault))
-		refresh()
+		seedFromEntry(entries[0]) // SetSelected does not fire OnChange
 	}
 	cancel := func() { w.desktop.RemoveLayer(layer) }
 
+	// saveAs stores the current editor state as a NEW named theme, leaving the source
+	// untouched (issue #462) — the non-destructive copy path. On a duplicate name it
+	// confirms before overwriting (matching Delete's destructiveness), then re-selects and
+	// applies the copy so it becomes the live active theme.
+	saveAs := func() {
+		w.showInputDialog("Save Theme As", "&Name:", "", func(value string, ok bool) {
+			if !ok {
+				return
+			}
+			name := strings.TrimSpace(value)
+			if name == "" {
+				return
+			}
+			entryCfg := buildEntryCfg(selectedEntry().parent)
+			commit := func() {
+				storedName := name
+				if di := findSavedThemeByName(saved, name); di >= 0 {
+					storedName = saved[di].Name // keep the original casing on overwrite
+					saved[di].Theme = entryCfg
+				} else {
+					saved = append(saved, config.NamedTheme{Name: name, Theme: entryCfg})
+				}
+				w.handlers.SetSavedThemes(saved)
+				rebuildPresetOptions()
+				if di := findSavedEntry(storedName); di >= 0 {
+					preset.SetSelected(di)
+					seedFromEntry(entries[di])
+				}
+				activeCfg := entryCfg
+				activeCfg.SavedName = storedName
+				w.handlers.SetTheme(activeCfg) // apply the copy live
+				w.rebuildMenu()
+			}
+			if findSavedThemeByName(saved, name) >= 0 {
+				w.showConfirm("Save Theme As",
+					fmt.Sprintf("A theme named %q already exists. Overwrite it?", name),
+					func(yes bool) {
+						if yes {
+							commit()
+						}
+					})
+				return
+			}
+			commit()
+		})
+	}
+
+	// deleteTheme removes the selected saved theme after confirmation (issue #462).
+	// Built-ins are not deletable. After deletion it reconciles the editor to the
+	// post-delete LIVE active theme so the dropdown, fields and live colours all agree.
+	deleteTheme := func() {
+		e := selectedEntry()
+		if e.savedIndex < 0 {
+			return // built-in: nothing to delete
+		}
+		w.showConfirm("Delete Theme",
+			fmt.Sprintf("Delete the saved theme %q? This cannot be undone.", e.name),
+			func(yes bool) {
+				if !yes {
+					return
+				}
+				if e.savedIndex < len(saved) {
+					saved = append(saved[:e.savedIndex], saved[e.savedIndex+1:]...)
+				}
+				w.handlers.SetSavedThemes(saved)
+				// (1) If the deleted theme was the LIVE active one, reset the active theme to
+				// the pristine parent built-in so no dangling SavedName survives — keyed on
+				// the re-read live SavedName, never the dropdown selection or stale cur.
+				if w.handlers.GetTheme != nil {
+					live := w.handlers.GetTheme()
+					if live.SavedName != "" && strings.EqualFold(strings.TrimSpace(live.SavedName), strings.TrimSpace(e.name)) {
+						w.handlers.SetTheme(config.ThemeConfig{Name: e.parent})
+					}
+				}
+				// (2) Rebuild the dropdown and re-select+seed the post-delete live active
+				// theme in BOTH sub-paths, so selection/fields/live never diverge.
+				rebuildPresetOptions()
+				if w.handlers.GetTheme != nil {
+					selectActive(w.handlers.GetTheme())
+				}
+				w.rebuildMenu()
+			})
+	}
+
 	resetBtn := newButton("Reset", tv.Rect{X: 2, Y: height - 3, W: 9, H: 1}, reset)
+	dialog.Window.AddContent(resetBtn)
+	// Save As/Delete are only offered when the saved-themes handlers are wired (issue
+	// #462); without them the editor is the built-ins-only editor it was before.
+	var saveAsBtn, deleteBtn *tv.Button
+	if savable {
+		saveAsBtn = newButton("Save As…", tv.Rect{X: 12, Y: height - 3, W: 11, H: 1}, saveAs)
+		deleteBtn = newButton("Delete", tv.Rect{X: 24, Y: height - 3, W: 10, H: 1}, deleteTheme)
+		dialog.Window.AddContent(saveAsBtn)
+		dialog.Window.AddContent(deleteBtn)
+	}
 	saveBtn := newButton("Save", tv.Rect{X: width - 24, Y: height - 3, W: 9, H: 1}, save)
 	cancelBtn := newButton("Cancel", tv.Rect{X: width - 13, Y: height - 3, W: 10, H: 1}, cancel)
-	dialog.Window.AddContent(resetBtn)
 	dialog.Window.AddContent(saveBtn)
 	dialog.Window.AddContent(cancelBtn)
 
@@ -948,6 +1224,12 @@ func (w *Workbench) showThemeEditor() {
 		}
 		bar.SetBounds(tv.Rect{X: layout.scrollbarX, Y: layout.contentTop, W: 1, H: layout.visibleRows})
 		resetBtn.Root().SetBounds(tv.Rect{X: 2, Y: nh - 3, W: 9, H: 1})
+		if saveAsBtn != nil {
+			saveAsBtn.Root().SetBounds(tv.Rect{X: 12, Y: nh - 3, W: 11, H: 1})
+		}
+		if deleteBtn != nil {
+			deleteBtn.Root().SetBounds(tv.Rect{X: 24, Y: nh - 3, W: 10, H: 1})
+		}
 		saveBtn.Root().SetBounds(tv.Rect{X: nw - 24, Y: nh - 3, W: 9, H: 1})
 		cancelBtn.Root().SetBounds(tv.Rect{X: nw - 13, Y: nh - 3, W: 10, H: 1})
 		scrollY = layout.clampScroll(scrollY)

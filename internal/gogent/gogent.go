@@ -3137,6 +3137,44 @@ func (g *Gogent) SetTheme(t config.ThemeConfig) {
 	}
 }
 
+// SavedThemes returns the user's named custom themes (issue #462). It returns a
+// deep copy — fresh slice and per-entry override maps — so a caller can edit the
+// result (the theme editor mutates a working copy before SetSavedThemes) without
+// aliasing the live config. The zero value is an empty slice, so a config.json
+// predating the setting yields no custom themes.
+func (g *Gogent) SavedThemes() []config.NamedTheme {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if len(g.config.SavedThemes) == 0 {
+		return nil
+	}
+	out := make([]config.NamedTheme, len(g.config.SavedThemes))
+	for i, nt := range g.config.SavedThemes {
+		cp := nt
+		if nt.Theme.Overrides != nil {
+			cp.Theme.Overrides = make(map[string]string, len(nt.Theme.Overrides))
+			for k, v := range nt.Theme.Overrides {
+				cp.Theme.Overrides[k] = v
+			}
+		}
+		out[i] = cp
+	}
+	return out
+}
+
+// SetSavedThemes replaces the named-custom-theme list and persists it to disk so
+// custom themes survive a restart (issue #462). It only persists; the active
+// palette is re-applied separately via SetTheme when the editor makes a saved theme
+// the live theme.
+func (g *Gogent) SetSavedThemes(themes []config.NamedTheme) {
+	g.mu.Lock()
+	g.config.SavedThemes = themes
+	g.mu.Unlock()
+	if err := g.SaveConfig(); err != nil {
+		g.warnf("Failed to persist config: %v", err)
+	}
+}
+
 // Keybindings returns the keyboard-shortcut override configuration (issue #269).
 // The zero value leaves every action at its built-in default, so a config.json
 // predating the setting yields the original shortcuts.

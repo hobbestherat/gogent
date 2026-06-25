@@ -200,6 +200,10 @@ func installPresentationHandlers(h *tuipkg.Handlers, g *gogent.Gogent, wb *tuipk
 		tuipkg.ApplyTheme(tuipkg.ResolveTheme(t, os.Getenv, noColorFlag))
 		wb.RefreshTheme()
 	}
+	// Named custom themes (issue #462): persisted alongside the active theme; the
+	// editor applies a saved theme live via SetTheme, so this only stores the list.
+	h.GetSavedThemes = func() []config.NamedTheme { return g.SavedThemes() }
+	h.SetSavedThemes = func(themes []config.NamedTheme) { g.SetSavedThemes(themes) }
 	h.GetKeybindings = func() config.KeybindingsConfig { return g.Keybindings() }
 	h.SetKeybindings = func(k config.KeybindingsConfig) { g.SetKeybindings(k) }
 	h.LoadLayout = func() gogent.Layout { return g.LoadLayout() }

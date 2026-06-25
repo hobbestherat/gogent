@@ -481,14 +481,18 @@ func TestIssue267FieldsSeededInPlacementOrder(t *testing.T) {
 		if !ok {
 			t.Fatalf("role %q label vanished after scrolling it into view", role.key)
 		}
-		// The spec field is the first whitespace-delimited token after the label cell.
+		// The spec field is the first token after the label cell, fieldW columns wide.
+		// Cap the read at fieldW: since issue #462 the swatch leads the row so the field
+		// sits at the far right and the rightmost role's field abuts the scrollbar column
+		// with no trailing space — a greedy whitespace read would run past the value into
+		// the scrollbar glyphs.
 		p := c + len([]rune(label))
 		row := rows[r]
 		for p < len(row) && row[p] == ' ' {
 			p++
 		}
 		start := p
-		for p < len(row) && row[p] != ' ' {
+		for p < len(row) && row[p] != ' ' && p-start < themeEditorFieldW {
 			p++
 		}
 		token := string(row[start:p])
