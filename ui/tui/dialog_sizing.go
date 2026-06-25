@@ -50,6 +50,30 @@ func (w *Workbench) sessionsDialogSpec() tv.DialogSpec {
 	}
 }
 
+// commandsDialogSpec is the content-driven size of the Custom Commands editor
+// (issue #448). Like watchersDialogSpec it expresses a content footprint rather
+// than a share of the terminal: a command list beside a detail form that holds a
+// name/desc/template/model/agent set of fields, a parameter sub-editor and a live
+// preview. PreferredW 112 widens the detail pane (detailW = width-28) so the form
+// and preview are readable; PrefH 28 bounds the height to the form's actual needs
+// (fields occupy rows 2–13, previewH = height-17) instead of the old 85% balloon
+// (~42 rows on a 50-row terminal). MaxW 140 / MaxH 34 allow growth on a wide
+// terminal without sprawling; the 84×26 floor keeps the footer (which needs 63
+// cells) and the form usable on a small terminal. MinW is raised to the footer's
+// measured width if that is larger, so the buttons never overlap. The spec is
+// static (no terminal-share term), so the dialog uses dialog.Fit on resize, like
+// sessionsDialogSpec.
+func (w *Workbench) commandsDialogSpec() tv.DialogSpec {
+	spec := tv.DialogSpec{
+		MinW: 84, MaxW: 140, PreferredW: 112,
+		MinH: 26, MaxH: 34, PrefH: 28,
+	}
+	if need := footerRowMinWidth(commandsFooterLabels, tv.DefaultButtonGap); spec.MinW < need {
+		spec.MinW = need
+	}
+	return spec
+}
+
 // statisticsDialogSpec is the content-driven size of the Statistics dialog (issue
 // #345). Unlike browserDialogSpec (shared with Resources, which renders arbitrarily
 // long SKILL.md / input-schema text and genuinely fills the screen), Statistics
