@@ -2654,6 +2654,10 @@ func (sw *SessionWindow) registerTranscriptBindings() {
 	focus(actionTranscriptFoldAll, func() bool { sw.transcript.setFold(true); return true })
 	focus(actionTranscriptUnfoldAll, func() bool { sw.transcript.setFold(false); return true })
 	focus(actionTranscriptCopyAnswer, func() bool { sw.copyLastAnswer(); return true })
+	// "Copy last code block" (issue #463): rebindable but unbound by default, so focus()
+	// registers nothing until the user assigns a chord — it then yanks the fenced code
+	// from the last answer, paralleling the 'y' copy-answer binding above.
+	focus(actionTranscriptCopyCode, func() bool { sw.copyLastCode(); return true })
 }
 
 // promptFind opens the search prompt and applies the entered query as a

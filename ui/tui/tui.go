@@ -875,15 +875,15 @@ func (w *Workbench) rebuildMenu() {
 		w.menuActionItem("Ne&xt Session", actionSessionNext),
 		w.menuActionItem("&Close Session", actionSessionClose),
 		tv.NewMenuItem("----------", nil),
-		tv.NewMenuItem("Close &Others", func() { w.CloseOthers(w.ActiveID()) }),
-		tv.NewMenuItem("Close Al&l", func() { w.CloseAll() }),
+		w.menuActionItem("Close &Others", actionSessionCloseOthers),
+		w.menuActionItem("Close Al&l", actionSessionCloseAll),
 	}
 	// The Sessions browser (issue #58) is surfaced only when the backend wires
 	// the listing handler; otherwise the item would lead nowhere.
 	if w.handlers.ListSavedSessions != nil {
 		sessionItems = append(sessionItems,
 			tv.NewMenuItem("----------", nil),
-			tv.NewMenuItem("Saved &Sessions…", func() { w.showSessionsDialog() }),
+			w.menuActionItem("Saved &Sessions…", actionSessionsBrowser),
 		)
 	}
 	// The Watchers dialog (issue #329 Phase 4) is surfaced only when the backend
@@ -902,13 +902,13 @@ func (w *Workbench) rebuildMenu() {
 		}
 		sessionItems = append(sessionItems,
 			tv.NewMenuItem("----------", nil),
-			tv.NewMenuItem("&Rename Active…", func() { w.RenameSession(w.ActiveID()) }),
-			tv.NewMenuItem(pinLabel, func() { w.TogglePin(w.ActiveID()) }),
-			tv.NewMenuItem("Move Active &Up", func() { w.MoveSession(w.ActiveID(), -1) }),
-			tv.NewMenuItem("Move Active &Down", func() { w.MoveSession(w.ActiveID(), 1) }),
+			w.menuActionItem("&Rename Active…", actionSessionRename),
+			w.menuActionItem(pinLabel, actionSessionPin),
+			w.menuActionItem("Move Active &Up", actionSessionMoveUp),
+			w.menuActionItem("Move Active &Down", actionSessionMoveDown),
 			tv.NewMenuItem("----------", nil),
-			tv.NewMenuItem("Export &Markdown…", func() { w.exportActive("md") }),
-			tv.NewMenuItem("Export &JSON…", func() { w.exportActive("json") }),
+			w.menuActionItem("Export &Markdown…", actionSessionExportMD),
+			w.menuActionItem("Export &JSON…", actionSessionExportJSON),
 		)
 		// Plan-mode approval (issue #43): surface it when the backend wires the
 		// handler. The action reports when there is no plan to approve.

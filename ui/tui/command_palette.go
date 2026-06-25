@@ -75,6 +75,25 @@ const (
 	actionWindowTileGrid       tv.ActionID = "window.tileGrid"
 	actionWindowMaximizeAll    tv.ActionID = "window.maximizeAll"
 	actionWindowCascade        tv.ActionID = "window.cascade"
+
+	// Session operations promoted to rebindable bindings (issue #463): they were
+	// palette-only (no actionID), so the customizer could not list them and the user
+	// could not bind a key to e.g. "Rename session". Most have no conventional default
+	// key and so ship with deflt: unboundChord — rebindable but bound to nothing until
+	// the user assigns a chord (rebuildBindings/conflictHolder/persistence all skip the
+	// sentinel, so an unbound default registers, collides and persists as nothing).
+	actionSessionPrev        tv.ActionID = "session.prev"
+	actionSessionCloseOthers tv.ActionID = "session.closeOthers"
+	actionSessionCloseAll    tv.ActionID = "session.closeAll"
+	actionSessionRename      tv.ActionID = "session.rename"
+	actionSessionPin         tv.ActionID = "session.pin"
+	actionSessionMoveUp      tv.ActionID = "session.moveUp"
+	actionSessionMoveDown    tv.ActionID = "session.moveDown"
+	actionSessionSwitchModel tv.ActionID = "session.switchModel"
+	actionSessionExportMD    tv.ActionID = "session.exportMarkdown"
+	actionSessionExportJSON  tv.ActionID = "session.exportJSON"
+	actionSessionsBrowser    tv.ActionID = "session.browser"
+	actionTranscriptCopyCode tv.ActionID = "transcript.copyCode"
 )
 
 // visible reports whether the action should appear in the help overlay: an action
@@ -122,16 +141,30 @@ func (w *Workbench) rawActions() []action {
 		{category: "Session", name: "Fork session", keys: "/fork", run: sessionCmd("/fork")},
 		{category: "Session", name: "Next session", run: func() { w.cycle(1) },
 			actionID: actionSessionNext, scope: tv.ScopeGlobal, deflt: tv.Chord{Rune: ']', Ctrl: true}},
-		{category: "Session", name: "Previous session", run: func() { w.cycle(-1) }},
+		// Previous session mirrors Next; its default is Ctrl+P (not the issue's suggested
+		// Ctrl+[, which a terminal delivers as Esc and tui.Deliverability rejects).
+		{category: "Session", name: "Previous session", run: func() { w.cycle(-1) },
+			actionID: actionSessionPrev, scope: tv.ScopeGlobal, deflt: tv.Chord{Rune: 'p', Ctrl: true}},
 		{category: "Session", name: "Close session", run: w.CloseActive,
 			actionID: actionSessionClose, scope: tv.ScopeGlobal, deflt: tv.Chord{Rune: 'w', Ctrl: true}},
-		{category: "Session", name: "Close other sessions", run: func() { w.CloseOthers(w.ActiveID()) }},
-		{category: "Session", name: "Close all sessions", run: w.CloseAll},
-		{category: "Session", name: "Rename session", run: func() { w.RenameSession(w.ActiveID()) }},
-		{category: "Session", name: "Pin / unpin session", run: func() { w.TogglePin(w.ActiveID()) }},
-		{category: "Session", name: "Move session up", run: func() { w.MoveSession(w.ActiveID(), -1) }},
-		{category: "Session", name: "Move session down", run: func() { w.MoveSession(w.ActiveID(), 1) }},
-		{category: "Session", name: "Switch model", run: w.focusActiveModel},
+		// Destructive close-many ops ship unbound by default so no key fires them unless
+		// the user opts in; the customizer still lists them.
+		{category: "Session", name: "Close other sessions", run: func() { w.CloseOthers(w.ActiveID()) },
+			actionID: actionSessionCloseOthers, scope: tv.ScopeGlobal, deflt: unboundChord},
+		{category: "Session", name: "Close all sessions", run: w.CloseAll,
+			actionID: actionSessionCloseAll, scope: tv.ScopeGlobal, deflt: unboundChord},
+		// Rename defaults to F2 (conventional, conflict-free, deliverable); the rest of
+		// the per-session ops have no conventional key and ship unbound (issue #463).
+		{category: "Session", name: "Rename session", run: func() { w.RenameSession(w.ActiveID()) },
+			actionID: actionSessionRename, scope: tv.ScopeGlobal, deflt: tv.Chord{Key: tui.KeyF2}},
+		{category: "Session", name: "Pin / unpin session", run: func() { w.TogglePin(w.ActiveID()) },
+			actionID: actionSessionPin, scope: tv.ScopeGlobal, deflt: unboundChord},
+		{category: "Session", name: "Move session up", run: func() { w.MoveSession(w.ActiveID(), -1) },
+			actionID: actionSessionMoveUp, scope: tv.ScopeGlobal, deflt: unboundChord},
+		{category: "Session", name: "Move session down", run: func() { w.MoveSession(w.ActiveID(), 1) },
+			actionID: actionSessionMoveDown, scope: tv.ScopeGlobal, deflt: unboundChord},
+		{category: "Session", name: "Switch model", run: w.focusActiveModel,
+			actionID: actionSessionSwitchModel, scope: tv.ScopeGlobal, deflt: unboundChord},
 		// Running-turn / queue controls and per-session toggles (issue #201): the
 		// buttons cover the common path, but surfacing the commands here keeps the
 		// keyboard equivalents discoverable.
@@ -154,12 +187,17 @@ func (w *Workbench) rawActions() []action {
 		{category: "Session", name: "Approve plan", keys: "/act", run: sessionCmd("/act"),
 			enabled: w.activePlanPending},
 		{category: "Session", name: "Toggle thinking stream", keys: "/thinking", run: sessionCmd("/thinking")},
-		{category: "Session", name: "Export transcript (Markdown)", run: func() { w.exportActive("md") },
-			enabled: avail(h.GetTranscript != nil)},
-		{category: "Session", name: "Export transcript (JSON)", run: func() { w.exportActive("json") },
-			enabled: avail(h.GetTranscript != nil)},
+		// Names shortened to "Export Markdown"/"Export JSON" (matching the Session menu)
+		// so the customizer's 26-cell name column does not truncate them (issue #463).
+		{category: "Session", name: "Export Markdown", run: func() { w.exportActive("md") },
+			enabled:  avail(h.GetTranscript != nil),
+			actionID: actionSessionExportMD, scope: tv.ScopeGlobal, deflt: unboundChord},
+		{category: "Session", name: "Export JSON", run: func() { w.exportActive("json") },
+			enabled:  avail(h.GetTranscript != nil),
+			actionID: actionSessionExportJSON, scope: tv.ScopeGlobal, deflt: unboundChord},
 		{category: "Session", name: "Saved sessions browser", run: w.showSessionsDialog,
-			enabled: avail(h.ListSavedSessions != nil)},
+			enabled:  avail(h.ListSavedSessions != nil),
+			actionID: actionSessionsBrowser, scope: tv.ScopeGlobal, deflt: unboundChord},
 
 		// Window arrangement (issue #241): tile or maximize every open window across
 		// the work area. Mirrored on the View menu, which tags the same actionIDs.
@@ -201,7 +239,8 @@ func (w *Workbench) rawActions() []action {
 			run:      func() { w.withActiveTranscript((*SessionWindow).copyLastAnswer) },
 			actionID: actionTranscriptCopyAnswer, scope: tv.ScopeFocus, deflt: tv.Chord{Rune: 'y'}},
 		{category: "Transcript", name: "Copy last code block",
-			run: func() { w.withActiveTranscript((*SessionWindow).copyLastCode) }},
+			run:      func() { w.withActiveTranscript((*SessionWindow).copyLastCode) },
+			actionID: actionTranscriptCopyCode, scope: tv.ScopeFocus, deflt: unboundChord},
 
 		// Configuration browsers and editors.
 		{category: "Config", name: "Sub-agent settings", run: w.showSettingsDialog,
