@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-
-	"gogent/internal/clipboard"
 )
 
 // toTexts extracts the plain text from a slice of styled lines.
@@ -210,13 +208,12 @@ func TestWriteTranscriptExport(t *testing.T) {
 }
 
 // TestCopyLastAnswerAndCode drives the session window's yank actions through the
-// real clipboard board (writing OSC 52 to a buffer) and checks both the copied
-// payload and the confirmation note.
+// real clipboard path (turbotui App.CopyToClipboard writing OSC 52 to a buffer)
+// and checks both the copied payload and the confirmation note.
 func TestCopyLastAnswerAndCode(t *testing.T) {
-	w := newTestWorkbench(t)
-	sw := w.openWindow("s", "S")
 	var buf bytes.Buffer
-	w.clipboard = clipboard.New(&buf)
+	w := newBufferWorkbench(t, &buf)
+	sw := w.openWindow("s", "S")
 
 	// No assistant yet: yank reports nothing to copy and writes nothing.
 	sw.copyLastAnswer()
@@ -249,10 +246,9 @@ func TestCopyLastAnswerAndCode(t *testing.T) {
 
 // TestCopyLastCodeNoFence verifies a prose-only answer reports no code block.
 func TestCopyLastCodeNoFence(t *testing.T) {
-	w := newTestWorkbench(t)
-	sw := w.openWindow("s", "S")
 	var buf bytes.Buffer
-	w.clipboard = clipboard.New(&buf)
+	w := newBufferWorkbench(t, &buf)
+	sw := w.openWindow("s", "S")
 
 	sw.addAssistant("just words, no code at all")
 	sw.copyLastCode()
