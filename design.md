@@ -18,7 +18,7 @@ This is a **FIX**, not a feature or a refactor. Five acceptance criteria:
 | 1 | Buttons render & are usable | Shift bottom chrome up one row (`btnY = height-3`) | **Yes (primary)** |
 | 2 | Scrollable topic content + scrollbar | Port the `theme_editor.go` scroll viewport into each topic panel | Yes |
 | 3 | Required-field reachability under scroll | `ensureVisible(field)` before focusing the offending field in `submit` | Yes |
-| 4 | Resize reflow | Add `layer.OnResize` that re-resolves the rect and re-lays the interior | Yes |
+| 4 | Resize reflow (size **and content layout**) | `layer.OnResize` re-resolves the rect, repositions chrome, and resizes `Tabs`; the cascade re-derives each panel's `visibleRows`/`itemW`/scrollbar/`scrollY` via `LayoutFn`; `keepFocusVisible` runs after | Yes |
 | 5 | Tab-label overflow reachability | Keep Prev/Next + Alt-arrows (already wrap **all** tabs) as the guaranteed reachability path; add an always-visible "Topic n/N" indicator; elide long tab titles | Yes (reachability), visual scroll deferred to turbotui |
 
 No other behaviour is touched. The tool semantics, parsing, the neutral bridge
@@ -103,41 +103,62 @@ fallback. We mirror it, scoped to one topic panel.
 ### Mechanism (per topic panel)
 
 `buildTopicPanel` already stacks items at increasing logical `Y` into a
-`tv.NewComponent` panel. We keep that loop verbatim but treat each child's build-time
-`Y` as its **logical** row, then add:
+`tv.NewComponent` panel. We keep that loop verbatim but record, for each child, a
+**`scrollRow{comp, logicalY, h}`** (its build-time `Y` is the logical row, `h` its
+row span — 1 for labels/checkboxes/text, 3 for a textarea). The scrollbar is **not**
+a `scrollRow` (it is geometry, not content). Then add:
 
 - **`scrollY`** — first visible logical row (starts 0).
-- **`visibleRows`** — read live from the panel's own `Bounds.H`. Crucial detail:
-  `Tabs.layoutContent` resizes each tab's content to fill the content area
-  (`tabsH-1`) via `SetBounds`, which fires the panel's `LayoutFn`. So we set
-  `panel.LayoutFn` to `(1)` read `visibleRows = c.Bounds.H`, `(2)` clamp `scrollY`
-  to the new `maxScroll`, `(3)` `reflow()`. Because `LayoutFn` also runs at the start
-  of every `Draw`, the viewport self-heals on **both** resize and ordinary redraws
-  with no dialog-level plumbing into the panel internals. This is strictly cleaner
-  than the theme editor's explicit `relayout`, which it needs only because it is not
-  inside a `Tabs`.
+- **`visibleRows`, `itemW`** — derived live inside `panel.LayoutFn` from the panel's
+  own `Bounds` (`visibleRows = Bounds.H`, `itemW = Bounds.W - 2*margin`). Crucial
+  detail: `Tabs.layoutContent` resizes each tab's content to fill the content area
+  via `SetBounds`, which fires the panel's `LayoutFn` (verified `component.go:199`).
+  So `panel.LayoutFn` is the single place that re-derives **all** live geometry and is
+  what makes resize self-healing without the dialog reaching into panel internals
+  (`Tabs` is the layer the theme editor lacks). `LayoutFn` does, in order:
+  1. Guard `Bounds.H <= 0` / `Bounds.W <= 0` → keep the build-time seeds (resolves the
+     §8 `visibleRows==0` risk).
+  2. `visibleRows = Bounds.H`; `itemW = max(1, Bounds.W - 2*margin)`.
+  3. Reposition the scrollbar child to the live `Bounds`:
+     `bar.SetBounds({X: Bounds.W-1, Y: 0, W: 1, H: Bounds.H})` — **this is what keeps
+     the bar from going stale on resize** (it is a panel child, repositioned every
+     layout from live bounds, so a dialog-level relayout never needs to know about
+     it). (Resolves critic Defect A.)
+  4. `scrollY = clampScroll(scrollY)` against the new `maxScroll`.
+  5. `reflow()`.
+  Because `LayoutFn` runs on `SetBounds` **and** at the start of every `Draw`
+  (`component.go:280`), the viewport self-heals on both resize and ordinary redraws.
 - **`contentH`** — the panel's full logical height (the final `y` from the build
-  loop). `maxScroll = max(0, contentH - visibleRows)`.
-- **`reflow()`** — for each child: `Bounds.Y = logicalY - scrollY`; `Visible =
-  logicalY >= scrollY && logicalY < scrollY+visibleRows`. Identical to
-  `theme_editor.go:808–815`. Off-window children are not drawn, hit-tested, or
-  focus-navigated (`collectFocusable` skips `!Visible`, verified).
-- **`scrollTo(y)`** — clamp, set, reflow, `keepFocusVisible()`, redraw.
+  loop), captured once at build. `maxScroll = max(0, contentH - visibleRows)`.
+- **`reflow()`** — for every `scrollRow r`: set `r.comp.Bounds = {X: margin, Y:
+  r.logicalY - scrollY, W: itemW, H: r.h}` (so a horizontal resize re-widens **and**
+  re-narrows every field from the live `itemW` — resolves critic Defect B, satisfying
+  criterion 4's "recompute … content layout"), and `r.comp.Visible =
+  (r.logicalY + r.h > scrollY) && (r.logicalY < scrollY + visibleRows)` —
+  intersection, not strict containment, so a partially-scrolled 3-row textarea stays
+  visible/focusable (turbotui clips its off-window rows). Off-window children are not
+  drawn, hit-tested, or focus-navigated (`collectFocusable` skips `!Visible`,
+  verified `component.go:358`).
+- **`scrollTo(y)`** — clamp, set `scrollY`, `reflow()`, `keepFocusVisible()`, redraw.
 - **`keepFocusVisible()`** — if the focused child was just hidden, move focus to the
   first still-visible focusable in the panel (mirrors `theme_editor.go:816–844`).
   Prevents key-routing dead-ends (`desktop` drops keys to `!visibleInTree` widgets).
-- **`ensureVisible(target)`** — scroll the minimum amount to bring a child's logical
-  row inside the window (`if logical < scrollY → scrollY = logical`; `if logical >=
-  scrollY+visibleRows → scrollY = logical - visibleRows + 1`). Used by required
-  validation (§criterion 3) and by Enter-advance-focus so advancing onto a
-  below-the-fold field reveals it.
-- **Scrollbar** — a 1-column child at panel-relative `x = width-1` (items already end
-  at `width-2`; `itemW` stays `width - 2*margin`, leaving the last column free) with
-  a `DrawFn` that draws nothing when `maxScroll == 0` and otherwise calls the shared
-  vertical-scrollbar helper. We reserve `itemW`'s right edge so no field underlaps the
-  bar.
+  Exposed on the handle so the dialog's resize path can call it too (see §5).
+- **`ensureVisible(target *tv.VisualComponent)`** — scroll the minimum amount to bring
+  a focusable into the window. The panel builds a `focusRows map[*tv.VisualComponent]
+  struct{y, h int}` during the loop (keyed by each focusable's `Root()`, value its
+  logical top row + span — this is the component→logical-row source the critic flagged
+  as missing, resolving Defect D). `ensureVisible` looks `target` up, then: `if y <
+  scrollY → scrollTo(y)`; `if y+h > scrollY+visibleRows → scrollTo(y + h -
+  visibleRows)`. Used by required validation (criterion 3) and by Enter-advance-focus
+  so advancing onto a below-the-fold field reveals it before focus lands there.
+- **Scrollbar** — a 1-column panel child whose `X`/`H` track the live bounds via
+  `LayoutFn` (step 3). Items end at `margin + itemW - 1 = Bounds.W-3`, leaving column
+  `Bounds.W-2` as a gap and the bar alone at `Bounds.W-1`, so no field underlaps it.
+  Its `DrawFn` draws nothing when `maxScroll == 0` and otherwise calls the shared
+  vertical-scrollbar helper with `(contentH, visibleRows, scrollY)`.
 - **Mouse wheel** — `panel.OnScrollFn = scrollTo(scrollY - event.Delta)` (same delta
-  convention as TextView/theme editor).
+  convention as TextView/theme editor); always works, including inside a textarea.
 
 ### Keyboard scroll routing (dialog level)
 
@@ -148,17 +169,23 @@ The dialog's existing `dialog.Root().OnTypeFn` (Escape + Ctrl+Enter) gains, in t
 - `Up`/`Down` → active panel `scrollTo(scrollY ∓ 1)`.
 
 Verified key-consumption against the pinned turbotui:
-- `TextBox` handles only Left/Right → **Up/Down/PageUp/PageDown bubble** ✔.
-- `MultiLineInput` consumes Up/Down (caret move) but **not** PageUp/PageDown → at
-  least PageUp/PageDown always bubble out of a textarea ✔, and the mouse wheel always
-  works.
+- `TextBox` handles only Left/Right (`widget_textbox.go:146-148`) → **all of
+  Up/Down/PageUp/PageDown bubble** ✔.
+- `MultiLineInput` **always** consumes Up/Down (`widget_multiline_input.go:242-249`
+  return `true` even when `moveUp` no-ops at the top edge) but declines PageUp/PageDown
+  (`:259`) → from a focused textarea, **only PageUp/PageDown bubble**; Up/Down never
+  scroll the panel while a textarea holds focus. This asymmetry is stated plainly
+  rather than glossed: the guaranteed, focus-independent scroll affordances are the
+  **mouse wheel** and **PageUp/PageDown** (both work from every field, including a
+  textarea); Up/Down are an extra convenience that works only when the focused field
+  declines them (TextBox, checkbox). There is no edge-triggered auto-scroll out of a
+  textarea, so the surfaced hint (§6) advertises PageUp/PageDown + wheel explicitly so
+  a textarea-focused user is never left guessing how to scroll.
 
-So every field is reachable by **wheel** and **PageUp/PageDown** unconditionally, and
-by **Up/Down** except inside a textarea (where they correctly move the caret). We
-route to `tabs.Active()`'s panel via the per-tab handle slice. This matches the
-theme-editor gate: only scroll when `maxScroll > 0`, otherwise return `false` and let
-the desktop's focus navigation keep the arrows (so a short form behaves exactly as
-today).
+We route the bubbled keys to `tabs.Active()`'s panel via the per-tab handle slice.
+This matches the theme-editor gate: only scroll when the active panel's `maxScroll >
+0`, otherwise return `false` and let the desktop's focus navigation keep the arrows
+(so a short, non-overflowing form behaves exactly as today).
 
 ### Panel handle (the new return shape)
 
@@ -166,20 +193,23 @@ today).
 
 ```go
 type topicPanel struct {
-    widget      tv.Widget               // added to tabs.AddTab
-    fields      []questionField
-    firstFocus  *tv.VisualComponent
-    scrollTo    func(y int)
-    pageBy      func(rows int)          // visibleRows-relative
-    ensureVisible func(c *tv.VisualComponent)
+    widget           tv.Widget          // added to tabs.AddTab
+    fields           []questionField
+    firstFocus       *tv.VisualComponent
+    scrollBy         func(rows int)     // PageUp/Down (±visibleRows) and arrows (±1)
+    canScroll        func() bool        // maxScroll > 0 — the routing gate
+    ensureVisible    func(c *tv.VisualComponent)
+    keepFocusVisible func()             // called by the dialog's resize path (§5)
 }
 ```
 
-`showQuestionDialog` keeps `panels []topicPanel` indexed by tab so the key router and
-the validation path can address the active/offending tab. `fields` is still flattened
-into the dialog-level `fields` slice for validation; each `questionField` already
-carries `tabIndex`, so `submit` maps an offending field → `panels[f.tabIndex]` →
-`ensureVisible(f.focus)` → `desktop.SetFocus(f.focus)`.
+`showQuestionDialog` keeps `panels []topicPanel` indexed by tab so the key router, the
+validation path, and the resize path can address the active/offending tab. `fields`
+is still flattened into the dialog-level `fields` slice for validation; each
+`questionField` already carries `tabIndex`, so `submit` maps an offending field →
+`panels[f.tabIndex].ensureVisible(f.focus)` → `desktop.SetFocus(f.focus)` (scroll
+first so the focused field is never invisible). `ensureVisible` resolves `f.focus`
+through the panel's `focusRows` map, so no component→row lookup is left undefined.
 
 ### Shared scrollbar helper
 
@@ -205,24 +235,33 @@ We add a `relayout` closure modelled on `theme_editor.go:974`:
 layer.OnResize = func(tv.Rect) {
     nx, ny, nw, nh := tv.ResolveDialogRect(spec, app.Width(), app.Height())
     dialog.Window.Component.SetBounds(Rect{nx, ny, nw, nh})
-    // recompute errorY/btnY/tabsH from nh; reposition summary, tabs, errLabel,
-    // Cancel/Prev/Next/Submit; resize the Tabs widget.
+    // recompute errorY/btnY/tabsH from nh; reposition summary/indicator, errLabel,
+    // and Cancel/Prev/Next/Submit; resize the Tabs widget.
     tabs.Root().SetBounds(Rect{1, tabsY, nw-2, newTabsH})  // cascades to panels →
                                                            // layoutContent → panel
-                                                           // LayoutFn → reflow
+                                                           // LayoutFn (bar + itemW +
+                                                           // visibleRows + reflow)
+    panels[tabs.Active()].keepFocusVisible()               // active tab may have
+                                                           // hidden the focused field
     desktop.Redraw()
 }
 ```
 
-Because resizing `Tabs` cascades through `layoutContent → SetBounds → panel.LayoutFn
-→ reflow`, the per-panel viewports recompute `visibleRows` and re-clamp `scrollY`
-for free — we do **not** reach into panel internals from `relayout`. The button row
-re-flows with `reviewButtonRow`-style clamping is not needed here because the question
-buttons are left-packed with a right-anchored Submit; we re-run the same placement
-math (`bx` accumulation + `width-3-submitW+1`) against the new width, reusing
-`clampDialogRect` as the narrow-dialog safety net so Cancel/Prev/Next/Submit never
-overlap or cross the border on a small terminal (a latent improvement, since today
-they are pinned).
+Because resizing `Tabs` cascades through `layoutContent → SetBounds → panel.LayoutFn`,
+each per-panel viewport recomputes `visibleRows`, re-derives `itemW` (so fields
+re-widen/re-narrow horizontally — criterion 4's "content layout"), repositions its own
+scrollbar from live bounds (no stale bar), re-clamps `scrollY`, and re-`reflow`s — all
+for free, so `relayout` **never reaches into panel internals**. The one thing the
+cascade cannot decide is focus: a shrink can hide the focused field, so `relayout`
+calls `panels[active].keepFocusVisible()` after the cascade (mirrors
+`theme_editor.go:991`; only the active tab can hold focus, so only it is checked).
+(Resolves critic Defects A/B/C.)
+
+For the button row, the question buttons are left-packed (Cancel, optional Prev/Next)
+with a right-anchored Submit; `relayout` re-runs the same placement math (`bx`
+accumulation + `width-3-submitW+1`) against the new width, reusing `clampDialogRect`
+as the narrow-dialog safety net so Cancel/Prev/Next/Submit never overlap or cross the
+border on a small terminal (a latent improvement, since today they are pinned).
 
 The `spec` (`{MinW:50, MaxW:110, MinH:14}`) is pure Min/Max floors — path-independent
 — so re-resolving on each resize matches a fresh open at the new size.
@@ -243,8 +282,11 @@ rendering from gogent without a turbotui bump, which is out of scope. But:
 - **Add an always-visible "Topic n/N — Title" indicator** (a 1-row label updated in
   `tabs.OnTabChange`, placed on the summary row or just under it). This tells the user
   the current topic and total even when the strip clips, and is where we also surface
-  the "Tab/Ctrl+Enter to submit" hint. This keeps the existing `OnTabChange` error-
-  clearing behaviour (we extend the same callback).
+  the key hints. The hint text reads e.g. **"Ctrl+Enter submit · PgUp/PgDn or wheel
+  scroll · Tab next"** — it advertises PageUp/PageDown + wheel explicitly because (per
+  §2) those are the only scroll affordances that work from a focused textarea. This
+  keeps the existing `OnTabChange` error-clearing behaviour (we extend the same
+  callback).
 - **Elide long tab titles** (`topicTabTitle`) to a per-tab budget so the common
   multi-topic case fits the strip; combined with the indicator and Prev/Next, the
   overflow case stays fully usable.
@@ -264,21 +306,29 @@ schema, parsing, or bridge change. No turbotui change — honouring the chosen
 gogent-only scope.
 
 **(2) USABILITY.** Buttons are visible and reachable (Tab/Enter/Space, Ctrl+Enter,
-mouse). Every field is reachable: by wheel + PageUp/PageDown unconditionally, Up/Down
-outside textareas, and validation/Enter-advance auto-scroll the target into view. A
-scrollbar signals overflow; an always-visible Topic n/N indicator + submit hint tells
-the user where they are and how to submit. Nothing overflows silently. The user
-drives all input; auto-scroll only ever *reveals* a field, never changes a value.
+mouse). Every field is reachable: by wheel + PageUp/PageDown **from any field
+including a textarea**, by Up/Down when the focused field declines them, and by
+validation/Enter-advance auto-scroll bringing the target into view. The textarea
+Up/Down asymmetry is acknowledged plainly (§2) and mitigated by surfacing PgUp/PgDn +
+wheel in the always-visible hint, so a textarea-focused user is never stuck. A
+scrollbar signals overflow; the Topic n/N indicator tells the user where they are.
+Nothing overflows silently. The user drives all input; auto-scroll only ever *reveals*
+a field, never changes a value.
 
 **(3) NO REGRESSIONS.** The answer-collection contract (`questionField.answer`,
 required validation, `finish`/`onResult`, Cancelled-on-escape/shutdown) is untouched.
 Short forms that fit get `maxScroll == 0` → no scrollbar, scroll keys decline and fall
 through to focus nav → behaviour identical to today. The button shift aligns with the
-4 other modals' tested layout. The shared-scrollbar rename is behaviour-preserving and
-keeps the theme editor identical. Risk items called out in §8. Existing tests:
-`question_dialog`-specific tests (if any) plus the theme-editor scroll-math tests must
-stay green; the dev gate (build/vet/gofmt/lint/test, no `-race` on Pi5) runs before
-hand-off.
+4 other modals' tested layout. The resize path is fully specified (§5): the bar
+re-tracks live bounds, fields re-width, focus is kept visible — the four resize defects
+the critic raised (stale bar / no horizontal reflow / missing `keepFocusVisible` /
+undefined `ensureVisible` row lookup) are each resolved in §4–§5. The existing
+`question_dialog_issue406_test.go` tests call only `showQuestionDialog` (never
+`buildTopicPanel`), so the `topicPanel` return-type change is internal and safe; the
+`issue406` render tests guard the `maxScroll==0` byte-identical path (the §8
+`visibleRows==0` risk is the one to watch). The shared-scrollbar rename is
+behaviour-preserving and keeps the theme editor identical (its scroll-math tests guard
+it). The dev gate (build/vet/gofmt/lint/test, no `-race` on Pi5) runs before hand-off.
 
 **(4) HOLISTIC across both repos.** The change is in the right place: the button bug,
 the scroll viewport, resize, and tab handling are all *presentation* concerns owned by
@@ -293,19 +343,34 @@ than absorbed as a gogent hack pretending to be complete.
 
 ## 8. Regression risks & mitigations
 
-- **`visibleRows` read too early / zero.** If `LayoutFn` runs before the panel is
-  first sized, `visibleRows` could be 0 and hide everything. Mitigation: seed
-  `visibleRows` from the `tabsH-1` argument at build time (currently the ignored 4th
-  param) and only overwrite from `Bounds.H` when `Bounds.H > 0`.
+- **`visibleRows`/`itemW` read too early / zero.** If `LayoutFn` runs before the panel
+  is first sized, they could be 0 and hide/clip everything. Mitigation: seed
+  `visibleRows` from the `tabsH-1` argument and `itemW` from the build-time width, and
+  in `LayoutFn` guard `Bounds.H<=0`/`Bounds.W<=0` → keep the seeds. The `issue406`
+  render tests guard this byte-identical path.
+- **Stale scrollbar on resize (critic Defect A) — RESOLVED.** The bar is a panel child
+  repositioned from live `Bounds` in `LayoutFn` step 3, so the `Tabs` resize cascade
+  re-places it with no dialog-level plumbing.
+- **No horizontal field reflow (critic Defect B) — RESOLVED.** `reflow` sets each
+  row's `X`/`W` from the live `itemW`, not just `Y`/`Visible`, so fields re-width on a
+  horizontal resize (criterion 4's "content layout").
 - **Focus stranded on a hidden field.** Covered by `keepFocusVisible()` after every
-  scroll and `ensureVisible()` before every programmatic `SetFocus` — the same guard
-  the theme editor relies on.
+  scroll, after `relayout`'s cascade (critic Defect C — RESOLVED), and by
+  `ensureVisible()` before every programmatic `SetFocus` — the guard the theme editor
+  relies on.
+- **`ensureVisible` row lookup (critic Defect D) — RESOLVED.** The panel's `focusRows`
+  map (`*VisualComponent → {logicalY, h}`, built in the item loop) is the
+  component→row source; `ensureVisible` scrolls the minimum to fit `[y, y+h)`.
 - **Enter-advance-focus onto a below-fold field.** The existing `OnSubmit` wiring
   (`textBoxes`) jumps focus by index; wrap it to `ensureVisible(next)` first so the
   panel scrolls before the focus lands, else the new focus would be invisible.
+- **Textarea Up/Down never scroll (critic minor) — ACCEPTED + MITIGATED.** Up/Down are
+  consumed by `MultiLineInput`; scroll from a textarea is via PgUp/PgDn + wheel only.
+  Stated in §2 and advertised in the §6 hint so it is discoverable, not silent.
 - **Scroll keys swallowing focus navigation on short forms.** Gate all scroll routing
-  on `maxScroll > 0` (per active panel), returning `false` otherwise — identical to
-  the theme editor's gate — so a one-screen form is byte-for-byte unchanged.
+  on the active panel's `maxScroll > 0` (`canScroll`), returning `false` otherwise —
+  identical to the theme editor's gate — so a one-screen form is byte-for-byte
+  unchanged.
 - **Button row on a narrow/short dialog.** Reuse `clampDialogRect` for the left-packed
   buttons in both initial layout and `relayout`; the `tabsH >= 3` floor already
   guards the vertical squeeze.
