@@ -14,8 +14,8 @@ func ptr(v int) *int { return &v }
 // an unset max_steps reproduces gogent's prior fixed cap exactly, so older
 // config.json files behave as before.
 func TestDefaultMaxStepsMatchesHistoricalBound(t *testing.T) {
-	if DefaultMaxSteps != 25 {
-		t.Errorf("DefaultMaxSteps = %d, want 25 (the historical hardcoded bound)", DefaultMaxSteps)
+	if DefaultMaxSteps != 100 {
+		t.Errorf("DefaultMaxSteps = %d, want 100 (raised from 25 per issue #449)", DefaultMaxSteps)
 	}
 }
 
@@ -154,8 +154,8 @@ func TestGetDefaultConfigRoundTripsMaxSteps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal default: %v", err)
 	}
-	if !strings.Contains(string(raw), `"max_steps":25`) {
-		t.Errorf("default config JSON missing \"max_steps\":25; got %s", raw)
+	if !strings.Contains(string(raw), `"max_steps":100`) {
+		t.Errorf("default config JSON missing \"max_steps\":100; got %s", raw)
 	}
 	var loaded Config
 	if err := json.Unmarshal(raw, &loaded); err != nil {

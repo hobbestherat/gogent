@@ -582,8 +582,8 @@ type Config struct {
 	// unbounded too, matching the pre-#249 behaviour where the same fixed cap applied
 	// everywhere. It is a pointer so an absent "max_steps" key is distinguishable
 	// from an explicit 0:
-	//   nil (unset) -> the built-in default (DefaultMaxSteps, 25), preserving prior
-	//                  behaviour;
+	//   nil (unset) -> the built-in default (DefaultMaxSteps, 100; issue #449);
+	//                  the same as a config that predates the key;
 	//   0           -> UNLIMITED ("yolo") — the loop is bounded only by its other
 	//                  stop conditions (final answer, token budget, cancellation);
 	//   N > 0       -> cap at N steps.
@@ -609,10 +609,12 @@ type Config struct {
 }
 
 // DefaultMaxSteps is the built-in per-turn step (model round-trip) cap applied
-// when Config.MaxSteps is left unset (nil). It matches gogent's historical fixed
-// limit so an older config.json without a "max_steps" key behaves exactly as
-// before (issue #249).
-const DefaultMaxSteps = 25
+// when Config.MaxSteps is left unset (nil). It was originally gogent's historical
+// fixed limit (25, issue #249); issue #449 raised it to 100 so realistic
+// multi-step tasks complete before the cap interrupts them, while the cap still
+// bounds a runaway loop. The #249 mechanism is unchanged — nil ⇒ this default,
+// 0 ⇒ unlimited, N>0 ⇒ cap N — only the default value moved.
+const DefaultMaxSteps = 100
 
 // intPtr returns a pointer to v. It exists because Go does not allow taking the
 // address of a constant/literal inline, so GetDefaultConfig cannot spell
@@ -1014,7 +1016,7 @@ func GetDefaultConfig() *Config {
 		Notify:       notifyPtr(DefaultNotifyConfig()),
 		// Round-trip the default step cap explicitly so a freshly written
 		// config.json documents the setting (issue #249); 0 here would mean
-		// unlimited, so the default is the historical fixed bound.
+		// unlimited, so the default is the built-in DefaultMaxSteps (100, #449).
 		MaxSteps: intPtr(DefaultMaxSteps),
 		// Show the welcome/onboarding dialog by default (issue #339); the "Don't show
 		// again" checkbox persists false to opt out.

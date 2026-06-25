@@ -363,6 +363,15 @@ const (
 	// sees it if the conversation continues past the final answer.
 	finalToolCallResultNote = "[Final answer recorded and delivered to the user.]"
 
+	// stepLimitToolCallResultNote is the synthetic tool result recorded for a tool
+	// call that was orphaned when the loop hit its per-turn step cap before the call
+	// ran (issue #449). It balances the unanswered tool_call_id like
+	// finalToolCallResultNote, but says the call was NOT executed — the truthful
+	// thing a resumed model re-reading the transcript should see, rather than
+	// finalToolCallResultNote's "recorded and delivered" which would mislead it into
+	// treating interrupted work as done.
+	stepLimitToolCallResultNote = "[Tool call not executed: the per-turn step cap was reached before this call ran. Re-issue it if still needed.]"
+
 	// maxPreambleLen caps how long a tool-free turn may be and still be treated as
 	// a preamble. A genuine final answer — a summary, an explanation, a code block
 	// — runs long; a preamble is a sentence or two. Anything longer is final.
@@ -924,6 +933,14 @@ out — present it as your final answer.`
 // classify the run as failed (the task did not finish) (issue #28).
 const budgetExceededMarker = "BUDGET_EXCEEDED"
 
+// stepLimitReachedMarker prefixes an agent's final result when the loop stopped
+// because it hit its per-turn step cap with the just-completed turn still carrying
+// unexecuted tool calls (issue #449). Like budgetExceededMarker it makes the stop
+// visible (a folded SessionEventFinal notice rather than a silent finish) and is
+// the signal subAgentOutcome uses to classify a capped sub-agent as failed — the
+// task did not run to completion.
+const stepLimitReachedMarker = "STEP_LIMIT_REACHED"
+
 // waitRateLimit blocks until the session's rate limiter grants a permit (or ctx
 // is cancelled). It is a no-op when no limiter is installed.
 func (s *UserSession) waitRateLimit(ctx context.Context) error {
@@ -1101,6 +1118,29 @@ func stopForTruncation(resp *model.CompletionResponse) *model.CompletionResponse
 		" or lower its reasoning_effort, then try again."
 	if partial := strings.TrimSpace(resp.Content); partial != "" {
 		note += "\n\nPartial output before truncation:\n" + partial
+	}
+	resp.Content = note
+	return resp
+}
+
+// stopForStepLimit folds a visible, actionable notice into the agent's last
+// response when the loop stopped because it reached its per-turn step cap with
+// that turn's tool calls still unexecuted (issue #449). It mirrors stopForBudget /
+// stopForTruncation: the marker makes the stop unmistakable (not a silent finish)
+// and any partial output the model produced is preserved beneath it. maxSteps is
+// the cap that fired, surfaced so the user knows what to raise. Unlike
+// stopForTruncation the notice is NOT folded onto the persisted transcript: the
+// capped assistant turn carries real tool_calls that the caller balances instead,
+// so the persisted turn stays meaningful and the notice lives only in the emitted
+// SessionEventFinal.
+func stopForStepLimit(resp *model.CompletionResponse, maxSteps int) *model.CompletionResponse {
+	if resp == nil {
+		resp = &model.CompletionResponse{}
+	}
+	note := fmt.Sprintf("%s: reached the per-turn step cap (%d); the task was interrupted. "+
+		"Type a message to continue.", stepLimitReachedMarker, maxSteps)
+	if partial := strings.TrimSpace(resp.Content); partial != "" {
+		note += "\n\nPartial progress before stopping:\n" + partial
 	}
 	resp.Content = note
 	return resp
@@ -1286,7 +1326,23 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 	// uninterrupted stretch of tool-free turns.
 	truncationRetries := 0
 	raisedBudget := 0
-	for step := 0; maxSteps <= 0 || step < maxSteps; step++ {
+	// capExit records that the loop ended because it hit the per-turn step cap (as
+	// opposed to a clean break on a final answer / budget / truncation / cancel).
+	// The cap is checked as the first statement in the body — rather than in the
+	// for-condition — precisely so the exit path can tell a cap exit apart from a
+	// clean break and recover the just-completed turn's orphaned tool calls instead
+	// of dropping them silently (issue #449). The condition is byte-equivalent to the
+	// old `maxSteps <= 0 || step < maxSteps` header: maxSteps <= 0 stays unlimited,
+	// and a positive cap still permits steps 0..maxSteps-1 (the same N+1 round-trips).
+	// Checking it before ctx.Err() preserves the old precedence — the for-condition
+	// failed before the body ran, so a cancellation landing exactly at the boundary
+	// did not pre-empt the cap exit.
+	capExit := false
+	for step := 0; ; step++ {
+		if maxSteps > 0 && step >= maxSteps {
+			capExit = true
+			break
+		}
 		// Bail out promptly if the loop was stopped or the session closed; the
 		// in-flight request (if any) has already been cancelled via ctx.
 		if err := ctx.Err(); err != nil {
@@ -1545,6 +1601,36 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 		if err := advance(nextMessages, step+1, 0); err != nil {
 			return responses, err
 		}
+	}
+
+	// Step-cap exit recovery (issue #449). When the loop fell out because it hit
+	// maxSteps, the most recent advance()'d resp was persisted (sendCtx) but never
+	// run through the top-of-loop collectToolCalls, so any tool calls it carries are
+	// orphaned: never executed, never answered, and — without this — surfaced as a
+	// plain SessionEventFinal indistinguishable from a clean finish. Branch the same
+	// way the top of the next iteration would have, telling a genuine final that
+	// merely landed at the cap apart from a tool round the cap interrupted.
+	if capExit && resp != nil {
+		calls, explicitFinal := s.collectToolCalls(resp)
+		switch {
+		case explicitFinal || containsTerminalFinal(calls):
+			// A genuine final answer landed exactly at the cap. collectToolCalls has
+			// already folded the text-embedded / truncated-salvage forms into
+			// resp.Content; foldTerminalFinal folds a well-formed NATIVE
+			// structured_output{final} the serial runner never reached. Surface it as
+			// the normal final — NOT a step-limit stop — and balance its sibling /
+			// terminal calls with the accurate "recorded and delivered" note.
+			foldTerminalFinal(resp, calls)
+			s.finalizeTranscriptToolCalls(sess, resp, nil)
+		case len(calls) > 0:
+			// Real, non-final tool calls orphaned mid-action: surface the stop with a
+			// visible notice and balance the unanswered calls with the truthful
+			// "not executed" note so a resumed session's next user turn is valid.
+			resp = stopForStepLimit(resp, maxSteps)
+			s.balanceTranscriptToolCalls(sess, resp, nil, stepLimitToolCallResultNote)
+		}
+		// default: a plain-text cap (no calls) falls through to the normal final
+		// emission below, exactly as before.
 	}
 
 	if resp != nil {
@@ -1881,12 +1967,23 @@ func containsTerminalFinal(calls []tool.ToolCall) bool {
 // (issue #390) — ends the loop without the normal tool-result append, leaving
 // those tool_calls unanswered. OpenAI and Anthropic both reject an assistant
 // tool_calls message that is not answered one-to-one on the next request, so any
-// reused session would fail on its next user turn. This appends the results that
-// were already produced (executed siblings) plus a synthetic result for every
-// still-unanswered call id, so the transcript stays a balanced
-// assistant-tool_calls -> tool-results sequence. makeToolResultMessage emits no
-// SessionEvent, so the synthetic results stay out of the visible transcript.
+// reused session would fail on its next user turn. This balances the still-
+// unanswered call ids with the finalToolCallResultNote (a recorded final answer);
+// see balanceTranscriptToolCalls for the mechanics.
 func (s *UserSession) finalizeTranscriptToolCalls(sess *model.ModelSession, resp *model.CompletionResponse, executed []model.Message) {
+	s.balanceTranscriptToolCalls(sess, resp, executed, finalToolCallResultNote)
+}
+
+// balanceTranscriptToolCalls appends the results already produced (executed
+// siblings) plus a synthetic result carrying note for every still-unanswered
+// tool_call_id, so the persisted transcript stays a balanced assistant-tool_calls
+// -> tool-results sequence and a reused session's next user turn is a valid
+// request. note lets the caller pick wording that matches why the calls went
+// unanswered — finalToolCallResultNote for a recorded final (issue #390),
+// stepLimitToolCallResultNote for calls orphaned by the step cap (issue #449).
+// makeToolResultMessage emits no SessionEvent, so the synthetic results stay out
+// of the visible transcript.
+func (s *UserSession) balanceTranscriptToolCalls(sess *model.ModelSession, resp *model.CompletionResponse, executed []model.Message, note string) {
 	if sess == nil || resp == nil || len(resp.ToolCalls) == 0 {
 		return
 	}
@@ -1902,11 +1999,36 @@ func (s *UserSession) finalizeTranscriptToolCalls(sess *model.ModelSession, resp
 			continue
 		}
 		results = append(results, makeToolResultMessage(
-			tool.ToolCall{Tool: tc.Function.Name, CallID: tc.ID}, finalToolCallResultNote))
+			tool.ToolCall{Tool: tc.Function.Name, CallID: tc.ID}, note))
 		answered[tc.ID] = true
 	}
 	if len(results) > 0 {
 		sess.AppendToolResults(results)
+	}
+}
+
+// foldTerminalFinal folds a terminal structured_output{final:true} call's response
+// text into resp.Content, mirroring runToolCallsSerial's terminal handling. It is
+// the recovery for a genuine final answer that landed exactly on the step cap and
+// so was never folded by the serial runner (issue #449): the loop's exit path calls
+// it before surfacing the SessionEventFinal. It is a no-op when no call is a
+// terminal final or its response is empty (the empty case defers to the loop's
+// lastAssistant fallback, #171), and it leaves the calls to be balanced separately.
+func foldTerminalFinal(resp *model.CompletionResponse, calls []tool.ToolCall) {
+	if resp == nil {
+		return
+	}
+	for _, c := range calls {
+		if c.Tool != "structured_output" {
+			continue
+		}
+		if final, _ := c.Args["final"].(bool); !final {
+			continue
+		}
+		if text, ok := c.Args["response"].(string); ok && text != "" {
+			resp.Content = text
+		}
+		return
 	}
 }
 
@@ -2545,11 +2667,17 @@ func (s *UserSession) emitSubAgent(child *Agent, text string, err error) {
 
 // subAgentOutcome maps a sub-agent's final text to a terminal status. A reply
 // starting with FAILURE: is a failure, as is one stopped at its token budget
-// (BUDGET_EXCEEDED), since the task did not run to completion; anything else is
-// treated as completed.
+// (BUDGET_EXCEEDED) or interrupted by the per-turn step cap (STEP_LIMIT_REACHED,
+// issue #449), since in those cases the task did not run to completion; anything
+// else is treated as completed. A sub-agent that DID finish via
+// structured_output{final} exactly at the cap is surfaced by runLoop's exit path
+// as its real answer (not the step-limit marker), so it is correctly classified
+// completed here.
 func subAgentOutcome(final string) AgentStatus {
 	up := strings.TrimSpace(strings.ToUpper(final))
-	if strings.HasPrefix(up, "FAILURE") || strings.HasPrefix(up, budgetExceededMarker) {
+	if strings.HasPrefix(up, "FAILURE") ||
+		strings.HasPrefix(up, budgetExceededMarker) ||
+		strings.HasPrefix(up, stepLimitReachedMarker) {
 		return StatusFailed
 	}
 	return StatusCompleted
