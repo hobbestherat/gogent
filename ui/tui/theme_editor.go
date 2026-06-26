@@ -203,12 +203,20 @@ const themeEditorLeftLabelW = 20
 // toggles and the action buttons.
 const themeEditorContentTop = 3
 
+// themeEditorButtonGap is the number of blank rows kept between the last scrollable
+// colour row and the action-button row, so the buttons are not squeezed against the last
+// colour line. The buttons live at Y=height-3; this gap reserves the row(s) directly
+// above them, so the viewport ends at height-3-buttonGap and the last colour line is
+// followed by buttonGap blank rows before the buttons.
+const themeEditorButtonGap = 1
+
 // themeEditorVisibleRows is the FLOOR height of the scroll viewport: the rows between
-// themeEditorContentTop and the Save/Reset/Cancel button row (themeEditorDialogH-3) at
-// the 80×22 minimum. The live viewport height is resolveThemeEditorLayout(...).visibleRows
+// themeEditorContentTop and the Save/Reset/Cancel button row (themeEditorDialogH-3),
+// minus themeEditorButtonGap so a blank line separates the last colour row from the
+// buttons. The live viewport height is resolveThemeEditorLayout(...).visibleRows
 // (which grows with a larger dialog, issue #317); this const remains the documented floor
 // value the layout guard and the editor's scroll-math tests rest on.
-const themeEditorVisibleRows = themeEditorDialogH - 3 - themeEditorContentTop
+const themeEditorVisibleRows = themeEditorDialogH - 3 - themeEditorButtonGap - themeEditorContentTop
 
 // themeEditorScrollbarX is the FLOOR content-relative column of the fixed vertical
 // scrollbar: the last usable content column at the 80-wide minimum, just inside the right
@@ -296,7 +304,7 @@ func resolveThemeEditorLayout(width, height int) themeEditorLayout {
 		width:       width,
 		height:      height,
 		contentTop:  themeEditorContentTop,
-		visibleRows: height - 3 - themeEditorContentTop,
+		visibleRows: height - 3 - themeEditorButtonGap - themeEditorContentTop,
 		scrollbarX:  width - 3,
 		columns: []themeEditorColumn{
 			{leftX, leftLabelW, themeGroups[:2], 1},   // left: Session output, UI chrome (sectionPad=1 aligns UI chrome with Buttons and inputs)
@@ -391,12 +399,14 @@ func clampThemeScroll(y int) int {
 func checkThemeEditorLayout() {
 	const buttonRow = themeEditorDialogH - 3 // Reset/Save/Cancel live on this row
 
-	// The scroll viewport must be at least one row tall and sit strictly above the buttons.
+	// The scroll viewport must be at least one row tall and sit strictly above the buttons,
+	// leaving the themeEditorButtonGap blank row(s) between the last colour row and the
+	// buttons.
 	if themeEditorVisibleRows < 1 {
 		panic(fmt.Sprintf("theme editor: visible viewport is %d rows — nothing would show", themeEditorVisibleRows))
 	}
-	if last := themeEditorContentTop + themeEditorVisibleRows - 1; last >= buttonRow {
-		panic(fmt.Sprintf("theme editor: viewport last row %d collides with the buttons at row %d", last, buttonRow))
+	if last := themeEditorContentTop + themeEditorVisibleRows - 1; last >= buttonRow-themeEditorButtonGap {
+		panic(fmt.Sprintf("theme editor: viewport last row %d leaves no gap before the buttons at row %d", last, buttonRow))
 	}
 
 	cols := themeEditorColumns()

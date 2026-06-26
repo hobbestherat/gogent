@@ -331,9 +331,11 @@ func TestResolveThemeEditorLayoutFloor(t *testing.T) {
 
 // TestResolveThemeEditorLayoutGrows sweeps a range of resolved sizes the dialog can take
 // (from the floor up to a large terminal) and asserts the geometry stays self-consistent
-// at every one: the scrollbar tracks width-3, the viewport tracks height-3-contentTop,
-// the right column's swatch ends exactly one column before the scrollbar, and no label
-// clips. This is the core correctness property of deriving geometry from live bounds.
+// at every one: the scrollbar tracks width-3, the viewport tracks
+// height-3-buttonGap-contentTop (a blank line separates the last colour row from the
+// buttons), the right column's swatch ends exactly one column before the scrollbar, and
+// no label clips. This is the core correctness property of deriving geometry from live
+// bounds.
 func TestResolveThemeEditorLayoutGrows(t *testing.T) {
 	for _, dim := range []struct{ W, H int }{
 		{80, 22}, {81, 23}, {96, 34}, {120, 40}, {160, 42}, {200, 50}, {240, 68},
@@ -346,8 +348,8 @@ func TestResolveThemeEditorLayoutGrows(t *testing.T) {
 			if l.scrollbarX != dim.W-3 {
 				t.Errorf("at %dx%d scrollbarX = %d, want width-3 = %d", dim.W, dim.H, l.scrollbarX, dim.W-3)
 			}
-			if l.visibleRows != dim.H-3-themeEditorContentTop {
-				t.Errorf("at %dx%d visibleRows = %d, want height-3-contentTop = %d", dim.W, dim.H, l.visibleRows, dim.H-3-themeEditorContentTop)
+			if l.visibleRows != dim.H-3-themeEditorButtonGap-themeEditorContentTop {
+				t.Errorf("at %dx%d visibleRows = %d, want height-3-buttonGap-contentTop = %d", dim.W, dim.H, l.visibleRows, dim.H-3-themeEditorButtonGap-themeEditorContentTop)
 			}
 			// The right column's swatch must end exactly at the column before the scrollbar,
 			// so the grown dialog uses the full width with the scrollbar flush right.
