@@ -6,6 +6,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -322,5 +324,211 @@ func TestCatalogRevalidationSendsCachedValidators(t *testing.T) {
 	}
 	if got := f.gotLastMods[1]; got != "Wed, 01 Jan 2025 00:00:00 GMT" {
 		t.Errorf("revalidation Last-Modified = %q, want the cached value", got)
+	}
+}
+
+// --- fixes-round-1 pins: context propagation, empty-catalog not cached, concurrency ---
+
+// ctxCaptureFetcher records the context Catalog handed it, then returns a fixed
+// result. Used to prove Catalog threads its ctx through to the Fetcher.
+type ctxCaptureFetcher struct {
+	gotCtx context.Context
+	result fetchResult
+}
+
+func (f *ctxCaptureFetcher) Fetch(ctx context.Context, _, _ string) ([]byte, string, string, bool, error) {
+	f.gotCtx = ctx
+	return f.result.data, f.result.etag, f.result.lastMod, f.result.notModified, f.result.err
+}
+
+func TestCatalogPassesContextToFetcher(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	f := &ctxCaptureFetcher{result: okResult("e1", "lm1")}
+	c := newTestClient(t, filepath.Join(t.TempDir(), "cache.json"), f, 24*time.Hour, clk)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if _, err := c.Catalog(ctx, false); err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	// The exact ctx instance must reach the fetcher so a caller's cancellation
+	// (the dialog's Cancel/Escape) actually aborts the in-flight GET.
+	if f.gotCtx != ctx {
+		t.Errorf("fetcher received a different context than the one passed to Catalog")
+	}
+}
+
+// ctxAwareFetcher honors cancellation: it surfaces ctx.Err() when the context is
+// already done, otherwise returns a fixed result.
+type ctxAwareFetcher struct {
+	calls  int
+	result fetchResult
+}
+
+func (f *ctxAwareFetcher) Fetch(ctx context.Context, _, _ string) ([]byte, string, string, bool, error) {
+	f.calls++
+	if err := ctx.Err(); err != nil {
+		return nil, "", "", false, err
+	}
+	return f.result.data, f.result.etag, f.result.lastMod, f.result.notModified, f.result.err
+}
+
+func TestCatalogHonorsCancelledContextNoCache(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	f := &ctxAwareFetcher{result: okResult("e1", "lm1")}
+	c := newTestClient(t, filepath.Join(t.TempDir(), "cache.json"), f, 24*time.Hour, clk)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancelled: the fetch must abort and, with no cache, surface an error
+	_, err := c.Catalog(ctx, false)
+	if err == nil {
+		t.Fatal("Catalog with cancelled ctx + no cache = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "context canceled") {
+		t.Errorf("error = %q, want it to mention context canceled", err.Error())
+	}
+}
+
+func TestCatalogHonorsCancelledContextServesStale(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	f := &ctxAwareFetcher{result: okResult("e1", "lm1")}
+	c := newTestClient(t, filepath.Join(t.TempDir(), "cache.json"), f, 24*time.Hour, clk)
+
+	if _, err := c.Catalog(context.Background(), false); err != nil { // cold: populates cache
+		t.Fatalf("cold fetch: %v", err)
+	}
+	clk.t = clk.t.Add(48 * time.Hour) // stale → must revalidate
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cat, err := c.Catalog(ctx, false)
+	if err != nil {
+		t.Fatalf("cancelled revalidation with a cache should serve stale, got %v", err)
+	}
+	if _, ok := cat["groq"]; !ok {
+		t.Error("stale fallback on cancelled revalidation did not serve cached groq")
+	}
+}
+
+// A FRESH cache must short-circuit and ignore a cancelled context (there's no
+// work to abort).
+func TestCatalogFreshCacheIgnoresCancelledContext(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	f := &ctxAwareFetcher{result: okResult("e1", "lm1")}
+	c := newTestClient(t, filepath.Join(t.TempDir(), "cache.json"), f, 24*time.Hour, clk)
+
+	if _, err := c.Catalog(context.Background(), false); err != nil { // cold (call 1)
+		t.Fatalf("cold fetch: %v", err)
+	}
+	before := f.calls
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cat, err := c.Catalog(ctx, false) // within TTL → short-circuit, ctx unused
+	if err != nil {
+		t.Fatalf("fresh-cache read with cancelled ctx errored: %v", err)
+	}
+	if f.calls != before {
+		t.Errorf("fetcher calls = %d, want %d (a fresh cache must not fetch even with a cancelled ctx)", f.calls, before)
+	}
+	if _, ok := cat["groq"]; !ok {
+		t.Error("fresh-cache read missing groq")
+	}
+}
+
+// A valid-but-empty `{}` response must NOT be cached (it would poison the cache
+// for a full TTL). Cold path: surface an error.
+func TestCatalogEmptyResponseNotCachedCold(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	f := &queueFetcher{results: []fetchResult{{data: []byte("{}")}}}
+	c := newTestClient(t, filepath.Join(t.TempDir(), "cache.json"), f, 24*time.Hour, clk)
+
+	_, err := c.Catalog(context.Background(), false)
+	if err == nil {
+		t.Fatal("empty catalog with no cache = nil, want error")
+	}
+	// Nothing was persisted, so the next open is still a cold fetch (not a 24h
+	// wait on an empty cache).
+	if _, statErr := os.Stat(c.cachePath); !os.IsNotExist(statErr) {
+		t.Errorf("empty response should not be written to the cache; stat = %v", statErr)
+	}
+}
+
+// And when a good cache exists, an empty response must NOT overwrite it.
+func TestCatalogEmptyResponseServesStaleAndDoesNotPoison(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	f := &queueFetcher{results: []fetchResult{
+		okResult("e1", "lm1"),
+		{data: []byte("{}")}, // a transient empty 200
+	}}
+	c := newTestClient(t, filepath.Join(t.TempDir(), "cache.json"), f, 24*time.Hour, clk)
+
+	if _, err := c.Catalog(context.Background(), false); err != nil { // cold groq
+		t.Fatalf("cold fetch: %v", err)
+	}
+	clk.t = clk.t.Add(48 * time.Hour)
+	cat, err := c.Catalog(context.Background(), false)
+	if err != nil {
+		t.Fatalf("empty response should fall back to cache, got %v", err)
+	}
+	if _, ok := cat["groq"]; !ok {
+		t.Error("empty-response fallback did not serve cached groq")
+	}
+	// The good cache survives the empty response (not poisoned).
+	cf := readCacheFile(t, c.cachePath)
+	if _, ok := cf.Data["groq"]; !ok {
+		t.Fatal("cache poisoned: groq replaced by the empty response")
+	}
+	if len(cf.Data) != 1 {
+		t.Errorf("cache has %d providers, want 1 (groq only)", len(cf.Data))
+	}
+}
+
+// slowSafeFetcher is concurrency-safe (no shared mutable state), sleeps to widen
+// the race window, and honors cancellation.
+type slowSafeFetcher struct{ d time.Duration }
+
+func (f *slowSafeFetcher) Fetch(ctx context.Context, _, _ string) ([]byte, string, string, bool, error) {
+	select {
+	case <-time.After(f.d):
+		r := okResult("e1", "lm1")
+		return r.data, r.etag, r.lastMod, false, nil
+	case <-ctx.Done():
+		return nil, "", "", false, ctx.Err()
+	}
+}
+
+// Concurrent Catalog calls (force=true → every call fetches + writes) must not
+// panic or leave a torn/corrupt cache file. The Client.mu serializes the writes.
+// (Best-effort without -race on Pi5: it proves no panic/corruption, not the
+// absence of the data race itself.)
+func TestCatalogConcurrentCallsDoNotCorrupt(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	f := &slowSafeFetcher{d: 3 * time.Millisecond}
+	c := newTestClient(t, filepath.Join(t.TempDir(), "cache.json"), f, 24*time.Hour, clk)
+
+	const N = 8
+	var wg sync.WaitGroup
+	errs := make([]error, N)
+	start := make(chan struct{})
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start                                            // release together to maximize overlap
+			_, errs[i] = c.Catalog(context.Background(), true) // force → fetch + save
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, e := range errs {
+		if e != nil {
+			t.Errorf("goroutine %d errored: %v", i, e)
+		}
+	}
+	cf := readCacheFile(t, c.cachePath) // would fail to decode if writes had interleaved/torn
+	if _, ok := cf.Data["groq"]; !ok {
+		t.Fatal("cache file corrupted after concurrent writes (no groq)")
 	}
 }
