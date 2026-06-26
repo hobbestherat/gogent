@@ -104,20 +104,24 @@ func (w *Workbench) keybindingsDialogSpec() tv.DialogSpec {
 // #471). Like sessionsDialogSpec/keybindingsDialogSpec it expresses a content
 // footprint rather than a share of the terminal. The editor draws two columns of
 // swatch+label+field rows; the two column footprints plus the inter-column gutter, the
-// scrollbar column and the dialog chrome come to exactly the documented 80-column floor
-// (themeEditorDialogW) — the floor was designed as that tight two-column fit. So width is
-// PINNED there (MinW == MaxW == PreferredW): growing wider would only spread the surplus
-// into the role-label cells (resolveThemeEditorLayout's extra/2), the spacing/association
-// cascade tracked as a separate issue. Without this spec showThemeEditor fell back to the
-// 80%×85% percentage default and ballooned to 160×42 on a 200×50 terminal.
+// scrollbar column and the dialog chrome come to exactly the documented 83-column floor
+// (themeEditorDialogW) — the floor is that tight two-column fit, widened 80→83 with issue
+// #477's 1→4 inter-column gutter. So width is PINNED there (MinW == MaxW == PreferredW):
+// growing wider would only spread the surplus into the role-label cells
+// (resolveThemeEditorLayout's extra/2), the spacing/association cascade tracked as a
+// separate issue. The contentW sum below MUST stay equal to themeEditorDialogW — they are
+// the same number expressed two ways, and a drift makes MinW > MaxW; the layout test
+// asserts themeEditorDialogSpec() resolves MinW == MaxW == PreferredW == themeEditorDialogW
+// to catch exactly that. Without this spec showThemeEditor fell back to the 80%×85%
+// percentage default and ballooned to 160×42 on a 200×50 terminal.
 //
 // Height: PrefH shows every themeEditorContentRows() role with no scrolling. The chrome
 // the viewport math subtracts is constant and floor-height-independent — the resolver
 // computes visibleRows = height-3-contentTop, so the non-viewport rows are always
-// 3 + themeEditorContentTop (button row + border below, preset/toggle rows above). MinH
-// keeps the documented 80×22 floor, where the existing scrolling viewport takes over on a
-// short terminal. MaxH caps the height to that content fit so a tall terminal does not
-// stretch the dialog past its rows.
+// 3 + themeEditorButtonGap + themeEditorContentTop (button row + border below, the buttonGap
+// blank row above the buttons, preset/toggle rows above). MinH keeps the documented 83×22
+// floor, where the existing scrolling viewport takes over on a short terminal. MaxH caps the
+// height to that content fit so a tall terminal does not stretch the dialog past its rows.
 //
 // The spec is static (no terminal-share term), so it is path-independent: the same spec
 // flows into w.dialogRect at open and into relayout() on resize, and the dialog re-centres
@@ -126,12 +130,15 @@ func (w *Workbench) themeEditorDialogSpec() tv.DialogSpec {
 	const (
 		leftCol  = themeEditorSwatchW + 1 + themeEditorLeftLabelW + 1 + themeEditorFieldW // 36
 		rightCol = themeEditorSwatchW + 1 + themeEditorLabelW + 1 + themeEditorFieldW     // 38
-		// left border+gap (2) + leftCol + gutter (1) + rightCol + scrollbar (1) + gap+border (2).
-		// Equals themeEditorDialogW (80) by construction.
-		contentW = 2 + leftCol + 1 + rightCol + 1 + 2
-		// Rows the viewport math subtracts (resolver: visibleRows = height-3-contentTop):
-		// button row + border below, preset/toggle rows above. Floor-height-independent.
-		chromeH = 3 + themeEditorContentTop // 6
+		// left border+gap (2) + leftCol + gutter (4) + rightCol + scrollbar (1) + gap+border (2).
+		// Equals themeEditorDialogW (83) by construction (issue #477 widened the gutter 1→4).
+		contentW = 2 + leftCol + 4 + rightCol + 1 + 2
+		// Rows the viewport math subtracts. MUST mirror the resolver's visibleRows formula
+		// exactly — visibleRows = height-3-themeEditorButtonGap-themeEditorContentTop — or PrefH
+		// is off by the omitted term. Issue #477's sectionPad raise grew contentRows to 22 and
+		// exposed a prior omission of themeEditorButtonGap here (PrefH was one row short, so the
+		// "grown" editor still scrolled the last role). Floor-height-independent.
+		chromeH = 3 + themeEditorButtonGap + themeEditorContentTop // 7
 	)
 	prefH := themeEditorContentRows() + chromeH // all roles visible without scrolling
 	return tv.DialogSpec{
