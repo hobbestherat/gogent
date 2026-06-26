@@ -111,7 +111,15 @@ benefits: it currently clips at MinW and will now wrap cleanly onto row 2.
 
 Primary, faithful fit test — `WrapLabelRunes` is turbotui's *documented* height predictor
 (its doc: "`len(WrapLabelRunes(runes, w))` predicts a Wrap-enabled Label's height at width
-w"), so `len(rows) ≤ keybindStatusRows` is exactly the no-clip condition `Label.draw` uses:
+w"), so `len(rows) ≤ keybindStatusRows` is exactly the no-clip condition `Label.draw` uses.
+**The test must reproduce `Label.draw`'s exact path** (`widget_label.go:64-65`): strip the
+mnemonic with `tv.ParseMnemonic` *first*, then `WrapLabelRunes` the cleaned runes — because
+`dialogLabel`→`NewLabel` is mnemonic-aware and at least one catalog name
+("Resources (tools & skills)") contains a `&` the Label parses as a mnemonic marker (see
+"Pre-existing quirk" below). Wrapping the raw prompt instead would diverge from what is
+actually rendered. (For the *longest* name, "Set / show goal (supervisor)", there is no
+`&`, so clean == raw and the headline assertion is unaffected — but the test iterates the
+whole catalog, where it matters.)
 
 ```
 TestKeybindingCustomizerCapturePromptFitsTwoRows
@@ -120,11 +128,15 @@ TestKeybindingCustomizerCapturePromptFitsTwoRows
     as a catalog sanity anchor.
   - prompt := capturePrompt(longest); require strings.Contains(prompt, "Backspace clear").
   - for width in {58 (MinW), 62 (PreferredW), 76 (MaxW)}:
-      rows := tv.WrapLabelRunes([]rune(prompt), width-4)
-      require len(rows) <= keybindStatusRows           // no clip
+      clean, _ := tv.ParseMnemonic(prompt)              // mirror Label.draw exactly
+      rows := tv.WrapLabelRunes([]rune(clean), width-4)
+      require len(rows) <= keybindStatusRows            // no clip
       reconstruct text from rows; require it still contains
         "Backspace clear" and the full "(Esc cancel · Backspace clear)" suffix
         (catches a silent truncation as well as a clip).
+  - additionally loop over EVERY w.rebindable() action and assert the same
+    len(rows) <= keybindStatusRows at MinW (the tightest width), so a future long
+    name or a name whose `&` shifts the wrap can never silently start clipping.
 ```
 
 Layout/usability guard (non-empty list, non-overlapping rows after the status grows) at the
@@ -169,15 +181,26 @@ The user now sees the complete instruction set — crucially that `Backspace` *c
 hidden off the dialog's right edge. The user still drives input the same way (Enter to
 capture, then the gestures the prompt names). The list keeps its full height (no row lost),
 the footer buttons keep their positions and never overlap, and the dialog still
-centres/re-centres on resize (unchanged spec → `dialog.Fit` path is untouched). One
-cosmetic note: the status now sits flush under the list (the former blank separator row
-becomes the prompt's first line) instead of with a 1-row gap; this is the issue-sanctioned
-trade and keeps the list as tall as possible — preferred over shrinking `listH` at the
-`MinH=16` floor where every list row matters. See Open questions.
+centres/re-centres on resize (unchanged spec → `dialog.Fit` path is untouched).
+
+**Decision (flush, not gap):** the status now sits flush under the list — the former blank
+separator row at `height-4` becomes the prompt's first line. The alternative (shrink
+`listH` by 1 to keep a 1-row gap) costs a list row at every height, including the `MinH=16`
+floor where the list is already only 9 rows. We take the flush layout: it keeps the list as
+tall as possible, is the issue-sanctioned reclaim ("the list bottom and/or the footer y
+must shift up by one, or `listH` shrinks by one"), and the prompt is still visually
+distinct from the list rows (it is not an indented "name … chord (tag)" row and reads as a
+status line). The top of the dialog keeps its `Y=2` blank separator under the title, so the
+dialog is not visually crowded.
 
 ### (3) No regressions
+- The resolver guarantees `height ≥ MinH = 16` (height is `max(MinH, …)`; the
+  `{40,16}` case in `keybindingsSpecDims` resolves to `wantH=16`), so the layout never
+  underflows: `statusY = height-4 ≥ 12 > 0`, list bottom `height-5 ≥ 11`. The status row
+  can never collide with the title (`Y=1`) or go off the top.
 - `listH` formula and value are unchanged → list stays non-empty (`listH = height-7 ≥ 9` at
-  `MinH=16`; the existing `if listH < 3` guard remains a backstop).
+  `MinH=16`; the existing `if listH < 3` guard remains a backstop, and even at that clamp
+  `statusY = height-4` still sits below the clamped list).
 - Footer `y = height-2` and `footerButtonRects` call are unchanged → the #461 footer
   non-overlap invariant and `keybinding_customizer_issue461_test.go` sizing tests stay
   green (none of MinW/MaxW/PreferredW/MinH/PrefH/MaxH change).
@@ -196,13 +219,27 @@ optional turbotui hardening (truncate-with-ellipsis for one-row labels) — the 
 it out of scope and the two-row fix needs no toolkit change. No downstream effect on
 turbotui or on other gogent dialogs (the spec is shared by nobody else and is untouched).
 
+## Pre-existing quirk (documented, out of scope)
+
+`capturePrompt` builds its text with `%q`, which does not escape `&`. The mnemonic-aware
+`dialogLabel`/`NewLabel` therefore parses the `&` in the action name
+"Resources (tools & skills)" as a mnemonic marker: it is eaten and the following character
+is treated as the label's hot key (`ParseMnemonic`). So that one action's prompt renders as
+"…(tools  skills)…" with an Alt-hot char on a status line that has no meaningful Alt action.
+
+This is **pre-existing** — today's single-row label already does it — and is *not* caused by
+and *not* in scope for #472 (which is purely about clipping; "no string changes" per the
+proposed solution). The two-row fix neither introduces nor worsens it. It is called out so
+(a) the reviewer doesn't attribute it to this change, and (b) the fit test correctly mirrors
+the rendered (mnemonic-stripped) wrap rather than the raw string. A one-line `&`→`&&` escape
+in `capturePrompt` would fix the quirk, but it is a separate correctness issue and is
+deliberately left out to keep this change scoped to the reported clip.
+
 ## Open questions
-1. **Flush vs. gap:** the recommended approach consumes the blank `height-4` row, so the
-   status sits directly under the list (no separator). The alternative — shrink `listH` by
-   1 (`height - listY - 5`) to keep a 1-row gap — costs one list row at every height,
-   including the `MinH=16` floor. I recommend the flush layout (no list shrink); confirm
-   that's acceptable, or switch to the gap variant if visual separation is preferred.
-2. **Layout-helper extraction:** whether to extract `keybindCustomizerVRows(height)` purely
+1. **Layout-helper extraction:** whether to extract `keybindCustomizerVRows(height)` purely
    for testability (zero formula duplication in the layout test) or keep the inline math
    plus the shared `keybindStatusRows` constant. Default is the latter (smaller diff); the
    former is a clean optional follow-on.
+2. **`&` escape (optional, out of scope):** confirm we are content to leave the pre-existing
+   "Resources (tools & skills)" mnemonic quirk for a separate change rather than folding a
+   one-line `&`→`&&` escape into this PR.
