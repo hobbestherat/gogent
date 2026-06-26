@@ -97,8 +97,12 @@ type Fetcher interface {
 type httpFetcher struct{ url string; client *http.Client }  // default → https://models.dev/api.json
 ```
 `Client` holds `{ cachePath string; ttl time.Duration; fetcher Fetcher; now func() time.Time }`.
-`now` is injected (the workflow/runtime forbids `time.Now()` in some contexts; for
-prod it's `time.Now`, tests pass a fixed clock).
+`now` defaults to `time.Now` in production (`time.Now()` is perfectly fine in Go
+code); it is injected **only** so cache-TTL tests are deterministic with a fixed
+clock. Constructor: `func NewClient(homeDir string) *Client` (cachePath =
+`<homeDir>/.gogent/modelsdev-cache.json`, ttl = 24h, default httpFetcher, now =
+`time.Now`) — built directly in the handler wiring (§5.3/5.4), so the fetch-cache
+concern stays out of core.
 
 ### 2.3 On-disk cache: `~/.gogent/modelsdev-cache.json`
 ```go
@@ -158,7 +162,7 @@ oriented); the user can switch it in review if they want the native path.
 | `Name` | `UniqueName(providerID, m.ID, taken)` | unique, sanitized |
 | `DisplayName` | `m.Name` | |
 | `APIType` | `ProviderAPIType(p)` | |
-| `Endpoint` | `p.API` | `/v1` base; for `zai`/`openrouter` may be left as provider default if blank |
+| `Endpoint` | **resolver-aware** — see below | NOT blindly `p.API` |
 | `Model` | `m.ID` | |
 | `APIKey` | `""` | user enters; env hint from `p.Env` |
 | `Temperature` | `0.7` | `m.Temperature` only gates *whether* accepted |
@@ -170,12 +174,56 @@ oriented); the user can switch it in review if they want the native path.
 | `Free` | `m.Cost.Input==0 && m.Cost.Output==0` | |
 | `Project`/`Location` | `""` | Vertex only; user supplies |
 
+**`Thinking` is always `nil` in v1** (provider default). The table's nil/nil
+branches collapse to a single rule: we never *force* the toggle on or off from the
+catalog. When the model advertises a `type=toggle` reasoning option, the review
+form's Thinking selector is left enabled so the **user** can flip it; we just don't
+pre-commit a value. (Forcing it on would also mark the model as a reasoning model
+via `IsReasoningModel`, changing request encoding — not something to infer
+silently.)
+
+**Endpoint is resolver-aware, not blindly `p.API`** — this is the one place
+models.dev's data shape collides with gogent's adapter conventions:
+
+- gogent's **OpenAI family** keeps `/v1` in the *base* and `chatPath =
+  "/chat/completions"` (`provider_openai.go:21,38,47`), so the resolved URL is
+  `p.API + /chat/completions` — feeding `p.API` (a `/v1` base) is **correct**.
+- gogent's **Anthropic** adapter does the opposite: base
+  `https://api.anthropic.com` with `chatPath = "/v1/messages"`
+  (`provider_anthropic.go:16`) — the `/v1` lives in the chatPath.
+  `stripChatPath` (`provider.go:404-414`) only trims a *trailing full chatPath*, so
+  a `p.API` of `https://api.anthropic.com/v1` is **not** reduced, and `appendPath`
+  yields the broken `https://api.anthropic.com/v1/v1/messages` → 404.
+- **zai / openrouter / vertex\*** synthesize their base from the api_type alone
+  (the seeded entries all leave `Endpoint:""`, `config.go:1130,1146,1190`).
+
+So the transform classifies api_types into two buckets:
+
+```go
+// deriveBaseAPITypes leave Endpoint BLANK → adapter uses its own default base
+// (their version/base is implied by the adapter, not models.dev's p.API).
+var deriveBaseAPITypes = map[string]bool{
+    "anthropic": true, "zai": true, "openrouter": true,
+    "vertex": true, "vertex-native": true, "vertex-anthropic": true,
+}
+// Endpoint rule:
+//   if deriveBaseAPITypes[apiType] { Endpoint = "" }   // adapter default base
+//   else                          { Endpoint = p.API } // generic openai: /v1 base required
+```
+
+The generic `openai` adapter's default base is the useless
+`http://localhost:8080/v1` (`provider_openai.go:21`), so a real OpenAI-compatible
+gateway (Groq/Together/DeepSeek/…) **must** carry `p.API`. The derive-base set
+must NOT, because their adapters already know (or version-embed) the base.
+A unit test asserts the resolved Anthropic chat URL is `…/v1/messages` (single
+`/v1`), and that an `openai`-mapped provider keeps `p.API`.
+
 Fields models.dev has but gogent doesn't model (cost, modalities, tool_call,
 structured_output, cutoff, benchmarks) are **ignored** in v1 (explicit non-goal).
 
 ---
 
-## 3. Core: `Gogent.AddModel` + catalog accessor (`internal/gogent/gogent.go`)
+## 3. Core: `Gogent.AddModel` + `HomeDir()` accessor (`internal/gogent/gogent.go`)
 
 ```go
 // AddModel appends a NEW model config and persists it. The Name must not collide
@@ -198,13 +246,17 @@ func (g *Gogent) AddModel(cfg config.ModelConfig) error {
     return nil
 }
 
-// ModelCatalog returns the models.dev catalog (cached, TTL, offline fallback),
-// lazily constructing a modelsdev.Client against g.homeDir. force triggers a
-// revalidating refresh.
-func (g *Gogent) ModelCatalog(force bool) (modelsdev.Catalog, error)
+// HomeDir exposes the home dir so embedded handler wiring can construct a
+// modelsdev.Client (cache → <home>/.gogent/modelsdev-cache.json). Trivial accessor.
+func (g *Gogent) HomeDir() string { return g.homeDir }
 ```
 `AddModel` is the **authority** on uniqueness even though the dialog pre-computes a
 non-colliding name with `UniqueName` (defence in depth against a concurrent add).
+
+The catalog fetch/cache concern deliberately does **not** live on `*Gogent`: the
+`modelsdev.Client` is built in the handler wiring (§5.3/5.4), keeping core free of
+a network/caching dependency. Embedded mode passes `g.HomeDir()`; remote mode uses
+the client host's home.
 
 ---
 
@@ -263,21 +315,24 @@ GetModelCatalog func(force bool) (modelsdev.Catalog, error)
 
 ### 5.3 `cmd/embedded_handlers.go` (after `ScanModels`, ~line 170)
 ```go
+mdc := modelsdev.NewClient(g.HomeDir())   // cache → <home>/.gogent/modelsdev-cache.json
+...
 AddModel:        func(m config.ModelConfig) error { return g.AddModel(m) },
-GetModelCatalog: func(force bool) (modelsdev.Catalog, error) { return g.ModelCatalog(force) },
+GetModelCatalog: func(force bool) (modelsdev.Catalog, error) { return mdc.Catalog(context.Background(), force) },
 ```
 
 ### 5.4 `ui/tui/remote_handlers.go` (after `ScanModels`, ~line 782)
 ```go
+home, _ := os.UserHomeDir()
+mdc := modelsdev.NewClient(home)   // public data; cache lives on the client host
+...
 AddModel: func(m config.ModelConfig) error { return c.AddModel(m) },
-// Catalog is public data; the attached client fetches it directly (cache lives in
-// the client host's ~/.gogent). AddModel still mutates the daemon's config via POST.
-GetModelCatalog: func(force bool) (modelsdev.Catalog, error) {
-    return rc.modelsDevClient().Catalog(context.Background(), force)
-},
+// Catalog is public data; the attached client fetches it directly. AddModel still
+// mutates the DAEMON's config via POST /models, so the new entry lands server-side.
+GetModelCatalog: func(force bool) (modelsdev.Catalog, error) { return mdc.Catalog(context.Background(), force) },
 ```
-`rc.modelsDevClient()` lazily builds one `modelsdev.Client` against the client's
-home dir (memoised on the remote-handler struct).
+One `modelsdev.Client` is constructed per wiring (embedded/remote) and captured by
+the closures — no per-call re-construction, no extra struct field.
 
 ---
 
@@ -306,7 +361,14 @@ brand-new user — the catalog flow must work from zero models).
   capture the original handler, install a wrapper that calls it then re-filters the
   Select via `sel.SetOptions(filtered)` and maintains a `filteredIdx→providerID`
   slice. (Pure composition of existing turbotui primitives — explicitly **not** a
-  new `FilteredList` widget; see §9.)
+  new `FilteredList` widget; see the cross-repo decision under Design criteria (4).)
+- **Focus contract (spell it out for the implementer):** the `Select` has its own
+  `typeAhead`/`popupType` (`widget_select.go:349,406`) that captures keystrokes
+  when it holds focus. So substring filtering works **only while the filter TextBox
+  is focused**; the user types to narrow, then **Tab** to the Select to arrow/pick.
+  Initial focus is the TextBox. This is "type in the box to filter," not "type
+  anywhere." The narrowed Select still scrolls (scrollbar, `widget_select.go:263`),
+  so a few hundred options remain navigable once filtered.
 - "Refresh catalog" button → `GetModelCatalog(true)` then rebuild the list.
 - Next → Step 2 with the chosen provider id.
 
@@ -314,9 +376,21 @@ brand-new user — the catalog flow must work from zero models).
 `cat[providerID].Models`. Each row: `"<DisplayName>  · ctx <Nk> · out <Nk> [· reasoning] [· free]"`.
 Back → Step 1; Next → Step 3 with the chosen model.
 
-**Step 3 — Review form:** a pre-filled form **reusing the exact field layout** of
-`showModelEditor` (extract the field/`load`/`store` builders into a shared helper
-so both editors stay in lockstep — `buildModelFields(dialog, …) → (loaders, stores)`).
+**Step 3 — Review form:** a **standalone dialog** (`showReviewModelDialog`) that
+*replicates* the ~15 lines of single-draft field construction from the editor's
+layout — **`showModelEditor` is left byte-for-byte untouched.** This is a
+deliberate reversal of an earlier "extract a shared `buildModelFields` helper"
+idea: that helper is **not cleanly extractable** (the editor's `load(i)`/`store(i)`
+index into `models[cur]`, `sel.OnChange` does `store(cur);cur=i;load(cur)`, and
+`scanModels` captures `cur`/`target` for a mid-scan selection-change guard,
+`model_editor.go:182-251`) and the existing #389 test drives only `SetModels` +
+session-window refresh — it never opens the editor, so it would **not** catch a
+regression in re-wired editor closures. The review step has a *single* draft and no
+selector, so it gets its own flat `load`/`store` over one `config.ModelConfig`
+(label/box rows identical in appearance, ~15 lines, zero shared mutable state with
+the editor). Lower risk than re-plumbing a tested, closure-heavy function behind a
+weaker net.
+
 Pre-filled from `modelsdev.ToModelConfig(providerID, p, m)` with
 `Name = UniqueName(…, takenNames)`:
 - **Name** — shown read-only (generated, unique) with an "Edit" toggle; conflict is
@@ -324,8 +398,12 @@ Pre-filled from `modelsdev.ToModelConfig(providerID, p, m)` with
 - **API type** — read-only label "from catalog" (the existing api-type `Select`
   pre-selected, disabled).
 - **Display name, Endpoint, Model id, Temperature, Max tokens, Reasoning, Thinking**
-  — auto-filled, **fully editable**. Model id keeps the existing **"Scan"** button
-  (reuses `handlers.ScanModels` against the draft) to swap to a live dropdown.
+  — auto-filled, **fully editable**. Model id offers a **"Scan"** button (same
+  `handlers.ScanModels` draft-probe as the editor) to swap to a live dropdown —
+  but `ScanModels` probes the backend with the *draft* config, which has a **blank
+  API key**, so it 401s until a key is entered. The button is therefore **disabled
+  until the API key field is non-empty** (for Vertex, until project+location are
+  set), so the user isn't handed a button that always errors pre-credential.
 - **API key** — blank, **required** (validated on Save). For Vertex api_types,
   swap the API-key requirement for **Project**/**Location** (already fields in the
   editor at rows 12-13) and drop the key requirement (ADC auth).
@@ -354,7 +432,13 @@ The new entry is then immediately selectable in the sidebar/model dropdowns.
 - `internal/modelsdev`:
   - `ProviderAPIType`: openrouter/zai/anthropic/vertex variants + unknown→openai.
   - `ToModelConfig`: every mapped field incl. `Free` (cost==0), `EffortOptions`,
-    effort default, toggle→Thinking, limits→MaxTokens/ContextWindow, blank APIKey.
+    effort default, `Thinking` always nil, limits→MaxTokens/ContextWindow, blank
+    APIKey.
+  - **Endpoint resolver-awareness (the blocking fix):** `anthropic` → `Endpoint==""`
+    and, fed through `model.NewModelConnectionFromConfig` + the resolver, the chat
+    URL is `https://api.anthropic.com/v1/messages` (single `/v1`, **not**
+    `/v1/v1/messages`); `zai`/`openrouter`/`vertex*` → `Endpoint==""`; a generic
+    `openai`-mapped provider (e.g. groq) → `Endpoint == p.API`.
   - `UniqueName`: sanitization + `-2/-3` suffixing against a taken set.
   - Cache: TTL short-circuit (no fetch within TTL), 304 revalidation bumps
     FetchedAt, 200 refresh replaces data, **network failure → cache fallback**,
@@ -367,8 +451,10 @@ The new entry is then immediately selectable in the sidebar/model dropdowns.
   tests).
 - `ui/tui`: `APIClient.AddModel` POSTs to `/models` with the right body (httptest).
 - Regression guards: existing `UpdateModel`/`ListModels`/`ScanModels` and
-  `issue389_test.go` refresh behaviour unaffected (shared `buildModelFields`
-  extraction must keep `showModelEditor` byte-for-byte equivalent in behaviour).
+  `issue389_test.go` refresh behaviour unaffected. **`showModelEditor` is left
+  byte-for-byte untouched** (the review step is a standalone dialog, §6.3), so no
+  new test is needed to protect the editor's closures — the change cannot reach
+  them.
 
 ---
 
@@ -381,7 +467,11 @@ editable; only the key (or Vertex project/location) is prompted; Save creates a
 **new, unique, persisted** entry that's immediately selectable. Non-goals are
 honoured: no auto-sync of existing entries, no pricing/benchmark UI, the manual
 editor and hand-edit path are untouched. The seeded `GetDefaultConfig()` entries
-remain as fallback/seed.
+remain as fallback/seed. Crucially the auto-fill is **correct out of the box** for
+every mapped provider, not just plausible-looking: the Endpoint mapping is
+resolver-aware (§2.4) so Anthropic resolves to `…/v1/messages` rather than the
+double-`/v1` 404 that a naïve `Endpoint = p.API` would produce — an editable review
+step does not excuse a silently-wrong default.
 
 ### (2) Usability — user drives, nothing silent
 Both pickers are searchable (filter TextBox re-filtering the Select); provider rows
@@ -397,9 +487,11 @@ the editor's "No models configured" early-return).
 `UpdateModel`/`Models`/`ScanModels`/`SetDefaultModel` and the GET/PUT/scan
 endpoints are unchanged — `AddModel` and `POST /models` are purely additive.
 `AddModel` mirrors `UpdateModel`'s lock + `SaveConfig` discipline (appends a copy,
-no aliasing). The shared `buildModelFields` refactor must preserve
-`showModelEditor` behaviour (issue #389 live-refresh test is the guard). New
-`Handlers` fields are nil-able, so every existing `SetHandlers` caller and test
+no aliasing). The review step is a **standalone dialog**; `showModelEditor` is left
+byte-for-byte untouched, so the closure-heavy, multi-model editor (and the #389
+live-refresh behaviour) cannot regress from this change — no risky shared-helper
+refactor. New `Handlers` fields are nil-able, so every existing `SetHandlers`
+caller and test
 (`issue389_test.go`, `model_selector_width_test.go`, …) compiles and behaves
 unchanged; the affordance simply hides when the handlers are nil. gofmt/vet/build
 clean, stdlib-only, no `-race` on Pi5; pre-existing `TestUserSessionSendMessage`
@@ -433,11 +525,10 @@ the dep. Downstream effect on turbotui: none in v1.
    `z-ai`, `google-vertex` vs `vertex`) — the `ProviderAPIType` map will accept the
    observed aliases; I'll snapshot a small fixture from a live `api.json` pull at
    implementation time (tests feed decoded structs, not the network).
-3. **Endpoint for `zai`/`openrouter`:** these api_types synthesize their base URL
-   from the api_type alone (seeded entries leave `Endpoint:""`). Should the catalog
-   transform leave `Endpoint` blank for them (rely on the adapter default) or fill
-   `p.API`? **Lean:** blank for `zai`/`openrouter` (matches the seeded defaults and
-   the adapter's intent), `p.API` for everything else. Confirm.
+3. **(Resolved — now §2.4.)** Endpoint mapping is resolver-aware: blank for the
+   derive-base set (`anthropic`, `zai`, `openrouter`, `vertex*`), `p.API` for
+   generic `openai`. Anthropic was the missed case (version in chatPath, not base)
+   and is now covered + unit-tested. No longer open.
 4. **Cache location in remote mode** writes `~/.gogent/modelsdev-cache.json` on the
    *client* host (may create `~/.gogent` there). Acceptable, or gate the cache to
    embedded mode only? **Lean:** allow it (harmless, speeds repeat opens).
