@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -886,4 +887,152 @@ func writeRSAKeyFile(t *testing.T) string {
 		t.Fatalf("write key: %v", err)
 	}
 	return p
+}
+
+// --------------------------------------------------------------------------------
+// Edge cases + defect guards (round-3 additions)
+// --------------------------------------------------------------------------------
+
+// TestDiscover_UnparseableAddrErrors: a daemon.addr whose content is garbage
+// (cat succeeds, exit 0, but the token is unrecognised) must surface a clear
+// error from Discover, not a silent fallback or an empty target.
+func TestDiscover_UnparseableAddrErrors(t *testing.T) {
+	env := newSSHTestEnv(t)
+	env.setAddr("this-is-not-a-transport")
+	tun := env.mustNew(t)
+	defer tun.Close()
+
+	_, err := tun.Discover()
+	if err == nil {
+		t.Fatal("Discover with an unparseable daemon.addr must error")
+	}
+	if !strings.Contains(err.Error(), "unrecognised") {
+		t.Fatalf("error should flag the unrecognised transport, got: %v", err)
+	}
+}
+
+// TestDialContext_NoTargetBeforeDiscover: DialContext before Discover has resolved
+// a target must fail with a clear contract message (it is never reached on the
+// real path, but must not dial an empty target / panic).
+func TestDialContext_NoTargetBeforeDiscover(t *testing.T) {
+	env := newSSHTestEnv(t)
+	tun := env.mustNew(t) // intentionally NO Discover
+	defer tun.Close()
+
+	conn, err := tun.DialContext(context.Background(), "", "")
+	if err == nil {
+		_ = conn.Close()
+		t.Fatal("DialContext before Discover must error (no resolved target)")
+	}
+}
+
+// TestDialContext_AfterClientDeath: once the underlying session is dead, DialContext
+// must return an error (snapshots a closed client) — never panic. This is the path
+// a reconnecting client hits before Restart recovers it.
+func TestDialContext_AfterClientDeath(t *testing.T) {
+	env := newSSHTestEnv(t)
+	tun := env.mustNew(t)
+	if _, err := tun.Discover(); err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	// Kill the live client out from under the tunnel (no Restart to recover it).
+	if tun.client == nil {
+		t.Fatal("no client after New")
+	}
+	_ = tun.client.Close()
+
+	conn, err := tun.DialContext(context.Background(), "", "")
+	if err == nil {
+		_ = conn.Close()
+		t.Fatal("DialContext over a dead client must error, not succeed")
+	}
+}
+
+// TestRestart_RecoversAfterFailedRedial: a redial that fails (here: a cancelled
+// ctx aborts the redial) must NOT permanently break the tunnel — a subsequent
+// Restart with a live ctx redials and the tunnel works again. Guards defect #3
+// (failed redial leaving the tunnel in an unrecoverable state).
+func TestRestart_RecoversAfterFailedRedial(t *testing.T) {
+	env := newSSHTestEnv(t)
+	tun := env.mustNew(t)
+	if _, err := tun.Discover(); err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+
+	// Kill the live client so a redial is required.
+	if tun.client == nil {
+		t.Fatal("no client after New")
+	}
+	_ = tun.client.Close()
+
+	// First Restart: cancelled ctx aborts the redial -> a failed redial.
+	deadCtx, deadCancel := context.WithCancel(context.Background())
+	deadCancel()
+	if _, err := tun.Restart(deadCtx); err == nil {
+		t.Fatal("Restart with a dead client + cancelled ctx must error (failed redial)")
+	}
+
+	// Second Restart: a live ctx must recover the tunnel despite the prior failure.
+	liveCtx, liveCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer liveCancel()
+	redialed, err := tun.Restart(liveCtx)
+	liveCancel()
+	if err != nil {
+		t.Fatalf("Restart should recover after a prior failed redial: %v", err)
+	}
+	if !redialed {
+		t.Fatalf("recovery Restart should report redialed=true, got false")
+	}
+	if err := healthOver(tun); err != nil {
+		t.Fatalf("health over recovered tunnel failed: %v", err)
+	}
+}
+
+// TestRestartAndDial_ConcurrentNoPanic: DialContext (from a reader) running
+// concurrently with Close+Restart cycling the underlying client must not panic or
+// data-race the mu-guarded client/target, and the tunnel must remain usable after.
+func TestRestartAndDial_ConcurrentNoPanic(t *testing.T) {
+	env := newSSHTestEnv(t)
+	tun := env.mustNew(t)
+	if _, err := tun.Discover(); err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	defer tun.Close()
+
+	deadline := time.Now().Add(600 * time.Millisecond)
+	var panicked atomic.Bool
+	var wg sync.WaitGroup
+
+	// Reader: hammer health-over-tunnel; errors are expected during cycles, a
+	// panic is the failure signal.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				panicked.Store(true)
+			}
+		}()
+		for time.Now().Before(deadline) {
+			_ = healthOver(tun)
+		}
+	}()
+
+	// Mutator: cycle the client via exported, lock-safe Close+Restart (no raw
+	// field access from the test) to force the snapshot-during-swap path.
+	for i := 0; i < 4; i++ {
+		_ = tun.Close() // nils the client under mu; the reader now errors until Restart
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, _ = tun.Restart(ctx) // redials (client nil) and publishes a fresh client
+		cancel()
+	}
+	wg.Wait()
+
+	if panicked.Load() {
+		t.Fatal("concurrent DialContext + Close/Restart panicked")
+	}
+	// After the storm the tunnel must be usable.
+	if err := healthOver(tun); err != nil {
+		t.Fatalf("health over tunnel after concurrent storm: %v", err)
+	}
 }
