@@ -103,9 +103,18 @@ is `width-4`, ranging from `MinW-4 = 54` to `MaxW-4 = 72`. `WrapLabelRunes`
 - inner 72 (MaxW 76): 79 > 72 → still **2 rows**.
 
 Since `79 ≤ 2 × 54`, two rows hold the longest prompt at every width in `[MinW, MaxW]`, and
-`Label.draw` renders both (`H=2`). The `…`/`·` glyphs are width-1 (confirmed in the issue
-and matching `RuneWidth`). The idle hint (`keybindCustomizerIdleHint`, ~55 cells) also
-benefits: it currently clips at MinW and will now wrap cleanly onto row 2.
+`Label.draw` renders both (`H=2`). Wrap row-count is monotonic in width (narrower ⇒ at least
+as many rows), so **`MinW` (inner 54) is the binding worst case**; every wider width is
+strictly easier. The `…`/`·` glyphs are width-1 (confirmed in the issue and matching
+`RuneWidth`). The idle hint (`keybindCustomizerIdleHint`, ~55 cells) also benefits: it
+currently clips at MinW and will now wrap cleanly onto row 2.
+
+**Note on the actually-reachable width range.** The resolved width is
+`floor(min(PreferredW=62, 80%·screenW), MinW=58)`, so the dialog renders at a width in
+`[58, 62]` — `MaxW=76` is an inert ceiling that never binds (it sits *above* `PreferredW`).
+The fit test still asserts at 76 because the acceptance criterion names the `[MinW, MaxW]`
+range literally, but the real-world widest is 62 and the only case that can ever clip is
+`MinW=58`. Testing 58 already proves the fix; 62 and 76 are belt-and-suspenders.
 
 ## Test plan (mirrors `keybinding_customizer_phase4b_test.go`)
 
@@ -209,6 +218,14 @@ dialog is not visually crowded.
   corrected to match.
 - No change to `clearBinding`/`unboundChord`/`"none"` persistence, the `?` cheatsheet, the
   welcome dialog, or the browsing idle hint (all explicitly out of scope).
+- **Resize path unchanged.** turbotui's `Dialog.reflow` (run by `dialog.Fit` and the layer
+  `OnResize`, `turbotv/dialog.go:150`) only re-resolves the *outer* window rect via
+  `SetBounds`; the content widgets (list, status, footer) keep the bounds computed from the
+  open-time `height`. The status label derives its `Y`/`H` from the same open-time `height`
+  as the list and footer, so their relative layout — no overlap, full 2-row prompt visible —
+  is preserved after a resize exactly as the list/footer already are today. #472 does not
+  touch the reflow path or introduce any new resize behavior; the existing
+  `TestKeybindingsDialogResizePathIndependent` (outer-bounds) invariant is unaffected.
 
 ### (4) Holistic design across gogent + turbotui
 The fix lives entirely on gogent's side, which is the correct seam: turbotui's `Label`
