@@ -743,3 +743,138 @@ func TestSendSubtaskEmitsErrorTerminalOnModelFailure(t *testing.T) {
 	}
 	waitNotBusy(t, srv, id)
 }
+
+// --- Exactly one terminal event per turn (duplicate-terminal regression guard) --
+//
+// A prior fix that re-emitted the synchronous entrypoint's returned error from the
+// dispatch goroutine produced TWO SessionEventError events for one failed/cancelled
+// root or plan turn (runLoop already emits on every error path). These tests pin the
+// invariant the fix restored: every dispatched turn emits exactly ONE terminal event
+// (final on success, error on failure/cancellation), for the root, subtask and stop
+// paths. They count events rather than awaiting the first, so a regression to a
+// duplicate cannot pass silently.
+
+// okBackend returns a fake model endpoint that always replies with a final answer.
+func okBackend(t *testing.T, reply string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeServerTestFinal(w, reply)
+	}))
+}
+
+// failingBackend returns a fake model endpoint that always fails (400), so a
+// dispatched turn ends in an error terminal.
+func failingBackend(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+	}))
+}
+
+// drainTerminals reads a session subscription until a quiet window, returning every
+// terminal event stamped with turnID. Call after the turn has fully ended (busy gate
+// released ⇒ the goroutine returned ⇒ its terminal was already emitted).
+func drainTerminals(sub <-chan taggedEvent, turnID string) []agent.SessionEvent {
+	var terms []agent.SessionEvent
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case te := <-sub:
+			if te.ev.TurnID == turnID && isTerminal(te.ev) {
+				terms = append(terms, te.ev)
+			}
+		case <-time.After(200 * time.Millisecond):
+			return terms
+		}
+	}
+	return terms
+}
+
+// assertOneTerminal fails unless terms is exactly one event of wantType.
+func assertOneTerminal(t *testing.T, terms []agent.SessionEvent, wantType agent.SessionEventType) {
+	t.Helper()
+	if len(terms) != 1 {
+		var tys []string
+		for _, e := range terms {
+			tys = append(tys, string(e.Type))
+		}
+		t.Fatalf("got %d terminal event(s) %v, want exactly 1 (%s)", len(terms), tys, wantType)
+	}
+	if terms[0].Type != wantType {
+		t.Fatalf("terminal type = %s, want %s", terms[0].Type, wantType)
+	}
+}
+
+// dispatchAndCountTerminals posts a message, waits for the turn to fully end, and
+// returns its terminal events.
+func dispatchAndCountTerminals(t *testing.T, srv *Server, id, body string) []agent.SessionEvent {
+	t.Helper()
+	sub, unsub := srv.hub.subscribeSession(id)
+	defer unsub()
+	rec := postMessage(t, srv, id, body)
+	turnID := acceptedTurnID(t, rec)
+	waitNotBusy(t, srv, id)
+	return drainTerminals(sub, turnID)
+}
+
+func TestRootTurnSuccessEmitsExactlyOneTerminal(t *testing.T) {
+	backend := okBackend(t, "answer")
+	defer backend.Close()
+	srv := newServerWithBackend(t, backend.URL)
+	id := createTestSession(t, srv)
+	assertOneTerminal(t, dispatchAndCountTerminals(t, srv, id, `{"message":"hi"}`), agent.SessionEventFinal)
+}
+
+func TestRootTurnFailureEmitsExactlyOneTerminal(t *testing.T) {
+	backend := failingBackend(t)
+	defer backend.Close()
+	srv := newServerWithBackend(t, backend.URL)
+	id := createTestSession(t, srv)
+	assertOneTerminal(t, dispatchAndCountTerminals(t, srv, id, `{"message":"hi"}`), agent.SessionEventError)
+}
+
+func TestSubtaskSuccessEmitsExactlyOneTerminal(t *testing.T) {
+	backend := okBackend(t, "subtask result")
+	defer backend.Close()
+	srv := newServerWithBackend(t, backend.URL)
+	id := createTestSession(t, srv)
+	assertOneTerminal(t, dispatchAndCountTerminals(t, srv, id, `{"message":"do thing","subtask":true}`), agent.SessionEventFinal)
+}
+
+func TestSubtaskFailureEmitsExactlyOneTerminal(t *testing.T) {
+	backend := failingBackend(t)
+	defer backend.Close()
+	srv := newServerWithBackend(t, backend.URL)
+	id := createTestSession(t, srv)
+	assertOneTerminal(t, dispatchAndCountTerminals(t, srv, id, `{"message":"do thing","subtask":true}`), agent.SessionEventError)
+}
+
+// TestStopCancelsTurnEmitsExactlyOneTerminal verifies a stopped root turn emits
+// exactly one error terminal (runLoop's ctx.Err emission) — not the duplicate that
+// re-emitting the returned error would produce.
+func TestStopCancelsTurnEmitsExactlyOneTerminal(t *testing.T) {
+	arrived := make(chan struct{}, 1)
+	release := make(chan struct{})
+	backend := blockingBackend(t, arrived, release, "done")
+	defer backend.Close()
+	defer close(release)
+	srv := newServerWithBackend(t, backend.URL)
+	id := createTestSession(t, srv)
+
+	sub, unsub := srv.hub.subscribeSession(id)
+	defer unsub()
+	rec := postMessage(t, srv, id, `{"message":"hi"}`)
+	turnID := acceptedTurnID(t, rec)
+
+	select {
+	case <-arrived:
+	case <-time.After(3 * time.Second):
+		t.Fatal("turn never reached the model")
+	}
+	stopRec := serveOne(t, srv, loopbackReq(http.MethodPost, "/api/sessions/"+id+"/stop", nil))
+	if stopRec.Code != http.StatusOK && stopRec.Code != http.StatusNoContent {
+		t.Fatalf("stop status = %d, want 200/204; body=%s", stopRec.Code, stopRec.Body.String())
+	}
+	waitNotBusy(t, srv, id)
+	assertOneTerminal(t, drainTerminals(sub, turnID), agent.SessionEventError)
+}
