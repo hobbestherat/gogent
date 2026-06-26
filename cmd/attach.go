@@ -7,11 +7,13 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"gogent/internal/config"
 	"gogent/internal/gogent"
+	"gogent/internal/sshtunnel"
 	tuipkg "gogent/ui/tui"
 )
 
@@ -60,13 +62,72 @@ func resolveConnectToken(flagValue string) string {
 // separate entry that returns when the TUI loop exits, after which the caller
 // (main) returns without running the embedded startup.
 func runAttached(homeDir, addr, token string, noColorFlag bool) error {
-	client, err := tuipkg.NewAPIClient(addr, token)
+	// The cancelable context and signal handler are established FIRST so a slow or
+	// hung initial connect — especially an ssh:// dial — is both bounded and
+	// Ctrl+C-interruptible (issue #482). There is exactly ONE sigChan consumer: it
+	// cancels ctx AND forwards into httpShutdownCh (the same funnel the TUI-loop
+	// goroutine uses), so a single Ctrl+C always unblocks the final wait below and
+	// prints the detach line, on every scheme.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	var sigSeen atomic.Value
+	go func() {
+		sig := <-sigChan
+		sigSeen.Store(sig)
+		cancel()
+		select {
+		case httpShutdownCh <- struct{}{}:
+		default:
+		}
+	}()
+
+	// ssh:// (issue #482): build the in-process SSH tunnel BEFORE the API client so
+	// a connect/auth/host-key failure surfaces as a clear error instead of an empty
+	// TUI. The tunnel's DialContext is injected so the APIClient mirrors the unix://
+	// transport (an SSH channel per request; no local listener). The tunnel is
+	// closed on every return path; reconnect re-establishes it via rc.SetTunnel.
+	var apiOpts []tuipkg.APIClientOption
+	var tunnel *sshtunnel.Tunnel
+	var sshTarget string // "user@host" — the exact target the tunnel authenticated as
+	if strings.HasPrefix(addr, "ssh://") {
+		cfg, perr := sshtunnel.ParseConnectURL(addr, token, *sshKey, *sshKnownHosts, *sshInsecure)
+		if perr != nil {
+			return fmt.Errorf("bad --connect %q: %w", addr, perr)
+		}
+		sshTarget = cfg.User + "@" + cfg.Host
+		connectCtx, connectCancel := context.WithTimeout(ctx, sshtunnel.DialTimeout)
+		t, nerr := sshtunnel.New(connectCtx, cfg)
+		connectCancel()
+		if nerr != nil {
+			return fmt.Errorf("ssh connect %s: %w", cfg.Host, nerr)
+		}
+		if _, derr := t.Discover(); derr != nil {
+			_ = t.Close()
+			return fmt.Errorf("resolve daemon at %s: %w", cfg.Host, derr)
+		}
+		tunnel = t
+		apiOpts = append(apiOpts, tuipkg.WithDialContext("http://ssh", tunnel.DialContext))
+	}
+	defer func() {
+		if tunnel != nil {
+			_ = tunnel.Close()
+		}
+	}()
+
+	client, err := tuipkg.NewAPIClient(addr, token, apiOpts...)
 	if err != nil {
 		return fmt.Errorf("build api client: %w", err)
 	}
 	// Confirm a live daemon before standing up the UI, so a stale socket or a
 	// wrong --connect fails with a clear message instead of an empty TUI.
 	if err := client.Health(); err != nil {
+		if tunnel != nil {
+			// The daemon runs on the REMOTE host, so point the user there, not at
+			// the local machine. sshTarget is the exact user@host that just authed.
+			return fmt.Errorf("no daemon found at %s — start it on the remote host with `ssh %s gogent daemon start` (%w)", addr, sshTarget, err)
+		}
 		return fmt.Errorf("daemon not reachable: %w", err)
 	}
 
@@ -106,6 +167,12 @@ func runAttached(homeDir, addr, token string, noColorFlag bool) error {
 	// now" pokes the client's backoff.
 	rc.SetReconnector(wb)
 	rc.SetHealthCheck(daemonHealthEvery)
+	// Give reconnect the SSH tunnel's Restart handle so a dropped stream
+	// re-establishes the tunnel before re-subscribing (issue #482). nil for the
+	// other transports leaves their reconnect path unchanged.
+	if tunnel != nil {
+		rc.SetTunnel(tunnel)
+	}
 	wb.SetReconnectControls(hostLabel(addr), rc.RetryNow)
 	handlers := rc.Handlers()
 	installPresentationHandlers(&handlers, g, wb, noColorFlag)
@@ -128,14 +195,12 @@ func runAttached(homeDir, addr, token string, noColorFlag bool) error {
 	}
 	wb.LoadKeybindings(g.Keybindings())
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	// Establish the remote event stream + approvals polling BEFORE entering the
 	// TUI loop, so a daemon that went away between the health check and the
 	// subscribe fails cleanly without ever launching (and tearing down) UI state.
 	// The consumer's posts are queued on the workbench desktop and delivered once
-	// the loop below starts.
+	// the loop below starts. ctx is the one created at the top, so a SIGINT during
+	// startup cancels it too.
 	if err := rc.Start(ctx); err != nil {
 		rc.Close()
 		return fmt.Errorf("start remote event stream: %w", err)
@@ -153,14 +218,13 @@ func runAttached(homeDir, addr, token string, noColorFlag bool) error {
 		}
 	}()
 
-	// Block until an OS interrupt or the TUI loop exits, then detach cleanly. The
-	// daemon keeps running on its end — detaching never stops it.
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	select {
-	case sig := <-sigChan:
+	// Block until shutdown. BOTH an OS interrupt (forwarded by the signal goroutine
+	// above) and a normal TUI quit arrive via httpShutdownCh, so a single Ctrl+C
+	// exits cleanly on every scheme. The daemon keeps running — detaching never
+	// stops it. The deferred tunnel.Close() then tears the SSH session down.
+	<-httpShutdownCh
+	if sig := sigSeen.Load(); sig != nil {
 		fmt.Printf("\nReceived signal %v, detaching...\n", sig)
-	case <-httpShutdownCh:
 	}
 
 	rc.Close()
