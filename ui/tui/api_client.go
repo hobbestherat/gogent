@@ -611,6 +611,12 @@ func (c *APIClient) UpdateModel(m config.ModelConfig) error {
 	return c.do(http.MethodPut, "/models/"+url.PathEscape(m.Name), m, nil)
 }
 
+// AddModel creates a NEW model on the daemon (POST /models). The daemon returns
+// 409 (surfaced as an error) when the name already exists.
+func (c *APIClient) AddModel(m config.ModelConfig) error {
+	return c.do(http.MethodPost, "/models", m, nil)
+}
+
 // ScanModels probes a model backend on the daemon for the model ids it serves.
 func (c *APIClient) ScanModels(name string) ([]string, error) {
 	var out struct {

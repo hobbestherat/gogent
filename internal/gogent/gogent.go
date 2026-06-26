@@ -3295,6 +3295,39 @@ func (g *Gogent) Models() []config.ModelConfig {
 	return out
 }
 
+// HomeDir returns the home directory gogent was constructed with. The TUI's
+// "Add model from catalog" wiring uses it to locate the models.dev cache
+// (<home>/.gogent/modelsdev-cache.json) without reaching into core state.
+func (g *Gogent) HomeDir() string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.homeDir
+}
+
+// AddModel appends a NEW model configuration and persists it. Unlike UpdateModel
+// (which only replaces an existing entry), AddModel creates one; it rejects a
+// name that already exists so a catalog-assisted add can't silently clobber a
+// configured backend. Sessions pick up the new model on their next turn
+// (connections are rebuilt per send). Mirrors UpdateModel's lock/SaveConfig
+// discipline.
+func (g *Gogent) AddModel(cfg config.ModelConfig) error {
+	g.mu.Lock()
+	for _, m := range g.config.ModelConfigs {
+		if m != nil && m.Name == cfg.Name {
+			g.mu.Unlock()
+			return fmt.Errorf("model %q already exists", cfg.Name)
+		}
+	}
+	added := cfg
+	g.config.ModelConfigs = append(g.config.ModelConfigs, &added)
+	g.mu.Unlock()
+
+	if err := g.SaveConfig(); err != nil {
+		g.warnf("Failed to persist config: %v", err)
+	}
+	return nil
+}
+
 // UpdateModel replaces the configuration of the model with the given Name and
 // persists the change. Sessions pick up the new endpoint/key on their next turn
 // (connections are rebuilt per send). Returns an error if no model matches.

@@ -239,6 +239,30 @@ Buttons: **Save**, **Cancel**, **Set Default**.
 
 Note that `effort_options`, `context_window`, `top_p`, and `free` are config-only fields — they are not exposed in the editor. Per-session effort options appear in the window header instead.
 
+## Add model from catalog (models.dev)
+
+Rather than hand-filling the editor, **Config → Add Model from Catalog…** pulls
+provider and model metadata from the public [models.dev](https://models.dev)
+catalog (`https://models.dev/api.json`, no auth) and pre-fills a new entry. See
+[Adding a model from the models.dev catalog](configuration.md#adding-a-model-from-the-modelsdev-catalog)
+for the user-facing flow and caching behavior.
+
+The catalog metadata maps onto `api_type` as follows (in `internal/modelsdev`):
+`openrouter` → `openrouter`, `zai`/`z-ai`/`z.ai` → `zai`, `anthropic` → `anthropic`,
+`google-vertex` → `vertex`, `google-vertex-anthropic` → `vertex-anthropic`; **every
+other (and unknown) provider defaults to `openai`**, matching `StringToAPIType`.
+All the OpenAI-compatible gateways models.dev lists (Groq, Together, DeepSeek,
+Mistral, Fireworks, …) are reached through the generic `openai` provider — the
+catalog flow only selects the right *existing* `api_type`; it adds no new adapter.
+
+`endpoint` is filled resolver-aware: it is left **blank** for `anthropic`, `zai`,
+`openrouter`, and the Vertex types (whose adapters supply or derive their own base
+URL — most importantly `anthropic`, where the `/v1` lives in the chat path, so
+feeding the catalog's `/v1` base would double it), and set to the catalog's base
+URL for generic `openai` gateways (which otherwise default to a useless localhost
+base). `thinking` is left unset (provider default) even when the model advertises a
+toggle; flip it in the review form if you want it on.
+
 ## Architecture: adding a provider or operation
 
 Each `api_type` maps to a registered `*provider` (`internal/model`) that **composes small strategy objects** rather than carrying a flat config struct. `ModelConnection` is a generic executor that delegates to the provider; it contains no backend-specific logic.

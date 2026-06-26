@@ -64,6 +64,36 @@ Each entry in `models[]` is a `ModelConfig`:
 > `reasoning_effort != ""` **or** `thinking != nil`. The default context window
 > (`defaultContextWindow`) is 32768 tokens when `context_window` is unset.
 
+### Adding a model from the models.dev catalog
+
+You do not have to hand-edit `config.json` or know a provider's endpoint, limits
+and reasoning options to add a backend. In the TUI, open **Config → Add Model from
+Catalog…** (also in the command palette as *Add model from catalog*). The flow:
+
+1. **Pick a provider** from the live [models.dev](https://models.dev) catalog
+   (searchable; each row shows the env var the provider expects, so you know which
+   credential to have ready).
+2. **Pick a model** (searchable; each row shows context window, output cap, and
+   reasoning/free badges).
+3. **Review** a pre-filled form. Every field models.dev can supply
+   (`display_name`, `endpoint`, `model`, `max_tokens`, `context_window`,
+   `reasoning_effort`, `effort_options`, `free`, derived `api_type`) is auto-filled
+   and **editable**. You are prompted only for what models.dev cannot know — the
+   **API key** (or, for Vertex, the GCP **project**/**location**, which use
+   Application Default Credentials, no key). The `api_type` is read-only ("from
+   catalog").
+4. **Save** creates a NEW, uniquely-named entry, persists it, and makes it
+   immediately selectable; you can optionally set it as the default for new
+   sessions.
+
+The catalog is fetched from `https://models.dev/api.json` and cached to
+`~/.gogent/modelsdev-cache.json` with a **24-hour TTL** and `ETag`/
+`If-Modified-Since` revalidation. A **Refresh** button forces an update. The flow
+degrades gracefully: if models.dev is unreachable it serves the cached catalog,
+and if there is no cache it offers the manual model editor instead — offline use is
+never blocked. The existing manual editor (**Config → Models…**) and hand-editing
+`config.json` continue to work unchanged.
+
 ---
 
 ## `SubAgentConfig`
