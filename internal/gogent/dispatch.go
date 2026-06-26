@@ -68,7 +68,10 @@ func (g *Gogent) DispatchMessage(sessionID, agentID, message, modelName, effort 
 		if onDone != nil {
 			defer onDone()
 		}
-		_, _ = g.SendMessageToSessionWithModelAndEffort(ctx, sessionID, agentID, message, modelName, effort)
+		defer recoverTurn(us, turnID)
+		if _, runErr := g.SendMessageToSessionWithModelAndEffort(ctx, sessionID, agentID, message, modelName, effort); runErr != nil {
+			us.EmitError(turnID, runErr)
+		}
 	}()
 	return turnID, nil
 }
@@ -92,7 +95,10 @@ func (g *Gogent) DispatchApprovedPlan(sessionID, agentID string, onDone func()) 
 		if onDone != nil {
 			defer onDone()
 		}
-		_, _ = g.ExecuteApprovedPlan(ctx, sessionID, agentID)
+		defer recoverTurn(us, turnID)
+		if _, runErr := g.ExecuteApprovedPlan(ctx, sessionID, agentID); runErr != nil {
+			us.EmitError(turnID, runErr)
+		}
 	}()
 	return turnID, nil
 }
@@ -115,6 +121,7 @@ func (g *Gogent) DispatchCommandSubtask(sessionID, agentID, message string, onDo
 		if onDone != nil {
 			defer onDone()
 		}
+		defer recoverTurn(us, turnID)
 		result, runErr := g.RunCommandSubtask(ctx, sessionID, agentID, message)
 		if runErr != nil {
 			us.EmitError(turnID, runErr)
@@ -123,4 +130,17 @@ func (g *Gogent) DispatchCommandSubtask(sessionID, agentID, message string, onDo
 		us.EmitFinal(turnID, result)
 	}()
 	return turnID, nil
+}
+
+// recoverTurn contains a panic from a dispatch goroutine and surfaces it as the
+// session's error event (issue #481, mirroring the embedded path's per-session
+// panic containment for issue #8). runLoop has its own recovery, but it is armed
+// only once the loop is running — a panic in the synchronous entrypoint before
+// then (model-config selection, buildConnection, ThoughtTrain setup,
+// checkpoints.BeginTurn) would otherwise escape the goroutine and crash the daemon
+// process. Used as `defer recoverTurn(us, turnID)`.
+func recoverTurn(us *agent.UserSession, turnID string) {
+	if r := recover(); r != nil {
+		us.EmitError(turnID, fmt.Errorf("turn panicked: %v", r))
+	}
 }

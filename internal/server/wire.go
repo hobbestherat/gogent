@@ -91,6 +91,12 @@ type messageView struct {
 // emit a literal 202 for a JSON body, so this is returned with 200 — the
 // behavioural contract is the non-blocking return plus the turn id, see design
 // §2.)
+//
+// Field name note: this POST/approve response uses camelCase "turnId" while SSE
+// events (eventView) use snake_case "turn_id". They are distinct messages decoded
+// into distinct client structs, so the difference is cosmetic; the client-side
+// contract tests pin "turnId" here, so normalizing both to turn_id is a
+// coordinated follow-up that would also update those tests.
 type acceptedView struct {
 	TurnID string `json:"turnId"`
 }

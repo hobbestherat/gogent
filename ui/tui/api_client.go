@@ -188,7 +188,8 @@ type MessageDTO struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 	// TurnID is the id of the async-dispatched turn (issue #481), set on the
-	// send/approve response; empty on transcript entries.
+	// send/approve response; empty on transcript entries. The POST/approve response
+	// carries it as "turnId" (the SSE EventDTO uses "turn_id" — distinct messages).
 	TurnID string `json:"turnId"`
 }
 
