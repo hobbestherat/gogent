@@ -2,8 +2,10 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // Turn represents a single exchange between user and model
@@ -12,6 +14,12 @@ type Turn struct {
 	Response string
 	Usage    *TokenUsage
 	Error    *ModelError
+	// Timestamp is when this round-trip completed (success or failure), stamped by
+	// sendCtx. It is the source for the per-record "at" field the persistence layer
+	// writes for usage/error records (issue #487); kept in History so a compaction
+	// full-rewrite re-emits the original time rather than re-dating records. Zero for
+	// turns recorded before this field existed (e.g. AddTurn callers that omit it).
+	Timestamp time.Time
 }
 
 // ModelSession is an internal session tied to a ModelConnection
@@ -222,6 +230,57 @@ func (s *ModelSession) GetHistory() []Turn {
 	history := make([]Turn, len(s.History))
 	copy(history, s.History)
 	return history
+}
+
+// HistoryLen returns the number of turns in the history without copying it. It is
+// the cheap read side used by persistence bookkeeping (issue #487), mirroring
+// TranscriptLen, so the per-turn meta frontier can be advanced without copying the
+// (never-compacted, ever-growing) History.
+func (s *ModelSession) HistoryLen() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.History)
+}
+
+// GetHistoryFrom returns a copy of History[off:] only (the new-since-last-save
+// delta), not the whole ledger. Persistence encodes per-turn usage/error records as
+// a delta keyed on a per-agent frontier (issue #487); since History is never
+// compacted it grows for the life of the session, so copying all of it every save
+// would be O(turns) per save (quadratic overall). Copying only the tail keeps each
+// save proportional to the delta, matching the transcript's encodeMessages/from
+// pattern. An off past the end (or negative) yields an empty slice.
+func (s *ModelSession) GetHistoryFrom(off int) []Turn {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if off < 0 {
+		off = 0
+	}
+	if off >= len(s.History) {
+		return nil
+	}
+	out := make([]Turn, len(s.History)-off)
+	copy(out, s.History[off:])
+	return out
+}
+
+// RestoreHistoryMeta rebuilds the History from per-turn meta (usage/error) records
+// read back from disk and recomputes the running token count from them (issue
+// #487). It is the History-side analogue of ReplaceTranscript: a restored session's
+// History is otherwise empty, so the persisted failure indicator (the last turn's
+// Error) and token accounting would be lost, and — critically — the per-turn meta
+// delta frontier would not line up with the in-memory History on the next save.
+// Each restored Turn carries only Usage/Error/Timestamp (Request is never persisted
+// and is left nil).
+//
+// CurrentTokenCount is seeded from the latest turn's usage so a reopened window
+// shows context usage immediately. Note the per-send connection rebuild makes
+// Resume re-derive exactly this value on the first turn (see Resume / design.md
+// §2.1), so the seed is the pre-first-turn display value, not the sole source.
+func (s *ModelSession) RestoreHistoryMeta(turns []Turn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.History = append([]Turn(nil), turns...)
+	s.CurrentTokenCount = lastUsageTotal(s.History)
 }
 
 // GetCurrentTokenCount returns the current token count
@@ -539,7 +598,27 @@ func (s *ModelSession) sendCtx(ctx context.Context, messages []Message, tools []
 	}
 	if err != nil {
 		s.mu.Lock()
-		s.History[len(s.History)-1].Error = &ModelError{Message: err.Error()}
+		last := len(s.History) - 1
+		// Preserve the full classified error (Type/HTTPStatusCode/RawResponse) instead
+		// of flattening it to a bare message string, so the persistence layer can encode
+		// a faithful failure record (issue #487). The connector returns a *ModelError
+		// (see connection.go analyzeError / ctxError); errors.As recovers it through
+		// sendCtx's own %w wrap. The only non-typed source is a config error, caught by
+		// the ErrorGeneric fallback.
+		var me *ModelError
+		if !errors.As(err, &me) {
+			me = &ModelError{Type: ErrorGeneric, Message: err.Error()}
+		}
+		s.History[last].Error = me
+		s.History[last].Timestamp = time.Now()
+		// Capture prompt-token usage on the error path where the provider returns it.
+		// Every real connector returns resp==nil on error today (the streaming path
+		// even assembles usage then discards it), so this is a forward-compatible
+		// no-op in production; it records cost the moment a connector returns usage
+		// alongside an error. See design.md §1.1.
+		if resp != nil && resp.Usage != nil {
+			s.History[last].Usage = resp.Usage
+		}
 		s.mu.Unlock()
 		return nil, fmt.Errorf("complete with tools: %w", err)
 	}
@@ -561,6 +640,7 @@ func (s *ModelSession) sendCtx(ctx context.Context, messages []Message, tools []
 	})
 	s.History[len(s.History)-1].Response = resp.Content
 	s.History[len(s.History)-1].Usage = resp.Usage
+	s.History[len(s.History)-1].Timestamp = time.Now()
 
 	// Real token accounting: the latest usage reflects the whole context size.
 	if resp.Usage != nil && resp.Usage.TotalTokens > 0 {

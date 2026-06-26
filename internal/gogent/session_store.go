@@ -57,16 +57,45 @@ const (
 	flushInterval      = 250 * time.Millisecond // cadence of the batched durability flush
 )
 
-// jsonlRecord is one line of a shard file. Shards hold only "message" records;
-// "meta" exists solely so the legacy single-file format can still be read.
+// jsonlRecord is one line of a shard file. Most records are "message" records;
+// "meta" exists solely so the legacy single-file format can still be read. Two
+// additive kinds make a failed turn debuggable straight from the file (issue #487):
+//
+//   - "usage": a successful round-trip's per-turn token usage.
+//   - "turn_error": a failed round-trip's classified ModelError. Any prompt-token
+//     usage the provider returned alongside the error rides the same top-level
+//     Usage field (so the failure payload stays pure), not inside Err.
+//
+// Both are emitted at most once per History turn and carry the turn's timestamp in
+// At (RFC3339). Readers predating them skip any non-"message" kind, so the addition
+// is backward-compatible in both directions.
 type jsonlRecord struct {
-	Kind      string         `json:"kind"`
-	SessionID string         `json:"session_id,omitempty"`
-	Title     string         `json:"title,omitempty"`
-	CreatedAt string         `json:"created_at,omitempty"`
-	AgentID   string         `json:"agent_id,omitempty"`
-	Message   *model.Message `json:"message,omitempty"`
+	Kind      string            `json:"kind"`
+	SessionID string            `json:"session_id,omitempty"`
+	Title     string            `json:"title,omitempty"`
+	CreatedAt string            `json:"created_at,omitempty"`
+	AgentID   string            `json:"agent_id,omitempty"`
+	Message   *model.Message    `json:"message,omitempty"`
+	Usage     *model.TokenUsage `json:"usage,omitempty"`
+	Err       *turnError        `json:"error,omitempty"`
+	At        string            `json:"at,omitempty"`
 }
+
+// turnError is the persisted, pure-failure payload of a "turn_error" record: the
+// classified ModelError fields that make a failed turn debuggable (issue #487). The
+// Type is persisted verbatim as classified, so the reader stays compatible with any
+// error type the classifier produces. RawResponse is truncated to rawResponseCap to
+// bound shard growth from a large error body.
+type turnError struct {
+	Type           string `json:"type,omitempty"`
+	Message        string `json:"message,omitempty"`
+	HTTPStatusCode int    `json:"http_status_code,omitempty"`
+	RawResponse    string `json:"raw_response,omitempty"`
+}
+
+// rawResponseCap bounds the persisted ModelError.RawResponse so a pathologically
+// large provider error body cannot bloat a shard (issue #487).
+const rawResponseCap = 8 * 1024
 
 // sessionIndex is the small JSON document at <base>.index: the session meta plus
 // the ordered shard table. It is the source of truth for listing and for the
@@ -195,6 +224,11 @@ type persistState struct {
 	persisted map[string]int         // agentID -> count of its messages already on disk
 	epoch     map[string]uint64      // agentID -> transcript epoch observed at last save
 	watchers  []config.WatcherConfig // attached watcher set as last written to the index
+	// metaPersisted is the per-turn meta (usage/error) frontier: agentID -> count of
+	// History turns already emitted as usage/turn_error records (issue #487). It is
+	// the meta-stream twin of persisted; History is append-only (compaction rewrites
+	// the Transcript, never History), so no epoch is needed for it.
+	metaPersisted map[string]int
 }
 
 // LoadedSession is a session transcript read back from disk.
@@ -223,6 +257,13 @@ type LoadedSession struct {
 	// back from the index, re-registered with the watcher manager via
 	// OnSessionRestored (issue #329 Phase 3). nil when the session has none.
 	Watchers []config.WatcherConfig
+	// RootHistory is the root agent's per-turn meta (usage/error) records restored
+	// from the current shard, reconstructed as model.Turns carrying only
+	// Usage/Error/Timestamp (issue #487). adoptLoaded feeds it to
+	// ModelSession.RestoreHistoryMeta so a reopened session shows its failure
+	// indicator and token accounting instead of a bare idle prompt. nil for sessions
+	// with no usage/error records on disk (e.g. shards written before this change).
+	RootHistory []model.Turn
 }
 
 // NewSessionStore creates (and ensures the directory for) a session store.
@@ -264,11 +305,17 @@ func (s *SessionStore) Adopt(sessionID, file string, agents []*agent.Agent) {
 		return // nothing persisted yet; a later save will build the shard set
 	}
 	s.shards[sessionID] = idx.Shards
-	transcripts, _ := s.loadTranscripts(base, idx.Shards)
+	transcripts, _, meta := s.loadTranscripts(base, idx.Shards)
 
-	st := &persistState{title: idx.Title, persisted: make(map[string]int), epoch: make(map[string]uint64)}
+	st := &persistState{title: idx.Title, persisted: make(map[string]int), epoch: make(map[string]uint64), metaPersisted: make(map[string]int)}
 	for aid, msgs := range transcripts {
 		st.persisted[aid] = len(msgs) // active-shard counts
+	}
+	// Seed the meta frontier from the active shard's usage/error records so the next
+	// save appends only new ones, and so it lines up with the History reconstructed
+	// by RestoreHistoryMeta on restore (issue #487).
+	for aid, turns := range meta {
+		st.metaPersisted[aid] = len(turns)
 	}
 	// Capture the baseline epoch of each restored agent so Save can tell a later
 	// compaction (epoch advance) from append-only growth and rewrite instead of
@@ -395,11 +442,18 @@ func (s *SessionStore) Save(us *agent.UserSession, title string) error {
 		}
 	}
 
-	// Delta path: encode only the messages added since the last save.
+	// Delta path: encode only the messages — and per-turn usage/error meta records —
+	// added since the last save. Both ride the same shard append (issue #487).
 	var buf bytes.Buffer
-	if _, err := encodeMessages(json.NewEncoder(&buf), agents, func(aid string) int { return st.persisted[aid] }); err != nil {
+	enc := json.NewEncoder(&buf)
+	if _, err := encodeMessages(enc, agents, func(aid string) int { return st.persisted[aid] }); err != nil {
 		// Drop the frontier so the next save rebuilds the shard set atomically
 		// instead of appending on top of an unknown state.
+		delete(s.state, us.ID)
+		delete(s.shards, us.ID)
+		return err
+	}
+	if _, err := encodeTurnMeta(enc, agents, func(aid string) int { return st.metaPersisted[aid] }); err != nil {
 		delete(s.state, us.ID)
 		delete(s.shards, us.ID)
 		return err
@@ -466,7 +520,14 @@ func watchersEqual(a, b []config.WatcherConfig) bool {
 // last so the on-disk state stays consistent.
 func (s *SessionStore) writeFullTranscript(base, id, title, created string, sum sessionSummary, watchers []config.WatcherConfig, agents []*agent.Agent) ([]shardMeta, error) {
 	var buf bytes.Buffer
-	if _, err := encodeMessages(json.NewEncoder(&buf), agents, func(string) int { return 0 }); err != nil {
+	enc := json.NewEncoder(&buf)
+	if _, err := encodeMessages(enc, agents, func(string) int { return 0 }); err != nil {
+		return nil, err
+	}
+	// Re-emit the full per-turn usage/error meta stream alongside the messages. It is
+	// regenerated from History (never compacted), so a rewrite is idempotent and the
+	// original timestamps are preserved (they live in History). Issue #487.
+	if _, err := encodeTurnMeta(enc, agents, func(string) int { return 0 }); err != nil {
 		return nil, err
 	}
 	lines := splitJSONLLines(buf.Bytes())
@@ -577,6 +638,61 @@ func encodeMessages(enc *json.Encoder, agents []*agent.Agent, from func(aid stri
 	return n, errs
 }
 
+// encodeTurnMeta writes each new per-turn meta record (History[from(aid):] per
+// agent) as a JSONL "usage" or "turn_error" record to enc, so a failed turn's
+// classified error and a round-trip's token usage survive restart (issue #487). It
+// emits at most one record per turn: a "turn_error" record when the turn errored
+// (carrying any usage the provider returned alongside it on the top-level Usage
+// field), otherwise a "usage" record when the turn reported usage; turns with
+// neither are skipped. Like encodeMessages it joins (does not swallow) encode errors
+// (issue #17) and returns the count written. It reads only the History tail via
+// GetHistoryFrom so a save stays proportional to the delta, not the whole ledger.
+func encodeTurnMeta(enc *json.Encoder, agents []*agent.Agent, from func(aid string) int) (int, error) {
+	n := 0
+	var errs error
+	for _, a := range agents {
+		if a.ThoughtTrain == nil {
+			continue
+		}
+		for _, t := range a.ThoughtTrain.GetHistoryFrom(from(a.ID)) {
+			rec := jsonlRecord{AgentID: a.ID, Usage: t.Usage}
+			if !t.Timestamp.IsZero() {
+				rec.At = t.Timestamp.UTC().Format(time.RFC3339)
+			}
+			switch {
+			case t.Error != nil:
+				rec.Kind = "turn_error"
+				rec.Err = &turnError{
+					Type:           string(t.Error.Type),
+					Message:        t.Error.Message,
+					HTTPStatusCode: t.Error.HTTPStatusCode,
+					RawResponse:    truncateRaw(t.Error.RawResponse),
+				}
+			case t.Usage != nil:
+				rec.Kind = "usage"
+			default:
+				continue // nothing debuggable to persist for this turn
+			}
+			if err := enc.Encode(rec); err != nil {
+				errs = errors.Join(errs, fmt.Errorf("encode turn meta for agent %s: %w", a.ID, err))
+				continue
+			}
+			n++
+		}
+	}
+	return n, errs
+}
+
+// truncateRaw caps a persisted ModelError.RawResponse at rawResponseCap bytes so a
+// large provider error body cannot bloat a shard (issue #487). A truncation marker
+// is appended so a reader can tell the body was clipped.
+func truncateRaw(s string) string {
+	if len(s) <= rawResponseCap {
+		return s
+	}
+	return s[:rawResponseCap] + "…(truncated)"
+}
+
 // splitJSONLLines splits a buffer of newline-terminated JSON records into
 // individual line byte slices (copying each, so the buffer can be reclaimed).
 func splitJSONLLines(b []byte) [][]byte {
@@ -612,13 +728,17 @@ func recordFrontier(st *persistState, agents []*agent.Agent) {
 		if st.epoch == nil {
 			st.epoch = make(map[string]uint64)
 		}
+		if st.metaPersisted == nil {
+			st.metaPersisted = make(map[string]int)
+		}
 		st.persisted[a.ID] = a.ThoughtTrain.TranscriptLen()
 		st.epoch[a.ID] = a.ThoughtTrain.TranscriptEpoch()
+		st.metaPersisted[a.ID] = a.ThoughtTrain.HistoryLen()
 	}
 }
 
 func newPersistFrontier(title string, agents []*agent.Agent) *persistState {
-	st := &persistState{title: title, persisted: make(map[string]int), epoch: make(map[string]uint64)}
+	st := &persistState{title: title, persisted: make(map[string]int), epoch: make(map[string]uint64), metaPersisted: make(map[string]int)}
 	recordFrontier(st, agents)
 	return st
 }
@@ -679,7 +799,7 @@ func (s *SessionStore) ListActive() ([]LoadedSession, error) {
 		if err != nil || idx.SessionID == "" {
 			continue
 		}
-		transcripts, order := s.loadTranscripts(base, idx.Shards)
+		transcripts, order, meta := s.loadTranscripts(base, idx.Shards)
 		sessions = append(sessions, LoadedSession{
 			ID:          idx.SessionID,
 			Title:       idx.Title,
@@ -691,6 +811,7 @@ func (s *SessionStore) ListActive() ([]LoadedSession, error) {
 			ModelLabel:  idx.ModelLabel,
 			ModelID:     idx.ModelID,
 			Watchers:    idx.Watchers,
+			RootHistory: meta["root"],
 		})
 	}
 	return sessions, nil
@@ -918,7 +1039,7 @@ func (s *SessionStore) LoadSession(file string) (LoadedSession, error) {
 	if err != nil {
 		return LoadedSession{}, err
 	}
-	transcripts, order := s.loadTranscripts(base, idx.Shards)
+	transcripts, order, meta := s.loadTranscripts(base, idx.Shards)
 	return LoadedSession{
 		ID:          idx.SessionID,
 		Title:       idx.Title,
@@ -930,30 +1051,39 @@ func (s *SessionStore) LoadSession(file string) (LoadedSession, error) {
 		ModelLabel:  idx.ModelLabel,
 		ModelID:     idx.ModelID,
 		Watchers:    idx.Watchers,
+		RootHistory: meta["root"],
 	}, nil
 }
 
 // loadTranscripts reads the current (latest) shard and returns its per-agent
-// transcripts and the agent order seen on disk. The current-shard-only restore
-// (issue #26) bounds restore cost for long sessions; older shards stay on disk.
-func (s *SessionStore) loadTranscripts(base string, sms []shardMeta) (map[string][]model.Message, []string) {
+// transcripts, the agent order seen on disk, and the per-agent per-turn meta
+// (usage/error) records reconstructed as model.Turns (issue #487). Only "message"
+// records populate the transcript; meta records route to the meta map, so neither
+// pollutes the other. The current-shard-only restore (issue #26) bounds restore
+// cost for long sessions; older shards stay on disk.
+func (s *SessionStore) loadTranscripts(base string, sms []shardMeta) (map[string][]model.Message, []string, map[string][]model.Turn) {
 	out := make(map[string][]model.Message)
+	meta := make(map[string][]model.Turn)
 	if len(sms) == 0 {
-		return out, nil
+		return out, nil, meta
 	}
 	active := sms[len(sms)-1]
 	records, err := s.loadShard(shardFilePath(base, active.Index))
 	if err != nil {
-		return out, nil
+		return out, nil, meta
 	}
 	var order []string
 	for _, r := range records {
+		if r.kind != "message" {
+			meta[r.agentID] = append(meta[r.agentID], r.turn)
+			continue
+		}
 		if _, seen := out[r.agentID]; !seen {
 			order = append(order, r.agentID)
 		}
 		out[r.agentID] = append(out[r.agentID], r.msg)
 	}
-	return out, order
+	return out, order, meta
 }
 
 // loadShard parses one shard file into ordered records, served from the LRU
@@ -980,14 +1110,18 @@ func (s *SessionStore) loadShard(path string) ([]shardRecord, error) {
 		if json.Unmarshal([]byte(line), &rec) != nil {
 			continue
 		}
-		if rec.Kind != "message" || rec.Message == nil {
-			continue // meta/legacy records are not part of a shard's transcript
-		}
 		aid := rec.AgentID
 		if aid == "" {
 			aid = "root"
 		}
-		records = append(records, shardRecord{agentID: aid, msg: *rec.Message})
+		switch {
+		case rec.Kind == "message" && rec.Message != nil:
+			records = append(records, shardRecord{agentID: aid, kind: "message", msg: *rec.Message})
+		case rec.Kind == "usage" || rec.Kind == "turn_error":
+			// Per-turn meta (issue #487): reconstruct the Turn for restore. Older
+			// "meta"/legacy and any unknown kinds are still skipped.
+			records = append(records, shardRecord{agentID: aid, kind: rec.Kind, turn: metaToTurn(rec)})
+		}
 	}
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("scan shard: %w", err)
@@ -996,10 +1130,35 @@ func (s *SessionStore) loadShard(path string) ([]shardRecord, error) {
 	return records, nil
 }
 
-// shardRecord is one parsed message keyed by its owning agent.
+// shardRecord is one parsed record keyed by its owning agent: either a transcript
+// message (kind "message") or a per-turn meta record (kind "usage"/"turn_error")
+// carrying the reconstructed Turn (issue #487).
 type shardRecord struct {
 	agentID string
-	msg     model.Message
+	kind    string
+	msg     model.Message // valid when kind == "message"
+	turn    model.Turn    // valid for the meta kinds
+}
+
+// metaToTurn reconstructs a model.Turn (Usage/Error/Timestamp only) from a persisted
+// usage/turn_error record (issue #487). The error Type is restored verbatim, so the
+// reader stays compatible with any classification the producer used.
+func metaToTurn(rec jsonlRecord) model.Turn {
+	t := model.Turn{Usage: rec.Usage}
+	if rec.At != "" {
+		if ts, err := time.Parse(time.RFC3339, rec.At); err == nil {
+			t.Timestamp = ts
+		}
+	}
+	if rec.Err != nil {
+		t.Error = &model.ModelError{
+			Type:           model.ModelErrorType(rec.Err.Type),
+			Message:        rec.Err.Message,
+			HTTPStatusCode: rec.Err.HTTPStatusCode,
+			RawResponse:    rec.Err.RawResponse,
+		}
+	}
+	return t
 }
 
 // Sync flushes any pending durability writes (fsync) for all dirty session files
