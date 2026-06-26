@@ -307,11 +307,63 @@ attach.
 File and shell tools run on **B**, where the daemon owns the workspace — the
 TUI on A is a thin client over the API.
 
-> **Native `ssh://` transport (Tier 2) is a separate planned follow-up.**
-> A future `gogent --connect ssh://user@machineB` would open the SSH session
-> and tunnel the API automatically — no manual `ssh -L`, SSH-key auth, host-key
-> verification. That is not part of this release; the manual port-forward above
-> is the supported remote path today.
+## Remote access over SSH (Tier 2 — native `ssh://`)
+
+The manual port-forward above still works, but you no longer need it. A single
+command opens the SSH session, auto-resolves the running remote daemon, tunnels
+its API over SSH, and launches the attached TUI:
+
+```bash
+gogent --connect ssh://user@machineB
+```
+
+No second terminal, no `ssh -L`, no port guessing, and **`--tcp` is not
+required** — a daemon started with a plain `gogent daemon start` (Unix socket
+only) is reachable, because SSH forwards the daemon's Unix domain socket
+natively. gogent reads `~/.gogent/daemon.addr` over the SSH session to discover
+the daemon's actual transport (the Unix socket, or a `--tcp` endpoint if one was
+configured — it is preferred when present), then dials it through the tunnel.
+
+```bash
+# On B: just start the daemon — no --tcp needed.
+gogent daemon start
+
+# On A: attach over SSH in one command.
+gogent --connect ssh://user@machineB             # default ssh port 22
+gogent --connect ssh://user@machineB:2222        # custom ssh port
+```
+
+**Authentication.** SSH itself authenticates the user via your SSH agent
+(`SSH_AUTH_SOCK`) or `~/.ssh/id_*` keys (`--ssh-key` selects a specific file;
+an encrypted key prompts for its passphrase on the terminal). The daemon's
+bearer token (`--token` / `GOGENT_HTTP_TOKEN`) is carried over the tunnel too,
+but is **usually unnecessary**: the tunnel lands on the daemon's local
+Unix-socket/loopback listener, which the daemon already treats as the local
+human (the same trust model as attaching on B directly). A token is only the
+gate for a daemon bound to a *non-loopback* `--tcp` host.
+
+**Host-key verification.** The remote host key is checked against
+`~/.ssh/known_hosts` by default (`--ssh-known-hosts` overrides the file); a
+mismatch or unknown host fails with an actionable hint. On the **first** connect
+to a new host there is no interactive trust-on-first-use prompt — add the key
+first (`ssh-keyscan machineB >> ~/.ssh/known_hosts`) or, for trusted/lab setups,
+pass `--ssh-insecure-skip-verify` to skip verification.
+
+**Reconnect and teardown.** If the SSH session or the daemon stream drops, the
+existing disconnect modal appears and reconnects with backoff (the same
+"Retry now / Quit" controls), re-establishing the tunnel and the event stream
+and jumping to the present. Exiting the TUI (Ctrl+C / quit) closes the SSH
+session and any local state; the remote daemon keeps running — detaching never
+stops it. An in-flight turn survives a brief disconnect (it runs on the daemon,
+decoupled from the request).
+
+**Fail-fast errors.** An unreachable/firewalled host, an SSH auth failure, a
+host-key mismatch, or a daemon that isn't running each fail within ~10s with a
+clear message *before* any UI is shown — e.g. `no daemon found at
+ssh://machineB — start it with `gogent daemon start``.
+
+Files and shell tools still run on **B**; the TUI on A is a thin client over the
+tunnelled API.
 
 ## Platform support
 

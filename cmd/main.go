@@ -39,9 +39,14 @@ var (
 	yolo         = flag.Bool("yolo", false, "Yolo mode: remove the step cap and auto-approve every permission prompt except the rules.json hard-deny guardrails (issue #356). Set a token budget as the brake.")
 	// Daemon attach flags (issue #358, Phase 2). The default invocation attaches
 	// the TUI to a live local daemon socket if present, else runs embedded.
-	connectAddr   = flag.String("connect", "", "Attach the TUI to a running daemon at this address (unix:///path | http://host:port | https://host:port). Default: auto-attach to the local daemon socket if a live daemon is present, else run embedded.")
-	connectToken  = flag.String("token", "", "Bearer token for --connect over TCP (env GOGENT_HTTP_TOKEN). Unused for the local Unix socket.")
+	connectAddr   = flag.String("connect", "", "Attach the TUI to a running daemon at this address (unix:///path | http://host:port | https://host:port | ssh://[user@]host[:sshport]). ssh:// opens a native SSH tunnel and auto-resolves the remote daemon (no --tcp, no manual ssh -L). Default: auto-attach to the local daemon socket if a live daemon is present, else run embedded.")
+	connectToken  = flag.String("token", "", "Bearer token for --connect over TCP (env GOGENT_HTTP_TOKEN). Unused for the local Unix socket and usually for ssh:// (the tunnel lands on the daemon's local listener).")
 	forceEmbedded = flag.Bool("embedded", false, "Force in-process embedded mode even if a local daemon is running (escape hatch / debugging).")
+	// ssh:// transport options (issue #482). Empty defaults to the SSH agent +
+	// ~/.ssh/id_* keys and strict ~/.ssh/known_hosts verification.
+	sshKey        = flag.String("ssh-key", "", "Private key file for --connect ssh:// (default: SSH agent + ~/.ssh/id_*).")
+	sshKnownHosts = flag.String("ssh-known-hosts", "", "known_hosts file for --connect ssh:// host-key verification (default: ~/.ssh/known_hosts).")
+	sshInsecure   = flag.Bool("ssh-insecure-skip-verify", false, "Skip SSH host-key verification for --connect ssh:// (trusted/lab use only).")
 )
 
 var (

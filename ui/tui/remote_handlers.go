@@ -113,7 +113,23 @@ type RemoteClient struct {
 	// disconnected; the blocking disconnect modal covers the UX instead.
 	disconnected atomic.Bool
 
+	// tunnel, when set (ssh:// attach, issue #482), is re-established at the top of
+	// each reconnect attempt before re-opening the SSE stream: a dropped stream is
+	// often a dropped SSH session. It is nil for the unix/http/https transports, so
+	// their reconnect path is unchanged. The RemoteClient does NOT own the tunnel's
+	// Close — cmd/attach.go does (single owner); this is only the Restart handle.
+	tunnel TunnelRestarter
+
 	startOnce sync.Once
+}
+
+// TunnelRestarter re-establishes an out-of-process transport (the ssh:// tunnel)
+// after a connection drop. Restart probes the existing session first and reports
+// redialed=false when it was healthy (no teardown), or redialed=true when it
+// actually replaced the session — so the caller only flushes pooled connections
+// when the underlying transport changed. *sshtunnel.Tunnel satisfies it.
+type TunnelRestarter interface {
+	Restart(ctx context.Context) (redialed bool, err error)
 }
 
 // NewRemoteClient builds a RemoteClient over the given APIClient. sink receives
@@ -146,6 +162,11 @@ func (rc *RemoteClient) SetReconnector(r Reconnector) { rc.reconnector = r }
 // reconnect path even when the stream read itself is wedged on a half-open socket.
 // It must be called before Start; a non-positive interval leaves it disabled.
 func (rc *RemoteClient) SetHealthCheck(every time.Duration) { rc.healthEvery = every }
+
+// SetTunnel installs the ssh:// tunnel's Restart handle (issue #482) so reconnect
+// re-establishes the SSH session before re-subscribing. It must be called before
+// Start. Leaving it unset (unix/http/https) keeps the reconnect path unchanged.
+func (rc *RemoteClient) SetTunnel(t TunnelRestarter) { rc.tunnel = t }
 
 // RetryNow collapses the current reconnect backoff so the next attempt fires
 // immediately. It backs the disconnect modal's "Retry now" button and is safe to
@@ -302,6 +323,23 @@ func (rc *RemoteClient) reconnect() <-chan GlobalEventDTO {
 			return nil
 		case <-rc.retryNow:
 		case <-time.After(rc.backoff(attempt)):
+		}
+		// For an ssh:// attach, a dropped stream is often a dropped SSH session, so
+		// re-establish the tunnel before re-subscribing (issue #482). Restart probes
+		// first and is a near-no-op when the session is healthy; a genuine failure
+		// feeds this same backoff. Only when it actually redialed do we flush pooled
+		// channels bound to the now-replaced session.
+		if rc.tunnel != nil {
+			redialed, terr := rc.tunnel.Restart(rc.ctx)
+			if terr != nil {
+				if rc.ctx.Err() != nil {
+					return nil
+				}
+				continue // tunnel still down: next attempt, longer backoff, modal stays up
+			}
+			if redialed {
+				rc.client.CloseIdleConnections()
+			}
 		}
 		next, err := rc.openStream()
 		if err == nil {

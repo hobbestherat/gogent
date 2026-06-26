@@ -26,13 +26,19 @@ import (
 // concurrent use — the underlying http.Client is, and its only mutable state is
 // the notification handler, guarded by a mutex.
 //
-// Two transports are supported, selected by the connect address scheme:
+// Transports are selected by the connect address scheme:
 //   - unix:///path/to/daemon.sock — the local daemon socket (default). The
 //     socket's 0600 filesystem permissions are the access gate; the server
 //     treats a Unix-socket caller as a local human, so no token is needed.
 //   - http://host:port | https://host:port — TCP, for a remote daemon reached
 //     over (manually forwarded) SSH or a trusted network. A bearer token
 //     (GOGENT_HTTP_TOKEN on the daemon) authenticates non-loopback callers.
+//   - ssh://[user@]host[:sshport] — a native in-process SSH tunnel (issue #482).
+//     The caller (cmd/attach.go) builds the tunnel and injects its DialContext
+//     via WithDialContext; this client then dials the remote daemon over an SSH
+//     channel per request, mirroring the unix:// transport with no local
+//     listener. The token is carried but usually inert (the channel lands on the
+//     daemon's Unix/loopback listener → local human).
 type APIClient struct {
 	http  *http.Client
 	base  string // request base, e.g. "http://unix" or "http://host:port"
@@ -68,22 +74,65 @@ func (c *APIClient) notificationHandler() func(NotificationDTO) {
 // run for the lifetime of a turn / the whole attachment and must not be capped.
 const quickTimeout = 30 * time.Second
 
+// APIClientOption customises NewAPIClient. It is the seam through which the
+// attach layer injects an out-of-process transport (the ssh:// tunnel) without
+// NewAPIClient itself depending on the SSH machinery.
+type APIClientOption func(*apiClientOptions)
+
+type apiClientOptions struct {
+	base string
+	dial func(context.Context, string, string) (net.Conn, error)
+}
+
+// WithDialContext supplies a custom transport (base URL placeholder + per-request
+// DialContext) for the ssh:// scheme. cmd/attach.go builds the SSH tunnel, owns
+// its lifecycle, and passes tunnel.DialContext here so this client opens an SSH
+// channel to the remote daemon per request — exactly as the unix:// case dials
+// the socket.
+func WithDialContext(base string, dial func(context.Context, string, string) (net.Conn, error)) APIClientOption {
+	return func(o *apiClientOptions) {
+		o.base = base
+		o.dial = dial
+	}
+}
+
 // NewAPIClient builds a client for the daemon at addr. addr is a scheme-
 // qualified connect address:
 //
 //	unix:///home/u/.gogent/daemon.sock
 //	http://localhost:8080
 //	https://host:8080
+//	ssh://user@host[:sshport]   (requires an injected WithDialContext tunnel)
 //
 // token is an optional bearer token used only for the TCP transports (it is
-// harmless but unnecessary over the Unix socket). A bare path or an unknown
-// scheme is rejected so a malformed --connect value fails fast and visibly.
-func NewAPIClient(addr, token string) (*APIClient, error) {
+// harmless but unnecessary over the Unix socket and usually over SSH). A bare
+// path or an unknown scheme is rejected so a malformed --connect value fails fast
+// and visibly.
+func NewAPIClient(addr, token string, opts ...APIClientOption) (*APIClient, error) {
 	u, err := url.Parse(addr)
 	if err != nil {
 		return nil, fmt.Errorf("parse connect address %q: %w", addr, err)
 	}
 	switch u.Scheme {
+	case "ssh":
+		// The tunnel is built and injected by the attach layer (which owns its
+		// lifecycle); this client is just the HTTP/SSE driver over its DialContext.
+		var o apiClientOptions
+		for _, opt := range opts {
+			opt(&o)
+		}
+		if o.dial == nil {
+			return nil, fmt.Errorf("ssh connect %q requires an injected tunnel (internal error)", addr)
+		}
+		base := o.base
+		if base == "" {
+			base = "http://ssh"
+		}
+		return &APIClient{
+			base:  base,
+			token: token,
+			http:  &http.Client{Transport: &http.Transport{DialContext: o.dial}},
+		}, nil
 	case "unix":
 		// The path is the socket; the HTTP host is a conventional placeholder the
 		// custom DialContext ignores.
@@ -109,8 +158,16 @@ func NewAPIClient(addr, token string) (*APIClient, error) {
 			http:  &http.Client{Transport: &http.Transport{}},
 		}, nil
 	default:
-		return nil, fmt.Errorf("unsupported connect scheme %q (want unix:// | http:// | https://)", u.Scheme)
+		return nil, fmt.Errorf("unsupported connect scheme %q (want unix:// | http:// | https:// | ssh://)", u.Scheme)
 	}
+}
+
+// CloseIdleConnections drops pooled keep-alive connections. The attach layer
+// calls it after the ssh:// tunnel actually redials (RemoteClient.reconnect), so
+// the http.Transport pool cannot hand a stale channel bound to the dead SSH
+// session to the next request. It is a no-op-equivalent for the other transports.
+func (c *APIClient) CloseIdleConnections() {
+	c.http.CloseIdleConnections()
 }
 
 // --- low-level request helpers ----------------------------------------------
