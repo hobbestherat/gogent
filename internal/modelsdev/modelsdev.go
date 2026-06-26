@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -141,6 +142,10 @@ type Client struct {
 	ttl       time.Duration
 	fetcher   Fetcher
 	now       func() time.Time
+	// mu serializes cache-file reads and writes so concurrent Catalog calls (e.g.
+	// a Refresh racing an in-flight load on a shared client) can't read a partial
+	// file or interleave two writes into a torn one.
+	mu sync.Mutex
 }
 
 // NewClient returns a Client caching to <homeDir>/.gogent/modelsdev-cache.json
@@ -197,11 +202,17 @@ func (c *Client) Catalog(ctx context.Context, force bool) (Catalog, error) {
 	}
 
 	var cat Catalog
-	if err := json.Unmarshal(data, &cat); err != nil {
+	// An empty catalog (decode failure or a valid-but-empty `{}`) is not worth
+	// caching: serve the prior cache if any, else surface the failure rather than
+	// poisoning the cache with nothing for a full TTL.
+	if err := json.Unmarshal(data, &cat); err != nil || len(cat) == 0 {
 		if hasCache {
 			return cached.Data, nil
 		}
-		return nil, fmt.Errorf("decode models.dev catalog: %w", err)
+		if err != nil {
+			return nil, fmt.Errorf("decode models.dev catalog: %w", err)
+		}
+		return nil, fmt.Errorf("models.dev returned an empty catalog")
 	}
 
 	c.saveCache(&cacheFile{FetchedAt: c.now(), ETag: newETag, LastModified: newLastMod, Data: cat})
@@ -211,12 +222,14 @@ func (c *Client) Catalog(ctx context.Context, force bool) (Catalog, error) {
 // loadCache reads the cache file. ok is false when it is absent or unreadable;
 // callers then treat it as a cold cache.
 func (c *Client) loadCache() (*cacheFile, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	data, err := os.ReadFile(c.cachePath) //nolint:gosec // cache path derived from the user's own home dir
 	if err != nil {
 		return nil, false
 	}
 	var cf cacheFile
-	if err := json.Unmarshal(data, &cf); err != nil || cf.Data == nil {
+	if err := json.Unmarshal(data, &cf); err != nil || len(cf.Data) == 0 {
 		return nil, false
 	}
 	return &cf, true
@@ -225,6 +238,8 @@ func (c *Client) loadCache() (*cacheFile, bool) {
 // saveCache writes the cache file best-effort; a failure to persist is non-fatal
 // (the next open simply re-fetches), so the error is intentionally swallowed.
 func (c *Client) saveCache(cf *cacheFile) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	dir := filepath.Dir(c.cachePath)
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return

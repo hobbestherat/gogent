@@ -125,8 +125,9 @@ type Handlers struct {
 	AddModel func(config.ModelConfig) error
 	// GetModelCatalog returns the models.dev catalog (cached on disk with a TTL).
 	// force=true revalidates/refreshes. May be nil (catalog affordance hidden). It
-	// may perform a live network fetch, so callers MUST invoke it off the UI thread.
-	GetModelCatalog func(force bool) (modelsdev.Catalog, error)
+	// may perform a live network fetch, so callers MUST invoke it off the UI thread
+	// and pass a context they can cancel to abort an in-flight fetch.
+	GetModelCatalog func(ctx context.Context, force bool) (modelsdev.Catalog, error)
 	// GetDefaultModel / SetDefaultModel read and persist the default model used
 	// for new sessions (issue #296). SetDefaultModel validates the name against the
 	// configured models. May be nil (the editor then hides the default control).

@@ -791,8 +791,8 @@ func (rc *RemoteClient) Handlers() Handlers {
 		UpdateModel: func(m config.ModelConfig) error { return c.UpdateModel(m) },
 		ScanModels:  func(m config.ModelConfig) ([]string, error) { return c.ScanModels(m.Name) },
 		AddModel:    func(m config.ModelConfig) error { return c.AddModel(m) },
-		GetModelCatalog: func(force bool) (modelsdev.Catalog, error) {
-			return mdc.Catalog(context.Background(), force)
+		GetModelCatalog: func(ctx context.Context, force bool) (modelsdev.Catalog, error) {
+			return mdc.Catalog(ctx, force)
 		},
 
 		// --- tools ---

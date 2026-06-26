@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strconv"
@@ -68,8 +69,8 @@ func (w *Workbench) offerManualEditor(err error) {
 
 // loadCatalogThen shows a cancellable "Loading catalog…" modal, fetches the
 // catalog on a goroutine (force triggers a revalidating refresh), and invokes
-// onReady on the UI thread with the result. Cancel/Escape abandons the fetch and
-// the posted callback is dropped.
+// onReady on the UI thread with the result. Cancel/Escape cancels the fetch's
+// context (aborting an in-flight network GET) and drops the posted callback.
 func (w *Workbench) loadCatalogThen(force bool, onReady func(modelsdev.Catalog, error)) {
 	spec := tv.DialogSpec{MinW: 40, MinH: 5, MaxH: 5, PreferredW: 40}
 	x, y, width, height := w.dialogRect(spec)
@@ -83,6 +84,7 @@ func (w *Workbench) loadCatalogThen(force bool, onReady func(modelsdev.Catalog, 
 	}
 	dialog.Window.AddContent(dialogLabel(label, tv.Rect{X: 2, Y: 1, W: width - 4, H: 1}))
 
+	ctx, cancelFetch := context.WithCancel(context.Background())
 	var layer *tv.Layer
 	done := false
 	cancel := func() {
@@ -90,6 +92,7 @@ func (w *Workbench) loadCatalogThen(force bool, onReady func(modelsdev.Catalog, 
 			return
 		}
 		done = true
+		cancelFetch() // abort the in-flight GET, not just drop its result
 		w.desktop.RemoveLayer(layer)
 	}
 	dialog.Window.AddContent(newButton("Cancel", tv.Rect{X: width - 13, Y: height - 3, W: 10, H: 1}, cancel))
@@ -105,7 +108,8 @@ func (w *Workbench) loadCatalogThen(force bool, onReady func(modelsdev.Catalog, 
 	dialog.Fit(spec)
 
 	go func() {
-		cat, err := w.handlers.GetModelCatalog(force)
+		defer cancelFetch() // release the context on the normal-completion path too
+		cat, err := w.handlers.GetModelCatalog(ctx, force)
 		w.desktop.Post(func() {
 			if done {
 				return // user cancelled the load
@@ -387,27 +391,14 @@ func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, mod
 	endpoint := field("Endpoint:", 4)
 	endpoint.SetText(draft.Endpoint)
 
-	// Model id with an optional Scan button (mirrors the manual editor): the text
-	// field swaps for a dropdown of advertised ids once a backend is probed.
-	dialog.Window.AddContent(dialogLabel("Model id:", tv.Rect{X: 2, Y: 5, W: labelW, H: 1}))
-	scanW := 8
-	modelBoxW := boxW
-	if w.handlers.ScanModels != nil {
-		modelBoxW = boxW - scanW - 1
-	}
-	modelRect := tv.Rect{X: boxX, Y: 5, W: modelBoxW, H: 1}
-	modelIDBox := tv.NewTextBox("", modelRect)
+	// Model id: a plain, editable text field pre-filled with the catalog
+	// selection. Unlike the manual editor there is deliberately NO "Scan" button
+	// here: the id is already the model the user just picked from the catalog, so
+	// scanning is redundant — and a draft scan cannot work in remote mode anyway,
+	// where ScanModels is keyed by a SAVED model name (the unsaved draft would
+	// 404). The user can still hand-edit the id.
+	modelIDBox := field("Model id:", 5)
 	modelIDBox.SetText(draft.Model)
-	dialog.Window.AddContent(modelIDBox)
-	modelSelect := newSelect(w.desktop, nil, modelRect)
-	modelSelect.Root().Visible = false
-	dialog.Window.AddContent(modelSelect)
-	currentModelID := func() string {
-		if modelSelect.Root().Visible {
-			return modelSelect.Value()
-		}
-		return modelIDBox.GetText()
-	}
 
 	apiKey := field("API key:", 6)
 	temp := field("Temperature:", 7)
@@ -427,44 +418,6 @@ func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, mod
 	location := field("Location:", 12)
 	location.SetText(draft.Location)
 
-	// Optional "Scan" button: probes the backend for its model ids. It needs a
-	// credential, so it is gated — ScanModels would otherwise 401 on the keyless
-	// draft (turbotui buttons have no disabled state, so the gate is a message).
-	if w.handlers.ScanModels != nil {
-		scanBtn := newButton("Scan", tv.Rect{X: boxX + modelBoxW + 1, Y: 5, W: scanW, H: 1}, func() {
-			if isVertex {
-				if strings.TrimSpace(project.GetText()) == "" || strings.TrimSpace(location.GetText()) == "" {
-					w.showConfirm("Scan", "Enter the project and location first.", nil)
-					return
-				}
-			} else if apiKey.GetText() == "" {
-				w.showConfirm("Scan", "Enter the API key first.", nil)
-				return
-			}
-			probe := draft
-			probe.Endpoint = endpoint.GetText()
-			probe.APIKey = apiKey.GetText()
-			probe.Model = currentModelID()
-			probe.Project = strings.TrimSpace(project.GetText())
-			probe.Location = strings.TrimSpace(location.GetText())
-			go func() {
-				ids, err := w.handlers.ScanModels(probe)
-				w.desktop.Post(func() {
-					if err != nil {
-						w.showConfirm("Scan", "Failed to list models:\n"+err.Error(), nil)
-						return
-					}
-					modelSelect.Options = ids
-					modelSelect.SetSelected(indexOrZero(ids, currentModelID()))
-					modelIDBox.Root().Visible = false
-					modelSelect.Root().Visible = true
-					w.desktop.SetFocus(modelSelect)
-				})
-			}()
-		})
-		dialog.Window.AddContent(scanBtn)
-	}
-
 	var layer *tv.Layer
 	cancel := func() { w.desktop.RemoveLayer(layer) }
 
@@ -472,7 +425,7 @@ func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, mod
 		draft.Name = strings.TrimSpace(name.GetText())
 		draft.DisplayName = display.GetText()
 		draft.Endpoint = strings.TrimSpace(endpoint.GetText())
-		draft.Model = strings.TrimSpace(currentModelID())
+		draft.Model = strings.TrimSpace(modelIDBox.GetText())
 		draft.APIKey = apiKey.GetText()
 		if v, err := strconv.ParseFloat(temp.GetText(), 32); err == nil {
 			draft.Temperature = float32(v)
