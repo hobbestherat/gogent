@@ -357,7 +357,7 @@ func themeEditorColumnRows(col themeEditorColumn) int {
 	if len(col.groups) > 1 {
 		// One separator between each pair of adjacent sections, plus col.sectionPad
 		// extra rows per gap (the cross-column alignment lever — see themeEditorColumn).
-		rows += (len(col.groups)-1)*(1+col.sectionPad)
+		rows += (len(col.groups) - 1) * (1 + col.sectionPad)
 	}
 	return rows
 }

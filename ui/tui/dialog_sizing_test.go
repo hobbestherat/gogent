@@ -406,17 +406,20 @@ func TestBrowserPreferredWidthClamped(t *testing.T) {
 	}
 }
 
-// TestThemeEditorFlooredAndGrows replaces the old TestThemeEditorPinnedFootprint:
-// after issue #317 the theme editor is no longer pinned (Min == Max). Its spec is a
-// pure 80×22 FLOOR (tv.DialogSpec{MinW: 80, MinH: 22}), so it collapses to 80×22 on a
-// small terminal — keeping the menu-bar clearance and the #279/#291 scrolling viewport
-// valid — and grows toward the shared 80%×85% cap on a larger one. This pins the new
-// invariant: floor at the bottom, grow toward the cap above it, centred throughout.
+// TestThemeEditorFlooredAndGrows guards the theme editor's resolver policy after issue
+// #471: showThemeEditor now hands the resolver a CONTENT-DRIVEN spec
+// (themeEditorDialogSpec) instead of the bare {MinW, MinH} floor, so it no longer
+// balloons to the 80%×85% percentage default. Width is PINNED at the 80-column
+// two-column content footprint (MinW == MaxW == PreferredW); height collapses to the
+// 22-row floor on a short terminal (keeping menu-bar clearance and the #279/#291
+// scrolling viewport valid) and grows only to PrefH (27) on a taller one — never to a
+// share of the screen. This is the resolver-level companion to the open-the-editor
+// TestThemeEditorOpensFlooredAndGrows.
 func TestThemeEditorFlooredAndGrows(t *testing.T) {
-	// The real spec showThemeEditor hands the resolver. A drift here (e.g. a stray
-	// MaxW/MaxH reintroducing the pin) is caught by TestThemeEditorOpensFlooredAndGrows,
-	// which opens the editor itself; this guards the resolver policy directly.
-	spec := tv.DialogSpec{MinW: themeEditorDialogW, MinH: themeEditorDialogH}
+	// The real spec showThemeEditor hands the resolver. A drift here (e.g. dropping the
+	// PreferredW/MaxW and reintroducing the percentage balloon) is also caught by
+	// TestThemeEditorOpensFlooredAndGrows, which opens the editor itself.
+	spec := newTestWorkbench(t).themeEditorDialogSpec()
 
 	for _, tc := range []struct {
 		name  string
@@ -428,17 +431,16 @@ func TestThemeEditorFlooredAndGrows(t *testing.T) {
 		{"floors on an 80x24 terminal", 80, 24, 80, 22},
 		{"floors on a sub-floor terminal", 70, 20, 80, 22},
 		{"floors on a tiny terminal", 30, 8, 80, 22},
-		{"grows toward the cap on 200x50", 200, 50, 160, 42}, // 80% of 200, 85% of 50
-		{"grows on a mid terminal", 120, 40, 96, 34},         // 80% of 120, 85% of 40
-		{"grows toward the cap on an ultrawide", 300, 80, 240, 68},
+		{"pinned width, height grown on 200x50", 200, 50, 80, 27}, // no 160×42 balloon
+		{"pinned width, height grown on a mid terminal", 120, 40, 80, 27},
+		{"pinned width, height capped at PrefH on an ultrawide", 300, 80, 80, 27},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			x, y, w, h := tv.ResolveDialogRect(spec, tc.termW, tc.termH)
 			if w != tc.wantW || h != tc.wantH {
 				t.Errorf("at %dx%d theme editor = %dx%d, want %dx%d", tc.termW, tc.termH, w, h, tc.wantW, tc.wantH)
 			}
-			// Never below the documented 80×22 floor, never pinned (it must exceed the
-			// floor once the terminal is roomy enough).
+			// Never below the documented 80×22 floor.
 			if w < themeEditorDialogW || h < themeEditorDialogH {
 				t.Errorf("at %dx%d size %dx%d fell below the %dx%d floor", tc.termW, tc.termH, w, h, themeEditorDialogW, themeEditorDialogH)
 			}
@@ -456,12 +458,14 @@ func TestThemeEditorFlooredAndGrows(t *testing.T) {
 		})
 	}
 
-	// It must actually GROW, not stay pinned: a roomy terminal is strictly larger than
-	// the floor in both axes.
+	// Width must stay PINNED to the content footprint (issue #471) — it must NOT balloon
+	// with the terminal; only the height grows above the floor toward PrefH.
 	_, _, bigW, bigH := tv.ResolveDialogRect(spec, 200, 50)
-	if bigW <= themeEditorDialogW || bigH <= themeEditorDialogH {
-		t.Errorf("on 200x50 the editor resolved to %dx%d — it stayed pinned at the %dx%d floor instead of growing",
-			bigW, bigH, themeEditorDialogW, themeEditorDialogH)
+	if bigW != themeEditorDialogW {
+		t.Errorf("on 200x50 width = %d, want it pinned at the %d-column content floor (no balloon)", bigW, themeEditorDialogW)
+	}
+	if bigH <= themeEditorDialogH {
+		t.Errorf("on 200x50 height = %d, want it grown above the %d-row floor toward PrefH", bigH, themeEditorDialogH)
 	}
 }
 
