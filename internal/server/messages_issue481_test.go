@@ -686,3 +686,60 @@ func TestApprovePlanDispatchesAsyncAndHoldsBusy(t *testing.T) {
 	}
 	waitNotBusy(t, srv, id)
 }
+
+// --- No silent failure: a failing turn must emit an error terminal ------------
+
+// TestDispatchedTurnEmitsErrorTerminalOnModelFailure verifies a dispatched root
+// turn whose model call fails ends in a SessionEventError terminal (stamped with
+// the turn id) — not a silent hang — and that the busy gate is released when the
+// failing turn ends. This is the no-swallowed-error guarantee for the common
+// model-failure case (runLoop emits the error; onDone releases the gate).
+func TestDispatchedTurnEmitsErrorTerminalOnModelFailure(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+	}))
+	defer backend.Close()
+	srv := newServerWithBackend(t, backend.URL)
+	id := createTestSession(t, srv)
+	sub, unsub := srv.hub.subscribeSession(id)
+	defer unsub()
+
+	rec := postMessage(t, srv, id, `{"message":"hi"}`)
+	turnID := acceptedTurnID(t, rec)
+
+	term := awaitEvent(t, sub, func(ev agent.SessionEvent) bool {
+		return isTerminal(ev) && ev.TurnID == turnID
+	}, 15*time.Second)
+	if term.Type != agent.SessionEventError {
+		t.Fatalf("terminal = %s, want error (a failing turn must not vanish silently)", term.Type)
+	}
+	// The busy gate is released when the failing turn's goroutine ends (onDone).
+	waitNotBusy(t, srv, id)
+}
+
+// TestSendSubtaskEmitsErrorTerminalOnModelFailure verifies the subtask/agent path:
+// when the one-shot sub-agent's turn fails, the dispatch goroutine surfaces it as a
+// SessionEventError (via EmitError, since the sub-agent's own error is emitted to a
+// no-op observer) stamped with the turn id, and releases the busy gate. Guards the
+// EmitError-on-failure branch of DispatchCommandSubtask.
+func TestSendSubtaskEmitsErrorTerminalOnModelFailure(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+	}))
+	defer backend.Close()
+	srv := newServerWithBackend(t, backend.URL)
+	id := createTestSession(t, srv)
+	sub, unsub := srv.hub.subscribeSession(id)
+	defer unsub()
+
+	rec := postMessage(t, srv, id, `{"message":"do thing","subtask":true}`)
+	turnID := acceptedTurnID(t, rec)
+
+	term := awaitEvent(t, sub, func(ev agent.SessionEvent) bool {
+		return isTerminal(ev) && ev.TurnID == turnID
+	}, 15*time.Second)
+	if term.Type != agent.SessionEventError {
+		t.Fatalf("terminal = %s, want error (a failing subtask must surface, not vanish)", term.Type)
+	}
+	waitNotBusy(t, srv, id)
+}
