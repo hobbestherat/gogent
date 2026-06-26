@@ -200,9 +200,17 @@ func (t *Tunnel) DialContext(_ context.Context, _, _ string) (net.Conn, error) {
 	}
 	switch {
 	case tgt.UnixSocket != "":
-		return client.Dial("unix", tgt.UnixSocket)
+		conn, err := client.Dial("unix", tgt.UnixSocket)
+		if err != nil {
+			return nil, fmt.Errorf("ssh dial unix %s: %w", tgt.UnixSocket, err)
+		}
+		return conn, nil
 	case tgt.TCPAddr != "":
-		return client.Dial("tcp", tgt.TCPAddr)
+		conn, err := client.Dial("tcp", tgt.TCPAddr)
+		if err != nil {
+			return nil, fmt.Errorf("ssh dial tcp %s: %w", tgt.TCPAddr, err)
+		}
+		return conn, nil
 	default:
 		return nil, errors.New("ssh tunnel has no resolved daemon target (call Discover)")
 	}
@@ -224,7 +232,7 @@ func (t *Tunnel) Restart(ctx context.Context) (redialed bool, err error) {
 		return false, nil // session is alive — reuse it, no teardown
 	}
 	if err := ctx.Err(); err != nil {
-		return false, err
+		return false, fmt.Errorf("ssh tunnel restart: %w", err)
 	}
 	if client != nil {
 		// The session is dead: close it and drop the pointer so a failed redial
@@ -263,7 +271,9 @@ func (t *Tunnel) Close() error {
 	t.client = nil
 	t.mu.Unlock()
 	if client != nil {
-		return client.Close()
+		if err := client.Close(); err != nil {
+			return fmt.Errorf("close ssh tunnel: %w", err)
+		}
 	}
 	return nil
 }
@@ -479,7 +489,7 @@ func agentAuth() ssh.AuthMethod {
 	if sock == "" {
 		return nil
 	}
-	conn, err := net.Dial("unix", sock)
+	conn, err := net.Dial("unix", sock) //nolint:gosec // SSH_AUTH_SOCK is a trusted local agent socket path from the user environment, not attacker-controlled
 	if err != nil {
 		return nil
 	}
@@ -557,7 +567,10 @@ func promptPassphrase(keyPath string) ([]byte, error) {
 	fmt.Fprintf(os.Stderr, "Enter passphrase for %s: ", keyPath)
 	pass, err := term.ReadPassword(fd)
 	fmt.Fprintln(os.Stderr)
-	return pass, err
+	if err != nil {
+		return nil, fmt.Errorf("read passphrase: %w", err)
+	}
+	return pass, nil
 }
 
 // --- host-key verification -------------------------------------------------
