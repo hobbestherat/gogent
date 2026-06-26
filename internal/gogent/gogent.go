@@ -1760,6 +1760,26 @@ func (g *Gogent) persistSession(id string) {
 	}
 }
 
+// lastModelError returns the classified *ModelError recorded for the agent's most
+// recent failed round-trip (issue #487), so the HookError event carries the same
+// Type/HTTPStatusCode the session file persists rather than a flattened string. It
+// falls back to a generic error wrapping fallbackErr when the agent has no
+// ThoughtTrain or its last turn recorded no error (e.g. a non-model failure).
+func lastModelError(ag *agent.Agent, fallbackErr error) *model.ModelError {
+	if ag != nil && ag.ThoughtTrain != nil {
+		if h := ag.ThoughtTrain.GetHistory(); len(h) > 0 {
+			if me := h[len(h)-1].Error; me != nil {
+				return me
+			}
+		}
+	}
+	msg := ""
+	if fallbackErr != nil {
+		msg = fallbackErr.Error()
+	}
+	return &model.ModelError{Type: model.ErrorGeneric, Message: msg}
+}
+
 // AgentTranscript returns the message transcript of a specific agent (root or a
 // sub-agent) within a session — used by the UI to show a sub-agent's internal
 // monologue. Returns nil if the session or agent is unknown.
@@ -1829,6 +1849,13 @@ func (g *Gogent) adoptLoaded(ls LoadedSession) (LoadedSession, bool) {
 	sess := model.NewModelSession("main", conn)
 	if msgs := ls.Transcripts["root"]; len(msgs) > 0 {
 		sess.ReplaceTranscript(msgs)
+	}
+	// Reconstruct the per-turn usage/error ledger so a reopened session shows its
+	// failure indicator and token accounting instead of a bare idle prompt, and so
+	// the next save's meta delta lines up with the in-memory History (issue #487). A
+	// session with no usage/error records on disk seeds an empty History (a no-op).
+	if len(ls.RootHistory) > 0 {
+		sess.RestoreHistoryMeta(ls.RootHistory)
 	}
 	rootAgent := agent.NewAgent("root", sess)
 	rootAgent.SetState(agent.StateIdle)
@@ -2590,18 +2617,29 @@ func (g *Gogent) SendMessageToSessionWithModelAndEffort(ctx context.Context, ses
 		g.checkpoints.CommitTurn(sessionID)
 	}
 	ag.SetState(agent.StateIdle)
+
+	// Persist the turn — success OR failure — for crash recovery and post-hoc
+	// debugging (issue #487). This must run on both outcomes: a failed turn's partial
+	// transcript and its usage/turn_error records are exactly what make the failure
+	// debuggable from the session file alone. It previously sat after the early error
+	// return below, so a failed turn was never written. This is the synchronous
+	// entrypoint every dispatch path funnels through (issue #481), so persisting here
+	// captures the turn on the daemon-owned goroutine for both embedded and daemon
+	// paths.
+	g.persistSession(sessionID)
+
 	if err != nil {
 		g.NotifyHooks(HookEvent{
 			Type:      HookError,
 			SessionID: sessionID,
 			AgentID:   agentID,
-			Error:     &model.ModelError{Message: err.Error()},
+			// Surface the classified error preserved in the agent's History (issue
+			// #487) rather than a flattened string, so live hooks see the same
+			// Type/HTTPStatusCode the session file records.
+			Error: lastModelError(ag, err),
 		})
 		return nil, fmt.Errorf("process message: %w", err)
 	}
-
-	// Persist the updated transcript (best-effort) for crash recovery.
-	g.persistSession(sessionID)
 
 	// Return the last response (this will be the final response from the model)
 	// and announce the completed turn to hooks with its text and token usage.
