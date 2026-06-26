@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +14,7 @@ import (
 	"gogent/internal/agent"
 	"gogent/internal/config"
 	"gogent/internal/gogent"
+	"gogent/internal/modelsdev"
 	"gogent/internal/permission"
 	"gogent/internal/stats"
 )
@@ -574,6 +576,14 @@ func editDecisionToWire(d gogent.EditReviewDecision) string {
 // Phase-2/3 slice.
 func (rc *RemoteClient) Handlers() Handlers {
 	c := rc.client
+	// The models.dev catalog is public data fetched directly by the attached
+	// client (cache lives on the client host); AddModel still mutates the DAEMON's
+	// config via POST /models. A missing HOME degrades the cache to the cwd.
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		home = "."
+	}
+	mdc := modelsdev.NewClient(home)
 	return Handlers{
 		// OnCreate creates the daemon session under the TUI's window id so the two
 		// stay in lock-step and the global SSE stream routes the session's events
@@ -780,6 +790,10 @@ func (rc *RemoteClient) Handlers() Handlers {
 		},
 		UpdateModel: func(m config.ModelConfig) error { return c.UpdateModel(m) },
 		ScanModels:  func(m config.ModelConfig) ([]string, error) { return c.ScanModels(m.Name) },
+		AddModel:    func(m config.ModelConfig) error { return c.AddModel(m) },
+		GetModelCatalog: func(ctx context.Context, force bool) (modelsdev.Catalog, error) {
+			return mdc.Catalog(ctx, force)
+		},
 
 		// --- tools ---
 		GetTools: func() []ToolInfo {

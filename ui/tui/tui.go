@@ -15,6 +15,7 @@ import (
 	"gogent/internal/agent"
 	"gogent/internal/config"
 	"gogent/internal/gogent"
+	"gogent/internal/modelsdev"
 	"gogent/internal/notify"
 	"gogent/internal/stats"
 	"os"
@@ -118,6 +119,15 @@ type Handlers struct {
 	// api_type/endpoint/api_key) for the model ids it serves, so the editor can
 	// swap the model-id text field for a dropdown. May be nil.
 	ScanModels func(config.ModelConfig) ([]string, error)
+	// AddModel creates a NEW model config (the "Add from catalog" flow), distinct
+	// from UpdateModel which only replaces an existing entry. May be nil, in which
+	// case the catalog affordance is hidden.
+	AddModel func(config.ModelConfig) error
+	// GetModelCatalog returns the models.dev catalog (cached on disk with a TTL).
+	// force=true revalidates/refreshes. May be nil (catalog affordance hidden). It
+	// may perform a live network fetch, so callers MUST invoke it off the UI thread
+	// and pass a context they can cancel to abort an in-flight fetch.
+	GetModelCatalog func(ctx context.Context, force bool) (modelsdev.Catalog, error)
 	// GetDefaultModel / SetDefaultModel read and persist the default model used
 	// for new sessions (issue #296). SetDefaultModel validates the name against the
 	// configured models. May be nil (the editor then hides the default control).
@@ -1029,8 +1039,14 @@ func (w *Workbench) settingsItems() []*tv.MenuItem {
 	items := []*tv.MenuItem{
 		w.menuActionItem("&Sub-agents…", actionConfigSubagents),
 		tv.NewMenuItem("&Models…", func() { w.showModelEditor() }),
-		tv.NewMenuItem("&Resources…", func() { w.showResourcesDialog() }),
 	}
+	// "Add from catalog…" creates a NEW model from the models.dev catalog (issue
+	// #486); it works even with zero configured models, where the manual editor
+	// would early-return. Shown only when the catalog handlers are wired.
+	if w.catalogReady() {
+		items = append(items, tv.NewMenuItem("&Add Model from Catalog…", func() { w.showAddModelDialog() }))
+	}
+	items = append(items, tv.NewMenuItem("&Resources…", func() { w.showResourcesDialog() }))
 	// Statistics is surfaced only when the backend wires the report handler.
 	if w.handlers.GetStatistics != nil {
 		items = append(items, tv.NewMenuItem("S&tatistics…", func() { w.showStatisticsDialog() }))

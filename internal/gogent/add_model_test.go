@@ -1,0 +1,117 @@
+package gogent
+
+import (
+	"testing"
+
+	"gogent/internal/config"
+)
+
+// Issue #486: the catalog-assisted "Add model" flow needs a CREATE path. Until
+// now UpdateModel could only replace an existing entry. AddModel must append a
+// new entry, persist it, and refuse to clobber an existing name — these guard
+// the no-clobber guarantee the POST /api/models 409 semantics rely on.
+
+func TestAddModelAppendsAndPersists(t *testing.T) {
+	dir := t.TempDir()
+	g := NewGogent(dir)
+
+	before := len(g.Models())
+	cfg := config.ModelConfig{
+		Name:          "catalog-test-opus",
+		DisplayName:   "Opus (catalog)",
+		APIType:       "openai",
+		Model:         "claude-opus-4-6",
+		Endpoint:      "https://api.example.com/v1",
+		APIKey:        "catalog-key",
+		Temperature:   0.7,
+		MaxTokens:     8192,
+		ContextWindow: 200000,
+	}
+	if err := g.AddModel(cfg); err != nil {
+		t.Fatalf("AddModel: %v", err)
+	}
+
+	after := len(g.Models())
+	if after != before+1 {
+		t.Fatalf("model count before=%d after=%d, want %d", before, after, before+1)
+	}
+
+	// The new entry is visible through Models().
+	found := false
+	for _, m := range g.Models() {
+		if m.Name == "catalog-test-opus" {
+			found = true
+			if m.Model != "claude-opus-4-6" {
+				t.Errorf("stored Model = %q, want claude-opus-4-6", m.Model)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("added model not returned by Models()")
+	}
+
+	// And it survives a reload from disk (AddModel persisted via SaveConfig).
+	loaded, err := config.LoadConfig(dir)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	persisted := false
+	for _, m := range loaded.ModelConfigs {
+		if m != nil && m.Name == "catalog-test-opus" {
+			persisted = true
+		}
+	}
+	if !persisted {
+		t.Fatal("AddModel did not persist the new entry to config.json")
+	}
+}
+
+func TestAddModelRejectsDuplicateName(t *testing.T) {
+	dir := t.TempDir()
+	g := NewGogent(dir)
+
+	cfg := config.ModelConfig{Name: "catalog-dup", Model: "m1"}
+	if err := g.AddModel(cfg); err != nil {
+		t.Fatalf("first AddModel: %v", err)
+	}
+	// A second add with the same Name must be rejected (the authority behind the
+	// 409 the HTTP layer returns).
+	if err := g.AddModel(cfg); err == nil {
+		t.Fatal("second AddModel of the same name = nil, want an error")
+	}
+
+	// Exactly one entry for that name survives (no silent clobber/append).
+	count := 0
+	for _, m := range g.Models() {
+		if m.Name == "catalog-dup" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("found %d entries named catalog-dup, want 1", count)
+	}
+}
+
+// AddModel must not collide with any pre-existing (seeded default) name either.
+func TestAddModelRejectsDuplicateOfExistingSeededName(t *testing.T) {
+	dir := t.TempDir()
+	g := NewGogent(dir)
+	existing := g.Models()
+	if len(existing) == 0 {
+		t.Skip("no seeded models to collide with")
+	}
+	dup := existing[0]
+	dup.APIKey = "should-not-overwrite"
+	// Trying to re-add an existing name fails; the original is untouched.
+	if err := g.AddModel(dup); err == nil {
+		t.Fatal("AddModel of an existing seeded name = nil, want error")
+	}
+}
+
+func TestHomeDirReturnsConstructorDir(t *testing.T) {
+	dir := t.TempDir()
+	g := NewGogent(dir)
+	if got := g.HomeDir(); got != dir {
+		t.Errorf("HomeDir() = %q, want %q", got, dir)
+	}
+}

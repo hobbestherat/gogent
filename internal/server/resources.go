@@ -28,6 +28,20 @@ func (svc modelsSvc) List(r *http.Request) (interface{}, error) {
 	return out, nil
 }
 
+// Create handles POST /models — create a NEW model entry from the request body
+// (the catalog-assisted add). Unlike Update it never preserves a prior key (a new
+// entry has none); a blank api_key is stored blank. Returns 409 on name conflict.
+func (svc modelsSvc) Create(r *http.Request, req updateModelRequest) (interface{}, error) {
+	if err := requireHuman(r, svc.s.provider); err != nil {
+		return nil, err
+	}
+	cfg := req.ModelConfig
+	if err := svc.s.g.AddModel(cfg); err != nil {
+		return nil, webapi.NewHTTPError(http.StatusConflict, err.Error())
+	}
+	return modelToView(&cfg), nil
+}
+
 // Update handles PUT /models/:name. An empty api_key in the body preserves the
 // existing key (so a GET→edit→PUT round-trip doesn't wipe it).
 func (svc modelsSvc) Update(r *http.Request, name string, req updateModelRequest) (interface{}, error) {

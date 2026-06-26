@@ -11,6 +11,7 @@ import (
 	"gogent/internal/config"
 	"gogent/internal/fileops"
 	"gogent/internal/gogent"
+	"gogent/internal/modelsdev"
 	"gogent/internal/stats"
 	"gogent/internal/tool"
 	tuipkg "gogent/ui/tui"
@@ -22,6 +23,9 @@ import (
 // attached can rebuild byte-for-byte identical embedded behaviour when the user
 // stops the daemon. noColor mirrors --no-color for the live theme re-apply.
 func embeddedHandlersFor(g *gogent.Gogent, wb *tuipkg.Workbench, noColor bool) tuipkg.Handlers {
+	// One models.dev client for the catalog-assisted "Add model" flow; its cache
+	// lives next to config.json under the core's home dir.
+	mdc := modelsdev.NewClient(g.HomeDir())
 	return tuipkg.Handlers{
 		// OnCreate builds the backend session and bridges its live events to
 		// the matching session window.
@@ -167,6 +171,12 @@ func embeddedHandlersFor(g *gogent.Gogent, wb *tuipkg.Workbench, noColor bool) t
 		},
 		ScanModels: func(m config.ModelConfig) ([]string, error) {
 			return g.ScanModels(m)
+		},
+		AddModel: func(m config.ModelConfig) error {
+			return g.AddModel(m)
+		},
+		GetModelCatalog: func(ctx context.Context, force bool) (modelsdev.Catalog, error) {
+			return mdc.Catalog(ctx, force)
 		},
 		GetDefaultModel: func() string {
 			return g.DefaultModelName()

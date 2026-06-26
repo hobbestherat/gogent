@@ -150,10 +150,12 @@ All model endpoints require `human`.
 | Method | Path                       | Body                  | Description                                                                                              | Response / Errors                              |
 |--------|----------------------------|-----------------------|----------------------------------------------------------------------------------------------------------|------------------------------------------------|
 | GET    | `/api/models`              | —                     | List configured models. API keys are redacted; `has_api_key` is reported instead.                        | `[]modelView`                                  |
+| POST   | `/api/models`              | `updateModelRequest`  | Create a NEW model config (the catalog-assisted add). A blank `api_key` is stored blank. `409` if the name already exists. | `modelView`                  |
 | PUT    | `/api/models/:name`        | `updateModelRequest`  | Update a model config. An empty `api_key` preserves the existing key. `404` if not found.                | `modelView`                                    |
 | POST   | `/api/models/:name/scan`   | —                     | Probe the backend model list. `404` if not found; `502` on scan error.                                   | `{"models":[...]}`                             |
 
-**`updateModelRequest`** embeds `config.ModelConfig`.
+**`updateModelRequest`** embeds `config.ModelConfig`. `POST /api/models` creates a
+new entry (unlike `PUT`, which only updates an existing one and is keyed by name).
 
 ### Tools
 

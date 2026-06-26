@@ -247,6 +247,8 @@ func (w *Workbench) rawActions() []action {
 			enabled:  avail(h.GetSettings != nil && h.SetSettings != nil),
 			actionID: actionConfigSubagents, scope: tv.ScopeGlobal, deflt: tv.Chord{Rune: ',', Ctrl: true}},
 		{category: "Config", name: "Models", run: w.showModelEditor},
+		{category: "Config", name: "Add model from catalog", run: w.showAddModelDialog,
+			enabled: avail(w.catalogReady())},
 		{category: "Config", name: "Resources (tools & skills)", run: w.showResourcesDialog},
 		{category: "Config", name: "Statistics", run: w.showStatisticsDialog,
 			enabled: avail(h.GetStatistics != nil)},
