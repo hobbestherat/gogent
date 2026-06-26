@@ -180,10 +180,16 @@ type SessionDTO struct {
 	Live         bool   `json:"live"`
 }
 
-// MessageDTO mirrors the server's messageView (transcript + send responses).
+// MessageDTO mirrors the server's messageView (transcript responses) and the
+// non-blocking send/approve acceptedView. For a transcript entry Role/Content are
+// set; for a dispatched turn (issue #481) the response carries only TurnID and the
+// final answer arrives over SSE, so callers use TurnID/err rather than Content.
 type MessageDTO struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+	// TurnID is the id of the async-dispatched turn (issue #481), set on the
+	// send/approve response; empty on transcript entries.
+	TurnID string `json:"turnId"`
 }
 
 // EventDTO mirrors the server's eventView — the JSON payload of one SSE event.
@@ -204,6 +210,7 @@ type EventDTO struct {
 	Todos     []TodoView     `json:"todos"`
 	Plan      string         `json:"plan"`
 	SessionID string         `json:"session_id"`
+	TurnID    string         `json:"turn_id"`
 }
 
 // StatsView mirrors the server's sessionStatsView, carried on usage events.
@@ -406,12 +413,14 @@ func (c *APIClient) GetTranscript(id, agentID string) ([]MessageDTO, error) {
 	return out, nil
 }
 
-// SendMessage runs a turn on the daemon and blocks until it completes. It is
-// the remote equivalent of the embedded OnSend background goroutine: progress
+// SendMessage dispatches a turn on the daemon and returns as soon as the turn is
+// accepted (issue #481) — it does NOT block until the turn completes. It is the
+// remote equivalent of the embedded OnSend background goroutine: progress
 // (thoughts, tool calls, the final answer) is delivered out-of-band over the
-// global SSE stream, so the returned MessageDTO is only used to detect an
-// outright failure. ctx (a background context) is NOT bounded by quickTimeout —
-// a turn may legitimately run for minutes.
+// global SSE stream, so the returned MessageDTO carries only the dispatched
+// TurnID (used for correlation) and the call is used mainly to detect an outright
+// dispatch failure. The turn then runs on the daemon independently of this
+// connection. ctx (a background context) is NOT bounded by quickTimeout.
 func (c *APIClient) SendMessage(ctx context.Context, id, message, modelName, effort string) (MessageDTO, error) {
 	return c.SendMessageWithOverrides(ctx, id, message, modelName, "", false, effort)
 }
@@ -490,9 +499,11 @@ func (c *APIClient) SetPlanMode(id string, on bool) error {
 		map[string]bool{"enabled": on}, nil)
 }
 
-// ApprovePlan executes a session's pending plan on the daemon. Like SendMessage
-// it runs a (potentially long) turn whose progress streams over SSE, so ctx is
-// a background context and the response is used only to detect failure.
+// ApprovePlan dispatches a session's pending plan as a turn on the daemon and
+// returns as soon as it is accepted (issue #481) — it does NOT block until the
+// plan turn completes. Like SendMessage the turn's progress streams over SSE, so
+// ctx is a background context and the call is used to detect a dispatch failure
+// (e.g. no plan awaiting approval, 400).
 func (c *APIClient) ApprovePlan(ctx context.Context, id string) error {
 	req, err := c.newRequest(ctx, http.MethodPost, "/sessions/"+url.PathEscape(id)+"/plan/approve", nil)
 	if err != nil {

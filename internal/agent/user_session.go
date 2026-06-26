@@ -135,6 +135,40 @@ type SessionEvent struct {
 	// Background carries whether any async sub-agent is running, on
 	// SessionEventBackground (issue #353).
 	Background bool
+
+	// TurnID correlates every event of one dispatched turn back to the POST that
+	// started it (issue #481). It is empty for legacy/embedded turns and for
+	// non-turn events; the daemon's async-dispatch path threads a turn id through
+	// the loop context (WithTurnID) and runLoop stamps it on every event it emits,
+	// so a reconnecting client can correlate SSE events to the originating send.
+	TurnID string
+}
+
+// turnIDKey is the context key under which the daemon's async-dispatch path
+// carries a turn id into the task loop (issue #481). It is unexported so the turn
+// id can only be set via WithTurnID and read via turnIDFrom.
+type turnIDKey struct{}
+
+// WithTurnID returns a child context carrying id as the turn id for the loop it
+// drives (issue #481). The daemon's Dispatch* methods wrap context.Background()
+// with this so runLoop can stamp every emitted SessionEvent with the turn id; the
+// embedded and synchronous paths pass a context without it (turn id stays empty).
+func WithTurnID(ctx context.Context, id string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, turnIDKey{}, id)
+}
+
+// turnIDFrom returns the turn id carried by ctx, or "" when none is set.
+func turnIDFrom(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if id, ok := ctx.Value(turnIDKey{}).(string); ok {
+		return id
+	}
+	return ""
 }
 
 // SessionObserver receives SessionEvents as a task loop progresses. It is always
@@ -638,6 +672,21 @@ func (s *UserSession) emit(event SessionEvent) {
 	if observer != nil {
 		observer(event)
 	}
+}
+
+// EmitFinal surfaces text as this session's final answer to the registered
+// observer (issue #481). It exists so the daemon's async command-subtask dispatch
+// can publish a one-shot sub-agent's result as the session's SessionEventFinal —
+// the role the server's old runCommandOverride hub.deliver shim played — through
+// the same observer→hub path runLoop uses, stamping the originating turn id.
+func (s *UserSession) EmitFinal(turnID, text string) {
+	s.emit(SessionEvent{Type: SessionEventFinal, Text: text, TurnID: turnID})
+}
+
+// EmitError surfaces err as this session's error event to the registered observer
+// (issue #481), the failure counterpart of EmitFinal for the async dispatch path.
+func (s *UserSession) EmitError(turnID string, err error) {
+	s.emit(SessionEvent{Type: SessionEventError, Err: err, TurnID: turnID})
 }
 
 // Init initializes the session
@@ -1201,6 +1250,19 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 	emit := s.emit
 	if agent.Kind != KindRoot {
 		emit = func(SessionEvent) {}
+	}
+
+	// Stamp every event of this turn with the dispatch turn id (issue #481) when
+	// one is carried on the context (the daemon async-dispatch path). The embedded
+	// and synchronous paths carry no turn id, so this wrap is skipped and behaviour
+	// is unchanged. Sub-agent loops already have a no-op emit, so only the root
+	// turn's events are correlated.
+	if turnID := turnIDFrom(ctx); turnID != "" {
+		base := emit
+		emit = func(ev SessionEvent) {
+			ev.TurnID = turnID
+			base(ev)
+		}
 	}
 
 	// Live thinking (issue #217): only the root agent streams its reasoning into
