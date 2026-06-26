@@ -80,21 +80,20 @@ const subAgentFoldTTL = 60 * time.Second
 // tree (internal/agent) is never touched, so folding is a pure visibility concern
 // that cannot affect ActiveSubAgentCount / ListAllAgents / slot counting.
 //
-// statusNode is the always-visible, always-first synthetic child rendering the
-// bracketed per-state counts ("[▶2 ‖1 ✓5 ✗1]"). It is a leaf, so the tree paints
-// a blank marker column — visually distinct from real agent rows (which lead with
-// a single status glyph) and from the bucket (which leads with ▸/▾).
-//
-// bucketNode is the synthetic SECOND child collecting folded completed agents
-// ("[✓ N]"). It is nil until the first agent folds in (a childless bucket would
-// still render a stray "[✓ 0]" row, so it must be absent — not empty — while
-// nothing is folded) and is detached again if it ever drops back to zero
-// children. Moving an agent node under this (collapsed) node is what hides it,
-// reusing the tree's existing collapse mechanic with no new widget API.
+// summaryNode is the single always-first synthetic child that both renders the
+// bracketed per-state counts ("[▶2 ‖1 ✓5 ✗1]") AND parents the TTL-folded
+// completed ("archived") agents (issue #490, collapsing the old two-row status-bar
+// + "[✓ N]" bucket into one line). It carries tv.HideMarker so the tree paints a
+// blank leading column instead of a ▸/▾ even once it has children, and a trailing
+// suffix glyph advertises and drives the fold: "" while it parents nothing
+// (empty-bucket rule), "+" collapsed (archived hidden, can expand), "-" expanded
+// (archived shown, can fold) — see summarySuffix. Folding an agent moves its node
+// under this (collapsed) node, reusing the tree's existing collapse mechanic; the
+// node is never detached on emptying (unlike the old bucket) because it is also the
+// always-present status bar — it is torn down only when no entries remain at all.
 type sessionFold struct {
-	statusNode *tv.TreeNode
-	bucketNode *tv.TreeNode
-	entries    map[string]*foldEntry // agent key -> fold metadata (same key applySubAgent derives)
+	summaryNode *tv.TreeNode
+	entries     map[string]*foldEntry // agent key -> fold metadata (same key applySubAgent derives)
 }
 
 // foldEntry is the per-sub-agent fold metadata mirrored UI-side. The agent's tree
@@ -103,18 +102,18 @@ type sessionFold struct {
 type foldEntry struct {
 	status     agent.AgentStatus
 	finishedAt time.Time // when status first became StatusCompleted (TTL clock start); zero otherwise
-	folded     bool      // moved under bucketNode
+	folded     bool      // moved under the session's summaryNode (archived)
 	dismissed  bool      // failed-and-manually-dismissed (excluded from the ✗ count)
 }
 
-// syntheticRef is the Data payload on the status-bar and finished-bucket nodes.
-// It is deliberately NOT a nodeRef, so the tree's OnSelect / OnSelectMouse /
-// OnActivate handlers (which all type-assert nodeRef and bail otherwise) treat
-// these synthetic rows as inert: a click never pops a monologue or raises a
-// window. bucket distinguishes the two for any future synthetic-aware logic.
+// syntheticRef is the Data payload on the per-session summary node (issue #490;
+// previously the separate status-bar and finished-bucket nodes). It is deliberately
+// NOT a nodeRef, so the tree's OnSelect / OnSelectMouse / OnActivate handlers (which
+// all type-assert nodeRef and bail otherwise) treat the row as inert: a click never
+// pops a monologue or raises a window (issue #302). The summary's own expand/collapse
+// is driven instead by tree.OnToggle, which self-filters on this type.
 type syntheticRef struct {
 	sessionID string
-	bucket    bool
 }
 
 // sidebar is the right-hand panel that shows every open session and, nested
@@ -274,6 +273,12 @@ func newSidebar(wb *Workbench) *sidebar {
 	tree := tv.NewTree(tv.Rect{})
 	panel.AddChild(tree.Root())
 	panel.DrawFn = func(c *tv.VisualComponent, surface tv.Surface) {
+		// Re-derive each summary row's +/- suffix from its live Expanded state before
+		// the tree child paints (issue #490). The tree only knows how to repaint the
+		// ▸/▾ marker we hide, so a keyboard toggle (Left/Right/Space flips Expanded
+		// natively, with no OnToggle hook) would otherwise leave the suffix stale.
+		// This only rewrites a label string — no structural mutation, no teardown.
+		s.syncFoldSuffixes()
 		abs := c.AbsoluteBounds()
 		surface.Fill(abs, tui.Cell{Ch: ' ', FG: chromePanelFG, BG: chromePanelBG})
 		// Left divider + title.
@@ -402,6 +407,26 @@ func newSidebar(wb *Workbench) *sidebar {
 			return
 		}
 		s.wb.Focus(ref.sessionID)
+	}
+	// A click anywhere on a session's summary row toggles its archived sub-agents
+	// in/out of view (issue #490). The summary node hides its ▸/▾ marker (HideMarker),
+	// so the tree's own marker-column toggle never fires for it; OnToggle is the host
+	// hook that flips Expanded from a body click instead. It self-filters on
+	// syntheticRef so real session/agent rows fall through to the default marker /
+	// repeat-click-activate behaviour, and is inert for a childless summary (nothing
+	// to reveal). Returning true consumes the click: the row never pops a monologue
+	// (OnSelectMouse/OnActivate also bail on syntheticRef, issue #302) and the
+	// repeat-click activate is suppressed. refreshFoldChrome repaints the +/- suffix
+	// immediately; the draw-time reconcile (panel.DrawFn) covers the keyboard path,
+	// which flips Expanded natively without calling OnToggle.
+	tree.OnToggle = func(n *tv.TreeNode, _ tui.ClickEvent) bool {
+		ref, ok := n.Data.(syntheticRef)
+		if !ok || len(n.Children) == 0 {
+			return false
+		}
+		n.Expanded = !n.Expanded
+		s.refreshFoldChrome(ref.sessionID)
+		return true
 	}
 
 	// Draggable left-edge divider (issue #175), ported from turbotui's chat-demo
@@ -982,30 +1007,33 @@ func (s *sidebar) applySubAgent(sessionID string, ev agent.SessionEvent) {
 	s.refreshFoldChrome(sessionID)
 }
 
-// ensureFold returns the session's fold bookkeeping, creating it (and the
-// always-first status-bar node) on first use. The status-bar node is inserted at
-// child index 0, shifting any existing children (e.g. attached watchers) right.
-// The bucket node is NOT created here — it is attached lazily by foldAgent so a
-// session with nothing folded never renders a stray "[✓ 0]" row.
+// ensureFold returns the session's fold bookkeeping, creating it (and the single
+// always-first summary node) on first use. The summary node is inserted at child
+// index 0, shifting any existing children (e.g. attached watchers) right. It is
+// created childless and collapsed with its ▸/▾ marker hidden (issue #490): while it
+// parents no archived agent it renders as just the totals bracket with no +/-
+// suffix (empty-bucket rule); the suffix and the archived children appear only once
+// foldAgent moves a completed agent under it.
 func (s *sidebar) ensureFold(sessionID string, parent *tv.TreeNode) *sessionFold {
 	if fold := s.folds[sessionID]; fold != nil {
 		return fold
 	}
-	status := tv.NewTreeNode("")
-	status.Data = syntheticRef{sessionID: sessionID}
-	parent.Children = append([]*tv.TreeNode{status}, parent.Children...)
+	summary := tv.NewTreeNode("")
+	summary.Data = syntheticRef{sessionID: sessionID}
+	summary.HideMarker = true // never paint a leading ▸/▾, even once it has children
+	summary.Expanded = false  // collapsed by default; childless ⇒ no suffix yet
+	parent.Children = append([]*tv.TreeNode{summary}, parent.Children...)
 	fold := &sessionFold{
-		statusNode: status,
-		entries:    make(map[string]*foldEntry),
+		summaryNode: summary,
+		entries:     make(map[string]*foldEntry),
 	}
 	s.folds[sessionID] = fold
 	return fold
 }
 
 // insertVisibleAgent adds a real (un-folded) agent node to the session's visible
-// child list, after the synthetic prefix (the status bar, and the bucket when
-// present) so the synthetic rows stay pinned at the front regardless of insert/
-// detach order with watcher nodes.
+// child list, after the synthetic prefix (the summary node) so the summary row
+// stays pinned at the front regardless of insert/detach order with watcher nodes.
 func (s *sidebar) insertVisibleAgent(fold *sessionFold, parent, node *tv.TreeNode) {
 	at := s.syntheticPrefixLen(fold, parent)
 	parent.Children = append(parent.Children, nil)
@@ -1013,58 +1041,47 @@ func (s *sidebar) insertVisibleAgent(fold *sessionFold, parent, node *tv.TreeNod
 	parent.Children[at] = node
 }
 
-// syntheticPrefixLen is the number of leading synthetic nodes (status bar +
-// bucket-when-present) currently at the front of the session's child list. It
-// reads positions rather than assuming a fixed count so it stays correct even if
-// a node was momentarily reordered.
+// syntheticPrefixLen is the number of leading synthetic nodes (the summary node,
+// when present) currently at the front of the session's child list. Archived
+// agents live UNDER the summary node, not as siblings, so the prefix is just the
+// summary itself. It reads positions rather than assuming a fixed count so it stays
+// correct even if a node was momentarily reordered.
 func (s *sidebar) syntheticPrefixLen(fold *sessionFold, parent *tv.TreeNode) int {
 	n := 0
-	if fold.statusNode != nil && len(parent.Children) > n && parent.Children[n] == fold.statusNode {
-		n++
-	}
-	if fold.bucketNode != nil && len(parent.Children) > n && parent.Children[n] == fold.bucketNode {
+	if fold.summaryNode != nil && len(parent.Children) > n && parent.Children[n] == fold.summaryNode {
 		n++
 	}
 	return n
 }
 
 // foldAgent moves a completed agent's node out of the visible list and under the
-// finished bucket, creating and attaching the bucket node (collapsed) on the
-// first fold. Later folds leave the bucket's expand state as the user last set it,
-// giving "collapsed by default once non-empty" without overriding a manual expand.
+// session's summary node (issue #490). The first fold (summary previously childless)
+// forces the summary collapsed so it defaults to "collapsed once non-empty" (a "+"
+// suffix); later folds leave the expand state as the user last set it, so a manual
+// expand is not overridden. The summary node already exists (ensureFold), so unlike
+// the old bucket nothing is created or attached here.
 func (s *sidebar) foldAgent(fold *sessionFold, parent, node *tv.TreeNode) {
-	if fold.bucketNode == nil {
-		bucket := tv.NewTreeNode("")
-		bucket.Data = syntheticRef{sessionID: refSessionID(node), bucket: true}
-		bucket.Expanded = false
-		// Insert immediately after the status bar (index 1 when the status bar is
-		// child 0).
-		at := 0
-		if fold.statusNode != nil && len(parent.Children) > 0 && parent.Children[0] == fold.statusNode {
-			at = 1
-		}
-		parent.Children = append(parent.Children, nil)
-		copy(parent.Children[at+1:], parent.Children[at:])
-		parent.Children[at] = bucket
-		fold.bucketNode = bucket
-	}
-	removeChild(parent, node)
-	fold.bucketNode.Children = append(fold.bucketNode.Children, node)
-}
-
-// unfoldAgent moves an agent node from under the finished bucket back into the
-// visible child list, detaching (and clearing) the bucket if it becomes empty so
-// no "[✓ 0]" row lingers.
-func (s *sidebar) unfoldAgent(fold *sessionFold, parent, node *tv.TreeNode) {
-	if fold.bucketNode == nil {
+	if fold.summaryNode == nil {
 		return
 	}
-	removeChild(fold.bucketNode, node)
-	s.insertVisibleAgent(fold, parent, node)
-	if len(fold.bucketNode.Children) == 0 {
-		removeChild(parent, fold.bucketNode)
-		fold.bucketNode = nil
+	firstFold := len(fold.summaryNode.Children) == 0
+	removeChild(parent, node)
+	fold.summaryNode.Children = append(fold.summaryNode.Children, node)
+	if firstFold {
+		fold.summaryNode.Expanded = false
 	}
+}
+
+// unfoldAgent moves an agent node from under the summary node back into the visible
+// child list (issue #490). The summary node is NOT detached when it empties — it is
+// also the always-present status bar, so it simply reverts to a plain bracket with
+// no +/- suffix (refreshFoldChrome); teardown happens only when no entries remain.
+func (s *sidebar) unfoldAgent(fold *sessionFold, parent, node *tv.TreeNode) {
+	if fold.summaryNode == nil {
+		return
+	}
+	removeChild(fold.summaryNode, node)
+	s.insertVisibleAgent(fold, parent, node)
 }
 
 // tickFolds folds every completed sub-agent whose TTL has elapsed into its
@@ -1110,11 +1127,11 @@ func (s *sidebar) tickFolds() bool {
 	}
 	if changed && sel != nil {
 		// Re-anchor the highlight: if the selected row survived, keep it; if it was
-		// the row just folded away, land on the bucket that absorbed it rather than
-		// drift to an unrelated node.
+		// the row just folded away (now hidden under a collapsed summary), land on the
+		// summary node that absorbed it rather than drift to an unrelated node.
 		if !s.tree.SelectNode(sel) && selFolded {
-			if fold := s.foldOf(sel); fold != nil && fold.bucketNode != nil {
-				s.tree.SelectNode(fold.bucketNode)
+			if fold := s.foldOf(sel); fold != nil && fold.summaryNode != nil {
+				s.tree.SelectNode(fold.summaryNode)
 			}
 		}
 	}
@@ -1133,12 +1150,13 @@ func (s *sidebar) foldOf(node *tv.TreeNode) *sessionFold {
 	return nil
 }
 
-// refreshFoldChrome recomputes the session's status-bar and finished-bucket
-// labels from its fold entries. The ✓ count includes folded agents; the ✗ count
-// excludes dismissed failures. When the session has no live counts and nothing
-// folded (e.g. its only agent was a dismissed failure), the synthetic nodes are
-// torn down and the fold entry dropped, returning the row to its clean pre-agent
-// state. Runs on the UI thread.
+// refreshFoldChrome recomputes the session's single summary label from its fold
+// entries (issue #490). The ✓ count includes folded (archived) agents; the ✗ count
+// excludes dismissed failures. The label is the bracketed totals plus a trailing
+// +/- suffix (summarySuffix) when the summary parents archived agents. When the
+// session has no tracked sub-agents at all (e.g. its only agent was a dismissed
+// failure), the summary node is torn down and the fold entry dropped, returning the
+// row to its clean pre-agent state. Runs on the UI thread.
 func (s *sidebar) refreshFoldChrome(sessionID string) {
 	fold := s.folds[sessionID]
 	if fold == nil {
@@ -1147,16 +1165,11 @@ func (s *sidebar) refreshFoldChrome(sessionID string) {
 	parent := s.sessions[sessionID]
 	if len(fold.entries) == 0 {
 		// No tracked sub-agents remain (e.g. the only agent was a dismissed failure):
-		// drop the synthetic rows and the bookkeeping so the session row returns to
-		// its clean pre-agent state. Keyed on the entry set rather than on the visible
+		// drop the summary row and the bookkeeping so the session row returns to its
+		// clean pre-agent state. Keyed on the entry set rather than on the visible
 		// counts so an agent in a non-counted transient status never orphans its node.
-		if parent != nil {
-			if fold.bucketNode != nil {
-				removeChild(parent, fold.bucketNode)
-			}
-			if fold.statusNode != nil {
-				removeChild(parent, fold.statusNode)
-			}
+		if parent != nil && fold.summaryNode != nil {
+			removeChild(parent, fold.summaryNode)
 		}
 		delete(s.folds, sessionID)
 		return
@@ -1174,13 +1187,45 @@ func (s *sidebar) refreshFoldChrome(sessionID string) {
 			failed++
 		}
 	}
-	if fold.statusNode != nil {
-		fold.statusNode.Label = statusBarLabel(running, waiting, completed, failed)
+	if fold.summaryNode != nil {
+		fold.summaryNode.Label = statusBarLabel(running, waiting, completed, failed) + summarySuffix(fold.summaryNode)
 	}
-	if fold.bucketNode != nil {
-		// The tree supplies the ▸/▾ marker for a node with children; the label is
-		// just the folded-completed count.
-		fold.bucketNode.Label = fmt.Sprintf("[%s %d]", statusIcon(agent.StatusCompleted), len(fold.bucketNode.Children))
+}
+
+// summarySuffix is the trailing expand/collapse glyph for a session's summary line
+// (issue #490): "" while it parents no archived agent (childless ⇒ no affordance,
+// the empty-bucket rule), "+" when it has archived children and is collapsed (they
+// are hidden, can expand), "-" when expanded (they are shown, can fold). It is the
+// only expand affordance — the leading ▸/▾ is suppressed via HideMarker.
+func summarySuffix(n *tv.TreeNode) string {
+	if len(n.Children) == 0 {
+		return ""
+	}
+	if n.Expanded {
+		return "-"
+	}
+	return "+"
+}
+
+// syncFoldSuffixes re-derives every summary row's trailing +/- from its live
+// Expanded state (issue #490). It is called from panel.DrawFn before the tree
+// child paints so the suffix tracks Expanded no matter how it changed — a click
+// (OnToggle), a keyboard Left/Right/Space (which flips Expanded natively with no
+// host hook), or a programmatic flip. It only rewrites the suffix on the existing
+// label (everything up to and including the last ']' is the counts bracket), never
+// mutating tree structure or tearing a node down, so it is safe to run every frame.
+// Runs on the UI thread.
+func (s *sidebar) syncFoldSuffixes() {
+	for _, fold := range s.folds {
+		n := fold.summaryNode
+		if n == nil {
+			continue
+		}
+		base := n.Label
+		if i := strings.LastIndexByte(base, ']'); i >= 0 {
+			base = base[:i+1]
+		}
+		n.Label = base + summarySuffix(n)
 	}
 }
 
@@ -1249,14 +1294,6 @@ func (s *sidebar) pruneClarifyWaiting(sessionID, key string) {
 		return
 	}
 	delete(s.wb.clarifyWaiting, key)
-}
-
-// refSessionID extracts the owning session id from a real agent node's nodeRef.
-func refSessionID(node *tv.TreeNode) string {
-	if ref, ok := node.Data.(nodeRef); ok {
-		return ref.sessionID
-	}
-	return ""
 }
 
 // removeChild detaches child from parent.Children by pointer identity, preserving
