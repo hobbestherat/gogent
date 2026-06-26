@@ -42,12 +42,21 @@ cascade the issue says is **tracked separately**. So width is **pinned at the co
 footprint** — `PreferredW == MaxW == MinW == 80` — mirroring how settings pins its
 height (`MinH == MaxH == 20`).
 
-Height: the tallest column is `themeEditorContentRows() == 20` logical rows, and the
-chrome above/below the viewport is a constant 6 rows
-(`themeEditorDialogH - themeEditorVisibleRows == 22 - 16 == 6`). So **26 rows** shows
-every role with no scrolling. `PrefH == MaxH == 26`; `MinH == 22` keeps the documented
-floor. Below ~31 terminal rows the height is capped by the 85% rule down toward the 22
-floor, where the existing scroll viewport takes over — unchanged behaviour.
+Height: the tallest column is `themeEditorContentRows() == 20` logical rows. The chrome
+the viewport math subtracts is **constant and floor-independent**:
+`resolveThemeEditorLayout` computes `visibleRows = height - 3 - contentTop`, so the
+non-viewport rows are always `3 + themeEditorContentTop == 3 + 3 == 6` (button row +
+border below, plus the preset/toggle rows above). For all 20 content rows to be visible
+we need `visibleRows >= 20`, i.e. `height >= 26`. So **`PrefH == MaxH == 26`** shows
+every role with no scrolling, and it's exact — at 26 the last viewport row is
+`contentTop + visibleRows - 1 == 3 + 20 - 1 == 22`, one clear of the button row at
+`height - 3 == 23` (no collision, no wasted row). `MinH == 22` keeps the documented
+floor. Below ~31 terminal rows the 85% rule caps height down toward the 22 floor, where
+the existing scroll viewport takes over — unchanged behaviour.
+
+Deriving the chrome as `3 + themeEditorContentTop` (rather than
+`themeEditorDialogH - themeEditorVisibleRows`) keeps `PrefH` correct even if the floor
+height const is ever changed, since it mirrors the resolver's own `height - 3 - contentTop`.
 
 Resolved sizes under the new spec:
 
@@ -84,8 +93,9 @@ func (w *Workbench) themeEditorDialogSpec() tv.DialogSpec {
         rightCol = themeEditorSwatchW + 1 + themeEditorLabelW + 1 + themeEditorFieldW     // 38
         // left border+gap (2) + leftCol + gutter (1) + rightCol + scrollbar (1) + gap+border (2)
         contentW = 2 + leftCol + 1 + rightCol + 1 + 2 // == themeEditorDialogW (80)
-        // chrome above+below the viewport is constant: preset/toggle rows, borders, button row.
-        chromeH = themeEditorDialogH - themeEditorVisibleRows // 6
+        // Rows the viewport math subtracts (resolver: visibleRows = height-3-contentTop):
+        // button row + border below, preset/toggle rows above. Floor-height-independent.
+        chromeH = 3 + themeEditorContentTop // 6
     )
     prefH := themeEditorContentRows() + chromeH // 26 — all roles visible, no scroll
     return tv.DialogSpec{
@@ -190,13 +200,19 @@ pickers, toggles, buttons — unchanged.
 
 **(3) No regressions.** `checkThemeEditorLayout` (init guard) and `themeEditorColumns()`
 assert invariants at the 80×22 floor and are geometry-independent of the new caps —
-unaffected, re-run. `resolveThemeEditorLayout` is unchanged; at 80×26 `extra==0` keeps
-the floor column positions, and the resolver-level grow tests
+unaffected, re-run. Its menu-bar ceiling check `(24 - themeEditorDialogH)/2 >= 1` keys on
+the floor const (22), not the new caps, so it is untouched. `resolveThemeEditorLayout` is
+unchanged; at 80×26 `extra == width - themeEditorDialogW == 0`, so the columns stay at the
+exact floor positions and only `visibleRows` grows (16→20). The resolver-level tests
 (`TestResolveThemeEditorLayoutGrows/Floor/Monotonic`, the scroll-helper tests) call
-`resolveThemeEditorLayout` with explicit dims and still pass. The only tests that change
-are the three that *pinned the balloon*, which this issue deliberately reverses; they're
-updated to the new caps. Save/override round-trip, carry-override, picker sentinel, and
-saved-themes logic are not touched.
+`resolveThemeEditorLayout` with *explicit* dims and still pass — including the ones that
+exercise 160×42/200×50/240×68, which remain valid resolver inputs even though the editor
+now never *resolves* to them. The no-scroll-when-grown property still holds at the **real**
+grown size: at 80×26 `maxScroll() == contentRows(20) - visibleRows(20) == 0`, so
+`TestThemeEditorNoScrollWhenGrown` (code_bg visible at scrollY 0) passes without relying on
+the old 160×42 path. The only tests that change are the three that *pinned the balloon*,
+which this issue deliberately reverses; they're updated to the new caps. Save/override
+round-trip, carry-override, picker sentinel, and saved-themes logic are not touched.
 
 **(4) Holistic / cross-repo.** The change lives entirely in gogent, in the right place:
 a `themeEditorDialogSpec()` helper alongside the other content-driven specs in
