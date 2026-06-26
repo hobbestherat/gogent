@@ -86,7 +86,7 @@ type Tunnel struct {          // owns one *ssh.Client; safe for concurrent Dial
 func New(ctx, Config) (*Tunnel, error)             // dial TCP to host:sshport (bounded), SSH handshake + auth, host-key verify
 func (*Tunnel) Discover() (ResolvedTarget, error)  // exec `cat ~/.gogent/daemon.addr`; parse; fallback default sock
 func (*Tunnel) DialContext(ctx, network, addr) (net.Conn, error)  // dispatch on resolved target (snapshots client under mu)
-func (*Tunnel) Restart(ctx) error                  // PROBE-then-redial under mu (see below); ctx-cancelable, dial bounded
+func (*Tunnel) Restart(ctx) (redialed bool, err error)            // PROBE-then-redial (see below); redialed=false on live-session skip
 func (*Tunnel) Close() error
 ```
 
@@ -97,19 +97,41 @@ errors in ~10s (not the ~75–130s OS TCP timeout), and a caller ctx cancel (sig
 shutdown) aborts immediately — never an indefinite hang before the UI.
 
 **`Restart(ctx)` probes before it tears down (fixes "every reconnect kills a live
-session", critique #3).** Most stream drops (daemon graceful restart, transient blip,
+session", critique r1-#3).** Most stream drops (daemon graceful restart, transient blip,
 the health monitor's 2-fail trip, server idle-close) leave the SSH session perfectly
 healthy. So `Restart` first sends a cheap liveness probe on the existing client —
-`client.SendRequest("keepalive@openssh.com", true, nil)` under a short deadline:
+`client.SendRequest("keepalive@openssh.com", true, nil)`:
 - probe **succeeds** → session is fine → return nil immediately (no redial, no
-  re-auth, no re-Discover). "Retry now" then costs only an `openStream`, as fast as
-  the `unix`/`http` path.
+  re-auth, no re-Discover, `client`+`target` unchanged). "Retry now" then costs only an
+  `openStream`, as fast as the `unix`/`http` path. `Restart` signals the caller *no
+  redial happened* (returns `(redialed=false, nil)` or sets a flag the reconnect loop
+  reads) so §2.4 can skip the now-pointless `CloseIdleConnections` (item r2-#4).
 - probe **fails / no client** → the session is genuinely dead → close it and redial +
-  re-auth + re-`Discover` under `mu` (bounded by `dialTimeout` and `ctx`), replacing
-  `client`+`target`. `Discover` re-runs because a daemon that restarted may have a new
-  socket path / TCP port.
+  re-auth + re-`Discover`, replacing `client`+`target`, and returns `redialed=true`.
+
+Two tuning constants and a locking rule make this responsive (items r2-#2, r2-#3):
+- `probeTimeout = 2 * time.Second` — the probe's **own** short deadline, distinct from
+  `dialTimeout`. A half-open session (peer gone, no FIN) thus trips into redial in ~2s,
+  not 10s, so "Retry now" never stalls on a wedged probe.
+- **`mu` is held only for the probe and the final `client`/`target` swap, NOT across the
+  ~10s network redial.** `Restart` snapshots the old client under `mu`, releases it,
+  probes; on failure it dials/auths/Discovers *without* the lock, then re-takes `mu`
+  only to publish the new `client`+`target` (and close the old). This keeps a concurrent
+  `DialContext` (and `pollApprovals`, which dials every 750ms — `remote_handlers.go:53`)
+  from blocking up to 10s behind a redial. The brief unlocked window is safe: a
+  `DialContext` that grabs the soon-to-be-replaced client just fails and feeds the
+  existing reconnect backoff.
+
 `Restart` honors `ctx`: a `ctx.Done()` during the probe or redial returns promptly, so
-shutdown and (via the reconnect loop, §2.4) "Retry now" interrupt it.
+shutdown and (via the reconnect loop, §2.4) "Retry now" interrupt it. The redial dial is
+bounded by `dialTimeout` (as `New`).
+
+**Re-Discover scope (item r2-#5, correcting a mis-statement).** Re-`Discover` runs only
+on the *redial* path, and it is *not* required for correctness in the common case:
+daemon paths are deterministic (`~/.gogent/daemon.sock`, fixed `--http-port`), so the
+probe-skip path correctly reuses `t.target`. Known accepted edge: a mid-attachment
+daemon restart that *changes* `--http-port` is only picked up once the SSH session itself
+dies and forces a redial — rare, and out of scope for v1.
 
 **Auth order (v1):** SSH agent (`SSH_AUTH_SOCK`) first → explicit `--ssh-key` →
 default `~/.ssh/id_ed25519`, `~/.ssh/id_rsa` (passphrase prompt via
@@ -176,8 +198,20 @@ synchronous "is SSH reachable?" failure happen in the wrong layer.
 are created at `:131`/`:158`, *after* `NewAPIClient`/`Health`/`rc.Start`). This is
 required so the *initial* SSH connect — a synchronous, potentially slow operation — is
 both bounded and interruptible by Ctrl+C, instead of relying on the shell's default
-SIGINT disposition (critique #4). The existing later-stage code that used `ctx` is
+SIGINT disposition (critique r1-#4). The existing later-stage code that used `ctx` is
 unaffected; we are only widening its scope.
+
+**Critical: `sigChan` must keep exactly ONE consumer (item r2-#1).** Today (`:158-164`)
+the final `select` is the *only* `sigChan` reader, and `httpShutdownCh` is the single
+shutdown funnel fed by the TUI-loop goroutine (`:145-154`). The naive "add a goroutine
+that does `<-sigChan; cancel()`" would create a *second* reader — and since a channel
+value goes to exactly one receiver, a Ctrl+C after the TUI is up would nondeterministically
+hit the goroutine (which cancels `rc.ctx` but never unblocks the final `select`, since
+`wb.Run()` isn't driven by `rc.ctx`), forcing a **second** Ctrl+C to quit and losing the
+"detaching…" line. That is a regression on the untouchable `unix`/`http`/`https` paths.
+
+**Fix — the single signal consumer both cancels AND forwards into the existing funnel,
+mirroring the TUI-loop goroutine at `:145-154`:**
 
 ```go
 func runAttached(homeDir, addr, token string, noColorFlag bool) error {
@@ -185,8 +219,14 @@ func runAttached(homeDir, addr, token string, noColorFlag bool) error {
     defer cancel()
     sigChan := make(chan os.Signal, 1)                        // MOVED UP from :158
     signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-    go func() { <-sigChan; cancel() }()  // SIGINT during the initial connect aborts the dial cleanly
-    // (the final blocking select below still drains sigChan for the "detaching…" message)
+    var sigSeen atomic.Value                                  // carries the signal for the detach message
+    go func() {                                               // the ONLY sigChan consumer
+        sig := <-sigChan
+        sigSeen.Store(sig)
+        cancel()                                              // aborts a hung *initial* connect / SSE start
+        select { case httpShutdownCh <- struct{}{}:           // SAME funnel as the TUI-loop goroutine (:145-154)
+                 default: }                                   // ...so a single Ctrl+C always unblocks the final wait
+    }()
 
     var apiOpts []tuipkg.APIClientOption
     var tunnel *sshtunnel.Tunnel
@@ -211,19 +251,28 @@ func runAttached(homeDir, addr, token string, noColorFlag bool) error {
     rc := tuipkg.NewRemoteClient(client, wb.EmitSessionEvent, wb)
     if tunnel != nil { rc.SetTunnel(tunnel) }    // give reconnect a Restart handle (§2.4)
     ...
+    // Final wait: BOTH a Ctrl+C and a normal TUI quit now arrive via httpShutdownCh —
+    // the signal goroutine above forwards into it, the TUI-loop goroutine (:145-154)
+    // already does. One consumer, one funnel, single-press exit on every scheme.
+    <-httpShutdownCh
+    if sig := sigSeen.Load(); sig != nil {
+        fmt.Printf("\nReceived signal %v, detaching...\n", sig)
+    }
     // teardown (was :166)
     rc.Close()
     if tunnel != nil { tunnel.Close() }          // session + listener gone; daemon keeps running
 }
 ```
 
-Because the moved signal goroutine now both `cancel()`s and the final `select` still
-needs to print "detaching…", keep the final `select { case sig := <-sigChan … }` —
-`signal.Notify` delivers to the buffered channel and the goroutine + the select both
-observe shutdown; on a normal TUI quit (`httpShutdownCh`) the goroutine simply parks
-until `defer cancel()`/process exit. (Implementation detail to confirm at code time:
-one consumer, or fan the signal to both — the design intent is "SIGINT aborts a hung
-initial connect AND still prints the detach line".)
+Why this is regression-free on the existing paths: the final `select { case sig :=
+<-sigChan; case <-httpShutdownCh }` (`:160-164`) collapses to a single `<-httpShutdownCh`
+wait. A Ctrl+C — whether it lands during the initial connect or after the TUI is up —
+goes to the **one** `sigChan` reader, which cancels `ctx` *and* sends to `httpShutdownCh`,
+so the wait unblocks on the **first** press and still prints the detach line (from
+`sigSeen`). A normal TUI quit feeds `httpShutdownCh` exactly as today. No second reader,
+no scheduler-dependent double-press. (`sigChan` stays buffered cap-1 so the `Notify`
+delivery never blocks; the goroutine reads once, which is all we need — process exits
+after teardown.)
 
 `local := strings.HasPrefix(addr, "unix://")` (:114) is already correct: `ssh://`
 → `false` → `DaemonModeAttachedRemote` → daemon menu shows "Daemon status" only, no
@@ -234,8 +283,12 @@ local Start/Stop. Optional polish: label the remote with the SSH host.
 Add a tiny interface + optional field; do **not** make RemoteClient own Close of the
 tunnel (runAttached owns that — single owner):
 
+`Restart` returns whether it actually redialed, so the caller only flushes the HTTP pool
+when the underlying `*ssh.Client` changed (item r2-#4 — no pointless flush on probe-skip):
+
 ```go
-type TunnelRestarter interface{ Restart(context.Context) error }  // *sshtunnel.Tunnel satisfies it; nil for unix/http
+// redialed=false on the probe-skip (live-session) path; true when client/target were replaced.
+type TunnelRestarter interface{ Restart(context.Context) (redialed bool, err error) }
 // new field on RemoteClient:  tunnel TunnelRestarter
 func (rc *RemoteClient) SetTunnel(t TunnelRestarter) { rc.tunnel = t }
 ```
@@ -246,35 +299,40 @@ backoff `select` (which is where `RetryNow` is honored, :300-305), *before*
 
 ```go
 if rc.tunnel != nil {
-    if err := rc.tunnel.Restart(rc.ctx); err != nil {   // PROBE-then-redial (§2.1), ctx-cancelable, dial-bounded
+    redialed, err := rc.tunnel.Restart(rc.ctx)   // PROBE-then-redial (§2.1), ctx-cancelable, dial-bounded
+    if err != nil {
         continue   // SSH genuinely down → next attempt, longer backoff, modal stays up
     }
-    rc.client.CloseIdleConnections()  // drop channels pooled on a possibly-replaced session (critique #5)
+    if redialed {
+        rc.client.CloseIdleConnections()  // only when the session was actually replaced (item r2-#5/#4, critique r1-#5)
+    }
 }
 next, err := rc.openStream()
 ```
 
 Three properties this gives us, each closing a critique item:
 
-- **`Restart(rc.ctx)` is bounded and cancelable** (critique #2). The dial inside is
-  capped at `dialTimeout`, so a hung re-dial returns control to the backoff `select` in
-  ~10s where `RetryNow` is honored again — "Retry now" is no longer a multi-minute
-  no-op. And `Close()` (which cancels `rc.ctx`) interrupts an in-progress `Restart`
-  immediately, so shutdown never blocks on a wedged session.
-- **Live sessions are *not* torn down** (critique #3). `Restart` probes first and
-  returns nil without redialing when the SSH session is healthy (the common case — the
-  stream dropped, not the tunnel). So the steady-state reconnect cost stays ~one
-  `openStream`, matching the `unix`/`http` path.
-- **Stale pooled channels are dropped** (critique #5). Unlike the `unix` dialer, the
-  SSH tunnel can swap its underlying `*ssh.Client` on a redial, leaving the
-  `http.Transport` pool holding channels bound to the dead session. A non-idempotent
-  `POST` (e.g. `/sessions/{id}/stop`, `/approvals/{id}/decision`) landing on such a
-  channel would error (net/http only auto-retries idempotent requests). It is benign
-  for current callers (they log-and-ignore), but we call
+- **`Restart(rc.ctx)` is bounded and cancelable** (critique r1-#2). The dial inside is
+  capped at `dialTimeout` (probe at `probeTimeout`), so a hung re-dial returns control to
+  the backoff `select` in ~10s where `RetryNow` is honored again — "Retry now" is no
+  longer a multi-minute no-op. And `Close()` (which cancels `rc.ctx`) interrupts an
+  in-progress `Restart` immediately, so shutdown never blocks on a wedged session.
+- **Live sessions are *not* torn down** (critique r1-#3). `Restart` probes first and
+  returns `(false, nil)` without redialing when the SSH session is healthy (the common
+  case — the stream dropped, not the tunnel). So the steady-state reconnect cost stays
+  ~one `openStream`, matching the `unix`/`http` path, and `mu` is not held across any
+  slow dial (§2.1) so `pollApprovals` is never stalled.
+- **Stale pooled channels are dropped — only when actually stale** (critique r1-#5, item
+  r2-#4). Unlike the `unix` dialer, the SSH tunnel can swap its underlying `*ssh.Client`
+  on a redial, leaving the `http.Transport` pool holding channels bound to the dead
+  session. A non-idempotent `POST` (e.g. `/sessions/{id}/stop`, `/approvals/{id}/decision`)
+  landing on such a channel would error (net/http only auto-retries idempotent requests).
+  It is benign for current callers (they log-and-ignore), but we call
   `APIClient.CloseIdleConnections()` (a thin wrapper over `c.http.CloseIdleConnections()`,
-  added alongside `WithDialContext`) right after a successful `Restart` so the pool is
-  rebuilt on the live session. Nil-tunnel paths skip this branch entirely → no behavior
-  change for `unix`/`http`/`https`.
+  added alongside `WithDialContext`) right after a `Restart` **that reports `redialed=true`**
+  so the pool is rebuilt on the live session — the probe-skip path leaves the pool intact
+  (no waste). Nil-tunnel paths skip the whole branch → no behavior change for
+  `unix`/`http`/`https`.
 
 On success, `openStream` → `notifyRestored` → `kickApprovals` (jump-to-present) fire
 exactly as today. No second reconnect state machine.
@@ -397,6 +455,12 @@ package). Risks + mitigations:
   restart (§2.4) rebuilds the pool on the live session; benign for current callers
   regardless (they log-and-ignore the rare stale-conn `POST` error).
 - *Per-request channel cost* → `http.Transport` pooling reuses channels, same as unix.
+- *Moved signal handler (the round-2 catch)* → the relocated `ctx`+`sigChan` keep
+  **exactly one** `sigChan` consumer, which both `cancel()`s and forwards to
+  `httpShutdownCh` (the existing funnel). So a single Ctrl+C still exits on the first
+  press and prints the detach line on every scheme — verified by the new test below.
+  Without this, a second `sigChan` reader would race the final `select` and intermittently
+  require a double Ctrl+C on `unix`/`http`/`https` (§2.3).
 - Gates to run: `gofmt`, `go build ./...`, `go vet ./...`, `golangci-lint` (0 NEW),
   `go test ./...` (no `-race` on Pi5).
 
@@ -420,8 +484,8 @@ survive the reconnect.
 |---|---|
 | `internal/sshtunnel/` (new) | `Tunnel`: SSH session, `New`/`Discover`/`DialContext`/`Restart`/`Close`; auth + known_hosts. |
 | `ui/tui/api_client.go` | `case "ssh"` in `NewAPIClient`; variadic `APIClientOption` + `WithDialContext`; `APIClient.CloseIdleConnections()` wrapper; update `default:` error string. |
-| `cmd/attach.go` | `runAttached`: **move `ctx`+signal handler to the top**; parse `ssh://`, build (bounded `New`) + `Discover` tunnel before `NewAPIClient`, inject dialer, `SetTunnel`, close tunnel after `rc.Close()`, wrap no-daemon Health error. |
-| `ui/tui/remote_handlers.go` | `TunnelRestarter` (`Restart(ctx) error`) field + `SetTunnel`; `Restart(rc.ctx)` + `CloseIdleConnections()` at top of `reconnect` loop. |
+| `cmd/attach.go` | `runAttached`: **move `ctx`+signal handler to the top with a single `sigChan` consumer that `cancel()`s AND forwards to `httpShutdownCh`** (preserves single-press exit on all schemes); parse `ssh://`, build (bounded `New`) + `Discover` tunnel before `NewAPIClient`, inject dialer, `SetTunnel`, close tunnel after `rc.Close()`, wrap no-daemon Health error. |
+| `ui/tui/remote_handlers.go` | `TunnelRestarter` (`Restart(ctx) (bool, error)`) field + `SetTunnel`; `Restart(rc.ctx)` + conditional `CloseIdleConnections()` (only on `redialed`) at top of `reconnect` loop. |
 | `cmd/main.go` | extend `--connect` help; add `--ssh-key`/`--ssh-known-hosts`/`--ssh-insecure-skip-verify`. |
 | `docs/usage-headless.md` | replace lines 310-314 "Tier 2 planned" with shipped behavior. |
 | `go.mod` / `go.sum` | add `golang.org/x/crypto`; `go mod tidy`. |
@@ -438,15 +502,25 @@ No turbotui files.
 - `DialContext` returns a working `net.Conn` against a loopback in-process test SSH
   server (`x/crypto/ssh` server side) serving both a Unix socket and a TCP target.
 - `reconnect` calls `tunnel.Restart(ctx)` before `openStream` (inject a fake `TunnelRestarter`),
-  and calls `CloseIdleConnections` after a successful restart.
+  and calls `CloseIdleConnections` **only when `Restart` reports `redialed=true`** (assert
+  it is NOT called on the probe-skip path).
 - **Bounded dial**: `New`/`Restart` against a host that accepts the TCP conn but never
   completes the SSH handshake (or a `net.Pipe`/blackhole address) returns an error within
   `dialTimeout`, not the OS default — assert wall-clock < dialTimeout+ε.
-- **Probe-skips-redial**: `Restart(ctx)` on a still-live test SSH session returns nil
-  *without* opening a new client (assert the test server's accept-count is unchanged);
-  on a closed session it redials (accept-count increments).
+- **Probe-skips-redial**: `Restart(ctx)` on a still-live test SSH session returns
+  `(false, nil)` *without* opening a new client (assert the test server's accept-count is
+  unchanged); on a closed session it returns `(true, nil)` and redials (accept-count
+  increments).
+- **Probe deadline**: `Restart(ctx)` against a half-open session (keepalive never
+  answered) trips into redial within ~`probeTimeout` (~2s), well under `dialTimeout`.
+- **`mu` not held across redial**: a `DialContext`/probe call concurrent with a slow
+  `Restart` redial is not blocked for the full dial (assert it returns/errs promptly).
 - **Cancelable Restart**: a `Restart(ctx)` whose `ctx` is cancelled mid-dial returns
   promptly with `ctx.Err()`.
+- **Single-press exit (regression guard, item r2-#1)**: with the §2.3 signal wiring, one
+  SIGINT both cancels `ctx` and unblocks the final `<-httpShutdownCh` wait on a
+  non-ssh (`unix`) attach — assert `runAttached` returns after exactly one signal and the
+  detach line is printed. (Guards against re-introducing a second `sigChan` consumer.)
 - `Close`/teardown closes the SSH session (assert the test server sees the channel/conn close).
 - Fail-fast: unreachable host, auth failure, no daemon (Health fails → actionable error).
 
