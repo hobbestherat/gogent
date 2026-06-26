@@ -604,13 +604,16 @@ func (w *Workbench) showThemeEditor() {
 	// checkThemeEditorLayout (run at init) asserts the scroll model is self-consistent at the
 	// floor, so this renderer can trust the resolved geometry.
 
-	// Floored, not pinned (issue #317): the shared resolver is given an 80×22 Min floor only,
-	// so the editor floors at 80×22 on an 80×24 terminal and grows toward the 80%×85% cap on a
-	// larger one, centred (and re-centred on resize) like every other dialog (issue #299). The
-	// spec is a pure floor, so dialog.Fit is path-independent; the renderer reads the resolved
-	// width/height (not the compile-time constants) so the columns, scrollbar and viewport fill
-	// whatever the dialog resolved to.
-	spec := tv.DialogSpec{MinW: themeEditorDialogW, MinH: themeEditorDialogH}
+	// Content-driven, floored at 80×22 (issues #317/#471): themeEditorDialogSpec pins the
+	// width to the two-column content footprint and caps the height to the rows the roles
+	// need, so the editor sizes to its content instead of the 80%×85% percentage default
+	// (which ballooned it to 160×42 on a wide terminal). It still collapses to the documented
+	// 80×22 floor on a small terminal — where the scrolling viewport takes over — and is
+	// centred (and re-centred on resize) like every other dialog (issue #299). The spec is
+	// static/path-independent, so the renderer reads the resolved width/height (not the
+	// compile-time constants) and the columns, scrollbar and viewport fill whatever the dialog
+	// resolved to.
+	spec := w.themeEditorDialogSpec()
 	x, y, width, height := w.dialogRect(spec)
 	layout := resolveThemeEditorLayout(width, height)
 

@@ -100,6 +100,46 @@ func (w *Workbench) keybindingsDialogSpec() tv.DialogSpec {
 	return spec
 }
 
+// themeEditorDialogSpec is the content-driven size of the modal theme editor (issue
+// #471). Like sessionsDialogSpec/keybindingsDialogSpec it expresses a content
+// footprint rather than a share of the terminal. The editor draws two columns of
+// swatch+label+field rows; the two column footprints plus the inter-column gutter, the
+// scrollbar column and the dialog chrome come to exactly the documented 80-column floor
+// (themeEditorDialogW) — the floor was designed as that tight two-column fit. So width is
+// PINNED there (MinW == MaxW == PreferredW): growing wider would only spread the surplus
+// into the role-label cells (resolveThemeEditorLayout's extra/2), the spacing/association
+// cascade tracked as a separate issue. Without this spec showThemeEditor fell back to the
+// 80%×85% percentage default and ballooned to 160×42 on a 200×50 terminal.
+//
+// Height: PrefH shows every themeEditorContentRows() role with no scrolling. The chrome
+// the viewport math subtracts is constant and floor-height-independent — the resolver
+// computes visibleRows = height-3-contentTop, so the non-viewport rows are always
+// 3 + themeEditorContentTop (button row + border below, preset/toggle rows above). MinH
+// keeps the documented 80×22 floor, where the existing scrolling viewport takes over on a
+// short terminal. MaxH caps the height to that content fit so a tall terminal does not
+// stretch the dialog past its rows.
+//
+// The spec is static (no terminal-share term), so it is path-independent: the same spec
+// flows into w.dialogRect at open and into relayout() on resize, and the dialog re-centres
+// via the existing relayout()/OnResize path.
+func (w *Workbench) themeEditorDialogSpec() tv.DialogSpec {
+	const (
+		leftCol  = themeEditorSwatchW + 1 + themeEditorLeftLabelW + 1 + themeEditorFieldW // 36
+		rightCol = themeEditorSwatchW + 1 + themeEditorLabelW + 1 + themeEditorFieldW     // 38
+		// left border+gap (2) + leftCol + gutter (1) + rightCol + scrollbar (1) + gap+border (2).
+		// Equals themeEditorDialogW (80) by construction.
+		contentW = 2 + leftCol + 1 + rightCol + 1 + 2
+		// Rows the viewport math subtracts (resolver: visibleRows = height-3-contentTop):
+		// button row + border below, preset/toggle rows above. Floor-height-independent.
+		chromeH = 3 + themeEditorContentTop // 6
+	)
+	prefH := themeEditorContentRows() + chromeH // all roles visible without scrolling
+	return tv.DialogSpec{
+		MinW: themeEditorDialogW, MaxW: contentW, PreferredW: contentW,
+		MinH: themeEditorDialogH, MaxH: prefH, PrefH: prefH,
+	}
+}
+
 // statisticsDialogSpec is the content-driven size of the Statistics dialog (issue
 // #345). Unlike browserDialogSpec (shared with Resources, which renders arbitrarily
 // long SKILL.md / input-schema text and genuinely fills the screen), Statistics
