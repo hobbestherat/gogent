@@ -618,6 +618,12 @@ type Workbench struct {
 	// Reconnector callbacks marshal through Post), so they need no lock.
 	disconnectLayer *tv.Layer
 	disconnectBody  *tv.TextView
+	// daemonHandoffLayer is the live interim "Migrating…" progress modal during a
+	// Start/Stop daemon handoff, nil when none is in flight. The result dialog
+	// replaces it (RemoveLayer) so the two never stack (issue #478). Start (embedded
+	// only) and Stop (attached-local only) are mode-exclusive and the modal blocks
+	// the menu, so one field suffices. Touched only on the UI thread.
+	daemonHandoffLayer *tv.Layer
 }
 
 // NewWorkbench creates the workbench and its desktop chrome.
