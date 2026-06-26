@@ -69,9 +69,16 @@ func (g *Gogent) DispatchMessage(sessionID, agentID, message, modelName, effort 
 			defer onDone()
 		}
 		defer recoverTurn(us, turnID)
-		if _, runErr := g.SendMessageToSessionWithModelAndEffort(ctx, sessionID, agentID, message, modelName, effort); runErr != nil {
-			us.EmitError(turnID, runErr)
-		}
+		// runLoop is the single source of the root turn's terminal event: it emits
+		// SessionEventFinal on success and SessionEventError on every error path
+		// (model failure, cancellation, panic-in-loop). So the returned error is NOT
+		// re-emitted here — doing so would surface a duplicate error event for one
+		// failure. The only errors that escape runLoop without an emit are the
+		// pre-loop session/agent-vanished cases, which are validated synchronously
+		// above; a session destroyed in the tiny window after that has no client
+		// left to receive an event anyway. (recoverTurn still covers a panic in the
+		// synchronous entrypoint, before runLoop's own recovery is armed.)
+		_, _ = g.SendMessageToSessionWithModelAndEffort(ctx, sessionID, agentID, message, modelName, effort)
 	}()
 	return turnID, nil
 }
@@ -96,9 +103,10 @@ func (g *Gogent) DispatchApprovedPlan(sessionID, agentID string, onDone func()) 
 			defer onDone()
 		}
 		defer recoverTurn(us, turnID)
-		if _, runErr := g.ExecuteApprovedPlan(ctx, sessionID, agentID); runErr != nil {
-			us.EmitError(turnID, runErr)
-		}
+		// runLoop owns the terminal event for the plan-execution turn (see
+		// DispatchMessage): the returned error is not re-emitted here to avoid a
+		// duplicate SessionEventError. recoverTurn still contains a pre-runLoop panic.
+		_, _ = g.ExecuteApprovedPlan(ctx, sessionID, agentID)
 	}()
 	return turnID, nil
 }

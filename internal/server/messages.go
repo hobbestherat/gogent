@@ -66,8 +66,8 @@ func (svc messagesSvc) Send(r *http.Request, req sendMessageRequest, id string) 
 }
 
 // Stream handles POST /sessions/:id/messages/stream — returns immediately with
-// SSE headers, then forwards every SessionEvent the turn produces until its
-// terminal (final/error) event. It is a thin async-dispatch wrapper kept for
+// SSE headers, then forwards every SessionEvent the turn produces until the turn's
+// dispatch goroutine completes. It is a thin async-dispatch wrapper kept for
 // backwards compatibility (issue #481): the turn is dispatched on a daemon-owned
 // goroutine (context.Background()), so a client disconnect stops the streaming but
 // does NOT cancel the turn and does NOT release the busy gate — the turn runs to
@@ -95,54 +95,58 @@ func (svc messagesSvc) Stream(r *http.Request, req sendMessageRequest, id string
 	// via onDone, NOT to the producer's lifetime: the turn outlives the SSE
 	// connection now, so releasing on producer return would drop the gate while the
 	// turn is still running (a reconnecting client could wrongly start a second
-	// turn). onDone fires when the dispatched goroutine ends.
+	// turn). onDone fires when the dispatched goroutine ends. It also closes
+	// turnDone, the producer's authoritative "no more events" signal.
 	planMode := req.Mode == "plan"
 	if planMode {
 		svc.s.g.SetPlanMode(id, true)
 	}
+	turnDone := make(chan struct{})
 	onDone := func() {
 		if planMode {
 			svc.s.g.SetPlanMode(id, false)
 		}
 		release()
+		close(turnDone)
 	}
 
-	var turnID string
 	var err error
 	if req.Subtask || req.Agent != "" {
-		turnID, err = svc.s.g.DispatchCommandSubtask(id, req.Agent, req.Message, onDone)
+		_, err = svc.s.g.DispatchCommandSubtask(id, req.Agent, req.Message, onDone)
 	} else {
-		turnID, err = svc.s.g.DispatchMessage(id, "root", req.Message, req.Model, req.Effort, onDone)
+		_, err = svc.s.g.DispatchMessage(id, "root", req.Message, req.Model, req.Effort, onDone)
 	}
 	if err != nil {
-		onDone()
+		onDone() // releases the gate (and closes turnDone, harmless — no producer)
 		unsub()
 		return nil, webapi.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 
 	return &webapi.EventStreamResponse{
 		Producer: func(stream webapi.EventStream) error {
-			// Unsubscribe when the producer ends (terminal event seen or client
-			// gone). The busy gate is released by onDone, independently, when the
-			// turn itself completes — so it is intentionally NOT released here.
+			// Unsubscribe when the producer ends (turn done or client gone). The busy
+			// gate is released by onDone, independently, when the turn itself
+			// completes — so it is intentionally NOT released here.
 			defer unsub()
 
 			for {
 				select {
 				case <-stream.Context().Done():
 					return nil // client gone — the turn keeps running on the daemon
+				case <-turnDone:
+					// The dispatch goroutine has finished, so every event it will ever
+					// emit — including a plan-mode SessionEventPlan emitted AFTER the
+					// final, and trailing usage events — is already buffered on the
+					// subscription (terminal events are delivered with a blocking send
+					// before onDone runs). Flush them, then close the stream. Stopping
+					// on turn completion rather than on a guessed terminal event also
+					// avoids missing the unstamped Plan event the old terminal-match
+					// logic skipped.
+					svc.drainRemaining(sub, stream)
+					return nil
 				case te := <-sub:
 					if err := stream.Send(sessionSSE(te.ev, id)); err != nil {
 						return fmt.Errorf("send message event: %w", err)
-					}
-					// Stop when this turn's terminal event has been forwarded. The
-					// dispatched turn always emits a terminal event on every exit path
-					// (final on completion, error on cancellation/failure); the busy
-					// gate guarantees one turn per session, and we additionally match
-					// the dispatched turn id for precision.
-					if isTerminal(te.ev) && te.ev.TurnID == turnID {
-						svc.drainRemaining(sub, stream)
-						return nil
 					}
 				}
 			}
