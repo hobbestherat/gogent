@@ -409,11 +409,11 @@ func TestBrowserPreferredWidthClamped(t *testing.T) {
 // TestThemeEditorFlooredAndGrows guards the theme editor's resolver policy after issue
 // #471: showThemeEditor now hands the resolver a CONTENT-DRIVEN spec
 // (themeEditorDialogSpec) instead of the bare {MinW, MinH} floor, so it no longer
-// balloons to the 80%×85% percentage default. Width is PINNED at the 80-column
+// balloons to the 80%×85% percentage default. Width is PINNED at the 83-column
 // two-column content footprint (MinW == MaxW == PreferredW); height collapses to the
 // 22-row floor on a short terminal (keeping menu-bar clearance and the #279/#291
-// scrolling viewport valid) and grows only to PrefH (27) on a taller one — never to a
-// share of the screen. This is the resolver-level companion to the open-the-editor
+// scrolling viewport valid) and grows only to PrefH on a taller one — never to a share
+// of the screen. This is the resolver-level companion to the open-the-editor
 // TestThemeEditorOpensFlooredAndGrows.
 func TestThemeEditorFlooredAndGrows(t *testing.T) {
 	// The real spec showThemeEditor hands the resolver. A drift here (e.g. dropping the
@@ -428,19 +428,19 @@ func TestThemeEditorFlooredAndGrows(t *testing.T) {
 		wantW int
 		wantH int
 	}{
-		{"floors on an 80x24 terminal", 80, 24, 80, 22},
-		{"floors on a sub-floor terminal", 70, 20, 80, 22},
-		{"floors on a tiny terminal", 30, 8, 80, 22},
-		{"pinned width, height grown on 200x50", 200, 50, 80, 27}, // no 160×42 balloon
-		{"pinned width, height grown on a mid terminal", 120, 40, 80, 27},
-		{"pinned width, height capped at PrefH on an ultrawide", 300, 80, 80, 27},
+		{"floors on an 80x24 terminal", 80, 24, themeEditorDialogW, themeEditorDialogH},
+		{"floors on a sub-floor terminal", 70, 20, themeEditorDialogW, themeEditorDialogH},
+		{"floors on a tiny terminal", 30, 8, themeEditorDialogW, themeEditorDialogH},
+		{"pinned width, height grown on 200x50", 200, 50, themeEditorDialogW, spec.PrefH}, // no 160×42 balloon
+		{"pinned width, height grown on a mid terminal", 120, 40, themeEditorDialogW, spec.PrefH},
+		{"pinned width, height capped at PrefH on an ultrawide", 300, 80, themeEditorDialogW, spec.PrefH},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			x, y, w, h := tv.ResolveDialogRect(spec, tc.termW, tc.termH)
 			if w != tc.wantW || h != tc.wantH {
 				t.Errorf("at %dx%d theme editor = %dx%d, want %dx%d", tc.termW, tc.termH, w, h, tc.wantW, tc.wantH)
 			}
-			// Never below the documented 80×22 floor.
+			// Never below the documented 83×22 floor.
 			if w < themeEditorDialogW || h < themeEditorDialogH {
 				t.Errorf("at %dx%d size %dx%d fell below the %dx%d floor", tc.termW, tc.termH, w, h, themeEditorDialogW, themeEditorDialogH)
 			}

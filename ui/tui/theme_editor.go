@@ -188,7 +188,7 @@ func init() { checkPickerCommitSentinel() }
 // so a cell narrower than the text makes the wrapped Label drop the overflow and clip
 // the label on screen (e.g. "Code block background" → "Code block"). The longest label,
 // "Code block background:", is 22 columns, so the cell is at least 22 wide. On a dialog
-// wider than the 80-column floor the cell grows past this (issue #317); it never shrinks
+// wider than the 83-column floor the cell grows past this (issue #317); it never shrinks
 // below it.
 const themeEditorLabelW = 22
 
@@ -219,24 +219,28 @@ const themeEditorButtonGap = 1
 const themeEditorVisibleRows = themeEditorDialogH - 3 - themeEditorButtonGap - themeEditorContentTop
 
 // themeEditorScrollbarX is the FLOOR content-relative column of the fixed vertical
-// scrollbar: the last usable content column at the 80-wide minimum, just inside the right
+// scrollbar: the last usable content column at the 83-wide minimum, just inside the right
 // border. The live column is resolveThemeEditorLayout(...).scrollbarX = width-3 (issue
 // #317); this const is the documented floor value the layout guard and tests rest on.
 const themeEditorScrollbarX = themeEditorDialogW - 3
 
-// Geometry FLOOR of the modal theme editor (issue #267). Width floors at 80 so the
-// dialog fits a standard 80-column terminal, and height at 22 — the 24-row terminal is
-// the hard ceiling. Since issue #317 the dialog is no longer PINNED to this footprint:
-// the shared resolver is given these as Min floors only, so the editor grows toward the
-// 80%×85% cap on a larger terminal while still collapsing to 80×22 on a small one, and is
-// centred (and re-centred on resize) like every other dialog (issue #299). The renderer
-// derives all of its geometry from the resolved live bounds (resolveThemeEditorLayout),
-// not these constants; they remain the documented minimum and the size at which
-// checkThemeEditorLayout asserts the scrolling model is self-consistent. themeEditorFieldW
-// and themeEditorSwatchW are the spec-field ("#RRGGBB"/"default") and live-swatch
-// ("invalid") cell widths that follow each role label.
+// Geometry FLOOR of the modal theme editor (issue #267). Width floors at 83 and height at
+// 22 — the 24-row terminal is the hard ceiling. The floor rose 80→83 with issue #477, which
+// widened the inter-column gutter from 1 to 4 columns: the two-column content footprint plus
+// the wider gutter, the scrollbar column and the chrome come to exactly 83, so the editor no
+// longer fits a standard 80-column terminal — below 83 the dialog resolves to its floor and
+// its rightmost columns (scrollbar + right border) clip off-screen, the same below-floor
+// behaviour the dialog has always had on a sub-floor terminal (the threshold moved 80→83).
+// Since issue #317 the dialog is no longer PINNED to this footprint: the shared resolver is
+// given these as Min floors only, so the editor grows toward the 80%×85% cap on a larger
+// terminal while still collapsing to 83×22 on a small one, and is centred (and re-centred on
+// resize) like every other dialog (issue #299). The renderer derives all of its geometry
+// from the resolved live bounds (resolveThemeEditorLayout), not these constants; they remain
+// the documented minimum and the size at which checkThemeEditorLayout asserts the scrolling
+// model is self-consistent. themeEditorFieldW and themeEditorSwatchW are the spec-field
+// ("#RRGGBB"/"default") and live-swatch ("invalid") cell widths that follow each role label.
 const (
-	themeEditorDialogW = 80
+	themeEditorDialogW = 83
 	themeEditorDialogH = 22
 	themeEditorFieldW  = 7
 	themeEditorSwatchW = 7
@@ -248,11 +252,14 @@ const (
 // blank rows inserted in every inter-section gap on top of the single separator row
 // every column gets. It is the cross-column alignment lever: the left column's first
 // section (Session output, 8 rows) is one row shorter than the right's (Controls, 9
-// rows), so without extra padding the left column's second section (UI chrome) lands
-// one row above the right's (Buttons and inputs). Setting sectionPad=1 on the left
-// column widens its single gap to two rows, dropping UI chrome onto the same logical
-// row as Buttons and inputs while leaving both columns' first sections aligned at
-// row 0. The right column keeps sectionPad=0 so its gaps are unchanged.
+// rows), so the left column always carries one more pad than the right for their second
+// sections (UI chrome / Buttons and inputs) to share a logical row. Issue #477 raised the
+// inter-section spacing to 2 blank rows on the right column (sectionPad=1 → 1 separator +
+// 1 pad) and 3 on the left (sectionPad=2), which keeps UI chrome on the same logical row
+// as Buttons and inputs while leaving both columns' first sections aligned at row 0. (The
+// two cannot both show exactly 2 blank rows while staying aligned — the left's shorter
+// first section forces its single gap one row taller; that extra row is the alignment
+// lever, not extra breathing room.)
 type themeEditorColumn struct {
 	x, labelW  int
 	groups     []themeGroup
@@ -264,7 +271,7 @@ type themeEditorColumn struct {
 // The dialog floors at themeEditorDialogW×themeEditorDialogH and grows toward the shared
 // 80%×85% cap; every position the renderer and the scroll math need is derived from the
 // resolved width/height so the two columns, the scrollbar and the viewport fill the
-// larger dialog while still collapsing to the documented 80×22 minimum. The two-column
+// larger dialog while still collapsing to the documented 83×22 minimum. The two-column
 // scrolling model is unchanged — only the geometry source moved from constants to these
 // resolved bounds.
 type themeEditorLayout struct {
@@ -280,12 +287,13 @@ type themeEditorLayout struct {
 // viewport spans the rows between themeEditorContentTop and the action-button row
 // (height-3). The two section columns split the content area — the left column stacks
 // Session output and UI chrome, the right column stacks Controls, Buttons and inputs and
-// Code (issue #267) — and the extra width beyond the 80-column floor is shared evenly
+// Code (issue #267) — and the extra width beyond the 83-column floor is shared evenly
 // between the two label cells, so the columns, fields and swatches use the space on a
-// larger dialog while collapsing to the original {x:2,labelW:20} / {x:39,labelW:22}
+// larger dialog while collapsing to the original {x:2,labelW:20} / {x:42,labelW:22}
 // placement at the floor. By construction the right column's swatch always ends exactly at
-// the column before the scrollbar, and the left column clears the right by one gap column,
-// so checkThemeEditorLayout's collision/label-fit invariants hold at every width ≥ 80.
+// the column before the scrollbar, and the left column clears the right by four gap columns
+// (issue #477), so checkThemeEditorLayout's collision/label-fit invariants hold at every
+// width ≥ 83.
 func resolveThemeEditorLayout(width, height int) themeEditorLayout {
 	extra := width - themeEditorDialogW
 	if extra < 0 {
@@ -296,8 +304,9 @@ func resolveThemeEditorLayout(width, height int) themeEditorLayout {
 
 	const leftX = 2
 	leftLabelW := themeEditorLeftLabelW + extraL
-	// One gap column between the left column's swatch and the right column's label.
-	rightX := leftX + leftLabelW + themeEditorFieldW + themeEditorSwatchW + 2 + 1
+	// Four gap columns between the left column's swatch and the right column's label
+	// (issue #477 widened this gutter from 1 to 4 for visual separation between the columns).
+	rightX := leftX + leftLabelW + themeEditorFieldW + themeEditorSwatchW + 2 + 4
 	rightLabelW := themeEditorLabelW + extraR
 
 	return themeEditorLayout{
@@ -307,15 +316,15 @@ func resolveThemeEditorLayout(width, height int) themeEditorLayout {
 		visibleRows: height - 3 - themeEditorButtonGap - themeEditorContentTop,
 		scrollbarX:  width - 3,
 		columns: []themeEditorColumn{
-			{leftX, leftLabelW, themeGroups[:2], 1},   // left: Session output, UI chrome (sectionPad=1 aligns UI chrome with Buttons and inputs)
-			{rightX, rightLabelW, themeGroups[2:], 0}, // right: Controls, Buttons and inputs, Code
+			{leftX, leftLabelW, themeGroups[:2], 2},   // left: Session output, UI chrome (sectionPad=2 aligns UI chrome with Buttons and inputs)
+			{rightX, rightLabelW, themeGroups[2:], 1}, // right: Controls, Buttons and inputs, Code (sectionPad=1 → 2 blank rows per gap)
 		},
 	}
 }
 
 // maxScroll is the largest valid scroll offset for this layout's viewport: 0 when the
 // content fits, otherwise the number of rows by which the tallest column overflows it. On
-// a tall (grown) dialog the content fits and this is 0 — no scrolling; at the 80×22 floor
+// a tall (grown) dialog the content fits and this is 0 — no scrolling; at the 83×22 floor
 // the #279/#291 roles overflow and it scrolls.
 func (l themeEditorLayout) maxScroll() int {
 	if m := themeEditorContentRows() - l.visibleRows; m > 0 {
@@ -335,10 +344,10 @@ func (l themeEditorLayout) clampScroll(y int) int {
 	return y
 }
 
-// themeEditorColumns is the two-column section placement at the 80×22 floor — the value
+// themeEditorColumns is the two-column section placement at the 83×22 floor — the value
 // the init-time layout guard (checkThemeEditorLayout) and the editor's layout tests read.
 // It is the floor case of resolveThemeEditorLayout, so the split point can never drift
-// from what the renderer draws on an 80-column terminal.
+// from what the renderer draws on an 83-column terminal.
 func themeEditorColumns() []themeEditorColumn {
 	return resolveThemeEditorLayout(themeEditorDialogW, themeEditorDialogH).columns
 }
@@ -375,7 +384,7 @@ func themeEditorContentRows() int {
 	return max
 }
 
-// themeEditorMaxScroll is the largest valid scroll offset at the 80×22 floor — the value
+// themeEditorMaxScroll is the largest valid scroll offset at the 83×22 floor — the value
 // the layout guard and the editor's scroll-math tests read. The renderer uses the live
 // layout's maxScroll method instead (issue #317).
 func themeEditorMaxScroll() int {
@@ -597,18 +606,18 @@ func (w *Workbench) showThemeEditor() {
 	// columns (see resolveThemeEditorLayout): the left column stacks Session output and UI
 	// chrome, the right column stacks Controls, Buttons and inputs and Code. Each section costs
 	// one header row plus its roles. With the #279/#291 roles added the columns are taller than
-	// fit between contentTop and the buttons at the 80×22 floor, so the section content lives
+	// fit between contentTop and the buttons at the 83×22 floor, so the section content lives
 	// inside a scrolling viewport (built below): the preset row and the Save/Reset/Cancel
 	// buttons stay fixed while the grouped rows scroll. On a larger terminal the dialog grows
 	// (issue #317), the viewport gains rows and the content stops needing to scroll.
 	// checkThemeEditorLayout (run at init) asserts the scroll model is self-consistent at the
 	// floor, so this renderer can trust the resolved geometry.
 
-	// Content-driven, floored at 80×22 (issues #317/#471): themeEditorDialogSpec pins the
+	// Content-driven, floored at 83×22 (issues #317/#471): themeEditorDialogSpec pins the
 	// width to the two-column content footprint and caps the height to the rows the roles
 	// need, so the editor sizes to its content instead of the 80%×85% percentage default
 	// (which ballooned it to 160×42 on a wide terminal). It still collapses to the documented
-	// 80×22 floor on a small terminal — where the scrolling viewport takes over — and is
+	// 83×22 floor on a small terminal — where the scrolling viewport takes over — and is
 	// centred (and re-centred on resize) like every other dialog (issue #299). The spec is
 	// static/path-independent, so the renderer reads the resolved width/height (not the
 	// compile-time constants) and the columns, scrollbar and viewport fill whatever the dialog
@@ -719,7 +728,7 @@ func (w *Workbench) showThemeEditor() {
 	// one role per row) and reflow() shifts and shows/hides them as scrollY changes, so rows
 	// outside the window are neither drawn, clicked nor focus-navigated. The columns and the
 	// scrollbar column come from the resolved layout (issue #317): the left column clears the
-	// right by one gap column and the right column's swatch ends just before layout.scrollbarX,
+	// right by four gap columns and the right column's swatch ends just before layout.scrollbarX,
 	// which holds the fixed scrollbar. fields[i]/swatches[i] stay keyed by the single flat
 	// themeRoles index, so the scrolling only changes where each row is drawn — Save still
 	// reads every field regardless of scroll position. checkThemeEditorLayout (init) guards
