@@ -16,10 +16,12 @@ The fix introduces a dedicated, retryable error class and a guard on both paths:
   **retry it inline** like the existing transient-failure paths (backoff + `continue`).
   After attempts are exhausted, return a clear `ErrorEmptyResponse` instead of the opaque
   unmarshal error.
-- **Streaming** (`parseOpenAIStream`): detect a stream that produced **nothing at all**
-  (no content, no tool calls, no finish reason, no usage) and surface `ErrorEmptyResponse`
-  instead of returning a silently-empty turn. (Streaming intentionally does **not** retry
-  — see Gate 3 — so it surfaces rather than retries.)
+- **Streaming** (`parseOpenAIStream`): detect a stream that produced **literally nothing**
+  — no content, no tool calls, **no reasoning/thinking deltas**, no finish reason, no usage
+  — and surface `ErrorEmptyResponse` instead of returning a silently-empty turn. The
+  reasoning channel is part of the conjunction: a reasoning-model stream that streamed
+  thinking and was then cut mid-turn is **not** empty and must not be flagged. (Streaming
+  intentionally does **not** retry — see Gate 3 — so it surfaces rather than retries.)
 
 The change is confined to `internal/model/connection.go`. No `adapter.go` change is
 required; turbotui is untouched; no new dependencies.
@@ -75,26 +77,47 @@ required; turbotui is untouched; no new dependencies.
    - `bytes` is already imported (used by `bytes.NewReader`). `bytes.TrimSpace` covers
      `""`, `"   "`, `"\n"` uniformly, satisfying the whitespace-only acceptance case.
 
-3. **Streaming guard** — in `parseOpenAIStream()` (~line 1476-1591), after the tool calls
-   are assembled (~line 1580) and **before** the terminal `streamCh <- StreamResponse{…
-   Done: true}` send (~1583), add:
-   ```go
-   // An OpenAI-compatible gateway can answer 200 then send a zero-length / immediately-
-   // closed stream. parseOpenAIStream would otherwise return ("", nil, nil) — a silently
-   // empty assistant turn. Treat a stream that produced literally nothing (no content, no
-   // tool calls, no finish reason, no usage) as an empty-response failure (issue #485).
-   // The conjunction is deliberately conservative: a model that legitimately finishes with
-   // empty content still sets a finish reason and/or usage, so it is NOT misflagged.
-   if content.Len() == 0 && len(toolCalls) == 0 && finishReason == nil && usage == nil {
-       return "", nil, &ModelError{
-           Type:    ErrorEmptyResponse,
-           Message: "model returned an empty response (streaming: no content, tool calls, usage, or finish reason)",
-       }
-   }
-   ```
+3. **Streaming guard** — in `parseOpenAIStream()` (~line 1476-1591):
+
+   a. **Accumulate reasoning** (the parser currently only *forwards* reasoning deltas on
+      `streamCh`; it never records whether any arrived). Next to `var content strings.Builder`
+      (~1487) add `var reasoning strings.Builder`, and in the reasoning-delta branch
+      (~1508-1512) write the delta into it before forwarding — mirroring how `content` is
+      both written and forwarded, and how the Anthropic parser already keeps a `thinkingBuf`
+      (adapter.go:621):
+      ```go
+      if r := ch.Delta.ReasoningContent; r != "" {
+          reasoning.WriteString(r)
+          streamCh <- StreamResponse{Reasoning: r, Role: ch.Delta.Role}
+      } else if r := ch.Delta.Reasoning; r != "" {
+          reasoning.WriteString(r)
+          streamCh <- StreamResponse{Reasoning: r, Role: ch.Delta.Role}
+      }
+      ```
+
+   b. **Detect the truly-empty stream** — after the tool calls are assembled (~line 1580)
+      and **before** the terminal `streamCh <- StreamResponse{… Done: true}` send (~1583):
+      ```go
+      // An OpenAI-compatible gateway can answer 200 then send a zero-length / immediately-
+      // closed stream. parseOpenAIStream would otherwise return ("", nil, nil) — a silently
+      // empty assistant turn. Treat a stream that produced LITERALLY NOTHING — no content,
+      // no tool calls, no reasoning, no finish reason, no usage — as an empty-response
+      // failure (issue #485). The reasoning term is essential: a reasoning-model stream that
+      // streamed thinking and was then cut before any finish/usage chunk is NOT empty
+      // (see TestCompleteWithToolsStreamCtxPartialStreamDeliversDeltas); omitting it would
+      // turn a previously-usable reasoning-only partial turn into a spurious error.
+      if content.Len() == 0 && reasoning.Len() == 0 && len(toolCalls) == 0 &&
+          finishReason == nil && usage == nil {
+          return "", nil, &ModelError{
+              Type:    ErrorEmptyResponse,
+              Message: "model returned an empty response (streaming: no content, reasoning, tool calls, usage, or finish reason)",
+          }
+      }
+      ```
    Returning before the terminal `Done` send means the consumer
    (`CompleteWithToolsStreamCtx` / `CompleteStream`) sees the error on `errCh` and does
-   **not** assemble a spurious empty completion.
+   **not** assemble a spurious empty completion. With the reasoning term, a reasoning-only
+   cut stream still falls through to the existing return and is delivered as before.
 
 ### No change required
 
@@ -156,19 +179,34 @@ The surfaced error is actionable and names the cause and attempt count
 (`"… (HTTP 200, 0 bytes) after 3 attempt(s)"`). Transient hiccups become invisible
 (auto-retry). The streaming path no longer **silently** swallows an empty turn — the right
 thing is surfaced rather than hidden. The error type `empty_response` is distinct and
-greppable for future telemetry.
+greppable for future telemetry. The streaming message is **accurate** because the guard
+fires only when *nothing at all* arrived: it enumerates every channel checked (content,
+reasoning, tool calls, usage, finish reason), so it can never mislabel a stream that did
+deliver thinking-only deltas as "empty".
 
 ### (3) No regressions
 - **Happy path unchanged**: a non-empty 200 still `break`s and parses exactly as before;
   the new branch only fires when `bytes.TrimSpace(bodyBytes)` is empty.
 - **Existing retry/parse tests**: `TestCompleteRetryByStatus` and friends drive non-200
   statuses and valid 200 bodies — untouched by this change. The new empty case is additive.
-- **Streaming false-positive guard**: the streaming detection requires **all four** of
-  (no content, no tool calls, no finish reason, no usage) to be empty/nil, so a legitimate
-  empty-content turn (which still carries a finish reason and/or usage) is **not**
-  misclassified. Existing stream tests (`stream_test.go`,
-  `stream_truncation_issue390_test.go`, `reasoning_stream_test.go`) all produce at least a
-  finish reason or content, so they remain green.
+- **Streaming false-positive guard**: the streaming detection requires **all five** of
+  (no content, no reasoning, no tool calls, no finish reason, no usage) to be empty/nil, so
+  a legitimate empty-content turn (which still carries a finish reason and/or usage) and a
+  **reasoning-only cut stream** (which carries reasoning) are both **not** misclassified.
+  Existing stream tests (`stream_test.go`, `stream_truncation_issue390_test.go`,
+  `reasoning_stream_test.go`) all produce at least content, a tool call, reasoning, a
+  finish reason, or usage, so they remain green.
+- **Reasoning-only partial stream preserved (the critical regression to avoid)**:
+  `TestCompleteWithToolsStreamCtxPartialStreamDeliversDeltas`
+  (`reasoning_stream_test.go:639`) feeds exactly one `reasoning_content` chunk then an
+  abrupt `Hijack`+`Close` — no content, tool calls, finish reason, or usage. Today this
+  returns a `*CompletionResponse{Reasoning:"partial reasoning"}` with **no error**. Because
+  the guard now includes `reasoning.Len() == 0` (step 3a accumulates it), the conjunction is
+  **false** for this stream, so it falls through to the existing
+  `return content.String(), usage, nil` path and the reasoning-bearing response is delivered
+  unchanged — the call still returns `(resp, nil)`, not `(nil, ErrorEmptyResponse)`. A guard
+  that omitted the reasoning term would silently flip this to `(nil, err)`, discarding the
+  thinking; that is the regression this design explicitly prevents.
 - **Streaming retry semantics preserved**: streaming deliberately does not retry (per the
   documented "a streamed response cannot be safely replayed mid-stream" contract on
   `CompleteWithToolsStreamCtx`); the fix **surfaces** `ErrorEmptyResponse` there rather
@@ -186,11 +224,13 @@ greppable for future telemetry.
   existing `maxAttempts`/`backoff`/`sleepCtx`/`ctxError` machinery rather than inventing a
   parallel retry mechanism. The error classification (`ModelErrorType`) is the established
   vocabulary for model failures and is the correct abstraction to extend.
-- **turbotui untouched**: turbotui is the sibling UI repo (read-only clone at
-  `$HOME/work/turbotui`). It consumes gogent only through gogent's already-stringified
-  error surface; `ModelError.Error()` formats the new type automatically, so the
-  improvement propagates to any UI **without** an API change, a `go.mod` bump, or a new
-  exported symbol turbotui must adopt. No new dependency in either repo.
+- **turbotui untouched and provably decoupled**: turbotui (read-only clone at
+  `$HOME/work/turbotui`) has **zero** `.go` references to `ModelError`, `ModelErrorType`,
+  `empty_response`, or `hobbestherat/gogent` — it does not import gogent's model layer at
+  all, so there is no compile-time seam to break. The new error type is internal to
+  `internal/model`; `ModelError.Error()` formats it automatically for any string-rendering
+  UI, with **no** API change, `go.mod` bump, or new exported symbol to adopt. No new
+  dependency in either repo.
 - **Downstream wrap chain** (`model_session.go` → `user_session.go` → `gogent.go` →
   `server/messages.go` → `ui/tui/api_client.go`) is pure `%w`/`%s` wrapping and needs no
   change; it simply now carries the clearer leaf message.
@@ -216,8 +256,16 @@ All use `httptest.NewServer` and `newTestConn(server.URL)` (backoff already disa
 5. **Non-empty happy path unaffected** — a single valid 200 parses and returns with
    exactly **one** request (no extra retries), guarding against accidental retry of good
    responses.
-6. **(Streaming sanity)** — a stream that carries a finish reason but empty content is
-   **not** flagged as empty (guards the conservative AND condition / false-positive case).
+6. **(Streaming sanity — finish reason)** — a stream that carries a finish reason but empty
+   content is **not** flagged as empty (guards the conjunction's `finishReason` term).
+7. **(Streaming sanity — reasoning-only cut, the Defect-A guard)** — a stream that delivers
+   only a `reasoning_content` delta then is cut (no content, tool calls, finish reason, or
+   usage) must **not** be flagged `ErrorEmptyResponse`: assert the call returns a
+   `*CompletionResponse` with `Reasoning != ""` and a **nil** error. (Directly exercises the
+   `reasoning.Len() == 0` term; without it this case regresses to `(nil, err)`. This is the
+   shape `TestCompleteWithToolsStreamCtxPartialStreamDeliversDeltas` already feeds, but that
+   test only asserts no-hang + sink delivery, so a dedicated `err == nil` assertion is added
+   here rather than relying on it.)
 
 ---
 
@@ -236,3 +284,16 @@ All use `httptest.NewServer` and `newTestConn(server.URL)` (backoff already disa
 3. **`adapter.go` defensiveness**: deliberately skipped (the connection-layer guard fully
    covers the empty case). Worth adding only if another caller bypasses `complete()` and
    feeds raw bytes to `parseResponse` — none does today.
+4. **Anthropic / Gemini *streaming* empty responses remain unguarded (intentional scope
+   line)**: the streaming guard is added only to `parseOpenAIStream`, which the issue names
+   explicitly and which is the path the reported gateways (OpenRouter, Z.AI, vLLM, LiteLLM)
+   use. The Anthropic (`adapter.go:598`) and Gemini (`adapter.go:1254`) `parseStream`
+   implementations still return `("", usage/nil, nil)` on an empty SSE. Their **blocking**
+   empty-200s *are* covered for free (the `complete()` guard is adapter-agnostic). A
+   universal streaming guard is **not** chosen here because the naive adapter-agnostic
+   alternative (a `full == "" && usage == nil && err == nil` check hoisted into
+   `completeStream`) reintroduces exactly Defect A: it cannot see the reasoning channel
+   (`full` is content only), so it would misflag reasoning-only cut streams on every
+   adapter. Per-parser reasoning-aware detection is the correct shape; extending it to the
+   Anthropic/Gemini parsers is deferred as out-of-scope for this issue (flagged for a
+   maybe-later, since no reported gateway uses those streaming paths).
