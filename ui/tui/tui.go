@@ -1263,6 +1263,16 @@ func (w *Workbench) copyToClipboard(text string) {
 	}
 }
 
+// SessionTitle returns the window title for an open session id, or "" when the id
+// is unknown. The handoff controller uses it to preserve a window's title when
+// creating its session on the daemon during an embedded->daemon handoff, mirroring
+// the title OnCreate carries on the auto-attach path. It delegates to the
+// unexported sessionTitle so the lookup has a single source of truth, and is the
+// public sibling of SessionIDs.
+func (w *Workbench) SessionTitle(id string) string {
+	return w.sessionTitle(id)
+}
+
 // sessionTitle returns a session's window title, or "" when it is unknown.
 func (w *Workbench) sessionTitle(id string) string {
 	w.mu.Lock()
