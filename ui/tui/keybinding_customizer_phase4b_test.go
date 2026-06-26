@@ -366,6 +366,47 @@ func TestKeybindingCustomizerBackspaceClearsBinding(t *testing.T) {
 	}
 }
 
+// TestKeybindingCustomizerCapturePromptFitsTwoRows guards issue #472: the capture-mode
+// prompt — "Press a key for %q…  (Esc cancel · Backspace clear)" — must stay fully
+// visible (its trailing "Backspace clear" unbind hint was the only place the UI
+// advertises unbinding) for the longest catalog action name at the floored dialog width.
+// The fix makes the status Label keybindStatusRows tall so the prompt wraps instead of
+// clipping; this pins both that the prompt genuinely needs more than one row (so the test
+// has teeth) and that it fits within the rows the Label now provides.
+func TestKeybindingCustomizerCapturePromptFitsTwoRows(t *testing.T) {
+	w := newTestWorkbench(t)
+
+	// Widest capture prompt across the whole rebindable catalog.
+	var longest action
+	for _, a := range w.actions() {
+		if tui.StringWidth(capturePrompt(a)) > tui.StringWidth(capturePrompt(longest)) {
+			longest = a
+		}
+	}
+	prompt := capturePrompt(longest)
+	if !strings.Contains(prompt, "Backspace clear") {
+		t.Fatalf("capture prompt no longer advertises the unbind hint: %q", prompt)
+	}
+
+	// Status Label inner width at the keybindingsDialogSpec MinW floor (58): Rect{W: width-4}.
+	const floorInnerW = 58 - 4 // 54
+	pw := tui.StringWidth(prompt)
+
+	// Premise: the longest prompt does NOT fit one row — that was the bug, the trailing
+	// "Backspace clear" clipped off the right edge.
+	if pw <= floorInnerW {
+		t.Fatalf("longest prompt %q is %d cells; expected it to exceed the %d-cell one-row floor (test would be vacuous)", prompt, pw, floorInnerW)
+	}
+	// Fix: the status Label is >= 2 rows, and the prompt fits within them so the full hint
+	// is visible. (A regression to a one-row Label reintroduces the clip.)
+	if keybindStatusRows < 2 {
+		t.Fatalf("keybindStatusRows = %d, want >= 2 so the capture prompt wraps instead of clipping (issue #472)", keybindStatusRows)
+	}
+	if pw > keybindStatusRows*floorInnerW {
+		t.Fatalf("longest prompt %q is %d cells; exceeds keybindStatusRows(%d) × %d-cell rows — the status Label would still clip", prompt, pw, keybindStatusRows, floorInnerW)
+	}
+}
+
 func TestKeybindingCustomizerResetSelectedAndResetAll(t *testing.T) {
 	w := newTestWorkbench(t)
 	w.openWindow("s", "S")
