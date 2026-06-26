@@ -323,7 +323,10 @@ GetModelCatalog: func(force bool) (modelsdev.Catalog, error) { return mdc.Catalo
 
 ### 5.4 `ui/tui/remote_handlers.go` (after `ScanModels`, ~line 782)
 ```go
-home, _ := os.UserHomeDir()
+home, err := os.UserHomeDir()
+if err != nil || home == "" {
+    home = "." // last-resort cache dir so a missing HOME degrades to cwd, not ""
+}
 mdc := modelsdev.NewClient(home)   // public data; cache lives on the client host
 ...
 AddModel: func(m config.ModelConfig) error { return c.AddModel(m) },
@@ -350,10 +353,33 @@ brand-new user — the catalog flow must work from zero models).
 
 ### 6.2 Wizard = three modal layers built from existing primitives (NO new widget)
 
-**Step 1 — Provider picker** (`showAddModelDialog`):
-- Fetch catalog: `cat, err := w.handlers.GetModelCatalog(false)`.
-  - error + no usable data → `showConfirm` explaining offline, offer to open the
-    manual editor instead (graceful degradation; feature never blocks).
+**Catalog fetch is asynchronous (must not block the UI thread).** `GetModelCatalog`
+can do a multi-second live `GET https://models.dev/api.json` on a cold/stale cache
+(the very size that justifies caching) — running that on the event thread would
+freeze the TUI, worst on the Pi5 target, and is exactly what the existing editor
+avoids ("Query off the UI thread so a slow backend can't freeze the dialog,"
+`model_editor.go:223`). So the wizard fetches off-thread, mirroring `scanModels`
+(`model_editor.go:215-241`):
+
+1. `showAddModelDialog` first shows a small **"Loading catalog…"** modal layer
+   (a label + Cancel), then spawns `go func(){ cat, err := w.handlers.GetModelCatalog(force); w.desktop.Post(func(){ … }) }()`.
+2. In the posted callback (back on the UI thread): remove the loading layer, then
+   - **success** → open the Step-1 provider picker built from `cat`;
+   - **error + no usable cache** → `showConfirm` explaining offline, offer to open
+     the manual editor instead (graceful degradation; the feature never blocks);
+   - **stale/offline-with-cache** → open the picker over the cached catalog with a
+     non-blocking "(offline — cached)" note in the title.
+3. The **"Refresh catalog"** button reuses the *same* async path with `force=true`
+   (loading layer → goroutine → `Post` rebuilds the open picker's options). It never
+   blocks; Cancel on the loading layer abandons the refresh and keeps the current
+   list. (The warm-cache path still decodes the cache file in the goroutine, so even
+   that small cost is off-thread.)
+
+The provider/model `Catalog` value is fetched **once** at wizard entry and reused
+for Step 1 → Step 2 (Step 2 just indexes `cat[providerID].Models` in memory — no
+second fetch).
+
+**Step 1 — Provider picker** (built in the success callback above):
 - A **filter `TextBox`** above a **`Select`** of provider rows
   `"<name> — env: <ENV_VAR>"` sorted by name. Each row shows the provider name and
   the credential env var so the user knows what to have ready.
@@ -369,8 +395,9 @@ brand-new user — the catalog flow must work from zero models).
   Initial focus is the TextBox. This is "type in the box to filter," not "type
   anywhere." The narrowed Select still scrolls (scrollbar, `widget_select.go:263`),
   so a few hundred options remain navigable once filtered.
-- "Refresh catalog" button → `GetModelCatalog(true)` then rebuild the list.
-- Next → Step 2 with the chosen provider id.
+- "Refresh catalog" button → the async `force=true` path above, then rebuild the
+  list in the posted callback (never on-thread).
+- Next → Step 2 with the chosen provider id (same in-memory `cat`).
 
 **Step 2 — Model picker:** same filter+Select pattern over
 `cat[providerID].Models`. Each row: `"<DisplayName>  · ctx <Nk> · out <Nk> [· reasoning] [· free]"`.
@@ -395,8 +422,11 @@ Pre-filled from `modelsdev.ToModelConfig(providerID, p, m)` with
 `Name = UniqueName(…, takenNames)`:
 - **Name** — shown read-only (generated, unique) with an "Edit" toggle; conflict is
   surfaced live (re-suffix if the user types a colliding name).
-- **API type** — read-only label "from catalog" (the existing api-type `Select`
-  pre-selected, disabled).
+- **API type** — read-only "from catalog". Render as a plain `Label` showing the
+  derived api_type (e.g. `openai  (from catalog)`), **not** a disabled `Select`:
+  turbotui's `Select` exposes no disabled state, so a static label is the reliable
+  read-only affordance (and avoids a focusable control the user can't meaningfully
+  change). The value is carried in the draft, not re-read from a widget.
 - **Display name, Endpoint, Model id, Temperature, Max tokens, Reasoning, Thinking**
   — auto-filled, **fully editable**. Model id offers a **"Scan"** button (same
   `handlers.ScanModels` draft-probe as the editor) to swap to a live dropdown —
@@ -479,9 +509,13 @@ surface the **env var** so the user has the right credential ready; model rows
 surface ctx/output/reasoning/free at a glance. The review step is **fully
 editable** — auto-fill is a starting point, not a lock-in. Failures are surfaced
 (offline banner, 409 conflict inline, missing-key validation), never swallowed.
-Cache + manual **Refresh** keep it fast; offline degrades to cache then to the
-manual editor. Works from **zero** configured models (menu/palette entry bypasses
-the editor's "No models configured" early-return).
+The catalog fetch is **off the UI thread** behind a "Loading catalog…" state
+(mirroring `model_editor.go:223`), so a cold/slow models.dev pull on the Pi5 never
+freezes the TUI; the same async path backs "Refresh catalog". Cache + manual
+**Refresh** keep repeat opens fast; offline degrades to cache then to the manual
+editor. The review step's Scan button is gated until a credential is present (it
+would otherwise 401 on the keyless draft). Works from **zero** configured models
+(menu/palette entry bypasses the editor's "No models configured" early-return).
 
 ### (3) No regressions
 `UpdateModel`/`Models`/`ScanModels`/`SetDefaultModel` and the GET/PUT/scan
