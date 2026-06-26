@@ -588,6 +588,13 @@ const (
 	ErrorConnection         ModelErrorType = "connection"
 	ErrorRateLimit          ModelErrorType = "rate_limit"
 	ErrorContextLengthLimit ModelErrorType = "context_length_limit"
+	// ErrorEmptyResponse is returned when the backend replies 200 OK with an empty
+	// or whitespace-only body (blocking) or a stream that yields no content,
+	// reasoning, tool calls, usage, or finish reason at all (streaming). It is a
+	// known-transient failure mode of OpenAI-compatible gateways (OpenRouter, Z.AI,
+	// vLLM, LiteLLM, …) that answer 200 then close early / send a zero-length body;
+	// the blocking path retries it up to maxAttempts before surfacing it (issue #485).
+	ErrorEmptyResponse ModelErrorType = "empty_response"
 )
 
 type ModelError struct {
@@ -1348,6 +1355,23 @@ func (c *ModelConnection) complete(ctx context.Context, messages []Message, stre
 		}
 
 		if resp.StatusCode == http.StatusOK {
+			if len(bytes.TrimSpace(bodyBytes)) == 0 {
+				// Empty/whitespace-only 200 from an OpenAI-compatible gateway: a transient
+				// transport hiccup (early close / zero-length body), NOT a real completion.
+				// Retry with backoff while attempts remain rather than break-and-parse,
+				// which would otherwise unmarshal "" into `unexpected end of JSON input`
+				// and abort the turn on the first attempt (issue #485).
+				if attempt < attempts-1 {
+					if !sleepCtx(ctx, c.backoff(attempt, retryAfter)) {
+						return nil, ctxError(ctx)
+					}
+					continue
+				}
+				return nil, &ModelError{
+					Type:    ErrorEmptyResponse,
+					Message: fmt.Sprintf("model returned an empty response (HTTP 200, 0 bytes) after %d attempt(s)", attempts),
+				}
+			}
 			break
 		}
 
@@ -1485,6 +1509,7 @@ func parseOpenAIStream(body io.Reader, streamCh chan<- StreamResponse) (string, 
 	var order []int
 
 	var content strings.Builder
+	var reasoning strings.Builder
 	var usage *TokenUsage
 	var finishReason *string
 
@@ -1506,8 +1531,10 @@ func parseOpenAIStream(body io.Reader, streamCh chan<- StreamResponse) (string, 
 					// reasoning_content (Z.AI/GLM, DeepSeek) and reasoning (OpenRouter)
 					// are alternative names for the same channel; prefer whichever is set.
 					if r := ch.Delta.ReasoningContent; r != "" {
+						reasoning.WriteString(r)
 						streamCh <- StreamResponse{Reasoning: r, Role: ch.Delta.Role}
 					} else if r := ch.Delta.Reasoning; r != "" {
+						reasoning.WriteString(r)
 						streamCh <- StreamResponse{Reasoning: r, Role: ch.Delta.Role}
 					}
 					if ch.Delta.Content != "" {
@@ -1577,6 +1604,23 @@ func parseOpenAIStream(body io.Reader, streamCh chan<- StreamResponse) (string, 
 			Function:  FunctionCall{Name: acc.name, Arguments: args},
 			Truncated: truncatedTurn && argsTruncated(args),
 		})
+	}
+
+	// An OpenAI-compatible gateway can answer 200 then send a zero-length /
+	// immediately-closed stream; parseOpenAIStream would otherwise return
+	// ("", nil, nil) — a silently empty assistant turn. Treat a stream that
+	// produced LITERALLY NOTHING — no content, no reasoning, no tool calls, no
+	// finish reason, no usage — as an empty-response failure (issue #485). The
+	// reasoning term is essential: a reasoning-model stream that streamed thinking
+	// and was then cut before any finish/usage chunk is NOT empty (see
+	// TestCompleteWithToolsStreamCtxPartialStreamDeliversDeltas); omitting it would
+	// turn a previously-usable reasoning-only partial turn into a spurious error.
+	if content.Len() == 0 && reasoning.Len() == 0 && len(toolCalls) == 0 &&
+		finishReason == nil && usage == nil {
+		return "", nil, &ModelError{
+			Type:    ErrorEmptyResponse,
+			Message: "model returned an empty response (streaming: no content, reasoning, tool calls, usage, or finish reason)",
+		}
 	}
 
 	// One authoritative end-of-stream event.
