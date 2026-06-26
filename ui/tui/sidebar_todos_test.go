@@ -35,6 +35,8 @@ func TestApplyTodoStoresNotTreeChildren(t *testing.T) {
 		t.Fatalf("s.todos[s1] = %d items, want 3", got)
 	}
 	// No todo nodes were attached to the session: the tree half is agents only.
+	// Since issue #484 a session only gains a synthetic status-bar child once it
+	// has a sub-agent, and applyTodo never creates one, so the count is still 0.
 	if n := len(s.sessions["s1"].Children); n != 0 {
 		t.Fatalf("session node has %d children after applyTodo, want 0 (todos must not be tree children)", n)
 	}
@@ -42,10 +44,16 @@ func TestApplyTodoStoresNotTreeChildren(t *testing.T) {
 		t.Fatalf("s.agents = %d, want 0 (todos must not register as agents)", len(s.agents))
 	}
 	// Sanity check the other direction: a sub-agent is still a tree child, so
-	// the test is actually exercising the todo path's distinctness.
+	// the test is actually exercising the todo path's distinctness. Count REAL
+	// (nodeRef) children rather than raw len: issue #484 also prepends a synthetic
+	// status-bar node (child[0]) to every session that has a sub-agent, so the raw
+	// child count is now statusNode + agent (= 2), but only one is a real agent row.
 	s.applySubAgent("s1", agent.SessionEvent{AgentID: "a1", Name: "worker", Status: agent.StatusRunning})
-	if n := len(s.sessions["s1"].Children); n != 1 {
-		t.Fatalf("sub-agent should add 1 tree child, got %d", n)
+	if n := countNodeRefChildren(s.sessions["s1"]); n != 1 {
+		t.Fatalf("sub-agent should add 1 real (nodeRef) tree child, got %d", n)
+	}
+	if _, ok := s.sessions["s1"].Children[0].Data.(syntheticRef); !ok {
+		t.Fatalf("child[0] should be the synthetic status-bar node after a sub-agent (issue #484), got %T", s.sessions["s1"].Children[0].Data)
 	}
 }
 
