@@ -44,7 +44,9 @@ func TestAPIClientSendMessageAndStreamEvents(t *testing.T) {
 				Authorization: r.Header.Get("Authorization"),
 				Body:          body,
 			}
-			_ = json.NewEncoder(w).Encode(MessageDTO{Role: "assistant", Content: "ok"})
+			// Issue #481: the send response carries the dispatched turn id, not the
+			// final answer (which arrives over SSE).
+			_ = json.NewEncoder(w).Encode(map[string]string{"turnId": "turn_test123"})
 		case "/api/events":
 			if got := r.Header.Get("Accept"); got != "text/event-stream" {
 				t.Errorf("Accept = %q, want text/event-stream", got)
@@ -78,8 +80,11 @@ func TestAPIClientSendMessageAndStreamEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
-	if msg.Content != "ok" {
-		t.Fatalf("send response content = %q, want ok", msg.Content)
+	if msg.TurnID != "turn_test123" {
+		t.Fatalf("send response turnId = %q, want turn_test123", msg.TurnID)
+	}
+	if msg.Content != "" {
+		t.Fatalf("send response content = %q, want empty (issue #481: final answer arrives over SSE)", msg.Content)
 	}
 	select {
 	case rec := <-records:

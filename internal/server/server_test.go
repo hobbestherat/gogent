@@ -10,7 +10,9 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
+	"gogent/internal/agent"
 	"gogent/internal/gogent"
 )
 
@@ -177,7 +179,11 @@ func TestGetUnknownSession404(t *testing.T) {
 	}
 }
 
-func TestSendMessageBlocking(t *testing.T) {
+// TestSendMessageAccepted covers the issue #481 contract: Send is non-blocking —
+// it returns 200 with an acceptedView carrying the dispatched turn id, and the
+// final answer now arrives over the SSE hub (not the response body). (The framework
+// cannot emit a literal 202 for a JSON body, so the status is 200; see design §2.)
+func TestSendMessageAccepted(t *testing.T) {
 	srv, _, _ := newTestServer(t, Options{Password: "x"})
 
 	// Create + send a message in one flow.
@@ -186,17 +192,33 @@ func TestSendMessageBlocking(t *testing.T) {
 	var created sessionView
 	_ = json.Unmarshal(rec.Body.Bytes(), &created)
 
+	// Subscribe before sending so the terminal event is not missed.
+	sub, unsub := srv.hub.subscribeSession(created.ID)
+	defer unsub()
+
 	msg := strings.NewReader(`{"message":"hi"}`)
 	rec = serveOne(t, srv, loopbackReq(http.MethodPost, "/api/sessions/"+created.ID+"/messages", msg))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("send status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	var resp messageView
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("invalid message JSON: %v", err)
+	var acc acceptedView
+	if err := json.Unmarshal(rec.Body.Bytes(), &acc); err != nil {
+		t.Fatalf("invalid accepted JSON: %v", err)
 	}
-	if !strings.Contains(resp.Content, "fake model") {
-		t.Fatalf("content = %q, want it to mention the fake model", resp.Content)
+	if acc.TurnID == "" {
+		t.Fatalf("accepted response has no turn id; body=%s", rec.Body.String())
+	}
+
+	// The final answer arrives over the hub, stamped with the dispatched turn id.
+	term := awaitEvent(t, sub, func(ev agent.SessionEvent) bool { return isTerminal(ev) }, 3*time.Second)
+	if term.Type != agent.SessionEventFinal {
+		t.Fatalf("terminal event = %s, want final", term.Type)
+	}
+	if !strings.Contains(term.Text, "fake model") {
+		t.Fatalf("final text = %q, want it to mention the fake model", term.Text)
+	}
+	if term.TurnID != acc.TurnID {
+		t.Fatalf("final turn id = %q, want %q", term.TurnID, acc.TurnID)
 	}
 }
 
