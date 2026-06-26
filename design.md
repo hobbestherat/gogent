@@ -80,15 +80,16 @@ shards still load; turbotui is untouched; no new dependencies.
   `encodeTurnMeta` was O(N) per save → O(N²) over a session, on the Pi5 target.
   `GetHistoryFrom` copies only the 0–few-element delta, matching the
   `encodeMessages`/`from` pattern. (`GetHistory()` stays for existing callers.)
-- **`RestoreHistoryMeta(turns []Turn, seedTokenCount bool)` (new).** Restore-seed:
-  replaces `s.History` with the reconstructed per-round-trip `Turn`s (only
-  `Usage`/`Error`/`Timestamp` populated; `Request` left nil — never persisted).
-  When `seedTokenCount` is true it also sets
-  `s.CurrentTokenCount = lastUsageTotal(s.History)` (existing helper, L390). The
-  caller passes `seedTokenCount=false` for multi-shard sessions — see §2.1 (the
-  restore-drives-compaction guard). This is the meta-stream analogue of
-  `ReplaceTranscript`; restoring `History` to the persisted length is **required**,
-  not cosmetic, for the next delta to be correct (see "Restore alignment").
+- **`RestoreHistoryMeta(turns []Turn)` (new).** Restore-seed: replaces `s.History`
+  with the reconstructed per-round-trip `Turn`s (only `Usage`/`Error`/`Timestamp`
+  populated; `Request` left nil — never persisted) and sets
+  `s.CurrentTokenCount = lastUsageTotal(s.History)` (existing helper, L390) so the
+  reopened window shows context usage immediately, before the first new turn. This
+  is the meta-stream analogue of `ReplaceTranscript`; restoring `History` to the
+  persisted length is **required**, not cosmetic, for the next delta to be correct
+  (see "Restore alignment"). **Note** the count it sets is re-derived identically by
+  `Resume` on the first turn — see §2.1 for that interaction and why there is no
+  `seedTokenCount` toggle.
 
 `Turn.Usage`/`Turn.Error` already exist; the only struct change is the added
 `Timestamp`.
@@ -102,12 +103,15 @@ shards still load; turbotui is untouched; no new dependencies.
   Err   *turnError        `json:"error,omitempty"`
   At    string            `json:"at,omitempty"` // RFC3339; from Turn.Timestamp
   ```
-  New `turnError` payload (store-local): `Type string`, `Message string`,
-  `HTTPStatusCode int`, `RawResponse string` (**truncated** to a cap, e.g. 8 KiB,
-  to bound shard growth from a large error body). Kinds: `"usage"` and
-  `"turn_error"`. `TokenUsage` already has clean JSON tags (its own doc says they
-  exist "to keep it round-tripping through gogent's persistence"), so it serializes
-  directly.
+  New `turnError` payload (store-local) is the **pure failure** shape: `Type
+  string`, `Message string`, `HTTPStatusCode int`, `RawResponse string`
+  (**truncated** to a cap, e.g. 8 KiB, to bound shard growth from a large error
+  body) — **no usage field**. Kinds: `"usage"` and `"turn_error"`. A `turn_error`
+  record carries any error-path usage via the record's **top-level** `Usage` field
+  (the same field a `usage` record uses), not inside `turnError` — so the failure
+  payload stays clean and the reader reads `rec.Usage` uniformly for both kinds.
+  `TokenUsage` already has clean JSON tags (its own doc says they exist "to keep it
+  round-tripping through gogent's persistence"), so it serializes directly.
 - **`persistState` (L193–198).** Add `metaPersisted map[string]int` (agentID →
   count of `History` turns already emitted as meta records) — the meta-stream twin
   of `persisted`. No epoch needed: `History` is append-only (compaction rewrites
@@ -115,9 +119,9 @@ shards still load; turbotui is untouched; no new dependencies.
 - **`encodeTurnMeta(enc, agents, from func(aid string) int) (int, error)` (new).**
   For each agent, iterate `a.ThoughtTrain.GetHistoryFrom(from(aid))` (the bounded
   copy) and emit **one record per turn that has usage or an error**: a `turn_error`
-  record when `Turn.Error != nil` (embedding `Usage` too on the off chance it is
-  present), otherwise a `usage` record when `Turn.Usage != nil`; `At` =
-  `Turn.Timestamp.Format(time.RFC3339)`. Marshal errors are `errors.Join`-aggregated
+  record when `Turn.Error != nil` (also setting the record's top-level `Usage` on
+  the off chance it is present), otherwise a `usage` record when `Turn.Usage != nil`;
+  `At` = `Turn.Timestamp.Format(time.RFC3339)`. Marshal errors are `errors.Join`-aggregated
   exactly like `encodeMessages` (issue-#17 "never lose a line"). Called from **both**
   write paths into the **same buffer** as `encodeMessages`, so meta lines ride the
   existing shard-append/roll machinery unchanged:
@@ -143,10 +147,11 @@ shards still load; turbotui is untouched; no new dependencies.
   restored agent (twin of the existing `st.persisted` line) so the next save is a
   correct meta delta.
 - **`LoadedSession` (L201).** Add `RootHistory []model.Turn` (root agent's
-  reconstructed `Turn`s — Usage/Error/Timestamp only) and `ShardCount int` (from
-  `len(idx.Shards)`, for the §2.1 guard). Only root is reconstructed, matching the
-  existing transcript restore which seeds only `Transcripts["root"]`. Populated in
-  `ListActive` and `LoadSession`.
+  reconstructed `Turn`s — Usage/Error/Timestamp only). Each is built from a meta
+  record as `Turn{Usage: rec.Usage, Error: fromTurnError(rec.Err), Timestamp:
+  parse(rec.At)}`. Only root is reconstructed, matching the existing transcript
+  restore which seeds only `Transcripts["root"]`. Populated in `ListActive` and
+  `LoadSession`.
 
 **`shardMeta.Events` (critique §3.2 — corrected reasoning).** `Events` now counts
 message **and** meta records. This is correct for shard rolling: `writeLinesToShards`
@@ -184,10 +189,9 @@ for this issue.
   reads `ag.ThoughtTrain`'s last `Turn.Error` so the live `HookError` event also
   carries the typed classification; the persisted record is correct regardless.)
 - **`adoptLoaded` (L1807–1853).** After `sess.ReplaceTranscript(msgs)`, also
-  `sess.RestoreHistoryMeta(ls.RootHistory, ls.ShardCount <= 1)` so a restored
-  session reconstructs the failure indicator (last `Turn.Error`) and — for the
-  common **single-shard** case — token accounting (`CurrentTokenCount`). See §2.1
-  for why multi-shard passes `false`.
+  `sess.RestoreHistoryMeta(ls.RootHistory)` so a restored session reconstructs the
+  failure indicator (last `Turn.Error`) and token accounting (`CurrentTokenCount`).
+  See §2.1 for the interaction with `Resume` on the first restored turn.
 
 ### 4. Read-only context (NOT edited)
 
@@ -227,31 +231,57 @@ connector and labelled as forward-compatible — see Tests).
 
 ---
 
-## §2.1 — Restore must not spuriously trigger compaction
+## §2.1 — Restore, the `Resume` interaction, and first-turn compaction
 
 `compactIfNeeded` (`user_session.go:1721`) runs `NeedsCompression()`
 (`model_session.go:272`) at the **top of every turn** (`1315`/`1352`), testing
-`CurrentTokenCount >= 80% of the window`. Today a restored session has
-`CurrentTokenCount == 0`, so it never compacts until real usage accumulates.
-Restoring the count changes that, so we bound it:
+`CurrentTokenCount >= 80% of the window`. Today a restored session has empty
+`History` → `CurrentTokenCount == 0`, so it never compacts until real usage
+accumulates. Reconstructing `History` (which we **must** do for the failure
+indicator and meta-frontier alignment) changes that, and the change is **not**
+something a restore-time flag can gate — because `Resume` owns the count at turn
+time:
+
+- The first new message enters `SendMessageToSessionWithModelAndEffort`, which calls
+  `ag.ThoughtTrain.Resume(newModel)` (`gogent.go:2564`).
+- `buildConnection` (`gogent.go:1540-1546`) returns a **fresh** `*ModelConnection`
+  every call (no caching; the codebase documents "gogent rebuilds the connection on
+  each send"), so `newModel != prev` holds on the first restored turn.
+- `Resume` therefore executes `s.CurrentTokenCount = lastUsageTotal(s.History)`
+  (`model_session.go:381`), re-deriving the count from the reconstructed `History`
+  **regardless** of what `RestoreHistoryMeta` set. A `seedTokenCount=false` toggle
+  would be a no-op, so it is **removed** from the design (it was inert).
+
+So restoring `History` restores the token count for **all** reopened sessions via
+the existing `Resume` path — which is exactly the "context-size accounting lost"
+bug #487 is meant to fix. We **own** this consequence rather than pretend to gate
+it:
 
 - **Single-shard session (the common case):** the restored transcript is the
-  *complete* transcript, so `CurrentTokenCount` and the transcript agree. Seeding
-  the count is correct, and if the session is genuinely near capacity, compacting on
-  the first new message is the **right** behavior (it pre-empts an overflow). We
-  seed it (`seedTokenCount=true`).
-- **Multi-shard session:** restore is current-shard-only (`session_store.go:944`),
-  so the live transcript is a *partial* recent slice while `lastUsageTotal` reflects
-  the *full* pre-rollover context. Seeding the full count against a short transcript
-  could fire a spurious summarization on the first message (which would then
-  summarize only the recent slice and self-correct the count downward). To avoid
-  this mismatch we pass `seedTokenCount=false`, preserving today's behavior (count
-  starts at 0, re-measured by the first real round-trip). The failure indicator and
-  `History` are still reconstructed; only the count seed is withheld.
+  *complete* transcript, so the re-derived `CurrentTokenCount` agrees with it. If the
+  session is genuinely near capacity, compacting on the first new message is the
+  **correct** behavior (it pre-empts an overflow) — an improvement over today's
+  "count silently 0," not a regression.
+- **Multi-shard session (>5000 records or >10 MiB — uncommon):** restore is
+  current-shard-only (`session_store.go:944`), so the live transcript is a *partial*
+  recent slice while `lastUsageTotal` reflects the *full* pre-rollover context. A
+  near-capacity such session may therefore summarize on the first reopened message.
+  This is **bounded and self-correcting**: compaction summarizes the loaded recent
+  slice and immediately recomputes `CurrentTokenCount` from that slice
+  (`ApplyCompressedTranscript`), so the overstatement lasts at most one turn. It is
+  also **consistent** with the deliberate current-shard-only restore (issue #26): the
+  recent slice *is* the working context, so compacting it to continue is reasonable.
 
-`ShardCount` on `LoadedSession` (from the index's shard table) drives the choice in
-`adoptLoaded`. This is the only behavioral interaction the count-restore has with
-the rest of the system, and it is now explicitly handled.
+We document this as known/bounded rather than guard it, because a working guard is
+not cheap: withholding the seed cannot survive `Resume`; a `compressSuppressed`-style
+restore flag is cleared by the first turn's `SetMaxContextLength(window)`
+(`gogent.go:2569`, which clears the flag whenever the window differs from the
+`NewModelSession` default of 4096 — `model_session.go:188`); and reconstructing
+multi-shard `History` *without* `Usage` (to force `lastUsageTotal == 0`) would
+corrupt the next compaction full-rewrite, which re-emits every `History` turn's
+usage record from index 0. The bounded one-turn overstatement is the right
+trade-off against that complexity, and it only touches the rare multi-shard
+near-capacity reopen.
 
 ---
 
@@ -285,9 +315,9 @@ active-shard-scoped and mutually consistent.
 The partial transcript (user + tool-call + tool-result + 2nd user message) is
 present, the first round-trip's usage is present, and the failing round-trip's
 classified error is present. **Note:** the `turn_error` record above carries **no**
-`usage` block — that matches production, where the failed round-trip's `resp` is nil
-(§1.1). A `usage` block inside a `turn_error` record only appears if a future
-connector returns usage-with-error.
+top-level `usage` field — that matches production, where the failed round-trip's
+`resp` is nil (§1.1). A `turn_error` record only also carries a `usage` field if a
+future connector returns usage-with-error.
 
 ---
 
@@ -305,14 +335,14 @@ Out-of-scope items (auto-compaction, refusal handling, index layout, live event
 stream) are untouched.
 
 ### (2) Usability — the right thing is surfaced — **addressed**
-A previously-failed session reopens with its error and (single-shard) token figures
-reconstructed instead of a bare idle prompt. A worker can debug from the `.jsonl`
-alone — error class, HTTP status, message, the tool calls/results that led there,
-and the timestamped per-round-trip usage. The one behavioral interaction of
-count-restore (compaction) is now bounded (§2.1): legitimate for single-shard
-near-capacity sessions, suppressed for the multi-shard partial-transcript case.
-Drawing a TUI marker from the restored state is the optional follow-up the issue
-scopes out; the state needed to draw it is present.
+A previously-failed session reopens with its error and token figures reconstructed
+instead of a bare idle prompt. A worker can debug from the `.jsonl` alone — error
+class, HTTP status, message, the tool calls/results that led there, and the
+timestamped per-round-trip usage. The one behavioral consequence of count-restore
+(first-turn compaction via `Resume`) is analyzed and owned in §2.1: correct for the
+common single-shard case; bounded and self-correcting for the rare multi-shard
+near-capacity case. Drawing a TUI marker from the restored state is the optional
+follow-up the issue scopes out; the state needed to draw it is present.
 
 ### (3) No regressions — **addressed**
 - **Happy path unchanged on disk:** message records byte-identical (new fields
@@ -328,7 +358,10 @@ scopes out; the state needed to draw it is present.
   map; meta records route to the meta map — no zero-value `Message` injection.
 - **`Events` count (§3.2):** corrected reasoning — byte/event caps are independent,
   so the `Messages`-figure shift is purely cosmetic, not a roll desync.
-- **Compaction on restore (§2.1):** analyzed and guarded.
+- **Compaction on restore (§2.1):** analyzed and owned — the existing `Resume`
+  re-derives the count from the reconstructed `History` every turn, so the count is
+  restored for all sessions; first-turn compaction is correct for single-shard and
+  bounded/self-correcting for the rare multi-shard near-capacity reopen.
 - **Invariants preserved:** delta/full-rewrite/epoch logic, shard rolling, and the
   issue-#17 `errors.Join` aggregation all extend to meta records unchanged. No new
   lock ordering: `encodeTurnMeta`'s `GetHistoryFrom` takes `s.mu` under the store
@@ -336,7 +369,8 @@ scopes out; the state needed to draw it is present.
 - **Tests:** `go build/vet/gofmt/golangci-lint` clean; `go test ./...` (no `-race`,
   Pi5) green except the pre-existing environmental `TestUserSessionSendMessage` 404.
   Any existing test asserting `CurrentTokenCount == 0` after restore now sees a real
-  count for single-shard sessions (intended improvement; update if present).
+  count for sessions that have on-disk usage records (intended improvement; update
+  if present).
 
 ### (4) Holistic across both repos — **OK**
 Confined to gogent's persistence + model-session seam. **turbotui owns no session
@@ -374,8 +408,11 @@ request. `Type` persisted verbatim → #485-compatible. Persist-on-error works w
   only; not a roll desync — §3.2).
 - **Shard size** grows ~1 small line per round-trip plus, on failures, a truncated
   raw-response blob (≤8 KiB). Bounded, far below the 10 MiB roll cap.
-- **Restored token count** is recovered only for single-shard sessions (§2.1);
-  multi-shard and pre-change sessions keep today's 0-until-first-turn behavior.
+- **Restored token count** is now recovered for all reopened sessions (via the
+  reconstructed `History` + `Resume`), replacing today's silent-0. For a *near-
+  capacity multi-shard* session this can trigger one summarization on the first
+  reopened message against the partial loaded slice — bounded and self-correcting
+  (§2.1). Pre-change sessions (no usage records on disk) still restore to 0.
 - **`RawResponse` may contain sensitive provider output.** Truncation bounds size;
   full redaction is out of scope but the cap is the hook for a later policy.
 
@@ -396,9 +433,12 @@ request. `Type` persisted verbatim → #485-compatible. Persist-on-error works w
      labelled in the test as exercising the guard, **not** current real-provider
      behavior (real connectors return nil `resp` on error).
 3. **Restore — failure.** A session whose last turn failed reloads with `History`
-   reconstructed: last `Turn.Error` set; for a single-shard fixture
-   `CurrentTokenCount` non-zero; for a multi-shard fixture `CurrentTokenCount`
-   stays 0 (the §2.1 guard) — not a bare idle session either way.
+   reconstructed: last `Turn.Error` set and `CurrentTokenCount` seeded from
+   `lastUsageTotal` (non-zero when prior round-trips reported usage) — not a bare
+   idle session. A companion assertion covers the §2.1 `Resume` interaction: after
+   the first new turn the count is re-derived from the reconstructed `History`
+   (same value), confirming restored accounting survives the per-turn connection
+   rebuild.
 4. **Backward-compat.** A hand-written shard containing only `Kind:"message"`
    records loads cleanly (no meta → no-op seed; no zero-value messages injected).
 5. **Happy-path no-regression.** A successful turn persists + restores its
