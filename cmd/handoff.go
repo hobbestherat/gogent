@@ -190,6 +190,15 @@ func (dc *daemonController) Start() error {
 		dc.rollbackSpawn(spawned)
 		return fmt.Errorf("daemon not reachable after start: %w", err)
 	}
+	// Recreate every open window's session on the daemon before switching Handlers,
+	// so a fresh, never-messaged window — which was never persisted, so the daemon's
+	// RestoreSessions cannot rebuild it — has a live backend session and its next
+	// send resolves instead of 404ing (issue #476). This is the remote-side mirror of
+	// the Stop() path's bindWindowSession loop, making both handoff directions
+	// guarantee every open window has a live backend session. The daemon is healthy
+	// (sessions are creatable) and the source core is still fully live here, so this
+	// runs before the Handlers switch and well before the source shutdown below.
+	createDaemonWindowSessions(client, dc.wb)
 	rc, err := dc.switchToRemote(g, client, addr)
 	if err != nil {
 		dc.rollbackSpawn(spawned)
@@ -435,6 +444,31 @@ func bindWindowSession(g *gogent.Gogent, wb *tuipkg.Workbench, id string) {
 	}
 	s.SetObserver(func(ev agent.SessionEvent) { wb.EmitSessionEvent(id, ev) })
 	g.EmitYoloState(id)
+}
+
+// createDaemonWindowSessions creates each open window's session on the freshly
+// started daemon, so an embedded->daemon handoff leaves every window with a live
+// backend session (issue #476). It is the remote equivalent of the Stop() path's
+// bindWindowSession: a fresh, never-messaged window was never persisted, so the
+// daemon's RestoreSessions cannot rebuild it and the window's next OnSend would
+// 404. The backend-only "default" and "watcher:"-prefixed sessions are excluded —
+// they are not user windows — using the same filter as liveUserSessionCount. The
+// server's createSession is idempotent, so a window already restored from disk is
+// re-created harmlessly (no duplicate, no error). The window title is carried
+// across so the daemon session keeps the user's name, mirroring OnCreate on the
+// auto-attach path. A per-window create failure is logged and degrades to the
+// pre-fix behaviour for that one window (it would 404 on send), so a single failure
+// never aborts the whole handoff.
+func createDaemonWindowSessions(client *tuipkg.APIClient, wb *tuipkg.Workbench) {
+	for _, id := range wb.SessionIDs() {
+		if id == "default" || strings.HasPrefix(id, "watcher:") {
+			continue
+		}
+		title := wb.SessionTitle(id)
+		if _, err := client.CreateSession(id, title, true); err != nil {
+			log.Printf("handoff: create session %s on daemon: %v", id, err)
+		}
+	}
 }
 
 // liveUserSessionCount counts the user-facing live sessions on g — the shared
