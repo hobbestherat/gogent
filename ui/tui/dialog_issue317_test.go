@@ -489,18 +489,20 @@ func themeEditorFrameRows(rows [][]rune) (top, bottom int) {
 }
 
 // TestThemeEditorOpensFlooredAndGrows opens the REAL editor at several terminal sizes
-// and asserts its outer bounds match the floored-and-grows policy end-to-end (catching
-// any drift in showThemeEditor's spec): floors at 80×22 on an 80×24 terminal and grows
-// toward the cap on larger ones. This is the open-the-dialog companion to the
-// resolver-level TestThemeEditorFlooredAndGrows.
+// and asserts its outer bounds match the content-pinned policy end-to-end (catching any
+// drift in showThemeEditor's spec): it floors at 80×22 on an 80×24 terminal and is then
+// PINNED to its 80-wide two-column content footprint on larger terminals — only the
+// height grows to PrefH (27); the width never balloons toward a share of the screen
+// (issue #471). This is the open-the-dialog companion to the resolver-level
+// TestThemeEditorFlooredAndGrows.
 func TestThemeEditorOpensFlooredAndGrows(t *testing.T) {
 	for _, tc := range []struct {
 		termW, termH int
 		wantW, wantH int
 	}{
-		{80, 24, 80, 22},
-		{200, 50, 160, 42},
-		{120, 40, 96, 34},
+		{80, 24, 80, 22},  // floor
+		{200, 50, 80, 27}, // pinned width, height grown to PrefH (no 160×42 balloon)
+		{120, 40, 80, 27}, // pinned width, height grown to PrefH (no 96×34 balloon)
 	} {
 		issue204RestoreTheme(t)
 		w := newTestWorkbench(t)
