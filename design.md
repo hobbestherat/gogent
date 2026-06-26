@@ -9,7 +9,7 @@ registers every remote tool into the tool registry via
 `newMCPTool(server, client, mt)`. Those tools are already agent-callable and
 already appear in the Resources dialog's **Tools** tab.
 
-The only thing "missed" is the Resources dialog's dedicated **MCP** tab. It is a
+The only thing "missed" is the Resources dialog's dedicated **MCP** tab, a
 hardcoded placeholder:
 
 - `ui/tui/resources_dialog.go:138` — `currentItems()` returns
@@ -19,206 +19,307 @@ hardcoded placeholder:
 - The package doc (~42) calls the MCP tab "a placeholder until MCP client
   support lands (#36)".
 
-So even with connected MCP servers, the MCP tab shows nothing. **That is the
-bug.** This is a *fix* (wire an existing-but-stubbed tab to live data), not a new
-feature or a refactor.
+So even with connected MCP servers the MCP tab shows nothing. **That is the
+bug** — a *fix* (wire an existing-but-stubbed tab to live data), not a feature
+or refactor.
 
-## Verified facts (read from source, not assumed)
+## Verified facts (read from source)
 
-1. **MCP tools carry their server identity in the registered name.**
-   `internal/gogent/mcp.go:125` defines `mcpToolPrefix = "mcp__"` and
-   `newMCPTool` (line 135) names every remote tool
-   `mcp__<server>__<toolName>`. The description and `InputSchema` are also set.
-2. **That name reaches the UI verbatim on both transports.**
-   - Embedded: `cmd/embedded_handlers.go:214` `GetTools` copies `t.Name`,
-     `t.Description`, `tool.SchemaJSON(t.InputSchema)` straight into `ToolInfo`.
-   - Remote: `ui/tui/remote_handlers.go:785` `GetTools` does the same from the
-     daemon's `/api` tool list.
-   `ToolInfo` (`ui/tui/tui.go:433`) = `{Name, Description, InputSchema string,
-   Enabled, Invocations, LastUsed}`.
-3. **`StartMCPServers()` is already invoked on every launch path** — embedded
+1. `internal/gogent/mcp.go:125,135` — `mcpToolPrefix = "mcp__"`; `newMCPTool`
+   names every remote tool `mcp__<server>__<toolName>`, sets `InputSchema`, and
+   (lines 144-145) **appends** to the description:
+   `\n\nWhen calling this tool, use its full name "mcp__…".`
+2. That name/desc/schema reaches the UI verbatim on both transports — embedded
+   `cmd/embedded_handlers.go:214-235` and remote `ui/tui/remote_handlers.go:785-800`
+   both copy `Name`/`Description`/serialized `InputSchema` into
+   `ToolInfo{Name, Description, InputSchema string, …}` (`ui/tui/tui.go:433`).
+3. `StartMCPServers()` is invoked on every launch path — embedded
    `cmd/main.go:256`, daemon `cmd/daemon.go:338`, handoff `cmd/handoff.go:337`.
-   So Required-change #3 is already satisfied; **no startup wiring change is
+   **Required-change #3 is already satisfied; no startup wiring change is
    needed.**
-4. The MCP tools are namespaced specifically so the bare name is unambiguous
-   only via fallback (issue #360 note in `mcp.go`). The `mcp__<server>__<tool>`
-   prefix is therefore a *stable, intentional* contract we can parse.
+4. `resourceListLabel` hard-truncates the name to `nameW = 22` runes with
+   `truncateRunes` (`session_window.go:3111`) — **no ellipsis, a clean cut**.
+   The list column `listW` is capped at 34 cols. This is the constraint that
+   drives the label design below.
+5. `ui/tui` already imports `internal/gogent` (`tui.go:17`,
+   `remote_handlers.go:15`), so the deriver's end-to-end test can live in
+   `ui/tui` and build a real `Gogent` (item below).
+6. The only stale MCP-placeholder references are
+   `resources_dialog.go:42-43/138/443-449` plus one test assertion
+   (`resources_dialog_test.go:188` expects `#36`). Scope is fully enumerated.
 
 ## Chosen approach: client-side derive (no new handlers/endpoints)
 
-Because the registered tool items already carry server-origin info in their
-name, we derive the MCP tab **entirely client-side** from the existing
-`GetTools` data, confined to `ui/tui/resources_dialog.go` (+ its test). This is
-the PREFERRED path in the task brief and the FALLBACK
-(`GetMCPServers`/`GET /api/mcp`) is **not** needed. Crucially this avoids
-touching `ui/tui/api_client.go`, `remote_handlers.go`, `tui.go`,
-`internal/gogent/gogent.go`, and `internal/server`, all of which have in-flight
-work (#482 ssh, #486 model catalog, #490 sidebar) — zero conflict surface.
+The registered tool items already carry server-origin info in their name, so the
+MCP tab is derived **entirely client-side** from the existing `GetTools` data —
+the PREFERRED path in the brief. The FALLBACK
+(`GetMCPServers` + `GET /api/mcp`) is **not** used, which avoids touching
+`api_client.go`/`remote_handlers.go`/`tui.go`/`internal/gogent`/`internal/server`
+— all of which carry in-flight work (#482 ssh, #486 catalog, #490 sidebar).
+Zero conflict surface.
 
 ### Files touched (gogent only)
 
-- `ui/tui/resources_dialog.go` — the real change.
-- `ui/tui/resources_dialog_test.go` — new tests + update the one stale
-  placeholder assertion.
+- `ui/tui/resources_dialog.go` — the change.
+- `ui/tui/resources_dialog_test.go` — new tests + update one stale assertion.
 
 **No turbotui change.** The dialog only *consumes* turbotui widgets
-(`tv.Tree`, `tv.TextView`, etc.); the repo seam is respected and there is no
-downstream effect on `github.com/hobbestherat/turbotui`.
+(`tv.Tree`, `tv.TextView`); the repo seam is respected, no downstream effect on
+`github.com/hobbestherat/turbotui`.
 
-### Mechanics in `resources_dialog.go`
+### The list model: server header rows + bare-name tool rows
 
-1. **New deriver `loadMCPItems(get func() []ToolInfo) []resourceItem`** (mirrors
-   `loadToolItems`/`loadSkillItems`):
-   - Call `get()`; keep only tools whose `Name` has prefix `mcp__`.
-   - Parse each: strip `mcp__`, then split on the **first** `__` →
-     `server` = left, `toolName` = right (the bare name may itself contain `__`,
-     so split once, not greedily). A name with no second `__` is malformed and
-     skipped.
-   - Group by server. Sort server names; within a server sort tool names.
-   - Emit, per server, in this order:
-     - one **server header** item: `{kind: resourceMCP, name: server,
-       canToggle:false, usage: "<n> tool(s)", detail: mcpServerDetail(server,
-       tools)}`.
-     - one **tool** item per tool: `{kind: resourceMCP, name: server+"/"+
-       toolName, desc: description, canToggle:false,
-       detail: mcpToolDetail(server, toolName, description, schema)}`.
-   - Build the slice already in grouped/sorted order and **do not** re-run
-     `sortResourceItems` on it (sorting by `name` would still keep
-     `server` before `server/tool` before `serverB`, but constructing in order
-     is clearer and guarantees the header leads its group).
-   - MCP rows are **read-only** (`canToggle:false`): MCP tools stay toggleable
-     from the existing Tools tab by their real registered name; making them
-     toggle here would need the namespaced-name round-trip and risks diverging
-     enabled-state between the two tabs — out of scope for this fix.
+Two-tier flat list, grouped by server. This is the crux of the usability fix
+(see critique resolution below): the server lives in a **header row**, and each
+tool row shows the **bare tool name** so it survives the 22-column truncation.
 
-2. **`detail` renderers** (kept local, mirroring `toolDetail`):
-   - `mcpServerDetail(server, tools)` — header `MCP server: <server>`, a tool
-     count, and a bulleted list of the tool names it advertises.
-   - `mcpToolDetail(server, toolName, desc, schema)` — `MCP tool: <toolName>` /
-     `Server: <server>` / `Registered as: mcp__<server>__<toolName>` (so the
-     user sees the agent-callable name) / `Description` / `Input schema`,
-     matching `toolDetail`'s layout so the pane is visually consistent.
+`resourceItem` gains one unexported field, `group bool` (true = server-header
+row). Minimal, explicit, used only by the MCP path; the Tools/Skills loaders
+never set it.
 
-3. **`currentItems()` (line ~131)** — replace
-   `return nil // MCP: no servers until #36` with `return allMCP`, where
-   `allMCP = loadMCPItems(w.handlers.GetTools)` is captured in the
-   `browser state` block (line ~125) alongside `allTools`/`allSkills`, and
-   refreshed in the `catSel.OnChange` and `toggleSelected` reload blocks for
-   parity (cheap; keeps the tab live if tools change).
+**`loadMCPItems(get func() []ToolInfo) []resourceItem`** (mirrors
+`loadToolItems`/`loadSkillItems`):
+- `get()`, keep only `Name` with prefix `mcp__`.
+- Parse: strip `mcp__`, split on the **first** `__` → `server` = left,
+  `toolName` = right. The tool name may itself contain `__` (e.g.
+  `mcp__srv__do__thing` → server `srv`, tool `do__thing`), so split once. A name
+  with no second `__` is malformed and skipped.
+- Group by server; sort server names; within each, sort tool names.
+- Emit per server, in order:
+  - **header**: `{kind: resourceMCP, group: true, name: server,
+    usage: "<n> tool(s)", canToggle: false, detail: mcpServerDetail(server, toolNames)}`.
+  - **per tool**: `{kind: resourceMCP, group: false, name: toolName,
+    desc: cleanMCPDescription(description), canToggle: false,
+    detail: mcpToolDetail(server, toolName, description, schema)}`.
+- Built already grouped/sorted; **not** passed through `sortResourceItems`
+  (constructing in order keeps each header leading its group deterministically).
+- All MCP rows are **read-only** (`canToggle: false`): MCP tools stay toggleable
+  from the Tools tab by their real registered name; toggling here would need the
+  namespaced-name round-trip and risk diverging enabled-state between the two
+  tabs — out of scope.
 
-4. **`emptyDetail`/`mcpPlaceholder` (~429/445)** — keep the empty-state path but
-   rewrite `mcpPlaceholder` text: drop the "#36 / lands later" wording and say
-   the tab is empty because **no MCP servers are configured or connected**, with
-   a one-line pointer to the `mcp_servers` config key. It is shown only when the
-   MCP item count is 0 and there is no search query — unchanged gating, so a
-   non-empty server list never shows it.
+**`resourceListLabel` gains a `resourceMCP` branch** (Tools/Skills untouched):
+- header (`group`): `"<server>  (<n> tool(s))"`, no checkbox slot — reads as a
+  section heading.
+- tool: `"  " + <toolName>` — a two-space indent conveys nesting, no checkbox,
+  the bare name gets ~20 of the 22 columns. `navigate_page`, `click`, `fill`,
+  etc. render in full; only the longest names (e.g. `performance_start_trace`)
+  clip, and the full name is always in the detail pane.
 
-5. **Package doc (~42)** — update to: the MCP tab lists the configured/connected
-   MCP servers and the tools each advertises (via `tools/list`), derived from
-   the registered `mcp__*` tools.
+### Search that preserves grouping — `filterMCPItems`
+
+The generic `filterResources` would strip server headers (empty desc) and orphan
+matching tool rows. So the MCP tab uses a small group-aware filter instead;
+`render()` gets a one-line branch: `if curKind == resourceMCP` use
+`filterMCPItems(allMCP, query)`, else `filterResources(currentItems(), query)`.
+Tools/Skills behavior is unchanged.
+
+`filterMCPItems(items, q)` walks the flat, ordered list using the `group` flag as
+the group delimiter and keeps a coherent server→tools view:
+- query empty → all items.
+- a **server group is kept whole** (header + all its tool rows) when the server
+  name matches `q` — so searching `chrome-devtools` shows that server and every
+  tool it advertises.
+- otherwise, individual **tool rows that match** `q` (name or cleaned desc) are
+  kept, **and their server header is retained** above them — so searching
+  `navigate` shows the matching tools *with* their server context, never
+  orphaned.
+- a server contributing neither a name match nor any tool match is dropped
+  entirely (header included).
+
+This resolves both usability concerns at once: bare tool names fit the column,
+and grouping/server-context survives search without a compound `server/tool`
+label.
+
+### Detail renderers (local, mirroring `toolDetail`)
+
+- `cleanMCPDescription(raw)` strips the model-targeted trailer
+  `newMCPTool` appends (`"\n\nWhen calling this tool, use its full name …"`) by
+  cutting at that fixed marker. The human-facing pane then shows only the
+  server's real tool description; the agent-callable name is surfaced explicitly
+  (below) instead. Pure cosmetic; if the marker is absent the description is
+  shown unchanged.
+- `mcpToolDetail(server, tool, rawDesc, schema)` →
+  `MCP tool: <tool>` / `Server: <server>` / `Registered as: mcp__<server>__<tool>`
+  (the agent-callable name) / `Description` (cleaned) / `Input schema` — same
+  layout as `toolDetail` for a consistent pane.
+- `mcpServerDetail(server, toolNames)` → `MCP server: <server>`, the tool count,
+  a bulleted list of the tools it advertises, and a line noting they are
+  registered as `mcp__<server>__<tool>` and callable by the agent.
+
+### Wiring
+
+- `currentItems()` (line ~131): replace `return nil // MCP: no servers until #36`
+  with `return allMCP`, where `allMCP = loadMCPItems(w.handlers.GetTools)` is
+  captured in the browser-state block (~125) and refreshed in `catSel.OnChange`
+  and `toggleSelected` alongside `allTools`/`allSkills` (cheap; keeps the tab
+  live).
+- `mcpPlaceholder` (~445): rewrite — drop the `#36`/"lands later" wording; say
+  the tab is empty because **no MCP servers are configured or connected**, with
+  a one-line pointer to the `mcp_servers` config key. Still shown only when the
+  MCP item count is 0 and the query is empty (unchanged gating), so a non-empty
+  server list never shows it.
+- Package doc (~42): update — the MCP tab lists the configured/connected MCP
+  servers and the tools each advertises (`tools/list`), derived from the
+  registered `mcp__*` tools.
 
 ### Reused, unchanged plumbing
 
-`filterResources` (search), `resourceListLabel` (checkbox/pad/usage rendering;
-non-togglable rows already render a blank slot so headers look like section
-rows), `render()`, `OnSelect`, the detail pane, and `installResizeReflow` all
-work as-is on the new items — no changes to the shared render path.
+`render()` (only the filter-selection branch added), `OnSelect`, the detail
+pane, `installResizeReflow`, `loadToolItems`/`loadSkillItems`,
+`sortResourceItems`, `filterResources` (Tools/Skills), and `toggleSelected`
+(no-ops on `canToggle:false` MCP rows) are otherwise untouched.
+
+## Resolving the critique
+
+- **Tool-row truncation (material):** fixed. Tool rows now show the **bare tool
+  name** under a per-server header, not `server/tool`. For `chrome-devtools-mcp`
+  / `playwright-mcp` the tool name is fully visible instead of being eaten by a
+  19-char server prefix.
+- **Search breaking grouping:** fixed by `filterMCPItems` (group-aware), which
+  keeps headers with their matching tools and supports searching by server name
+  — so the bare-name label stays coherent under search.
+- **Description noise in the pane:** fixed by `cleanMCPDescription`, which trims
+  the appended "use its full name" trailer from the human-facing detail while
+  surfacing the namespaced name as an explicit `Registered as:` line.
+- **Configured-but-failed-server gap (literal acceptance wording):** documented
+  as an explicit decision (below), not just an open question.
+- **Stub-server test promoted from optional to required** (Testing, below).
+- **Tree-can-nest note:** acknowledged below.
+
+## Decision: which servers appear (vs. literal acceptance wording)
+
+The client-side-derive path surfaces a server **only if it registered ≥1 tool**
+— i.e. it connected and `tools/list` returned tools. A server that is
+permission-**denied**, **unreachable**, or advertises **zero tools** will not
+appear, leaving the empty state even though `mcp_servers` is technically
+non-empty. This bends the literal criterion ("placeholder no longer shows when
+`mcp_servers` is non-empty").
+
+**Decision: ship the derive path and accept this.** It covers the issue's real
+target — `chrome-devtools-mcp` and `playwright-mcp` both advertise many tools, so
+both render correctly. Showing configured-but-not-connected servers *with a
+connection status* would require the FALLBACK `Handlers.GetMCPServers` accessor +
+`GET /api/mcp`, touching `api_client.go`/`remote_handlers.go`/`internal/server`
+— exactly the files with in-flight work this design is meant to avoid. The
+rewritten empty-state wording ("configured or connected") keeps the message
+honest. If maintainers later want failed-server visibility, the accessor is an
+additive follow-up. **This trade-off is called out so it is not a surprise at
+review.**
+
+## Holistic note: the Tree can nest
+
+turbotui's `TreeNode` supports real parent/child nesting with expand markers
+(`turbotv/widget_tree.go`), so a collapsible server node with tool children is an
+alternative idiom. The flat header-row emulation is a deliberate, lower-risk
+choice: real nesting would require restructuring the shared `render()` build
+path (which Tools/Skills also use), adding regression surface to those tabs for
+no functional gain here. The header-row grouping is not forced by the toolkit;
+it is chosen to keep the change additive and confined.
 
 ## User-facing behavior
 
-- Open Resources → **MCP** tab. With `mcp_servers` configured and connected, the
-  list shows each server as a header row (`<n> tool(s)`) followed by its tools
-  (`server/tool`). Arrow/click selects a row; the detail pane shows the server
-  summary or the tool's description + input schema + its agent-callable
-  `mcp__…` name.
-- Search filters MCP rows by name/description like the other tabs.
-- With no MCP servers (or none connected), the tab shows the rewritten empty
-  state — never the old "#36" placeholder.
-- MCP tools remain callable by the agent and still appear under the Tools tab
+- Resources → **MCP** tab: with connected `mcp_servers`, each server shows as a
+  heading (`<server>  (n tools)`) with its tools listed beneath as readable
+  bare names. Arrow/click selects; the detail pane shows the server summary or
+  the tool's cleaned description + input schema + its agent-callable `mcp__…`
+  name.
+- Search filters by tool or server name and keeps server grouping intact.
+- With no connected MCP servers, the tab shows the rewritten empty state — never
+  the old `#36` placeholder.
+- MCP tools remain agent-callable and still appear under the Tools tab
   (unchanged).
 
 ## Testing
 
-Following `internal/mcp/mcp_test.go` / `internal/gogent/mcp_test.go`'s stub
-pattern, but the new tests are **UI-level and need no live MCP server** because
-the deriver consumes `[]ToolInfo`:
+Confined to `ui/tui/resources_dialog_test.go`. No dependency on
+`chrome-devtools-mcp`/`playwright-mcp`.
 
-- `loadMCPItems` with synthetic `ToolInfo`s named `mcp__srvA__greet`,
-  `mcp__srvA__echo`, `mcp__srvB__nav` → assert grouping (header per server, tool
-  rows under the right server, sorted), counts, and that non-`mcp__` tools are
-  excluded.
-- `mcpToolDetail` / `mcpServerDetail` contain the tool name, server, namespaced
-  name, description, and schema.
-- Empty case: `loadMCPItems` over tools with no `mcp__` entries → empty slice;
-  `emptyDetail(resourceMCP, 0, "")` returns the new empty-state text.
-- Update the existing stale assertion `resources_dialog_test.go:188`
-  (`{"mcp placeholder", resourceMCP, 0, "", "#36"}`) to assert the new
-  empty-state wording instead of `#36`.
+Unit tests (synthetic `[]ToolInfo`):
+- `loadMCPItems` with `mcp__srvA__greet`, `mcp__srvA__echo`, `mcp__srvB__nav`,
+  plus a non-`mcp__` tool → assert headers for `srvA (2)` and `srvB (1)` in
+  sorted order, bare-name tool rows under the right server (sorted), `group`
+  flags set, non-MCP tools excluded.
+- Parse edges: `mcp__srvA__do__thing` → server `srvA`, tool `do__thing`;
+  `mcp__bogus` (no second `__`) skipped.
+- `resourceListLabel` for an MCP header vs. tool row → heading vs. indented bare
+  name; assert a long tool name is not prefixed by the server (truncation
+  budget preserved).
+- `filterMCPItems`: search a server name keeps its header + all tools; search a
+  tool name keeps matching tools **with** their headers; a non-matching group is
+  dropped.
+- `mcpToolDetail`/`mcpServerDetail` contain the tool name, server, namespaced
+  `mcp__…` name, and schema; `cleanMCPDescription` strips the
+  "use its full name" trailer (and is a no-op when absent).
+- `emptyDetail(resourceMCP, 0, "")` → new wording; **update the stale
+  `resources_dialog_test.go:188` assertion** from `#36` to the new text.
 
-Optionally, an end-to-end test can stand up the existing stub MCP server, run
-`StartMCPServers()`, build `ToolInfo`s from the registry via the same mapping
-`embedded_handlers.go` uses, and assert `loadMCPItems` surfaces the stub's tool
-— but the `ToolInfo`-level test already covers the UI contract without the
-process plumbing.
+Required stub-server end-to-end test (closes the registry→`GetTools`→`ToolInfo`→
+`loadMCPItems` seam the critique flagged) — lives in `ui/tui` since it already
+imports `internal/gogent`:
+- stand up an in-process MCP stub over httptest (the same shape as
+  `internal/gogent/mcp_test.go`'s `mcpTestServer`), build a real `Gogent` with an
+  allowing permission prompter and `MCPServers` pointing at the stub, call
+  `StartMCPServers()`, then build a `GetTools` closure that maps
+  `g.GetToolRegistry().List()` to `[]ToolInfo` exactly as
+  `embedded_handlers.go` does, and assert `loadMCPItems(GetTools)` surfaces the
+  stub's tool under its server header with the expected detail (description +
+  schema + namespaced name). This exercises the real client → registry →
+  namespacing → UI pipeline against a live (stub) MCP server.
 
-**Live verification with `chrome-devtools-mcp` and `playwright-mcp` requires
-Node/npx + browsers + network and is NOT part of the Pi5 automated gate.** The
-PR body will note: "Automated tests use an in-process/stub MCP source; live
-verification with chrome-devtools-mcp and playwright-mcp is a manual maintainer
-step (verified locally / to be verified by maintainer)."
+**Live verification with `chrome-devtools-mcp`/`playwright-mcp` requires
+Node/npx + browsers + network and is NOT part of the Pi5 gate.** PR body:
+"Automated tests use an in-process stub MCP server (including an end-to-end
+`StartMCPServers` → registry → MCP-tab pipeline test); live verification with
+chrome-devtools-mcp and playwright-mcp is a manual maintainer step (verified
+locally / to be verified by maintainer)."
 
 ## Criteria assessment
 
-**(1) Goal match.** Exactly the ask: the MCP tab now lists configured/connected
-servers and their advertised tools with detail; placeholder gone when servers
-exist; empty state retained for none. No scope creep (no new MCP runtime, no
-toggle semantics, no startup rewiring — already present and verified).
+**(1) Goal match — OK.** Wires the stubbed MCP tab to live registry data without
+rebuilding MCP; rests on the verified `mcp__<server>__<tool>` contract; confirms
+`StartMCPServers` is already invoked everywhere. One disclosed caveat
+(denied/unreachable/zero-tool servers don't appear) is an explicit, justified
+decision, not silent scope-cutting.
 
-**(2) Usability.** The MCP tab behaves like the Tools/Skills tabs: same list +
-search + detail-pane interaction, user-driven selection, server grouping makes
-the source obvious, and the agent-callable `mcp__…` name is surfaced rather than
-hidden. The right thing is shown, not silently empty.
+**(2) Usability — OK (concerns resolved).** Bare tool names under per-server
+headers fit the 22-col list, so the named servers' tools are readable;
+`filterMCPItems` keeps grouping coherent under search and supports server-name
+search; `cleanMCPDescription` removes model-targeted noise from the pane. The
+tab behaves like Tools/Skills (list + search + detail), user-driven, with server
+origin surfaced rather than hidden.
 
-**(3) No regressions.** Change is additive and confined to `resourceMCP`
-branches; Tools/Skills loaders, sort, filter, toggle, and render are untouched.
-`internal/mcp` and `internal/gogent/mcp.go` behavior is unchanged (we only read
-the registry the UI already reads). `StartMCPServers` gating and invocation are
-unchanged. Only one existing test asserts old text (`#36`) and is updated
-deliberately. gofmt/vet/build/lint/test gate per `[[dev-gate]]` (no `-race` on
-Pi5); the pre-existing `TestUserSessionSendMessage` 404 remains the only
+**(3) No regressions — OK.** Additive, confined to the `resourceMCP` branches +
+a one-line `render` filter branch + one new unexported field. Tools/Skills
+loaders, sort, generic filter, toggle, and resize-reflow are untouched;
+`internal/mcp` and `internal/gogent/mcp.go` are read-only here. The single stale
+test assertion is updated. gofmt/vet/build/lint/test per `[[dev-gate]]` (no
+`-race` on Pi5); pre-existing `TestUserSessionSendMessage` 404 remains the only
 accepted failure.
 
-**(4) Holistic / repo seam.** Confined to `ui/tui/resources_dialog.go` (+test),
-the correct layer (a UI tab fed by an existing handler). No api_client/
-remote_handlers/server/tui.go/gogent.go edits → no conflict with #482/#486/#490.
-turbotui is only consumed, never modified; no go.mod bump; no new dependencies;
-stdlib + existing MCP client reused.
+**(4) Holistic — OK.** Correct layer (a UI tab fed by an existing handler);
+turbotui consumed, never modified; no `go.mod` bump; no new deps; reuses the
+existing MCP client + registry; zero conflict with #482/#486/#490. The flat
+grouping vs. native Tree nesting trade-off is acknowledged and justified.
 
 ## Regression risks
 
-- **Stale placeholder test** (`resources_dialog_test.go:188`) asserts `#36`;
-  must be updated or the suite fails. Identified and planned.
-- **Name-parse assumption**: relies on the `mcp__<server>__<tool>` contract from
-  `newMCPTool`. It is intentional and tested (`mcp_test.go` asserts the
-  namespaced name). If that prefix ever changes, the deriver must change too —
-  acceptable coupling within one repo; noted.
+- **Stale placeholder test** (`resources_dialog_test.go:188`, expects `#36`) —
+  must be updated; identified and planned.
+- **Name-parse coupling** to the intentional `mcp__<server>__<tool>` contract
+  (`newMCPTool`, asserted in `internal/gogent/mcp_test.go`). Acceptable in-repo
+  coupling; if the prefix changes the deriver changes with it, and the e2e test
+  would catch a drift.
+- **`cleanMCPDescription` marker match** is a fixed-string cut; if `newMCPTool`'s
+  trailer wording changes it silently stops trimming (cosmetic only, never drops
+  real description text). Covered by a unit test asserting the trailer is gone.
 
 ## Open questions
 
-1. **Zero-tool / unconnected-but-configured servers.** The client-side-derive
-   approach only surfaces servers that registered ≥1 tool (i.e. connected and
-   non-empty). A server that is configured but **denied/unreachable**, or that
-   advertises **zero tools**, will not appear in the MCP tab. The brief's
-   acceptance says "configured/connected"; the pragmatic, conflict-free derive
-   path shows *connected* servers. Showing configured-but-not-connected entries
-   with a status would require the FALLBACK `Handlers.GetMCPServers` accessor +
-   `GET /api/mcp` (touching api_client/remote_handlers/server) — which conflicts
-   with in-flight work. **Recommendation:** ship the derive approach (covers the
-   issue's real target — chrome-devtools-mcp/playwright-mcp both advertise many
-   tools), and note this limitation; add the accessor later only if maintainers
-   want connection-status for failed servers. Confirm this trade-off is
-   acceptable.
-2. **MCP tool toggling from the MCP tab.** Proposed read-only here (toggle stays
-   on the Tools tab). If maintainers want Space/Enter to enable/disable an MCP
-   tool from this tab too, it's a small follow-up wiring `SetToolEnabled` with
-   the namespaced name. Confirm read-only is fine for this fix.
+1. **Failed/zero-tool server visibility** — design decision above is to *not*
+   show them (derive path), to stay conflict-free. Confirm acceptable, or
+   greenlight the additive `GetMCPServers` + `/api/mcp` follow-up to show
+   connection status for configured-but-unconnected servers.
+2. **MCP-tab toggling** — proposed read-only here (toggle stays on the Tools
+   tab). Confirm; enabling it later is a small `SetToolEnabled` wiring with the
+   namespaced name.
