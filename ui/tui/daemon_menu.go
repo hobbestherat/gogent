@@ -97,13 +97,14 @@ func (w *Workbench) daemonItems() []*tv.MenuItem {
 // rebuilds the menu so it reflects the new attached-local mode. The handler itself
 // swaps the Workbench Handlers (on the UI thread via Post) as part of the handoff.
 func (w *Workbench) startDaemonFromMenu() {
-	if w.handlers.StartDaemon == nil {
-		return
+	if w.handlers.StartDaemon == nil || w.daemonHandoffLayer != nil {
+		return // guard: no double handoff (mirrors the disconnect modal's guard)
 	}
-	w.showConfirm("Start daemon", "Migrating to the local daemon…\nIn-flight turns are cancelled; their partial output is preserved and reappears after reattach.", nil)
+	w.daemonHandoffLayer = w.showProgress("Start daemon", "Migrating to the local daemon…\nIn-flight turns are cancelled; their partial output is preserved and reappears after reattach.")
 	go func() {
 		err := w.handlers.StartDaemon()
 		w.desktop.Post(func() {
+			w.dismissDaemonHandoffProgress() // replace: progress gone before the result
 			w.rebuildMenu()
 			if err != nil {
 				w.showConfirm("Start daemon", "Could not start the daemon:\n"+err.Error(), nil)
@@ -114,17 +115,29 @@ func (w *Workbench) startDaemonFromMenu() {
 	}()
 }
 
+// dismissDaemonHandoffProgress removes the interim handoff progress modal if one is
+// up, so the result dialog replaces it rather than stacking on top (issue #478).
+// Idempotent and UI-thread-only, mirroring dismissDisconnectModal.
+func (w *Workbench) dismissDaemonHandoffProgress() {
+	if w.daemonHandoffLayer == nil {
+		return
+	}
+	w.desktop.RemoveLayer(w.daemonHandoffLayer)
+	w.daemonHandoffLayer = nil
+}
+
 // stopDaemonFromMenu runs the daemon->embedded handoff off the UI thread (it asks
 // the daemon to persist + exit and rebuilds the embedded core), then reports the
 // outcome and rebuilds the menu so it reflects the new embedded mode.
 func (w *Workbench) stopDaemonFromMenu() {
-	if w.handlers.StopDaemon == nil {
-		return
+	if w.handlers.StopDaemon == nil || w.daemonHandoffLayer != nil {
+		return // guard: no double handoff (mirrors the disconnect modal's guard)
 	}
-	w.showConfirm("Stop daemon", "Migrating back to in-process (embedded) mode…\nThe daemon persists its state and shuts down; sessions and watchers continue in this process.", nil)
+	w.daemonHandoffLayer = w.showProgress("Stop daemon", "Migrating back to in-process (embedded) mode…\nThe daemon persists its state and shuts down; sessions and watchers continue in this process.")
 	go func() {
 		err := w.handlers.StopDaemon()
 		w.desktop.Post(func() {
+			w.dismissDaemonHandoffProgress() // replace: progress gone before the result
 			w.rebuildMenu()
 			if err != nil {
 				w.showConfirm("Stop daemon", "Could not stop the daemon:\n"+err.Error(), nil)

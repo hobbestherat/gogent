@@ -85,13 +85,15 @@ func messageBodyHeight(height int) int {
 	return bodyH
 }
 
-// showConfirm opens a modal confirm/message dialog. When onResult is non-nil the
-// dialog asks Yes/No and reports the choice (Escape counts as No); when it is nil
-// the dialog is purely informational and shows a single OK button. Unlike the
-// turbotui helper it replaces, the message wraps to the dialog width and scrolls
-// when it overflows, and it renders with the dialog's own high-contrast palette
-// (issue #98).
-func (w *Workbench) showConfirm(title, message string, onResult func(bool)) {
+// newMessageLayer builds and registers the modal dialog scaffold shared by every
+// message dialog: a content-sized dialog (issues #299/#309), its wrapped,
+// top-scrolled body TextView, and the modal layer with resize-reflow installed
+// (NoEnterGrace, since these appear in direct response to a user action). The
+// caller adds its own buttons / Escape handler / focus. It returns the dialog, the
+// live layer, and the resolved content width + body height the caller needs to
+// place controls. Centralising layer creation here keeps a single source of truth
+// for it across showConfirm and showProgress (issue #478).
+func (w *Workbench) newMessageLayer(title, message, layerName string) (*tv.Dialog, *tv.Layer, int, int) {
 	spec := messageDialogSpec(w.app.Width(), w.app.Height(), message)
 	x, y, width, height := w.dialogRect(spec)
 	bodyH := messageBodyHeight(height)
@@ -112,7 +114,31 @@ func (w *Workbench) showConfirm(title, message string, onResult func(bool)) {
 	body.ScrollToTop()
 	dialog.Window.AddContent(body)
 
-	var layer *tv.Layer
+	layer := tv.NewModalLayer(layerName, dialog)
+	// User-initiated dialog: it appears in direct response to a user action and so
+	// cannot interrupt mid-keystroke. Opt out of the modal Enter-grace (issue #347,
+	// which scopes the grace to background-triggered modals) so a deliberate Enter
+	// on Yes/No/OK activates immediately.
+	layer.NoEnterGrace = true
+	w.desktop.AddLayer(layer)
+	// The spec's PrefH is measured against the open-time width, so re-resolve
+	// against the live terminal on resize rather than the stale spec dialog.Fit
+	// would remember (issues #299, #309).
+	installResizeReflow(w.desktop, dialog, layer, func() tv.DialogSpec {
+		return messageDialogSpec(w.app.Width(), w.app.Height(), message)
+	})
+	return dialog, layer, width, bodyH
+}
+
+// showConfirm opens a modal confirm/message dialog. When onResult is non-nil the
+// dialog asks Yes/No and reports the choice (Escape counts as No); when it is nil
+// the dialog is purely informational and shows a single OK button. Unlike the
+// turbotui helper it replaces, the message wraps to the dialog width and scrolls
+// when it overflows, and it renders with the dialog's own high-contrast palette
+// (issue #98).
+func (w *Workbench) showConfirm(title, message string, onResult func(bool)) {
+	dialog, layer, width, bodyH := w.newMessageLayer(title, message, "confirm-dialog")
+
 	dismiss := func(value bool) {
 		w.desktop.RemoveLayer(layer)
 		if onResult != nil {
@@ -145,20 +171,23 @@ func (w *Workbench) showConfirm(title, message string, onResult func(bool)) {
 		return false
 	}
 
-	layer = tv.NewModalLayer("confirm-dialog", dialog)
-	// User-initiated dialog: it appears in direct response to a user action and so
-	// cannot interrupt mid-keystroke. Opt out of the modal Enter-grace (issue #347,
-	// which scopes the grace to background-triggered modals) so a deliberate Enter
-	// on Yes/No/OK activates immediately.
-	layer.NoEnterGrace = true
-	w.desktop.AddLayer(layer)
-	// The spec's PrefH is measured against the open-time width, so re-resolve
-	// against the live terminal on resize rather than the stale spec dialog.Fit
-	// would remember (issues #299, #309).
-	installResizeReflow(w.desktop, dialog, layer, func() tv.DialogSpec {
-		return messageDialogSpec(w.app.Width(), w.app.Height(), message)
-	})
 	w.desktop.SetFocus(focus)
+}
+
+// showProgress opens a non-dismissable informational modal used as interim
+// feedback for a background operation (the daemon handoff). Unlike showConfirm it
+// has NO buttons and NO Escape handler: it blocks input while the operation runs
+// and is torn down programmatically (RemoveLayer) when the result is ready, so the
+// result dialog REPLACES it rather than stacking on top (issue #478). It returns
+// the layer so the caller can dismiss it. Mirrors the disconnect modal's
+// programmatic-only lifecycle (disconnect_modal.go). The distinct layer name keeps
+// the progress modal unambiguously identifiable.
+func (w *Workbench) showProgress(title, message string) *tv.Layer {
+	_, layer, _, _ := w.newMessageLayer(title, message, "daemon-progress")
+	// No focusable control; the modal swallows input until it is replaced. SetFocus
+	// is nil-safe, and RemoveLayer restores the pre-modal focus on teardown.
+	w.desktop.SetFocus(nil)
+	return layer
 }
 
 // confirmButtonRow centres a "Yes"/"No" button pair on row btnY across a dialog
