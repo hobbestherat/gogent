@@ -1218,7 +1218,31 @@ func (w *Workbench) viewItems() []*tv.MenuItem {
 		tv.NewSeparator(),
 		tv.NewMenuItem("&Widen Sidebar (keyboard)", func() { w.nudgeSidebarWidth(+sidebarNudge) }),
 		tv.NewMenuItem("Narro&w Sidebar (keyboard)", func() { w.nudgeSidebarWidth(-sidebarNudge) }),
+		// Failed sub-agents are never auto-folded from the sidebar (issue #484); they
+		// stay visible until the user clears them. This dismisses every failed
+		// sub-agent of the active session at once — the click affordance, since the
+		// sidebar tree's only per-row mouse target is the monologue-bound agent row
+		// and the tree does not hold keyboard focus.
+		tv.NewSeparator(),
+		tv.NewMenuItem("Dismiss &Failed Sub-agents", func() { w.dismissFailedSubAgents() }),
 	}
+}
+
+// dismissFailedSubAgents clears every failed sub-agent of the active session from
+// the sidebar and redraws (issue #484). It is the menu action behind "Dismiss
+// Failed Sub-agents"; ActiveID() is the canonical "session the user is viewing",
+// matching the other View-menu actions. A no-op when there is no active session
+// or no sidebar.
+func (w *Workbench) dismissFailedSubAgents() {
+	if w.sidebar == nil {
+		return
+	}
+	id := w.ActiveID()
+	if id == "" {
+		return
+	}
+	w.sidebar.dismissFailed(id)
+	w.desktop.Redraw()
 }
 
 // sidebarNudge is the column step used by the Widen/Narrow Sidebar commands (the
@@ -2725,6 +2749,13 @@ func (w *Workbench) tickBusyStatuses() {
 	// reconciled on the same tick from the parallel bgIDs set.
 	redraw := w.sidebar != nil && w.sidebar.syncBusy(busyIDs)
 	if w.sidebar != nil && w.sidebar.syncBackground(bgIDs) {
+		redraw = true
+	}
+	// Expire finished sub-agents whose fold TTL has elapsed (issue #484) on the same
+	// 1s sweep, before the all-idle early return so an otherwise-idle session still
+	// folds (and repaints) once its completed agents age out. This is the single
+	// ticker that drives every fold — no per-agent timers, no extra goroutine.
+	if w.sidebar != nil && w.sidebar.tickFolds() {
 		redraw = true
 	}
 	// Refresh the sidebar's watcher nodes on the same tick so a fire's busy marker,
