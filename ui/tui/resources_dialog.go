@@ -21,8 +21,9 @@ const (
 )
 
 // resourceItem is the browser's uniform view of one browsable resource: a
-// built-in tool, an (eventual) MCP server, or a skill. The detail field carries
-// the fully-rendered side-pane text so the widget code never inspects kinds.
+// built-in tool, an MCP server (or one of its tools), or a skill. The detail
+// field carries the fully-rendered side-pane text so the widget code never
+// inspects kinds.
 type resourceItem struct {
 	kind      resourceKind
 	name      string
@@ -31,6 +32,10 @@ type resourceItem struct {
 	enabled   bool
 	canToggle bool
 	usage     string
+	// group marks an MCP server-header row (as opposed to one of its tool rows).
+	// It is only set on resourceMCP items and governs how the row is labelled and
+	// how the MCP-aware filter preserves server grouping.
+	group bool
 }
 
 // showResourcesDialog opens the unified Resources browser: a single explorer for
@@ -39,9 +44,10 @@ type resourceItem struct {
 //
 // The Tools tab is generated from the ToolRegistry (so tool docs stop being
 // hardcoded in the UI); the Skills tab generalizes the former skills dialog and
-// adds the full SKILL.md preview; the MCP tab is a placeholder until MCP client
-// support lands (#36), at which point it will list configured servers and their
-// discovered tools.
+// adds the full SKILL.md preview; the MCP tab lists the connected MCP servers and
+// the tools each one advertises (via tools/list), derived from the registered
+// mcp__<server>__<tool> tools, with the same description + input-schema detail as
+// the Tools tab.
 func (w *Workbench) showResourcesDialog() {
 	// Large by default (≈85% of the terminal), floored so it stays usable on a
 	// small terminal; the list/detail split is derived from width below (#299).
@@ -126,16 +132,19 @@ func (w *Workbench) showResourcesDialog() {
 		curKind   = resourceTools
 		allTools  = loadToolItems(w.handlers.GetTools)
 		allSkills = loadSkillItems(w.handlers.GetSkills)
+		allMCP    = loadMCPItems(w.handlers.GetTools)
 	)
 
 	currentItems := func() []resourceItem {
 		switch curKind {
 		case resourceTools:
 			return allTools
+		case resourceMCP:
+			return allMCP
 		case resourceSkills:
 			return allSkills
 		default:
-			return nil // MCP: no servers until #36
+			return nil
 		}
 	}
 
@@ -143,7 +152,15 @@ func (w *Workbench) showResourcesDialog() {
 	// detail pane at the (clamped) selection. Redraw is synchronous, so reading
 	// Selected() right after it reflects the post-clamp highlight.
 	render := func() {
-		items := filterResources(currentItems(), searchBox.GetText())
+		// MCP rows are a two-tier server/tool list; a group-aware filter keeps a
+		// server header attached to its matching tools (and supports searching by
+		// server name) instead of orphaning rows the way the flat filter would.
+		var items []resourceItem
+		if curKind == resourceMCP {
+			items = filterMCPItems(allMCP, searchBox.GetText())
+		} else {
+			items = filterResources(currentItems(), searchBox.GetText())
+		}
 		nodes := make([]*tv.TreeNode, 0, len(items))
 		for i := range items {
 			n := tv.NewTreeNode(resourceListLabel(items[i]))
@@ -200,6 +217,7 @@ func (w *Workbench) showResourcesDialog() {
 		}
 		allTools = loadToolItems(w.handlers.GetTools)
 		allSkills = loadSkillItems(w.handlers.GetSkills)
+		allMCP = loadMCPItems(w.handlers.GetTools)
 		render()
 	}
 
@@ -212,6 +230,7 @@ func (w *Workbench) showResourcesDialog() {
 		curKind = resourceKind(idx)
 		allTools = loadToolItems(w.handlers.GetTools)
 		allSkills = loadSkillItems(w.handlers.GetSkills)
+		allMCP = loadMCPItems(w.handlers.GetTools)
 		render()
 	}
 	searchBox.OnSubmit = func() { render() }
@@ -310,6 +329,96 @@ func loadSkillItems(get func() []SkillInfo) []resourceItem {
 	return out
 }
 
+// mcpToolPrefix is the namespace gogent gives every registered MCP tool:
+// mcp__<server>__<tool> (see internal/gogent/newMCPTool). It is the contract the
+// MCP tab parses to recover which server a tool came from, since the registered
+// tool list is the only MCP-origin signal the UI receives.
+const mcpToolPrefix = "mcp__"
+
+// loadMCPItems derives the MCP tab from the registered tool list: it selects the
+// mcp__<server>__<tool> tools, groups them by server, and emits a two-tier list —
+// one server-header row followed by that server's tool rows, servers and tools
+// each sorted by name. A server appears only when it advertised at least one tool
+// (i.e. it connected and tools/list returned results); a denied, unreachable or
+// zero-tool server is not represented here. A nil getter yields no items.
+//
+// The result is built already grouped and sorted, so it must NOT be passed
+// through sortResourceItems (that would reorder headers away from their tools).
+func loadMCPItems(get func() []ToolInfo) []resourceItem {
+	if get == nil {
+		return nil
+	}
+	// Preserve first-seen tool order per server before the per-server sort below;
+	// the server iteration order is taken from a sorted key list for determinism.
+	type mcpTool struct{ name, desc, schema string }
+	byServer := map[string][]mcpTool{}
+	var servers []string
+	for _, t := range get() {
+		server, tool, ok := splitMCPToolName(t.Name)
+		if !ok {
+			continue
+		}
+		if _, seen := byServer[server]; !seen {
+			servers = append(servers, server)
+		}
+		byServer[server] = append(byServer[server], mcpTool{name: tool, desc: t.Description, schema: t.InputSchema})
+	}
+	sort.Strings(servers)
+
+	var out []resourceItem
+	for _, server := range servers {
+		tools := byServer[server]
+		sort.Slice(tools, func(i, j int) bool { return tools[i].name < tools[j].name })
+		names := make([]string, len(tools))
+		for i, mt := range tools {
+			names[i] = mt.name
+		}
+		out = append(out, resourceItem{
+			kind:      resourceMCP,
+			name:      server,
+			group:     true,
+			canToggle: false,
+			usage:     pluralTools(len(tools)),
+			detail:    mcpServerDetail(server, names),
+		})
+		for _, mt := range tools {
+			out = append(out, resourceItem{
+				kind:      resourceMCP,
+				name:      mt.name,
+				desc:      cleanMCPDescription(mt.desc),
+				canToggle: false,
+				detail:    mcpToolDetail(server, mt.name, mt.desc, mt.schema),
+			})
+		}
+	}
+	return out
+}
+
+// splitMCPToolName parses a registered tool name of the form
+// mcp__<server>__<tool> into its server and tool parts. The tool part may itself
+// contain "__" (so the split is on the first separator after the prefix); a name
+// without the prefix or without a second "__" is not an MCP tool and returns
+// ok=false.
+func splitMCPToolName(name string) (server, tool string, ok bool) {
+	rest, found := strings.CutPrefix(name, mcpToolPrefix)
+	if !found {
+		return "", "", false
+	}
+	server, tool, found = strings.Cut(rest, "__")
+	if !found || server == "" || tool == "" {
+		return "", "", false
+	}
+	return server, tool, true
+}
+
+// pluralTools renders the server-header tool count ("1 tool" / "3 tools").
+func pluralTools(n int) string {
+	if n == 1 {
+		return "1 tool"
+	}
+	return fmt.Sprintf("%d tools", n)
+}
+
 // sortResourceItems orders items by kind then name so each tab is alphabetical.
 func sortResourceItems(items []resourceItem) {
 	sort.Slice(items, func(i, j int) bool {
@@ -335,12 +444,57 @@ func filterResources(items []resourceItem, query string) []resourceItem {
 	return out
 }
 
+// filterMCPItems filters the two-tier MCP list while preserving server grouping.
+// items is the grouped, ordered output of loadMCPItems (a server header followed
+// by its tool rows). An empty query matches everything. Otherwise a whole server
+// group is kept when the server name matches the query; for other groups, the
+// tool rows that match (name or description) are kept together with their server
+// header, so a matching tool is never shown orphaned from its server. A group
+// that contributes neither a server-name match nor any tool match is dropped
+// entirely (header included).
+func filterMCPItems(items []resourceItem, query string) []resourceItem {
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" {
+		return items
+	}
+	out := make([]resourceItem, 0, len(items))
+	i := 0
+	for i < len(items) {
+		header := items[i]
+		// Collect this server's tool rows (everything up to the next header).
+		j := i + 1
+		for j < len(items) && !items[j].group {
+			j++
+		}
+		tools := items[i+1 : j]
+
+		serverMatch := strings.Contains(strings.ToLower(header.name), q)
+		matched := make([]resourceItem, 0, len(tools))
+		for _, t := range tools {
+			if serverMatch ||
+				strings.Contains(strings.ToLower(t.name), q) ||
+				strings.Contains(strings.ToLower(t.desc), q) {
+				matched = append(matched, t)
+			}
+		}
+		if serverMatch || len(matched) > 0 {
+			out = append(out, header)
+			out = append(out, matched...)
+		}
+		i = j
+	}
+	return out
+}
+
 // resourceListLabel renders one list row: a leading on/off checkbox for
 // togglable items (so enabled/disabled is obvious at a glance), the padded
 // name, and an optional usage tail. Toggling itself is a separate Space/Enter
 // gesture, so a click on the row only selects it.
 func resourceListLabel(it resourceItem) string {
 	const nameW = 22
+	if it.kind == resourceMCP {
+		return mcpListLabel(it)
+	}
 	box := "   " // non-togglable: a blank slot keeps names aligned with checkbox rows
 	if it.canToggle {
 		if it.enabled {
@@ -354,6 +508,23 @@ func resourceListLabel(it resourceItem) string {
 		label += " " + it.usage
 	}
 	return label
+}
+
+// mcpListLabel renders an MCP row as a two-tier list: a server-header row shows
+// the server name and its tool-count tail as a section heading, while a tool row
+// is indented under it and shows only the bare tool name. Keeping the server out
+// of the tool row leaves the full name-column budget for the tool name (which
+// would otherwise be truncated away under a long server prefix like
+// "chrome-devtools-mcp/").
+func mcpListLabel(it resourceItem) string {
+	if it.group {
+		label := it.name
+		if it.usage != "" {
+			label += "  (" + it.usage + ")"
+		}
+		return label
+	}
+	return "  " + it.name
 }
 
 // padName truncates or right-pads name with spaces to width columns (by rune).
@@ -425,6 +596,60 @@ func skillDetail(name, desc, path string, active bool, success, failure, total i
 	return b.String()
 }
 
+// mcpServerDetail renders the side-pane text for an MCP server-header row: the
+// server name, the tools it advertises and a note that they are registered under
+// the mcp__<server>__ namespace and callable by the agent.
+func mcpServerDetail(server string, tools []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "MCP server: %s\n", server)
+	fmt.Fprintf(&b, "Tools: %d\n", len(tools))
+	if len(tools) > 0 {
+		b.WriteString("\nAdvertised tools\n")
+		for _, t := range tools {
+			fmt.Fprintf(&b, " - %s\n", t)
+		}
+	}
+	fmt.Fprintf(&b, "\nThese tools are registered as %s%s__<tool> and are callable by the agent.\n",
+		mcpToolPrefix, server)
+	return b.String()
+}
+
+// mcpToolDetail renders the side-pane text for one MCP tool, mirroring
+// toolDetail's layout: the tool name, its server, the agent-callable namespaced
+// name, the (cleaned) description and the input schema.
+func mcpToolDetail(server, tool, desc, schema string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "MCP tool: %s\n", tool)
+	fmt.Fprintf(&b, "Server: %s\n", server)
+	fmt.Fprintf(&b, "Registered as: %s%s__%s\n", mcpToolPrefix, server, tool)
+	b.WriteString("\nDescription\n")
+	b.WriteString(cleanMCPDescription(desc))
+	if s := strings.TrimSpace(schema); s != "" {
+		b.WriteString("\n\nInput schema\n")
+		b.WriteString(s)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// mcpDescriptionTrailer is the model-targeted sentence newMCPTool appends to
+// every MCP tool description (instructing the model to call the tool by its full
+// namespaced name). It is noise in the human-facing detail pane — the namespaced
+// name is surfaced explicitly as a "Registered as:" line instead — so
+// cleanMCPDescription trims it.
+const mcpDescriptionTrailer = "\n\nWhen calling this tool, use its full name"
+
+// cleanMCPDescription strips the model-targeted "use its full name" trailer
+// newMCPTool appends, returning the server's own tool description trimmed of
+// surrounding whitespace. It is a no-op (beyond trimming) when the trailer is
+// absent, so it never drops real description text.
+func cleanMCPDescription(desc string) string {
+	if i := strings.Index(desc, mcpDescriptionTrailer); i >= 0 {
+		desc = desc[:i]
+	}
+	return strings.TrimSpace(desc)
+}
+
 // emptyDetail is the placeholder shown when a tab has no visible items.
 func emptyDetail(kind resourceKind, count int, query string) string {
 	if count == 0 && strings.TrimSpace(query) == "" {
@@ -440,11 +665,13 @@ func emptyDetail(kind resourceKind, count int, query string) string {
 	return "No matching items."
 }
 
-// mcpPlaceholder explains the MCP tab's empty state and points at the issue that
-// will fill it in.
+// mcpPlaceholder explains the MCP tab's empty state: no Model Context Protocol
+// server is currently connected. A server appears here once it is configured
+// (the mcp_servers config key), its launch is permitted, and it advertises at
+// least one tool via tools/list.
 func mcpPlaceholder() string {
-	return "MCP servers\n\nNo MCP servers are configured yet.\n\n" +
-		"Model Context Protocol client support lands with issue #36; once it " +
-		"does, configured servers, their connection status and the tools each " +
-		"one exposes (via tools/list) will appear here."
+	return "MCP servers\n\nNo MCP servers are configured or connected.\n\n" +
+		"Add servers under the \"mcp_servers\" config key. Once a server is " +
+		"configured, permitted to launch and advertises tools (via tools/list), " +
+		"it appears here with the tools it exposes."
 }

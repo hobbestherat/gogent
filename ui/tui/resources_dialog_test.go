@@ -80,9 +80,11 @@ func TestResourceListLabel(t *testing.T) {
 			"[ ] shell" + strings.Repeat(" ", 22-5) + " used:1",
 		},
 		{
-			"non-togglable aligned no box",
-			resourceItem{kind: resourceMCP, name: "server", canToggle: false},
-			"    server" + strings.Repeat(" ", 22-6),
+			// Since issue #492, resourceMCP rows route through mcpListLabel: a
+			// tool row is a 2-space-indented bare name (no checkbox slot).
+			"mcp tool row indented bare name",
+			resourceItem{kind: resourceMCP, name: "server"},
+			"  server",
 		},
 		{
 			"long name truncated to width",
@@ -185,7 +187,9 @@ func TestEmptyDetail(t *testing.T) {
 		query string
 		want  string
 	}{
-		{"mcp placeholder", resourceMCP, 0, "", "#36"},
+		// Since issue #492 the MCP empty state no longer references #36; it points
+		// the user at the mcp_servers config key instead.
+		{"mcp placeholder", resourceMCP, 0, "", "mcp_servers"},
 		{"tools none", resourceTools, 0, "", "No tools are registered."},
 		{"skills none", resourceSkills, 0, "", "No skills are loaded."},
 		{"search no match", resourceTools, 0, "abc", "No matching items."},
