@@ -84,6 +84,23 @@ type messageView struct {
 	Content string `json:"content"`
 }
 
+// acceptedView is the response from the non-blocking send/approve endpoints
+// (issue #481): the id of the turn the daemon dispatched. The turn runs to
+// completion independently of the request connection; its progress and final
+// answer arrive over the SSE hub, not in this response. (The framework cannot
+// emit a literal 202 for a JSON body, so this is returned with 200 — the
+// behavioural contract is the non-blocking return plus the turn id, see design
+// §2.)
+//
+// Field name note: this POST/approve response uses camelCase "turnId" while SSE
+// events (eventView) use snake_case "turn_id". They are distinct messages decoded
+// into distinct client structs, so the difference is cosmetic; the client-side
+// contract tests pin "turnId" here, so normalizing both to turn_id is a
+// coordinated follow-up that would also update those tests.
+type acceptedView struct {
+	TurnID string `json:"turnId"`
+}
+
 // transcriptQuery binds the ?agent= query parameter.
 type transcriptQuery struct {
 	Agent string `json:"agent"`
@@ -246,6 +263,9 @@ type eventView struct {
 	Plan  string         `json:"plan,omitempty"`
 	// SessionID is set on the global event stream so a client can route events.
 	SessionID string `json:"session_id,omitempty"`
+	// TurnID correlates the event with the async-dispatched turn that produced it
+	// (issue #481). Empty for legacy/embedded turns and non-turn events.
+	TurnID string `json:"turn_id,omitempty"`
 }
 
 type todoItemView struct {
@@ -495,6 +515,7 @@ func eventToView(ev agent.SessionEvent, sessionID string) eventView {
 		Kind:      string(ev.Kind),
 		Plan:      ev.Plan,
 		SessionID: sessionID,
+		TurnID:    ev.TurnID,
 	}
 	if ev.Err != nil {
 		v.Error = ev.Err.Error()

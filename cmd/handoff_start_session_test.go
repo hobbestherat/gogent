@@ -80,6 +80,27 @@ func stubChatCompletions(t *testing.T, reply string) *httptest.Server {
 	return srv
 }
 
+// awaitAssistantAnswer polls the session transcript until an assistant message
+// containing needle appears — i.e. the async-dispatched turn completed (issue
+// #481: Send no longer blocks until the turn finishes, so a test that needs the
+// turn's result must wait for it explicitly). Returns whether it arrived.
+func awaitAssistantAnswer(t *testing.T, client *tuipkg.APIClient, sessionID, needle string, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		msgs, err := client.GetTranscript(sessionID, "root")
+		if err == nil {
+			for _, m := range msgs {
+				if m.Role == "assistant" && strings.Contains(m.Content, needle) {
+					return true
+				}
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
+}
+
 // TestStartHandoffCreatesFreshWindowSessionOnDaemon is the core regression: a
 // fresh, never-messaged window (no backend session, never persisted) must gain a
 // live session on the daemon once the handoff's per-window create runs, so its
@@ -155,8 +176,14 @@ func TestStartHandoffFreshWindowSendRunsTurnNo404(t *testing.T) {
 		}
 		t.Fatalf("fresh window send returned an unexpected error after handoff: %v", err)
 	}
-	if dto.Content == "" {
-		t.Fatalf("fresh window send returned an empty answer; the turn did not run on the daemon")
+	// Issue #481: Send is non-blocking and returns the dispatched turn id — the
+	// answer no longer rides in the response body (it arrives over SSE). Confirm
+	// the turn actually ran on the daemon by waiting for the assistant answer.
+	if dto.TurnID == "" {
+		t.Fatal("fresh window send returned no turn id (dispatch did not start)")
+	}
+	if !awaitAssistantAnswer(t, client, "session-1", "hello from the daemon", 10*time.Second) {
+		t.Fatal("fresh window send: the turn did not run on the daemon (no assistant answer in transcript)")
 	}
 }
 
@@ -196,6 +223,12 @@ func TestStartHandoffPreservesWindowTitleAcrossHandoff(t *testing.T) {
 	defer cancel()
 	if _, err := client.SendMessage(ctx, "session-7", "hi", "", ""); err != nil {
 		t.Fatalf("seed turn to persist title: %v", err)
+	}
+	// Issue #481: the seed turn runs asynchronously, so wait for it to complete
+	// (and call persistSession, which writes the carried title to the index) before
+	// reading the title back.
+	if !awaitAssistantAnswer(t, client, "session-7", "ok", 10*time.Second) {
+		t.Fatal("seed turn to persist the title did not complete on the daemon")
 	}
 
 	dto, err := client.GetSession("session-7")

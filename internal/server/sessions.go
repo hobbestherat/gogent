@@ -219,7 +219,12 @@ func (svc sessionsSvc) Plan(r *http.Request, id string) (interface{}, error) {
 	return planView{Plan: svc.pendingPlan(id)}, nil
 }
 
-// ApprovePlan handles POST /sessions/:id/plan/approve.
+// ApprovePlan handles POST /sessions/:id/plan/approve — non-blocking like Send
+// (issue #481). It dispatches the approved plan as a daemon-owned turn and returns
+// the turn id immediately; the turn runs to completion regardless of the client
+// connection, with progress and the final answer flowing over the SSE hub. It
+// acquires the busy gate for the turn's full duration (held until completion, not
+// handler return), so a concurrent send gets 409 while the plan executes.
 func (svc sessionsSvc) ApprovePlan(r *http.Request, id string) (interface{}, error) {
 	if err := requireHuman(r, svc.s.provider); err != nil {
 		return nil, err
@@ -227,11 +232,20 @@ func (svc sessionsSvc) ApprovePlan(r *http.Request, id string) (interface{}, err
 	if svc.s.g.GetUserSession(id) == nil {
 		return nil, webapi.NewHTTPError(http.StatusNotFound, "session not found")
 	}
-	resp, err := svc.s.g.ExecuteApprovedPlan(r.Context(), id, "root")
+
+	release, ok := svc.s.markBusy(id)
+	if !ok {
+		return nil, webapi.NewHTTPError(http.StatusConflict, "session is busy")
+	}
+
+	turnID, err := svc.s.g.DispatchApprovedPlan(id, "root", release)
 	if err != nil {
+		release()
+		// "no plan awaiting approval" is the caller's fault (400); a missing
+		// session is 404 (already checked) — keep the existing 400 mapping.
 		return nil, webapi.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
-	return messageView{Role: "assistant", Content: resp.Content}, nil
+	return acceptedView{TurnID: turnID}, nil
 }
 
 // RejectPlan handles POST /sessions/:id/plan/reject.

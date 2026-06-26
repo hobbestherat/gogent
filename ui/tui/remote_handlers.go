@@ -7,6 +7,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gogent/internal/agent"
@@ -103,6 +104,14 @@ type RemoteClient struct {
 	// the health monitor can drop a wedged stream and force a reconnect.
 	streamMu     sync.Mutex
 	streamCancel context.CancelFunc
+
+	// disconnected is true while the daemon connection is down (set in notifyLost,
+	// cleared in notifyRestored). Since a dispatched turn now outlives the request
+	// (issue #481), a POST that fails because the connection dropped no longer means
+	// the turn failed — it may still be running on the daemon. The send handlers
+	// consult this to suppress a spurious "turn failed" error event while
+	// disconnected; the blocking disconnect modal covers the UX instead.
+	disconnected atomic.Bool
 
 	startOnce sync.Once
 }
@@ -310,17 +319,34 @@ func (rc *RemoteClient) reconnect() <-chan GlobalEventDTO {
 	}
 }
 
-// notifyLost / notifyRestored forward to the Reconnector when one is installed.
+// notifyLost / notifyRestored forward to the Reconnector when one is installed and
+// track the connection state so the send handlers can tell a real dispatch failure
+// from a POST that merely failed because the link dropped (issue #481).
 func (rc *RemoteClient) notifyLost(attempt int) {
+	rc.disconnected.Store(true)
 	if rc.reconnector != nil {
 		rc.reconnector.OnConnectionLost(attempt)
 	}
 }
 
 func (rc *RemoteClient) notifyRestored() {
+	rc.disconnected.Store(false)
 	if rc.reconnector != nil {
 		rc.reconnector.OnConnectionRestored()
 	}
+}
+
+// emitSendErr reports a failed send/approve/command POST, EXCEPT while the
+// connection is down (issue #481): a turn dispatched on the daemon survives a
+// client disconnect, so a connection-level POST failure no longer implies the turn
+// failed. While disconnected it is logged and the disconnect modal carries the UX;
+// when connected it surfaces as an error event in the session window as before.
+func (rc *RemoteClient) emitSendErr(sessionID string, err error) {
+	if rc.disconnected.Load() {
+		log.Printf("remote send for session %s failed while disconnected (turn may still be running on daemon): %v", sessionID, err)
+		return
+	}
+	rc.emitErr(sessionID, err)
 }
 
 // backoffFor is the production reconnect schedule: 0.5s, 1s, 2s, 5s, then a 10s
@@ -358,6 +384,7 @@ func eventDTOToSessionEvent(e EventDTO) agent.SessionEvent {
 		Status:  agent.AgentStatus(e.Status),
 		Kind:    agent.SubAgentKind(e.Kind),
 		Plan:    e.Plan,
+		TurnID:  e.TurnID,
 	}
 	if e.Error != "" {
 		ev.Err = errors.New(e.Error)
@@ -529,7 +556,7 @@ func (rc *RemoteClient) Handlers() Handlers {
 			// POST /stop). Progress streams back over the global SSE consumer.
 			go func() {
 				if _, err := c.SendMessage(context.Background(), sessionID, message, modelName, effort); err != nil {
-					rc.emitErr(sessionID, err)
+					rc.emitSendErr(sessionID, err)
 				}
 			}()
 		},
@@ -559,7 +586,7 @@ func (rc *RemoteClient) Handlers() Handlers {
 			// Plan execution is a daemon-owned turn, like OnSend: background context.
 			go func() {
 				if err := c.ApprovePlan(context.Background(), sessionID); err != nil {
-					rc.emitErr(sessionID, err)
+					rc.emitSendErr(sessionID, err)
 				}
 			}()
 		},
@@ -789,7 +816,7 @@ func (rc *RemoteClient) Handlers() Handlers {
 		OnSendCommand: func(sessionID, message, modelName, agentName string, subtask bool, effort string) {
 			go func() {
 				if _, err := c.SendMessageWithOverrides(context.Background(), sessionID, message, modelName, agentName, subtask, effort); err != nil {
-					rc.emitErr(sessionID, err)
+					rc.emitSendErr(sessionID, err)
 				}
 			}()
 		},

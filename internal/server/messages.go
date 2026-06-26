@@ -1,20 +1,22 @@
 package server
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 
 	"github.com/hobbestherat/webapi"
-	"gogent/internal/agent"
 )
 
 // messagesSvc groups the message handlers (blocking send + SSE stream).
 type messagesSvc struct{ s *Server }
 
-// Send handles POST /sessions/:id/messages — the blocking path that runs the
-// full ReAct loop and returns only the final answer. A second concurrent turn on
-// the same session is rejected with 409.
+// Send handles POST /sessions/:id/messages — the non-blocking path that
+// dispatches the full ReAct loop on a daemon-owned goroutine and returns the new
+// turn's id immediately (issue #481). The turn runs to completion regardless of
+// whether the client stays connected; its progress and final answer arrive over
+// the SSE hub. A second concurrent turn on the same session is rejected with 409.
+// (Returned with 200 rather than a literal 202 — the framework cannot set a custom
+// status for a JSON body; see design §2.)
 func (svc messagesSvc) Send(r *http.Request, req sendMessageRequest, id string) (interface{}, error) {
 	if req.Message == "" {
 		return nil, webapi.NewHTTPError(http.StatusBadRequest, "message is required")
@@ -28,49 +30,49 @@ func (svc messagesSvc) Send(r *http.Request, req sendMessageRequest, id string) 
 	if !ok {
 		return nil, webapi.NewHTTPError(http.StatusConflict, "session is busy")
 	}
-	defer release()
 
-	// Plan mode: toggle on for this request when requested, restoring after.
-	if req.Mode == "plan" {
+	// The busy gate (and any plan-mode restore) must be tied to the TURN's
+	// completion, not this handler's return: the turn now outlives the request, so
+	// releasing on handler return would drop the gate while the turn is still in
+	// flight (letting a second send wrongly start) and would restore plan mode
+	// before the turn even runs. onDone fires when the dispatched goroutine ends.
+	planMode := req.Mode == "plan"
+	if planMode {
 		svc.s.g.SetPlanMode(id, true)
-		defer svc.s.g.SetPlanMode(id, false)
 	}
-
-	// A custom command's agent/subtask override routes the prompt through a
-	// daemon-side sub-agent instead of the normal root turn (issue #403).
-	if req.Subtask || req.Agent != "" {
-		result, err := svc.runCommandOverride(r.Context(), id, req.Agent, req.Message)
-		if err != nil {
-			return nil, webapi.NewHTTPError(http.StatusInternalServerError, err.Error())
+	onDone := func() {
+		if planMode {
+			svc.s.g.SetPlanMode(id, false)
 		}
-		return messageView{Role: "assistant", Content: result}, nil
+		release()
 	}
 
-	resp, err := svc.s.g.SendMessageToSessionWithModelAndEffort(r.Context(), id, "root", req.Message, req.Model, req.Effort)
+	var turnID string
+	var err error
+	if req.Subtask || req.Agent != "" {
+		// A custom command's agent/subtask override routes the prompt through a
+		// daemon-side sub-agent instead of the normal root turn (issue #403). The
+		// sub-agent's result is surfaced as the session's SessionEventFinal by the
+		// dispatch goroutine (no server-side shim needed).
+		turnID, err = svc.s.g.DispatchCommandSubtask(id, req.Agent, req.Message, onDone)
+	} else {
+		turnID, err = svc.s.g.DispatchMessage(id, "root", req.Message, req.Model, req.Effort, onDone)
+	}
 	if err != nil {
+		onDone() // dispatch failed before the goroutine started; release the gate
 		return nil, webapi.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	return messageView{Role: "assistant", Content: resp.Content}, nil
-}
-
-// runCommandOverride runs an agent/subtask custom-command invocation on the
-// daemon: it spawns the one-shot sub-agent (its run streams to the session's SSE
-// subscribers via the installed observer) and then surfaces the result as the
-// session's final answer event, so a streamed or globally-subscribed remote
-// window renders the answer and idles — matching the embedded path's
-// SessionEventFinal. It returns the result for the blocking response body.
-func (svc messagesSvc) runCommandOverride(ctx context.Context, id, agentName, message string) (string, error) {
-	result, err := svc.s.g.RunCommandSubtask(ctx, id, agentName, message)
-	if err != nil {
-		return "", fmt.Errorf("run command subtask: %w", err)
-	}
-	svc.s.hub.deliver(id, agent.SessionEvent{Type: agent.SessionEventFinal, Text: result})
-	return result, nil
+	return acceptedView{TurnID: turnID}, nil
 }
 
 // Stream handles POST /sessions/:id/messages/stream — returns immediately with
-// SSE headers, then emits every SessionEvent the loop produces until final/error.
-// Client disconnect cancels the loop (SSE context). 409 if already busy.
+// SSE headers, then forwards every SessionEvent the turn produces until the turn's
+// dispatch goroutine completes. It is a thin async-dispatch wrapper kept for
+// backwards compatibility (issue #481): the turn is dispatched on a daemon-owned
+// goroutine (context.Background()), so a client disconnect stops the streaming but
+// does NOT cancel the turn and does NOT release the busy gate — the turn runs to
+// completion and a reconnecting client recovers the result via the hub/transcript.
+// 409 if already busy.
 func (svc messagesSvc) Stream(r *http.Request, req sendMessageRequest, id string) (interface{}, error) {
 	if req.Message == "" {
 		return nil, webapi.NewHTTPError(http.StatusBadRequest, "message is required")
@@ -89,58 +91,57 @@ func (svc messagesSvc) Stream(r *http.Request, req sendMessageRequest, id string
 	sub, unsub := svc.s.hub.subscribeSession(id)
 	_ = us // session existence already checked above
 
+	// The busy gate (and any plan-mode restore) is tied to the TURN's completion
+	// via onDone, NOT to the producer's lifetime: the turn outlives the SSE
+	// connection now, so releasing on producer return would drop the gate while the
+	// turn is still running (a reconnecting client could wrongly start a second
+	// turn). onDone fires when the dispatched goroutine ends. It also closes
+	// turnDone, the producer's authoritative "no more events" signal.
 	planMode := req.Mode == "plan"
 	if planMode {
 		svc.s.g.SetPlanMode(id, true)
 	}
+	turnDone := make(chan struct{})
+	onDone := func() {
+		if planMode {
+			svc.s.g.SetPlanMode(id, false)
+		}
+		release()
+		close(turnDone)
+	}
 
-	modelName := req.Model
-	effort := req.Effort
-	message := req.Message
-	agentName := req.Agent
-	subtask := req.Subtask
+	var err error
+	if req.Subtask || req.Agent != "" {
+		_, err = svc.s.g.DispatchCommandSubtask(id, req.Agent, req.Message, onDone)
+	} else {
+		_, err = svc.s.g.DispatchMessage(id, "root", req.Message, req.Model, req.Effort, onDone)
+	}
+	if err != nil {
+		onDone() // releases the gate (and closes turnDone, harmless — no producer)
+		unsub()
+		return nil, webapi.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
 
 	return &webapi.EventStreamResponse{
 		Producer: func(stream webapi.EventStream) error {
-			// The busy claim, plan-mode restore and unsubscribe MUST be tied to the
-			// producer's lifetime, not the handler method's: webapi invokes Producer from
-			// processResults AFTER the handler returns (handlerValue.Call has already run
-			// the handler's defers by then). A handler-level `defer release()` would drop
-			// the concurrency claim before the streamed model loop even starts, so a
-			// second turn would wrongly get 200 mid-stream instead of 409 (issue #353,
-			// busy gate). Releasing here holds it for the whole streamed turn — and
-			// unsubscribing here, rather than at handler return, keeps the subscription
-			// live so the turn's events actually reach the stream. A returned
-			// EventStreamResponse always has its Producer invoked by writeEventStream (the
-			// only skip is a non-flushable writer, which 500s SSE entirely), so the claim
-			// cannot leak in any functioning stream.
-			defer release()
+			// Unsubscribe when the producer ends (turn done or client gone). The busy
+			// gate is released by onDone, independently, when the turn itself
+			// completes — so it is intentionally NOT released here.
 			defer unsub()
-			if planMode {
-				defer svc.s.g.SetPlanMode(id, false)
-			}
-
-			// Run the model loop off the SSE goroutine so the stream context
-			// (cancelled on client disconnect) aborts in-flight model work.
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				if subtask || agentName != "" {
-					// agent/subtask: spawn the sub-agent and emit its final answer (its
-					// run + the final event both reach this stream's subscriber).
-					_, _ = svc.runCommandOverride(stream.Context(), id, agentName, message)
-					return
-				}
-				_, _ = svc.s.g.SendMessageToSessionWithModelAndEffort(
-					stream.Context(), id, "root", message, modelName, effort)
-			}()
 
 			for {
 				select {
 				case <-stream.Context().Done():
-					return nil // client gone
-				case <-done:
-					// Drain any events emitted just before completion, then stop.
+					return nil // client gone — the turn keeps running on the daemon
+				case <-turnDone:
+					// The dispatch goroutine has finished, so every event it will ever
+					// emit — including a plan-mode SessionEventPlan emitted AFTER the
+					// final, and trailing usage events — is already buffered on the
+					// subscription (terminal events are delivered with a blocking send
+					// before onDone runs). Flush them, then close the stream. Stopping
+					// on turn completion rather than on a guessed terminal event also
+					// avoids missing the unstamped Plan event the old terminal-match
+					// logic skipped.
 					svc.drainRemaining(sub, stream)
 					return nil
 				case te := <-sub:
