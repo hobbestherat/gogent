@@ -90,11 +90,13 @@ func runAttached(homeDir, addr, token string, noColorFlag bool) error {
 	// closed on every return path; reconnect re-establishes it via rc.SetTunnel.
 	var apiOpts []tuipkg.APIClientOption
 	var tunnel *sshtunnel.Tunnel
+	var sshTarget string // "user@host" — the exact target the tunnel authenticated as
 	if strings.HasPrefix(addr, "ssh://") {
 		cfg, perr := sshtunnel.ParseConnectURL(addr, token, *sshKey, *sshKnownHosts, *sshInsecure)
 		if perr != nil {
 			return fmt.Errorf("bad --connect %q: %w", addr, perr)
 		}
+		sshTarget = cfg.User + "@" + cfg.Host
 		connectCtx, connectCancel := context.WithTimeout(ctx, sshtunnel.DialTimeout)
 		t, nerr := sshtunnel.New(connectCtx, cfg)
 		connectCancel()
@@ -122,7 +124,9 @@ func runAttached(homeDir, addr, token string, noColorFlag bool) error {
 	// wrong --connect fails with a clear message instead of an empty TUI.
 	if err := client.Health(); err != nil {
 		if tunnel != nil {
-			return fmt.Errorf("no daemon found at %s — start it with `gogent daemon start` (%w)", addr, err)
+			// The daemon runs on the REMOTE host, so point the user there, not at
+			// the local machine. sshTarget is the exact user@host that just authed.
+			return fmt.Errorf("no daemon found at %s — start it on the remote host with `ssh %s gogent daemon start` (%w)", addr, sshTarget, err)
 		}
 		return fmt.Errorf("daemon not reachable: %w", err)
 	}

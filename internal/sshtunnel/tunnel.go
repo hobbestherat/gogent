@@ -227,7 +227,15 @@ func (t *Tunnel) Restart(ctx context.Context) (redialed bool, err error) {
 		return false, err
 	}
 	if client != nil {
+		// The session is dead: close it and drop the pointer so a failed redial
+		// below leaves t.client nil (a clean "not connected") rather than a stale
+		// closed handle. The publish at the end installs the fresh client.
 		_ = client.Close()
+		t.mu.Lock()
+		if t.client == client {
+			t.client = nil
+		}
+		t.mu.Unlock()
 	}
 
 	// Slow path: dial + discover OUTSIDE the lock, then publish under it.
@@ -331,6 +339,13 @@ func dialClient(ctx context.Context, cfg Config) (*ssh.Client, error) {
 			return nil, fmt.Errorf("ssh connect %s: %w", addr, ctxErr)
 		}
 		return nil, fmt.Errorf("ssh handshake %s: %w", addr, err)
+	}
+	// Belt-and-suspenders for the close(hsDone) race: if ctx was cancelled in the
+	// window where the watcher could still have closed conn, do not hand back a
+	// client whose transport may already be torn down — fail cleanly instead.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("ssh connect %s: %w", addr, ctxErr)
 	}
 	return ssh.NewClient(c, chans, reqs), nil
 }
