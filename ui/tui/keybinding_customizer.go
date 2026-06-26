@@ -11,6 +11,18 @@ import (
 // (issue #269): it names every gesture so the dialog is self-documenting.
 const keybindCustomizerIdleHint = "Enter: rebind · Reset / Reset All · ↑↓ move · Esc close"
 
+// keybindStatusRows is the height (in rows) of the customizer's status Label. It is 2
+// so the capture-mode prompt — "Press a key for %q…  (Esc cancel · Backspace clear)" —
+// wraps onto a second line instead of clipping its trailing "Backspace clear" unbind
+// hint off the dialog's right edge (issue #472). The longest catalog action name
+// ("Set / show goal (supervisor)") makes the prompt 79 cells, which exceeds the status
+// Label's inner width (width−4, i.e. 54 cells at the MinW=58 floor); turbotui's Label
+// renders only the first min(H, rows) wrapped rows, so a one-row Label silently dropped
+// everything past the first line. Two rows hold the longest prompt at every reachable
+// dialog width (58–62), and the row is reclaimed from the previously-blank margin row
+// above the status, so listH and the footer position are unchanged.
+const keybindStatusRows = 2
+
 // keybindFooterLabels are the customizer's footer action captions in display order
 // (issue #461). Named so keybindingsDialogSpec can floor the dialog width on their
 // measured footerRowMinWidth (the buttons can then never overlap), mirroring
@@ -51,11 +63,13 @@ func capturePrompt(a action) string {
 // after a refused capture (issue #464). For the capability-gated Ctrl+Shift+<letter>
 // case — which Deliverable() refuses on a terminal that can't tell it apart from
 // Ctrl+<letter> — it returns a chord-specific, actionable line that fits the customizer's
-// single-row status Label: "<chord> unavailable here — pick another key." is ≤52 cells,
-// so with the caller's "✗ " prefix it stays within the dialog's floored ~54-cell status
-// width and is never wrapped onto an unrendered second row. ("here" = this terminal
-// can't deliver it; "pick another key" is the action without leaving the dialog.) Every
-// other reason is turbotui's own string, surfaced unchanged.
+// status Label: "<chord> unavailable here — pick another key." is ≤52 cells, so with the
+// caller's "✗ " prefix it stays within the dialog's floored ~54-cell status width and
+// renders on a single line. (Since issue #472 the status Label is keybindStatusRows tall,
+// so even a refusal that did exceed one line would wrap and stay visible rather than
+// clip.) ("here" = this terminal can't deliver it; "pick another key" is the action
+// without leaving the dialog.) Every other reason is turbotui's own string, surfaced
+// unchanged.
 func captureRefusalMessage(chord tv.Chord, reason string) string {
 	if isCapabilityGated(chord) {
 		return fmt.Sprintf("%s unavailable here — pick another key.", displayChord(chord))
@@ -102,7 +116,7 @@ func (w *Workbench) showKeybindingCustomizer() {
 		tv.Rect{X: 2, Y: 1, W: width - 4, H: 1}))
 
 	listY := 3
-	listH := height - listY - 4 // status row + button row + bottom margin + border
+	listH := height - listY - 4 // status (keybindStatusRows) + button row + border
 	if listH < 3 {
 		listH = 3
 	}
@@ -114,7 +128,13 @@ func (w *Workbench) showKeybindingCustomizer() {
 		tv.DefaultTheme.SelectionFG, tv.DefaultTheme.SelectionBG)
 	dialog.Window.AddContent(list)
 
-	status := dialogLabel(keybindCustomizerIdleHint, tv.Rect{X: 2, Y: height - 3, W: width - 4, H: 1})
+	// The status Label is keybindStatusRows tall so the capture-mode prompt wraps onto a
+	// second line instead of clipping its "Backspace clear" hint (issue #472). It occupies
+	// the rows just above the footer (height−2−keybindStatusRows … height−3), reclaiming the
+	// row that used to sit blank between the list and a one-row status — so listH and the
+	// footer position are unchanged.
+	status := dialogLabel(keybindCustomizerIdleHint,
+		tv.Rect{X: 2, Y: height - 2 - keybindStatusRows, W: width - 4, H: keybindStatusRows})
 	dialog.Window.AddContent(status)
 	setStatus := func(msg string) {
 		status.SetText(msg)
