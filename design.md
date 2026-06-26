@@ -120,6 +120,24 @@ Why context value, not a new parameter: it touches **only** `runLoop`, leaves
 signatures **unchanged** (embedded path passes `context.Background()` → empty id,
 exactly as today), and naturally flows to any sub-call that re-reads ctx.
 
+**Plumb `TurnID` onto the wire (else the stamping is dead weight).** Stamping the
+field is pointless unless a client can read it, and the issue explicitly requires
+"SessionEvents carry the turn ID". Today the SSE shape is `eventView`
+(`internal/server/wire.go:229`), built by `eventToView` (`:483`), and consumed
+client-side as `EventDTO` (`ui/tui/api_client.go:190`) → `eventDTOToSessionEvent`
+(`ui/tui/remote_handlers.go:347`). None carries a turn id (verified: a grep for
+`TurnID`/`turn_id` across `internal/server` and `ui/tui` returns nothing). So:
+- add `TurnID string \`json:"turn_id,omitempty"\`` to `eventView` and set it in
+  `eventToView`;
+- add the matching field to `EventDTO` and copy it through
+  `eventDTOToSessionEvent`.
+
+This makes the per-event stamping observable end-to-end — it is what the
+"SessionEvents carry the turn ID" test actually asserts, and it is what lets the
+Stream producer (§3.4) match the turn it dispatched. Without this plumbing the
+§3.1 stamping would be invisible to every real consumer; we are not shipping it
+half-wired.
+
 ### 3.2 Async dispatch in the Gogent core (`internal/gogent/gogent.go`)
 
 Add three thin async wrappers **alongside** the existing synchronous methods
@@ -159,9 +177,17 @@ func (s *UserSession) EmitFinal(turnID, text string) // emit{Type:Final,Text,Tur
 func (s *UserSession) EmitError(turnID string, err error)
 ```
 and have `DispatchCommandSubtask`'s goroutine call `EmitFinal`/`EmitError`
-(stamped with `turnID`). The server's `runCommandOverride` hub.deliver shim is
-then removed from the async path (the blocking Stream path may keep its own; see
-3.4).
+(stamped with `turnID`).
+
+**Single final-event source — no double final.** Once `DispatchCommandSubtask`
+emits the subtask's final through the observer (→ hub → all subscribers), the old
+server-side shim in `runCommandOverride` (`messages.go:67`,
+`svc.s.hub.deliver(id, …Final…)`) becomes redundant. **`runCommandOverride` is
+retired entirely** — *both* `Send` and `Stream` route subtask/agent turns through
+`DispatchCommandSubtask`, so there is exactly one final emit (via the observer)
+for every path. There is no "Stream keeps its own shim" option: keeping it would
+make a streamed subtask emit two `SessionEventFinal`s (one from `EmitFinal`, one
+from `hub.deliver`). This removes the earlier ambiguity.
 
 > **Optional, not v1-blocking:** a `map[turnID]{sessionID,status,startedAt}`
 > registry on `Gogent`, populated at dispatch and cleared in the `onDone` defer,
@@ -211,22 +237,41 @@ tightening — without it an async plan turn would race a concurrent send.
 ### 3.4 `Stream` endpoint (`messages.go:74`) — keep, but decouple
 
 Kept for backwards compatibility, but the in-flight turn must no longer die on
-client disconnect, and the busy gate must no longer release on disconnect:
+client disconnect, and the busy gate must no longer release on disconnect. The
+current producer (`:104-152`) does three things wrongly coupled to the client:
+runs the turn under `stream.Context()` (`:131,134`), ties `defer release()` to
+producer lifetime (`:117`), and uses a local `done` channel that closes when the
+*turn goroutine it owns* returns (`:125-136`). All three move off the connection:
 
-- The producer goroutine currently runs the turn under `stream.Context()`
-  (`:131,134`) and ties `defer release()` to producer lifetime (`:117`). Change to
-  **dispatch the turn async** (via the same `Dispatch*` methods, under
-  `context.Background()`), with `onDone = release`. The producer then only
-  *subscribes and forwards* events to the connected client (`:138-151`).
-- On client disconnect (`<-stream.Context().Done()`, `:140`) the producer
-  returns and `unsub()`s (`:118`) — but the turn keeps running and `release`
-  fires later from `onDone`. So a reconnecting client that sends gets 409 until
-  the turn really finishes.
-- Plan-mode restore (`:119-121`) likewise moves into `onDone`.
+- **Dispatch async, not connection-scoped.** Replace the in-producer
+  `go func(){ … SendMessage(stream.Context()) }()` with a call to the same
+  `Dispatch*` methods (under `context.Background()`), passing
+  `onDone = func(){ planRestore(); release() }`. Turn lifetime + busy gate are now
+  owned by the daemon, not the stream.
+- **Completion detection = terminal event on the subscription, not a local
+  `done` channel.** The producer can no longer watch a goroutine it owns. Instead
+  it watches its hub subscription (`sub`, from `subscribeSession`, `:89`) for the
+  turn's terminal event. This is safe because **`runLoop` emits a terminal event
+  on every exit path** (verified): `SessionEventFinal` on completion
+  (`user_session.go:1645`), `SessionEventError` on `ctx.Err()` cancellation
+  (`:1348-1349`) and on loop errors (`:1263,:1296`). The busy gate guarantees one
+  turn per session at a time, so the next `final`/`error` on this session's
+  subscription is this turn's; for precision the producer matches the dispatched
+  `TurnID` (now on the wire, §3.1) before treating it as terminal. On that event
+  the producer drains remaining buffered events (`drainRemaining`, `:158`) and
+  returns.
+- **Disconnect path unchanged in shape, decoupled in effect.** On
+  `<-stream.Context().Done()` (`:140`) the producer returns and `unsub()`s
+  (`:118`) — but the turn keeps running and `release` fires later from `onDone`.
+  So a reconnecting client that sends gets 409 until the turn really finishes.
+- **No `runCommandOverride` shim** (see §3.2): the subtask/agent branch
+  (`:128-133`) dispatches via `DispatchCommandSubtask`; its final reaches the
+  producer's subscription like any other event — no second emit.
 
 This makes Stream a thin async-dispatch wrapper: it streams to whoever's
-connected and stops streaming on disconnect, without affecting turn lifetime or
-the busy gate.
+connected and stops streaming on disconnect (when it sees the turn's terminal
+event, or when the client goes away), without affecting turn lifetime or the busy
+gate.
 
 ### 3.5 Client (`ui/tui/api_client.go`, `ui/tui/remote_handlers.go`)
 
@@ -236,11 +281,12 @@ over the global SSE stream (`RemoteClient.consume`, `:199`). Two adjustments:
 
 1. **Response shape (`api_client.go`).** `SendMessage`/`SendMessageWithOverrides`
    (`:415,424`) and `ApprovePlan` (`:496`) today decode a `MessageDTO` used only
-   to detect failure. The body is now `acceptedView{turnId}`. JSON decoding is
-   lenient (unknown fields ignored), so the existing decode into `MessageDTO`
-   keeps working untouched; we will additionally decode `turnId` (so a future
-   correlation feature has it) and may change the return to surface the turn id.
-   Minimal-churn: keep signatures, just stop relying on `Content`.
+   to detect failure. The body is now `acceptedView{turnId}`. Decode it into a
+   small `acceptedDTO{TurnID string \`json:"turnId"\`}` and **return the turn id**
+   (the callers in `remote_handlers.go` ignore the value today and branch only on
+   `err`, so changing the return type is safe and gives a future correlation
+   feature the id). The `EventDTO` gains the matching `turn_id` field (§3.1) so
+   streamed events the client already consumes carry the correlation id.
 
 2. **Suppress false "turn failed" errors while disconnected (`remote_handlers.go`).**
    Today a failed POST calls `rc.emitErr` (`:532,562,792`), which would now fire a
@@ -297,13 +343,47 @@ Exactly the issue's ask — a behavior fix, no scope creep:
   correct, and `HasBackgroundWork` gating (`api.go:330`) is unaffected.
 - **Plan-mode restore** moves to `onDone` (must, else async would restore before
   the turn runs) — covered.
-- **Tests:** `TestSendMessageBlocking` (`server_test.go:180`) asserts 200 +
-  `messageView.Content` containing "fake model"; it **will need updating** to the
-  new async contract (assert 200 + non-empty `acceptedView.TurnID`, and, if it
-  wants the answer, subscribe to SSE and await `SessionEventFinal`). This is an
-  intended contract change, not a silent break. `TestMarkBusyRejectsSecondClaim`
-  (`:202`) is unaffected. The pre-existing environmental `TestUserSessionSendMessage`
-  404 (no model endpoint) remains the only acceptable failure.
+- **Tests broken by the contract change (full accounting — these MUST be
+  migrated, with how):**
+  1. `TestSendMessageBlocking` (`server_test.go:180`) — asserts 200 +
+     `messageView.Content` containing "fake model". Migrate to: 200 + non-empty
+     `acceptedView.TurnID`; subscribe to the session SSE *before* sending and
+     await the `SessionEventFinal` (assert its text + that it carries the returned
+     `TurnID`). Doubles as the "events carry the turn id" + "connected client gets
+     final over SSE" coverage.
+  2. `TestSendRejectsNewTurnWhileAsyncSpawnRunsInBackground`
+     (`background_state_issue353_test.go:71`) — today relies on `serveOne(first)`
+     **blocking until the foreground turn completes** before it checks the 409.
+     After the change `first` returns instantly and the foreground turn outlives
+     the test, racing `defer backend.Close()`/`defer close(releaseChild)` and
+     leaking a goroutine. Migrate to make the #353 invariant explicit: subscribe
+     to SSE; POST `first` (now 200+turnId); await `childArrived`; **await the
+     foreground turn's `SessionEventFinal` over SSE** (proves `onDone` fired and
+     `release()` ran, so the only remaining hold is `HasBackgroundWork`); THEN
+     POST `second` and assert 409 — this now precisely tests the
+     background-work busy gate the test is named for. Finally `close(releaseChild)`
+     and drain the child's terminal event before returning, so no goroutine
+     outlives teardown.
+  3. `TestStreamRejectsConcurrentTurnWhileForegroundRuns`
+     (`background_state_issue353_test.go:135`) — the busy assertion still holds
+     (release moves from producer-lifetime to `onDone`, and the turn is blocked on
+     `releaseFirstModel`, so 409 stands), **but its `<-r.Context().Done()` branch
+     (`:149`) becomes unreachable via client disconnect** once the model call runs
+     under `context.Background()`. Migrate by: keeping it as the Stream busy-gate
+     regression test (drop the now-dead `r.Context().Done()` expectation / leave
+     it only as the backend's unblock-on-shutdown path), and add the new
+     disconnect-survival Stream test in §5 to cover what this one no longer can.
+  4. `ui/tui/remote_client_phase2_test.go:47,81-83` — the fake daemon returns
+     `MessageDTO{Content:"ok"}` and asserts `msg.Content == "ok"`. Update the fake
+     to return `{"turnId":"turn_…"}` and assert the client surfaces that turn id
+     (the real contract), since `SendMessage` now returns the turn id rather than
+     message content.
+  `TestMarkBusyRejectsSecondClaim` (`server_test.go:202`),
+  `TestStopEndpointCancelsAsyncBackgroundSubAgents`
+  (`background_state_issue353_test.go:202`, drives the session API directly, not
+  the blocking send) and the other `background_state` state tests are unaffected.
+  The pre-existing environmental `TestUserSessionSendMessage` 404 (no model
+  endpoint) remains the only acceptable failure.
 - gofmt/build/vet clean; golangci-lint v2 whole-repo 0 *new* issues; `go test
   ./...` (no `-race`, Pi5) green per the dev gate.
 
@@ -320,6 +400,11 @@ Exactly the issue's ask — a behavior fix, no scope creep:
   release in the server layer; response-shape + disconnect-suppression in the TUI
   client. Each concern sits at its natural layer; the core stays unaware of HTTP
   and of the server's busy map (it only takes an `onDone` callback).
+- **Layering note (accepted):** `UserSession.EmitFinal`/`EmitError` add a second
+  final-emit path alongside the embedded subtask path's `wb.EmitSessionEvent`
+  (`cmd/embedded_handlers.go:446`). Both ultimately drive the same observer/hub
+  fan-out, so this is a cosmetic duplication, not a divergence; called out so a
+  later cleanup can unify them. No behavioral difference in v1.
 
 ---
 
@@ -338,7 +423,20 @@ In `internal/server` (httptest against the in-memory server + fake model):
 - **No regression when connected:** turn completes normally; final answer arrives
   as `SessionEventFinal` over SSE.
 
-Plus update `TestSendMessageBlocking` to the async contract (above).
+Stream-path coverage (the endpoint with the largest behavioral change — §3.4 —
+currently has only the busy-gate test):
+- **Stream survives client disconnect:** open `POST …/messages/stream`, await the
+  foreground model arriving, **close the client connection mid-turn**, and assert
+  via an independent `/events` subscriber that the turn still reaches
+  `SessionEventFinal` and that a concurrent `POST …/messages` stays 409 until that
+  final, then succeeds — i.e. busy released on turn completion, not on disconnect.
+- **Stream subtask emits exactly one final:** a subtask/agent stream produces a
+  single `SessionEventFinal` (guards the §3.2 double-final removal).
+
+Plus the four migrations in §4(3) (`TestSendMessageBlocking`,
+`TestSendRejectsNewTurnWhileAsyncSpawnRunsInBackground`,
+`TestStreamRejectsConcurrentTurnWhileForegroundRuns`, and the
+`remote_client_phase2_test.go` Content assertion).
 
 ---
 
@@ -351,15 +449,22 @@ Plus update `TestSendMessageBlocking` to the async contract (above).
   `DispatchApprovedPlan`/`DispatchCommandSubtask` async wrappers; stdlib turn-id
   minter; synchronous methods retained.
 - `internal/server/messages.go` — `Send` + `Stream` dispatch async, return
-  `acceptedView`, busy/plan-mode release on completion.
+  `acceptedView`, busy/plan-mode release on completion; **delete
+  `runCommandOverride`** (subtask final now emitted by the core via the observer).
 - `internal/server/sessions.go` — `ApprovePlan` dispatch async + acquire
   `markBusy`, return `acceptedView`.
-- `internal/server/wire.go` — `acceptedView` type.
-- `internal/server/server_test.go` (+ new test file) — update blocking-send test;
-  add the disconnect/stop/busy/turn-id tests.
-- `ui/tui/api_client.go` — decode `acceptedView` (turn id) for send/approve.
-- `ui/tui/remote_handlers.go` — disconnected flag; suppress `emitErr` on a send
-  error while disconnected.
+- `internal/server/wire.go` — `acceptedView` type; `TurnID` field on `eventView`
+  + set it in `eventToView`.
+- `internal/server/server_test.go`, `internal/server/background_state_issue353_test.go`
+  (+ a new Stream test file) — migrate the four affected tests (§4(3)); add the
+  disconnect/stop/busy/turn-id and Stream-disconnect/single-final tests (§5).
+- `ui/tui/api_client.go` — decode `acceptedView` (return turn id) for
+  send/approve; `TurnID`/`turn_id` on `EventDTO`.
+- `ui/tui/remote_handlers.go` — disconnected flag (`atomic.Bool` set in
+  `notifyLost`/cleared in `notifyRestored`); suppress `emitErr` on a send error
+  while disconnected; copy `turn_id` through `eventDTOToSessionEvent`.
+- `ui/tui/remote_client_phase2_test.go` — update fake response + assertion to the
+  `{turnId}` contract.
 
 ---
 
@@ -376,11 +481,9 @@ Plus update `TestSendMessageBlocking` to the async contract (above).
 3. **In-flight turn registry.** Deferred as optional convenience (§3.2). Build the
    `map[turnID]…` + `GET …/turns/:id` now, or wait until a consumer needs it?
    *Recommendation: defer; the `onDone` callback already covers busy release.*
-4. **`DispatchCommandSubtask` final-event emit.** Move the "surface subtask result
-   as session final" from the server (`runCommandOverride` hub.deliver) into the
-   core via `UserSession.EmitFinal`, so the async path needs no server hub. Agreed
-   as the right layering? *Recommendation: yes.*
-5. **ApprovePlan now busy-gated.** It is not today (`sessions.go:223`). Adding
+   (This is the *only* genuinely-optional piece; the turn-id wire plumbing and the
+   single-final emit are now in scope, not deferred.)
+4. **ApprovePlan now busy-gated.** It is not today (`sessions.go:223`). Adding
    `markBusy` is needed for a correct async busy gate but is a behavioral
    tightening. Confirm acceptable. *Recommendation: yes — it matches the
    send/turn busy model.*
