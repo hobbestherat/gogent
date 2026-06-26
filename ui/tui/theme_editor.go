@@ -235,11 +235,20 @@ const (
 )
 
 // themeEditorColumn places a contiguous run of groups in one on-screen column of the
-// editor: its x origin, the width of its label cell, and the groups stacked in it (each
-// drawn as a header row then one role per row).
+// editor: its x origin, the width of its label cell, the groups stacked in it (each
+// drawn as a header row then one role per row), and sectionPad — the number of EXTRA
+// blank rows inserted in every inter-section gap on top of the single separator row
+// every column gets. It is the cross-column alignment lever: the left column's first
+// section (Session output, 8 rows) is one row shorter than the right's (Controls, 9
+// rows), so without extra padding the left column's second section (UI chrome) lands
+// one row above the right's (Buttons and inputs). Setting sectionPad=1 on the left
+// column widens its single gap to two rows, dropping UI chrome onto the same logical
+// row as Buttons and inputs while leaving both columns' first sections aligned at
+// row 0. The right column keeps sectionPad=0 so its gaps are unchanged.
 type themeEditorColumn struct {
-	x, labelW int
-	groups    []themeGroup
+	x, labelW  int
+	groups     []themeGroup
+	sectionPad int
 }
 
 // themeEditorLayout is the editor's geometry resolved from the live dialog bounds (issue
@@ -290,8 +299,8 @@ func resolveThemeEditorLayout(width, height int) themeEditorLayout {
 		visibleRows: height - 3 - themeEditorContentTop,
 		scrollbarX:  width - 3,
 		columns: []themeEditorColumn{
-			{leftX, leftLabelW, themeGroups[:2]},   // left: Session output, UI chrome
-			{rightX, rightLabelW, themeGroups[2:]}, // right: Controls, Buttons and inputs, Code
+			{leftX, leftLabelW, themeGroups[:2], 1},   // left: Session output, UI chrome (sectionPad=1 aligns UI chrome with Buttons and inputs)
+			{rightX, rightLabelW, themeGroups[2:], 0}, // right: Controls, Buttons and inputs, Code
 		},
 	}
 }
@@ -338,7 +347,9 @@ func themeEditorColumnRows(col themeEditorColumn) int {
 		rows += 1 + len(g.roles)
 	}
 	if len(col.groups) > 1 {
-		rows += len(col.groups) - 1 // one separator between each pair of adjacent sections
+		// One separator between each pair of adjacent sections, plus col.sectionPad
+		// extra rows per gap (the cross-column alignment lever — see themeEditorColumn).
+		rows += (len(col.groups)-1)*(1+col.sectionPad)
 	}
 	return rows
 }
@@ -758,10 +769,13 @@ func (w *Workbench) showThemeEditor() {
 		for gi, g := range col.groups {
 			// One blank separator row between adjacent sections (issue #462): advance the
 			// logical row before every group after the first so the section reads with
-			// vertical breathing room. themeEditorColumnRows counts these same separators so
-			// the scroll math stays consistent.
+			// vertical breathing room. col.sectionPad adds further blank rows per gap on
+			// columns that need to drop their second section onto the same logical row as
+			// the other column's second section (the cross-column alignment lever — see
+			// themeEditorColumn). themeEditorColumnRows counts these same separator+pad rows
+			// so the scroll math stays consistent.
 			if gi > 0 {
-				logical++
+				logical += 1 + col.sectionPad
 			}
 			hx, hw := cellRect(col, rowHeader)
 			addRow(themeSectionHeader(g.title, tv.Rect{X: hx, Y: logical, W: hw, H: 1}).Root(), logical, colIdx, rowHeader)

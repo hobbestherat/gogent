@@ -370,23 +370,32 @@ func TestThemeEditorColumnRowsCountsSectionSeparators(t *testing.T) {
 	if len(cols) != 2 {
 		t.Fatalf("expected 2 columns, got %d", len(cols))
 	}
-	// Manual count: header + roles per group, plus one separator between groups.
+	// Manual count: header + roles per group, plus (1 separator + col.sectionPad) rows
+	// per inter-section gap. The left column carries sectionPad=1 so its second section
+	// (UI chrome) drops onto the same logical row as the right column's second section
+	// (Buttons and inputs); the right column keeps sectionPad=0.
 	wantRows := func(col themeEditorColumn) int {
 		rows := 0
 		for _, g := range col.groups {
 			rows += 1 + len(g.roles)
 		}
 		if len(col.groups) > 1 {
-			rows += len(col.groups) - 1
+			rows += (len(col.groups) - 1) * (1 + col.sectionPad)
 		}
 		return rows
 	}
 	left, right := cols[0], cols[1]
+	if left.sectionPad != 1 {
+		t.Errorf("left column sectionPad = %d, want 1 (aligns UI chrome with Buttons and inputs)", left.sectionPad)
+	}
+	if right.sectionPad != 0 {
+		t.Errorf("right column sectionPad = %d, want 0", right.sectionPad)
+	}
 	if got, want := themeEditorColumnRows(left), wantRows(left); got != want {
-		t.Errorf("left column rows = %d, want %d (separators miscounted)", got, want)
+		t.Errorf("left column rows = %d, want %d (separators/pad miscounted)", got, want)
 	}
 	if got, want := themeEditorColumnRows(right), wantRows(right); got != want {
-		t.Errorf("right column rows = %d, want %d (separators miscounted)", got, want)
+		t.Errorf("right column rows = %d, want %d (separators/pad miscounted)", got, want)
 	}
 
 	// A single-group column must add NO separator (the guard against off-by-one).
@@ -410,6 +419,49 @@ func TestThemeEditorColumnRowsCountsSectionSeparators(t *testing.T) {
 	}
 	if themeEditorContentRows() <= noSep {
 		t.Errorf("content rows = %d, expected > %d once separators are counted", themeEditorContentRows(), noSep)
+	}
+
+	// The left column's first section (Session output: 1 header + 7 roles = 8 rows) is
+	// one row shorter than the right's (Controls: 1 header + 8 roles = 9 rows). Without
+	// padding the left's second section (UI chrome) would land one row above the right's
+	// (Buttons and inputs). sectionPad=1 on the left column widens its single gap to two
+	// rows so the two second-section headers share a logical row, while both first-section
+	// headers still share logical row 0.
+	left, right = cols[0], cols[1]
+	leftSecondStart := 1 + len(left.groups[0].roles) + 1 + left.sectionPad // header+roles+sep+pad
+	rightSecondStart := 1 + len(right.groups[0].roles) + 1 + right.sectionPad
+	if leftSecondStart != rightSecondStart {
+		t.Errorf("second sections misaligned: left UI chrome at logical %d, right Buttons and inputs at %d",
+			leftSecondStart, rightSecondStart)
+	}
+}
+
+// TestIssue471SecondSectionsAlign is the rendered counterpart of the row-count
+// alignment check: the UI chrome and Buttons and inputs section headers land on the
+// SAME screen row (and thus the same logical row), so the two columns' second
+// sections read as a aligned pair rather than staggered by one row.
+func TestIssue471SecondSectionsAlign(t *testing.T) {
+	w := openThemeEditor462Raw(t, Handlers{
+		GetTheme: func() config.ThemeConfig { return config.ThemeConfig{} },
+		SetTheme: func(config.ThemeConfig) {},
+	})
+	pos := editorScrollFind(w, []string{"UI chrome ─", "Buttons and inputs ─"})
+	uiChrome := pos["UI chrome ─"]
+	buttons := pos["Buttons and inputs ─"]
+	if !uiChrome.found || !buttons.found {
+		t.Fatal("could not locate the UI chrome or Buttons and inputs section header")
+	}
+	if uiChrome.logical != buttons.logical {
+		t.Errorf("second sections not aligned: UI chrome at logical %d, Buttons and inputs at %d",
+			uiChrome.logical, buttons.logical)
+	}
+	// Sanity: the first sections are still aligned at logical row 0.
+	first := editorScrollFind(w, []string{"Session output ─", "Controls ─"})
+	if first["Session output ─"].found && first["Controls ─"].found {
+		if first["Session output ─"].logical != first["Controls ─"].logical {
+			t.Errorf("first sections drifted: Session output at %d, Controls at %d",
+				first["Session output ─"].logical, first["Controls ─"].logical)
+		}
 	}
 }
 

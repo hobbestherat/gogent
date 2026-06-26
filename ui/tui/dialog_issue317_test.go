@@ -394,11 +394,12 @@ func TestResolveThemeEditorLayoutMonotonic(t *testing.T) {
 func TestThemeEditorContentRowsGeometryIndependent(t *testing.T) {
 	rows := themeEditorContentRows()
 	// Left column: Session output (7) + UI chrome (10, +list_bg #327) = 17 roles + 2 headers
-	// = 19, plus 1 section separator (issue #462) = 20.
+	// = 19, plus 1 section separator (issue #462) and 1 sectionPad row (so UI chrome aligns
+	// with the right column's Buttons and inputs) = 21.
 	// Right column: Controls (8) + Buttons and inputs (6) + Code (1) = 15 + 3 headers = 18,
-	// plus 2 section separators (issue #462) = 20. Tallest = 20.
-	if rows != 20 {
-		t.Errorf("themeEditorContentRows() = %d, want 20 (tallest column, incl. #462 separators)", rows)
+	// plus 2 section separators (issue #462) = 20. Tallest = 21 (the padded left column).
+	if rows != 21 {
+		t.Errorf("themeEditorContentRows() = %d, want 21 (tallest column, incl. #462 separators + left sectionPad)", rows)
 	}
 }
 
