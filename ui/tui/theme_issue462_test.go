@@ -371,9 +371,10 @@ func TestThemeEditorColumnRowsCountsSectionSeparators(t *testing.T) {
 		t.Fatalf("expected 2 columns, got %d", len(cols))
 	}
 	// Manual count: header + roles per group, plus (1 separator + col.sectionPad) rows
-	// per inter-section gap. The left column carries sectionPad=1 so its second section
+	// per inter-section gap. The left column carries sectionPad=2 so its second section
 	// (UI chrome) drops onto the same logical row as the right column's second section
-	// (Buttons and inputs); the right column keeps sectionPad=0.
+	// (Buttons and inputs); the right column keeps sectionPad=1 (issue #477: 2 blank rows
+	// per gap; the left needs one more than the right to align its shorter first section).
 	wantRows := func(col themeEditorColumn) int {
 		rows := 0
 		for _, g := range col.groups {
@@ -385,11 +386,11 @@ func TestThemeEditorColumnRowsCountsSectionSeparators(t *testing.T) {
 		return rows
 	}
 	left, right := cols[0], cols[1]
-	if left.sectionPad != 1 {
-		t.Errorf("left column sectionPad = %d, want 1 (aligns UI chrome with Buttons and inputs)", left.sectionPad)
+	if left.sectionPad != 2 {
+		t.Errorf("left column sectionPad = %d, want 2 (aligns UI chrome with Buttons and inputs)", left.sectionPad)
 	}
-	if right.sectionPad != 0 {
-		t.Errorf("right column sectionPad = %d, want 0", right.sectionPad)
+	if right.sectionPad != 1 {
+		t.Errorf("right column sectionPad = %d, want 1 (issue #477: 2 blank rows per gap)", right.sectionPad)
 	}
 	if got, want := themeEditorColumnRows(left), wantRows(left); got != want {
 		t.Errorf("left column rows = %d, want %d (separators/pad miscounted)", got, want)
@@ -424,9 +425,10 @@ func TestThemeEditorColumnRowsCountsSectionSeparators(t *testing.T) {
 	// The left column's first section (Session output: 1 header + 7 roles = 8 rows) is
 	// one row shorter than the right's (Controls: 1 header + 8 roles = 9 rows). Without
 	// padding the left's second section (UI chrome) would land one row above the right's
-	// (Buttons and inputs). sectionPad=1 on the left column widens its single gap to two
-	// rows so the two second-section headers share a logical row, while both first-section
-	// headers still share logical row 0.
+	// (Buttons and inputs). sectionPad=2 on the left vs sectionPad=1 on the right keeps
+	// the left's gap one row taller, so the two second-section headers share a logical
+	// row while both first-section headers still share logical row 0 (issue #477 raised
+	// both pads: the right column gets 2 blank rows per gap, the left 3).
 	left, right = cols[0], cols[1]
 	leftSecondStart := 1 + len(left.groups[0].roles) + 1 + left.sectionPad // header+roles+sep+pad
 	rightSecondStart := 1 + len(right.groups[0].roles) + 1 + right.sectionPad

@@ -806,9 +806,17 @@ func TestIssue243CodeBlockLabelRendersFully(t *testing.T) {
 // round-1 concern: the dialog was widened to 84, which overflowed a standard 80-column
 // terminal (centeredDialog only clamps the origin; it does not scale an oversized dialog,
 // so the right column and the Cancel button were clipped). The driver reduced the width to
-// 80. This renders the real editor in the 80-wide test buffer and asserts the whole dialog
-// — borders, the right column's labels/fields/swatches, and the Cancel button — is visible
-// within 80 columns (the right border is present at the last column, not overwritten).
+// 80. This renders the real editor and asserts the whole dialog — borders, the right
+// column's labels/fields/swatches, and the Cancel button — is visible with its right border
+// present (not overwritten by an overflowing widget).
+//
+// Issue #477 re-widened the dialog to an 83-column floor (the 1→4 inter-column gutter), so
+// the editor NO LONGER fits a classic 80-column terminal — on an 80-wide screen the 83-wide
+// dialog clips its right border (╗/║/╝ at cols 80-82) off-screen. The test therefore renders
+// on an 83-wide buffer (the new floor, where the dialog sits at x=0 and its full frame is
+// visible) and checks the right border there. The invariant under guard — no right-column
+// widget overflows the dialog's own border — is unchanged; only the validated width moved
+// 80→83 with the floor.
 func TestIssue243DialogFitsEightyColumnTerminal(t *testing.T) {
 	issue204RestoreTheme(t)
 	w := newTestWorkbench(t)
@@ -816,12 +824,14 @@ func TestIssue243DialogFitsEightyColumnTerminal(t *testing.T) {
 		GetTheme: func() config.ThemeConfig { return config.ThemeConfig{} },
 		SetTheme: func(config.ThemeConfig) {},
 	})
+	// Render on the 83-wide floor (#477): below it the dialog clips its right border.
+	w.app.Resize(themeEditorDialogW, themeEditorDialogH+3)
 	w.showThemeEditor()
 	w.desktop.Redraw()
 
 	width := w.app.Width()
-	if width < 80 {
-		t.Fatalf("setup: test app is only %d cols wide; need ≥80 to validate an 80-col fit", width)
+	if width < themeEditorDialogW {
+		t.Fatalf("setup: test app is only %d cols wide; need ≥%d (the #477 floor) to validate the fit", width, themeEditorDialogW)
 	}
 
 	// The dialog's right border must be present on its rows. A right-column widget that

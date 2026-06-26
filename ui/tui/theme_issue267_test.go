@@ -296,6 +296,12 @@ func issue267Render(t *testing.T) (*Workbench, [][]rune) {
 		GetTheme: func() config.ThemeConfig { return config.ThemeConfig{} },
 		SetTheme: func(config.ThemeConfig) {},
 	})
+	// Since issue #477 the editor floors at 83 wide, so render on an 83-column terminal:
+	// on the 80-column default the 83-wide dialog clips its rightmost columns and the last
+	// role's (code_bg) field value truncates off-screen. At exactly 83 wide the dialog
+	// still sits at x=0 (no centring offset), so frame-at-col-0 assertions are unchanged;
+	// the editor internals are identical (the dialog resolves to the same 83×22 floor).
+	w.app.Resize(83, 25)
 	w.showThemeEditor()
 	w.desktop.Redraw()
 	rows := make([][]rune, w.app.Height())

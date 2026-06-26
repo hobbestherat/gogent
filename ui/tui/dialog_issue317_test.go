@@ -289,11 +289,13 @@ func checkThemeLayoutInvariants(t *testing.T, l themeEditorLayout) {
 	}
 }
 
-// TestResolveThemeEditorLayoutFloor pins the floor case: at the 80×22 minimum the
+// TestResolveThemeEditorLayoutFloor pins the floor case: at the 83×22 minimum the
 // resolved layout must reproduce the documented compile-time geometry exactly (the
-// original {x:2,labelW:20} / {x:39,labelW:22} columns, contentTop 3, visibleRows 16,
-// scrollbar at 77), so the floor render is byte-for-byte what the pre-#317 constants
+// original {x:2,labelW:20} / {x:42,labelW:22} columns, contentTop 3, visibleRows 15,
+// scrollbar at 80), so the floor render is byte-for-byte what the pre-#317 constants
 // drew. themeEditorColumns() is defined as this floor case, so they must agree.
+// (Issue #477 raised the floor 80→83 and widened the inter-column gutter 1→4, so the
+// right column's floor origin moved 39→42.)
 func TestResolveThemeEditorLayoutFloor(t *testing.T) {
 	l := resolveThemeEditorLayout(themeEditorDialogW, themeEditorDialogH)
 	if l.contentTop != themeEditorContentTop {
@@ -311,8 +313,8 @@ func TestResolveThemeEditorLayoutFloor(t *testing.T) {
 	if l.columns[0].x != 2 || l.columns[0].labelW != 20 {
 		t.Errorf("floor left column = {x:%d,labelW:%d}, want {2,20}", l.columns[0].x, l.columns[0].labelW)
 	}
-	if l.columns[1].x != 39 || l.columns[1].labelW != 22 {
-		t.Errorf("floor right column = {x:%d,labelW:%d}, want {39,22}", l.columns[1].x, l.columns[1].labelW)
+	if l.columns[1].x != 42 || l.columns[1].labelW != 22 {
+		t.Errorf("floor right column = {x:%d,labelW:%d}, want {42,22}", l.columns[1].x, l.columns[1].labelW)
 	}
 	// themeEditorColumns() is documented as the floor case; its x/labelW origins must
 	// match (themeEditorColumn embeds a slice, so compare the comparable fields).
@@ -338,7 +340,7 @@ func TestResolveThemeEditorLayoutFloor(t *testing.T) {
 // bounds.
 func TestResolveThemeEditorLayoutGrows(t *testing.T) {
 	for _, dim := range []struct{ W, H int }{
-		{80, 22}, {81, 23}, {96, 34}, {120, 40}, {160, 42}, {200, 50}, {240, 68},
+		{themeEditorDialogW, themeEditorDialogH}, {84, 23}, {96, 34}, {120, 40}, {160, 42}, {200, 50}, {240, 68},
 	} {
 		t.Run("", func(t *testing.T) {
 			l := resolveThemeEditorLayout(dim.W, dim.H)
@@ -396,12 +398,13 @@ func TestResolveThemeEditorLayoutMonotonic(t *testing.T) {
 func TestThemeEditorContentRowsGeometryIndependent(t *testing.T) {
 	rows := themeEditorContentRows()
 	// Left column: Session output (7) + UI chrome (10, +list_bg #327) = 17 roles + 2 headers
-	// = 19, plus 1 section separator (issue #462) and 1 sectionPad row (so UI chrome aligns
-	// with the right column's Buttons and inputs) = 21.
+	// = 19, plus 1 section separator (issue #462) and sectionPad=2 extra rows (so UI chrome
+	// aligns with the right column's Buttons and inputs) = 22.
 	// Right column: Controls (8) + Buttons and inputs (6) + Code (1) = 15 + 3 headers = 18,
-	// plus 2 section separators (issue #462) = 20. Tallest = 21 (the padded left column).
-	if rows != 21 {
-		t.Errorf("themeEditorContentRows() = %d, want 21 (tallest column, incl. #462 separators + left sectionPad)", rows)
+	// plus 2 section separators × (1 + sectionPad=1) = 4 = 22. Tallest = 22 (issue #477
+	// raised the inter-section spacing to 2 blank rows, which grew both columns to 22).
+	if rows != 22 {
+		t.Errorf("themeEditorContentRows() = %d, want 22 (tallest column, incl. #462 separators + sectionPad)", rows)
 	}
 }
 
@@ -410,7 +413,7 @@ func TestThemeEditorContentRowsGeometryIndependent(t *testing.T) {
 // ----------------------------------------------------------------------------
 
 // TestThemeEditorScrollsAtFloorFitsWhenGrown is the headline scroll property: at the
-// 80×22 floor the content overflows the 16-row viewport (the #279/#291 roles), so it
+// 83×22 floor the content overflows the 15-row viewport (the #279/#291 roles), so it
 // scrolls; on a tall grown dialog the viewport gains rows until the content fits and
 // scrolling is disabled. maxScroll is the single value the renderer keys all of that on.
 func TestThemeEditorScrollsAtFloorFitsWhenGrown(t *testing.T) {
@@ -490,19 +493,22 @@ func themeEditorFrameRows(rows [][]rune) (top, bottom int) {
 
 // TestThemeEditorOpensFlooredAndGrows opens the REAL editor at several terminal sizes
 // and asserts its outer bounds match the content-pinned policy end-to-end (catching any
-// drift in showThemeEditor's spec): it floors at 80×22 on an 80×24 terminal and is then
-// PINNED to its 80-wide two-column content footprint on larger terminals — only the
-// height grows to PrefH (27); the width never balloons toward a share of the screen
-// (issue #471). This is the open-the-dialog companion to the resolver-level
-// TestThemeEditorFlooredAndGrows.
+// drift in showThemeEditor's spec): it floors at 83×22 (on a sub-83 terminal the dialog
+// resolves to its 83-wide floor and clips, per #477's raised floor) and is then PINNED to
+// its 83-wide two-column content footprint on larger terminals — only the height grows to
+// PrefH; the width never balloons toward a share of the screen (issue #471). This is the
+// open-the-dialog companion to the resolver-level TestThemeEditorFlooredAndGrows. The
+// grown height is read from the spec's own PrefH so this test pins the policy (width
+// pinned, height → PrefH, no balloon) without coupling to PrefH's exact value.
 func TestThemeEditorOpensFlooredAndGrows(t *testing.T) {
+	prefH := newTestWorkbench(t).themeEditorDialogSpec().PrefH
 	for _, tc := range []struct {
 		termW, termH int
 		wantW, wantH int
 	}{
-		{80, 24, 80, 22},  // floor
-		{200, 50, 80, 27}, // pinned width, height grown to PrefH (no 160×42 balloon)
-		{120, 40, 80, 27}, // pinned width, height grown to PrefH (no 96×34 balloon)
+		{80, 24, themeEditorDialogW, themeEditorDialogH}, // floor (sub-83 terminal → 83×22 floor, clips)
+		{200, 50, themeEditorDialogW, prefH},             // pinned width, height grown to PrefH (no 160×42 balloon)
+		{120, 40, themeEditorDialogW, prefH},             // pinned width, height grown to PrefH (no 96×34 balloon)
 	} {
 		issue204RestoreTheme(t)
 		w := newTestWorkbench(t)
