@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"gogent/internal/agent"
 	"gogent/internal/config"
@@ -63,6 +64,58 @@ const watcherGlyph = "◷"
 // Like approvalBadge it has no global header counter (issue #230); it marks only
 // the owning row.
 const clarifyBadge = "❓"
+
+// subAgentFoldTTL is how long a successfully-completed sub-agent stays a normal
+// visible child row before it is folded into the session's collapsed "finished"
+// bucket (issue #484). It is measured from the moment the completion event is
+// delivered to the sidebar (sidebar.now, set when StatusCompleted first arrives
+// in applySubAgent). Failed sub-agents are never auto-folded; they stay visible
+// until manually dismissed. The live value is sidebar.ttl, defaulted to this and
+// overridable in tests for a fast, deterministic fold (no real 60s sleep).
+const subAgentFoldTTL = 60 * time.Second
+
+// sessionFold is the per-session UI-only bookkeeping for TTL folding of finished
+// sub-agents (issue #484). It is created lazily (ensureFold) when a session gets
+// its first sub-agent and lives entirely in the sidebar mirror — the shared agent
+// tree (internal/agent) is never touched, so folding is a pure visibility concern
+// that cannot affect ActiveSubAgentCount / ListAllAgents / slot counting.
+//
+// statusNode is the always-visible, always-first synthetic child rendering the
+// bracketed per-state counts ("[▶2 ‖1 ✓5 ✗1]"). It is a leaf, so the tree paints
+// a blank marker column — visually distinct from real agent rows (which lead with
+// a single status glyph) and from the bucket (which leads with ▸/▾).
+//
+// bucketNode is the synthetic SECOND child collecting folded completed agents
+// ("[✓ N]"). It is nil until the first agent folds in (a childless bucket would
+// still render a stray "[✓ 0]" row, so it must be absent — not empty — while
+// nothing is folded) and is detached again if it ever drops back to zero
+// children. Moving an agent node under this (collapsed) node is what hides it,
+// reusing the tree's existing collapse mechanic with no new widget API.
+type sessionFold struct {
+	statusNode *tv.TreeNode
+	bucketNode *tv.TreeNode
+	entries    map[string]*foldEntry // agent key -> fold metadata (same key applySubAgent derives)
+}
+
+// foldEntry is the per-sub-agent fold metadata mirrored UI-side. The agent's tree
+// node itself is reached via sidebar.agents[key]; this holds only the state the
+// fold logic needs.
+type foldEntry struct {
+	status     agent.AgentStatus
+	finishedAt time.Time // when status first became StatusCompleted (TTL clock start); zero otherwise
+	folded     bool      // moved under bucketNode
+	dismissed  bool      // failed-and-manually-dismissed (excluded from the ✗ count)
+}
+
+// syntheticRef is the Data payload on the status-bar and finished-bucket nodes.
+// It is deliberately NOT a nodeRef, so the tree's OnSelect / OnSelectMouse /
+// OnActivate handlers (which all type-assert nodeRef and bail otherwise) treat
+// these synthetic rows as inert: a click never pops a monologue or raises a
+// window. bucket distinguishes the two for any future synthetic-aware logic.
+type syntheticRef struct {
+	sessionID string
+	bucket    bool
+}
 
 // sidebar is the right-hand panel that shows every open session and, nested
 // underneath each one, its sub-agents and their live status. Selecting a node
@@ -172,6 +225,17 @@ type sidebar struct {
 	// the UI thread.
 	overallSelect    *tv.Select
 	overallModelKeys []string
+
+	// folds holds per-session TTL-fold bookkeeping for finished sub-agents (issue
+	// #484), keyed by session id and created lazily on a session's first sub-agent.
+	// All fold/status-bar state lives here in the UI mirror — never in the shared
+	// agent tree — so folding is purely a visibility concern (see sessionFold).
+	folds map[string]*sessionFold
+	// now is the clock the fold TTL is measured against; it is time.Now in
+	// production and overridden in tests so a fold can be exercised without sleeping
+	// the real TTL. ttl is the live fold delay, defaulted to subAgentFoldTTL.
+	now func() time.Time
+	ttl time.Duration
 }
 
 // nodeRef identifies what a tree node points at: a session (agentID empty), a
@@ -201,6 +265,9 @@ func newSidebar(wb *Workbench) *sidebar {
 		clarify:        make(map[string]bool),
 		clarifyCount:   make(map[string]int),
 		overallBandH:   overallBandHeight,
+		folds:          make(map[string]*sessionFold),
+		now:            time.Now,
+		ttl:            subAgentFoldTTL,
 	}
 
 	panel := tv.NewComponent(tv.Rect{})
@@ -517,21 +584,19 @@ func (s *sidebar) removeSession(id string) {
 	if node == nil {
 		return
 	}
-	for _, child := range node.Children {
-		if ref, ok := child.Data.(nodeRef); ok {
-			delete(s.agents, ref.agentID)
-			// Prune the Workbench's clarify dedup entry for this sub-agent: one still
-			// in StatusWaiting at close emits no terminal event, so without this its
-			// key would linger (issue #207). The key is reconstructed exactly as
-			// EmitSessionEvent derives it (agent id, else session/name).
-			if s.wb != nil && s.wb.clarifyWaiting != nil {
-				key := ref.agentID
-				if key == "" {
-					key = id + "/" + ref.name
-				}
-				delete(s.wb.clarifyWaiting, key)
-			}
+	// Drop every sub-agent's node bookkeeping via the fold entries, which cover
+	// both visible rows and agents folded under the finished bucket (issue #484) —
+	// a plain node.Children walk would miss the folded ones. The fold entry key is
+	// exactly the s.agents key and the EmitSessionEvent clarify dedup key (agent
+	// id, else session/name), so it prunes both correctly. One sub-agent still in
+	// StatusWaiting at close emits no terminal event, so without the clarify prune
+	// its key would linger (issue #207).
+	if fold := s.folds[id]; fold != nil {
+		for key := range fold.entries {
+			delete(s.agents, key)
+			s.pruneClarifyWaiting(id, key)
 		}
+		delete(s.folds, id)
 	}
 	// Drop bookkeeping for the session's attached watcher children (issue #329
 	// Phase 4): the nodes themselves vanish with the parent node removed below, but
@@ -862,12 +927,19 @@ func (s *sidebar) drawOverall(surface tv.Surface, abs tv.Rect) {
 	}
 }
 
-// applySubAgent inserts or updates a sub-agent node from a lifecycle event.
+// applySubAgent inserts or updates a sub-agent node from a lifecycle event and
+// maintains the per-session TTL-fold state (issue #484): it lazily builds the
+// session's status-bar node, records when a sub-agent first completes (the TTL
+// clock start), unfolds an agent that leaves the completed state (a re-run edge),
+// and refreshes the status-bar / bucket labels. The actual time-based fold happens
+// later in tickFolds; this only stamps the finish time. Runs on the UI thread
+// (called from Workbench.deliverSessionEvent).
 func (s *sidebar) applySubAgent(sessionID string, ev agent.SessionEvent) {
 	parent := s.sessions[sessionID]
 	if parent == nil {
 		return
 	}
+	fold := s.ensureFold(sessionID, parent)
 	key := ev.AgentID
 	if key == "" {
 		key = sessionID + "/" + ev.Name
@@ -877,13 +949,326 @@ func (s *sidebar) applySubAgent(sessionID string, ev agent.SessionEvent) {
 		node = tv.NewTreeNode("")
 		node.Data = nodeRef{sessionID: sessionID, agentID: ev.AgentID, name: ev.Name}
 		s.agents[key] = node
-		parent.Add(node)
+		s.insertVisibleAgent(fold, parent, node)
 	} else if ref, ok := node.Data.(nodeRef); ok {
 		// Keep the name in sync (it may have been empty on first sight).
 		ref.name = ev.Name
 		node.Data = ref
 	}
 	node.Label = agentLabel(ev.Name, ev.Status, ev.Kind)
+
+	entry := fold.entries[key]
+	if entry == nil {
+		entry = &foldEntry{}
+		fold.entries[key] = entry
+	}
+	entry.status = ev.Status
+	switch ev.Status {
+	case agent.StatusCompleted:
+		// Start the fold TTL on the first completion only; a duplicate completion
+		// event must not reset the clock.
+		if entry.finishedAt.IsZero() {
+			entry.finishedAt = s.now()
+		}
+	default:
+		// The agent left the completed state (e.g. re-run): cancel its TTL and pull
+		// it back into the visible list if it had already folded.
+		entry.finishedAt = time.Time{}
+		if entry.folded {
+			s.unfoldAgent(fold, parent, node)
+			entry.folded = false
+		}
+	}
+	s.refreshFoldChrome(sessionID)
+}
+
+// ensureFold returns the session's fold bookkeeping, creating it (and the
+// always-first status-bar node) on first use. The status-bar node is inserted at
+// child index 0, shifting any existing children (e.g. attached watchers) right.
+// The bucket node is NOT created here — it is attached lazily by foldAgent so a
+// session with nothing folded never renders a stray "[✓ 0]" row.
+func (s *sidebar) ensureFold(sessionID string, parent *tv.TreeNode) *sessionFold {
+	if fold := s.folds[sessionID]; fold != nil {
+		return fold
+	}
+	status := tv.NewTreeNode("")
+	status.Data = syntheticRef{sessionID: sessionID}
+	parent.Children = append([]*tv.TreeNode{status}, parent.Children...)
+	fold := &sessionFold{
+		statusNode: status,
+		entries:    make(map[string]*foldEntry),
+	}
+	s.folds[sessionID] = fold
+	return fold
+}
+
+// insertVisibleAgent adds a real (un-folded) agent node to the session's visible
+// child list, after the synthetic prefix (the status bar, and the bucket when
+// present) so the synthetic rows stay pinned at the front regardless of insert/
+// detach order with watcher nodes.
+func (s *sidebar) insertVisibleAgent(fold *sessionFold, parent, node *tv.TreeNode) {
+	at := s.syntheticPrefixLen(fold, parent)
+	parent.Children = append(parent.Children, nil)
+	copy(parent.Children[at+1:], parent.Children[at:])
+	parent.Children[at] = node
+}
+
+// syntheticPrefixLen is the number of leading synthetic nodes (status bar +
+// bucket-when-present) currently at the front of the session's child list. It
+// reads positions rather than assuming a fixed count so it stays correct even if
+// a node was momentarily reordered.
+func (s *sidebar) syntheticPrefixLen(fold *sessionFold, parent *tv.TreeNode) int {
+	n := 0
+	if fold.statusNode != nil && len(parent.Children) > n && parent.Children[n] == fold.statusNode {
+		n++
+	}
+	if fold.bucketNode != nil && len(parent.Children) > n && parent.Children[n] == fold.bucketNode {
+		n++
+	}
+	return n
+}
+
+// foldAgent moves a completed agent's node out of the visible list and under the
+// finished bucket, creating and attaching the bucket node (collapsed) on the
+// first fold. Later folds leave the bucket's expand state as the user last set it,
+// giving "collapsed by default once non-empty" without overriding a manual expand.
+func (s *sidebar) foldAgent(fold *sessionFold, parent, node *tv.TreeNode) {
+	if fold.bucketNode == nil {
+		bucket := tv.NewTreeNode("")
+		bucket.Data = syntheticRef{sessionID: refSessionID(node), bucket: true}
+		bucket.Expanded = false
+		// Insert immediately after the status bar (index 1 when the status bar is
+		// child 0).
+		at := 0
+		if fold.statusNode != nil && len(parent.Children) > 0 && parent.Children[0] == fold.statusNode {
+			at = 1
+		}
+		parent.Children = append(parent.Children, nil)
+		copy(parent.Children[at+1:], parent.Children[at:])
+		parent.Children[at] = bucket
+		fold.bucketNode = bucket
+	}
+	removeChild(parent, node)
+	fold.bucketNode.Children = append(fold.bucketNode.Children, node)
+}
+
+// unfoldAgent moves an agent node from under the finished bucket back into the
+// visible child list, detaching (and clearing) the bucket if it becomes empty so
+// no "[✓ 0]" row lingers.
+func (s *sidebar) unfoldAgent(fold *sessionFold, parent, node *tv.TreeNode) {
+	if fold.bucketNode == nil {
+		return
+	}
+	removeChild(fold.bucketNode, node)
+	s.insertVisibleAgent(fold, parent, node)
+	if len(fold.bucketNode.Children) == 0 {
+		removeChild(parent, fold.bucketNode)
+		fold.bucketNode = nil
+	}
+}
+
+// tickFolds folds every completed sub-agent whose TTL has elapsed into its
+// session's finished bucket and returns whether anything moved (so the caller
+// redraws only on a real fold edge). It is driven once per status tick by
+// Workbench.tickBusyStatuses — no per-agent timers, no extra goroutine. The
+// selection is re-anchored by node identity across the fold so a background tick
+// never silently drifts the highlight off the user's row (the tree's selection is
+// index-based). Runs on the UI thread.
+func (s *sidebar) tickFolds() bool {
+	now := s.now()
+	sel := s.tree.Selected()
+	selFolded := false
+	changed := false
+	for sessionID, fold := range s.folds {
+		parent := s.sessions[sessionID]
+		if parent == nil {
+			continue
+		}
+		sessionChanged := false
+		for key, entry := range fold.entries {
+			if entry.folded || entry.status != agent.StatusCompleted || entry.finishedAt.IsZero() {
+				continue
+			}
+			if now.Sub(entry.finishedAt) < s.ttl {
+				continue
+			}
+			node := s.agents[key]
+			if node == nil {
+				continue
+			}
+			if node == sel {
+				selFolded = true
+			}
+			s.foldAgent(fold, parent, node)
+			entry.folded = true
+			sessionChanged = true
+		}
+		if sessionChanged {
+			s.refreshFoldChrome(sessionID)
+			changed = true
+		}
+	}
+	if changed && sel != nil {
+		// Re-anchor the highlight: if the selected row survived, keep it; if it was
+		// the row just folded away, land on the bucket that absorbed it rather than
+		// drift to an unrelated node.
+		if !s.tree.SelectNode(sel) && selFolded {
+			if fold := s.foldOf(sel); fold != nil && fold.bucketNode != nil {
+				s.tree.SelectNode(fold.bucketNode)
+			}
+		}
+	}
+	return changed
+}
+
+// foldOf returns the fold whose status/bucket/agent nodes own node, or nil. Used
+// to find the bucket a just-folded selected agent landed under.
+func (s *sidebar) foldOf(node *tv.TreeNode) *sessionFold {
+	if ref, ok := node.Data.(nodeRef); ok {
+		return s.folds[ref.sessionID]
+	}
+	if ref, ok := node.Data.(syntheticRef); ok {
+		return s.folds[ref.sessionID]
+	}
+	return nil
+}
+
+// refreshFoldChrome recomputes the session's status-bar and finished-bucket
+// labels from its fold entries. The ✓ count includes folded agents; the ✗ count
+// excludes dismissed failures. When the session has no live counts and nothing
+// folded (e.g. its only agent was a dismissed failure), the synthetic nodes are
+// torn down and the fold entry dropped, returning the row to its clean pre-agent
+// state. Runs on the UI thread.
+func (s *sidebar) refreshFoldChrome(sessionID string) {
+	fold := s.folds[sessionID]
+	if fold == nil {
+		return
+	}
+	parent := s.sessions[sessionID]
+	if len(fold.entries) == 0 {
+		// No tracked sub-agents remain (e.g. the only agent was a dismissed failure):
+		// drop the synthetic rows and the bookkeeping so the session row returns to
+		// its clean pre-agent state. Keyed on the entry set rather than on the visible
+		// counts so an agent in a non-counted transient status never orphans its node.
+		if parent != nil {
+			if fold.bucketNode != nil {
+				removeChild(parent, fold.bucketNode)
+			}
+			if fold.statusNode != nil {
+				removeChild(parent, fold.statusNode)
+			}
+		}
+		delete(s.folds, sessionID)
+		return
+	}
+	var running, waiting, completed, failed int
+	for _, e := range fold.entries {
+		switch {
+		case e.status == agent.StatusRunning:
+			running++
+		case e.status == agent.StatusWaiting:
+			waiting++
+		case e.status == agent.StatusCompleted:
+			completed++
+		case e.status == agent.StatusFailed && !e.dismissed:
+			failed++
+		}
+	}
+	if fold.statusNode != nil {
+		fold.statusNode.Label = statusBarLabel(running, waiting, completed, failed)
+	}
+	if fold.bucketNode != nil {
+		// The tree supplies the ▸/▾ marker for a node with children; the label is
+		// just the folded-completed count.
+		fold.bucketNode.Label = fmt.Sprintf("[%s %d]", statusIcon(agent.StatusCompleted), len(fold.bucketNode.Children))
+	}
+}
+
+// statusBarLabel renders the bracketed per-state count row using the same glyphs
+// as agent rows (statusIcon). Zero counts are omitted; the brackets make it
+// visually distinct from real agent rows (which lead with a single status glyph).
+func statusBarLabel(running, waiting, completed, failed int) string {
+	var b strings.Builder
+	b.WriteByte('[')
+	first := true
+	add := func(status agent.AgentStatus, n int) {
+		if n == 0 {
+			return
+		}
+		if !first {
+			b.WriteByte(' ')
+		}
+		fmt.Fprintf(&b, "%s%d", statusIcon(status), n)
+		first = false
+	}
+	add(agent.StatusRunning, running)
+	add(agent.StatusWaiting, waiting)
+	add(agent.StatusCompleted, completed)
+	add(agent.StatusFailed, failed)
+	b.WriteByte(']')
+	return b.String()
+}
+
+// dismissFailed manually clears every undismissed failed sub-agent of a session:
+// each failed agent's row is removed, its node bookkeeping dropped, and the
+// status-bar ✗ count updated. Failed agents are never auto-folded (issue #484), so
+// this is the user's only way to clear them. It mirrors removeSession's per-agent
+// cleanup (clarifyWaiting dedup key). A no-op for an unknown session or one with
+// no failed agents. Runs on the UI thread.
+func (s *sidebar) dismissFailed(sessionID string) {
+	fold := s.folds[sessionID]
+	if fold == nil {
+		return
+	}
+	parent := s.sessions[sessionID]
+	dismissed := false
+	for key, entry := range fold.entries {
+		if entry.status != agent.StatusFailed || entry.dismissed {
+			continue
+		}
+		entry.dismissed = true
+		if node := s.agents[key]; node != nil && parent != nil {
+			removeChild(parent, node)
+		}
+		delete(s.agents, key)
+		delete(fold.entries, key)
+		s.pruneClarifyWaiting(sessionID, key)
+		dismissed = true
+	}
+	if dismissed {
+		s.refreshFoldChrome(sessionID)
+	}
+}
+
+// pruneClarifyWaiting drops the Workbench's clarify dedup entry for a sub-agent,
+// reconstructing the key exactly as EmitSessionEvent derives it (agent id, else
+// session/name). It is the shared helper for removeSession and dismissFailed so a
+// removed sub-agent never leaves a dangling waiting key (issue #207).
+func (s *sidebar) pruneClarifyWaiting(sessionID, key string) {
+	if s.wb == nil || s.wb.clarifyWaiting == nil {
+		return
+	}
+	delete(s.wb.clarifyWaiting, key)
+}
+
+// refSessionID extracts the owning session id from a real agent node's nodeRef.
+func refSessionID(node *tv.TreeNode) string {
+	if ref, ok := node.Data.(nodeRef); ok {
+		return ref.sessionID
+	}
+	return ""
+}
+
+// removeChild detaches child from parent.Children by pointer identity, preserving
+// the relative order of the remaining children. A no-op if child is not present.
+func removeChild(parent, child *tv.TreeNode) {
+	kids := parent.Children[:0]
+	for _, c := range parent.Children {
+		if c != child {
+			kids = append(kids, c)
+		}
+	}
+	parent.Children = kids
 }
 
 // setWatchers reconciles the sidebar's watcher nodes against the current watcher
