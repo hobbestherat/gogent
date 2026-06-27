@@ -129,6 +129,7 @@ func (dc *daemonController) installMenuHandlers(h *tuipkg.Handlers) {
 	h.StartDaemon = dc.Start
 	h.StopDaemon = dc.Stop
 	h.DaemonStatusInfo = dc.Status
+	h.ConnectionLabel = dc.Label
 }
 
 // Mode reports the current attachment mode.
@@ -136,6 +137,43 @@ func (dc *daemonController) Mode() tuipkg.DaemonMode {
 	dc.mu.Lock()
 	defer dc.mu.Unlock()
 	return dc.mode
+}
+
+// Label returns the terse remote target for the menu-bar connection-status indicator
+// (issue #500). It is cheap and synchronous (a lock-protected field read, no daemon
+// round-trip), so the TUI can call it on every menu rebuild/resize. It is empty for
+// embedded and attached-local mode (the indicator derives those from the mode alone);
+// for attached-remote it renders the connect address terse via remoteTargetLabel.
+func (dc *daemonController) Label() string {
+	dc.mu.Lock()
+	mode := dc.mode
+	connect := dc.connect
+	dc.mu.Unlock()
+	if mode != tuipkg.DaemonModeAttachedRemote {
+		return ""
+	}
+	return remoteTargetLabel(connect)
+}
+
+// remoteTargetLabel renders a --connect address as the terse target shown in the
+// status indicator. An ssh:// URL becomes "ssh:user@host" (the SSH port is dropped for
+// terseness); an http(s):// TCP address becomes its "host:port". The scheme-less /
+// unix forms (never reached in attached-remote mode) fall back to the raw address.
+func remoteTargetLabel(addr string) string {
+	u, err := url.Parse(addr)
+	if err != nil || u.Host == "" {
+		return addr
+	}
+	if u.Scheme == "ssh" {
+		host := u.Hostname() // drops the SSH port
+		if u.User != nil {
+			if name := u.User.Username(); name != "" {
+				host = name + "@" + host
+			}
+		}
+		return "ssh:" + host
+	}
+	return u.Host
 }
 
 // Start performs the embedded->daemon handoff. It is invoked on a background

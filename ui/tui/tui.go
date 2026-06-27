@@ -325,6 +325,13 @@ type Handlers struct {
 	// It may perform a blocking round-trip to the daemon and is called on a
 	// background goroutine. May be nil, in which case the status item is hidden.
 	DaemonStatusInfo func() (DaemonStatusReport, error)
+	// ConnectionLabel returns the terse remote target shown in the menu-bar status
+	// indicator when DaemonMode reports attached-remote, e.g. "ssh:user@host" (or a
+	// bare "host:port" for a plain --connect). It is cheap and synchronous (no
+	// round-trip) so it can be read on the UI thread on every menu rebuild/resize,
+	// unlike DaemonStatusInfo. It returns "" for embedded/attached-local (the
+	// indicator derives those labels from DaemonMode alone). May be nil.
+	ConnectionLabel func() string
 }
 
 // WatcherConfig is the UI-facing description of a watcher to create (issue #329
@@ -634,6 +641,16 @@ type Workbench struct {
 	// only) and Stop (attached-local only) are mode-exclusive and the modal blocks
 	// the menu, so one field suffices. Touched only on the UI thread.
 	daemonHandoffLayer *tv.Layer
+	// menuBar is the live menu bar built by rebuildMenu, retained so the right-anchored
+	// connection-status slot can be updated in place (refreshConnectionStatus) without a
+	// full menu rebuild. Touched only on the UI thread.
+	menuBar *tv.MenuBar
+	// connPhase tracks the remote connection's transient state for the status indicator
+	// (issue #500): healthy, just-dropped, or actively reconnecting. It is set from the
+	// Reconnector hooks (OnConnectionLost/OnConnectionRestored) and read when deriving the
+	// indicator. It only affects attached-remote mode — connectionIndicator forces healthy
+	// otherwise. Touched only on the UI thread (the hooks marshal through Post).
+	connPhase connPhase
 }
 
 // NewWorkbench creates the workbench and its desktop chrome.
@@ -957,9 +974,11 @@ func (w *Workbench) rebuildMenu() {
 		tv.NewSubMenu("&Config", w.settingsItems()...),
 	}
 	// The Daemon menu (issue #358 §6) appears only when the build wired the daemon
-	// handoff handlers; embedded users who never opt in never see it.
+	// handoff handlers; embedded users who never opt in never see it. It is
+	// right-aligned (issue #500) so it packs against the right edge, immediately left
+	// of the connection-status indicator; the left navigation menus keep their order.
 	if w.handlers.DaemonMode != nil {
-		subMenus = append(subMenus, tv.NewSubMenu("&Daemon", w.daemonItems()...))
+		subMenus = append(subMenus, tv.NewSubMenu("&Daemon", w.daemonItems()...).AlignRight())
 	}
 	subMenus = append(subMenus,
 		tv.NewSubMenu("&Help",
@@ -975,8 +994,56 @@ func (w *Workbench) rebuildMenu() {
 	)
 	bar := tv.NewMenuBar(tv.Rect{X: 0, Y: 0, W: w.app.Width(), H: 1}, subMenus...)
 	applyMenuBarShadow(bar) // honour the NoShadow theme setting (issue #215)
+	// Retain the bar and seed the right-anchored connection-status slot (issue #500) so
+	// the first paint already shows the indicator. A fresh bar is built every rebuild, so
+	// the slot must be reseeded here each time; refreshConnectionStatus updates it in place
+	// between rebuilds (e.g. on disconnect/reconnect).
+	w.menuBar = bar
+	text, fg, bg := w.connectionIndicator()
+	bar.SetStatus(text)
+	bar.SetStatusColors(fg, bg)
 	w.desktop.SetMenuBar(bar)
 	w.desktop.Redraw()
+}
+
+// connectionIndicator derives the menu-bar status string and its colours for the
+// current daemon mode + remote target + transient connection phase (issue #500). It
+// is cheap and synchronous (DaemonMode/ConnectionLabel are lock-free getters; no
+// daemon round-trip), so it is safe to call on every rebuild/refresh on the UI thread.
+// When no daemon wiring is present (DaemonMode nil) it reports "● embedded".
+func (w *Workbench) connectionIndicator() (text string, fg, bg tui.Color) {
+	mode := DaemonModeEmbedded
+	if w.handlers.DaemonMode != nil {
+		mode = w.handlers.DaemonMode()
+	}
+	label := ""
+	if w.handlers.ConnectionLabel != nil {
+		label = w.handlers.ConnectionLabel()
+	}
+	// The transient disconnect phase only applies to a remote attachment; force healthy
+	// otherwise so a stale phase (e.g. left over after a Stop handoff) can never leak a ○
+	// marker into embedded/local mode.
+	phase := w.connPhase
+	if mode != DaemonModeAttachedRemote {
+		phase = connHealthy
+	}
+	text = daemonIndicatorText(mode, label, phase)
+	fg, bg = daemonIndicatorColors(mode, phase)
+	return text, fg, bg
+}
+
+// refreshConnectionStatus updates the menu bar's right-anchored status slot in place,
+// without a full menu rebuild (issue #500). It is the light path used on remote
+// disconnect/reconnect, where rebuilding the whole dynamic menu on every backoff tick
+// would be wasteful. UI-thread only; a no-op before the first rebuildMenu.
+func (w *Workbench) refreshConnectionStatus() {
+	if w.menuBar == nil {
+		return
+	}
+	text, fg, bg := w.connectionIndicator()
+	w.menuBar.SetStatus(text)
+	w.menuBar.SetStatusColors(fg, bg)
+	w.desktop.RequestRedraw()
 }
 
 // menuActionItem builds a menu item for a rebindable catalog action (issue #401): it
