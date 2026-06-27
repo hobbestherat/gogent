@@ -59,7 +59,7 @@ const (
 // not used for SSH).
 type Config struct {
 	User string // SSH login user; defaults to the current OS user when absent
-	Host string // SSH host
+	Host string // SSH host to dial (HostName from ~/.ssh/config if it overrode the alias)
 	Port int    // SSH port; 0 → 22
 
 	Token string // daemon bearer token (passed through to the APIClient)
@@ -70,6 +70,15 @@ type Config struct {
 
 	DaemonPort int    // ?port= override: dial the daemon over loopback TCP at this port
 	DaemonSock string // ?socket= override: dial the daemon at this Unix socket path
+
+	// ssh-config (issue #498): filled by ParseConnectURL from ~/.ssh/config as a
+	// fallback for fields the URL/flags left unset. Explicit URL fields and CLI
+	// flags always win; these only fill holes.
+	Alias          string   // the original ssh:// host as typed (before HostName resolution), for diagnostics + the daemon-start hint
+	IdentityFiles  []string // IdentityFile(s) from ~/.ssh/config, merged into the key candidates
+	IdentitiesOnly bool     // IdentitiesOnly: offer only --ssh-key + IdentityFile keys (skip id_* defaults)
+	ConfigFound    bool     // ~/.ssh/config actually CONTRIBUTED an honored value for cfg.Alias (for auth diagnostics)
+	ConfigApplied  string   // human summary of what ssh-config applied (e.g. "User=pi HostName=192.168.1.5"); "" when nothing applied
 }
 
 func (c Config) sshPort() int {
@@ -102,9 +111,14 @@ type Tunnel struct {
 }
 
 // ParseConnectURL parses an ssh://[user@]host[:sshport][?port=&socket=] connect
-// address into a Config, folding in the SSH auth/host-key flags. A missing user
-// defaults to the current OS user. It validates the URL so a malformed --connect
-// value fails before any network I/O.
+// address into a Config, folding in the SSH auth/host-key flags. It then
+// consults ~/.ssh/config (best-effort) for the host and fills in ONLY the fields
+// the URL/flags left unset — HostName / User / Port / IdentityFile /
+// IdentitiesOnly — so that `gogent --connect ssh://<alias>` honors a matching
+// `Host` block the way `ssh <alias>` does (issue #498). Explicit URL fields and
+// CLI flags always win; ssh-config is the fallback only. A missing user (URL +
+// config) defaults to the current OS user. It validates the URL so a malformed
+// --connect value fails before any network I/O.
 func ParseConnectURL(addr, token, keyPath, knownHosts string, insecure bool) (Config, error) {
 	u, err := url.Parse(addr)
 	if err != nil {
@@ -119,19 +133,12 @@ func ParseConnectURL(addr, token, keyPath, knownHosts string, insecure bool) (Co
 	}
 	cfg := Config{
 		Host:       host,
+		Alias:      host,
 		User:       u.User.Username(),
 		Token:      token,
 		KeyPath:    keyPath,
 		KnownHosts: knownHosts,
 		Insecure:   insecure,
-	}
-	if cfg.User == "" {
-		if cu, e := user.Current(); e == nil {
-			cfg.User = cu.Username
-		}
-	}
-	if cfg.User == "" {
-		return Config{}, fmt.Errorf("ssh connect %q: no user; use ssh://user@host", addr)
 	}
 	if p := u.Port(); p != "" {
 		n, e := strconv.Atoi(p)
@@ -139,6 +146,51 @@ func ParseConnectURL(addr, token, keyPath, knownHosts string, insecure bool) (Co
 			return Config{}, fmt.Errorf("ssh connect %q: bad ssh port %q", addr, p)
 		}
 		cfg.Port = n
+	}
+	// ssh-config fallback (issue #498): fill MISSING fields only — the URL user@
+	// and :port set above, and the --ssh-* flags, take precedence. Best-effort:
+	// a missing/broken config is non-fatal (rc.Found stays false). rc.Found gates
+	// on a matching `Host` block: directives before the first Host line (top-level
+	// globals) are intentionally NOT applied — issue #498 is scoped to `Host
+	// <alias>` blocks, and applying a bare global HostName to every host would be
+	// a footgun. (Globals still participate in first-value-wins WITHIN a matched
+	// block, as TestReadSSHConfig_GlobalBeforeHostWins asserts.)
+	// Capture whether the URL supplied user@/:port BEFORE the config block fills
+	// them, so the "applied" summary can exclude a config User/Port the URL
+	// overrode (the URL wins for the dial; the diagnostic must not claim config
+	// applied a value it did not).
+	urlHadUser := cfg.User != ""
+	urlHadPort := cfg.Port != 0
+	if rc, _ := ReadSSHConfig(host); rc.Found {
+		if cfg.User == "" && rc.User != "" {
+			cfg.User = rc.User
+		}
+		if cfg.Port == 0 && rc.Port > 0 {
+			cfg.Port = rc.Port
+		}
+		if rc.HostName != "" {
+			cfg.Host = rc.HostName // the real dial address; cfg.Alias keeps the typed name
+		}
+		cfg.IdentityFiles = rc.IdentityFiles
+		cfg.IdentitiesOnly = rc.IdentitiesOnly
+		// ConfigFound/ConfigApplied report what config ACTUALLY applied to the
+		// dial — not merely what a Host block resolved. Two corrections matter:
+		// (a) a stock /etc `Host *` that matches but sets nothing honored yields
+		// "" → ConfigFound=false (no false "applied" claim); (b) a User/Port the
+		// URL overrode is excluded, so the diagnostic never contradicts itself
+		// ("attempted user=bob" vs "applied User=pi"). HostName/IdentityFile/
+		// IdentitiesOnly have no URL override, so they report as-resolved.
+		cfg.ConfigApplied = summarizeSSHConfig(rc, !urlHadUser, !urlHadPort)
+		cfg.ConfigFound = cfg.ConfigApplied != ""
+	}
+	// OS-user fallback last, so a config User (above) wins over it.
+	if cfg.User == "" {
+		if cu, e := user.Current(); e == nil {
+			cfg.User = cu.Username
+		}
+	}
+	if cfg.User == "" {
+		return Config{}, fmt.Errorf("ssh connect %q: no user; use ssh://user@host", addr)
 	}
 	q := u.Query()
 	if v := q.Get("port"); v != "" {
@@ -348,6 +400,12 @@ func dialClient(ctx context.Context, cfg Config) (*ssh.Client, error) {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, fmt.Errorf("ssh connect %s: %w", addr, ctxErr)
 		}
+		// Enrich an authentication failure so the user can see WHICH user, keys
+		// and agent were attempted and whether ~/.ssh/config applied — the bare
+		// "attempted methods [none publickey]" is otherwise inscrutable (#498).
+		if isAuthError(err) {
+			return nil, fmt.Errorf("ssh handshake %s: %w (%s)", addr, err, authDiagnostic(cfg))
+		}
 		return nil, fmt.Errorf("ssh handshake %s: %w", addr, err)
 	}
 	// Belt-and-suspenders for the close(hsDone) race: if ctx was cancelled in the
@@ -482,6 +540,128 @@ func authMethods(cfg Config) ([]ssh.AuthMethod, error) {
 	return methods, nil
 }
 
+// isAuthError reports whether an ssh handshake error is an authentication
+// failure (vs a transport/protocol error), so dialClient only enriches the
+// actionable case. golang.org/x/crypto/ssh surfaces auth failures as a plain
+// error whose message names the attempted methods, so we match on its text.
+func isAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "unable to authenticate") ||
+		strings.Contains(s, "no supported methods remain") ||
+		strings.Contains(s, "ssh: handshake failed")
+}
+
+// authDiagnostic renders a one-line summary of what the auth attempt offered:
+// the login user, the candidate key files (with a loaded/absent/encrypted note,
+// PATHS ONLY — never key contents), whether the agent was consulted (and how
+// many keys it holds), and whether/what ~/.ssh/config applied for the host. It
+// is built only on the failure path, so it may do a little extra I/O.
+func authDiagnostic(cfg Config) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "attempted user=%s", cfg.User)
+
+	keys := keyPaths(cfg)
+	if len(keys) == 0 {
+		b.WriteString("; keys=[none]")
+	} else {
+		b.WriteString("; keys=[")
+		for i, p := range keys {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			fmt.Fprintf(&b, "%s (%s)", p, classifyKey(p))
+		}
+		b.WriteString("]")
+	}
+
+	fmt.Fprintf(&b, "; agent=%s", agentSummary())
+
+	alias := cfg.Alias
+	if alias == "" {
+		alias = cfg.Host
+	}
+	// Report ONLY what ssh-config actually contributed (cfg.ConfigApplied), not
+	// the merged/default dial values — otherwise a stock `Host *` in
+	// /etc/ssh/ssh_config makes this falsely claim config set the user/port.
+	if cfg.ConfigFound {
+		fmt.Fprintf(&b, "; ~/.ssh/config: applied for %q: %s", alias, cfg.ConfigApplied)
+	} else {
+		fmt.Fprintf(&b, "; ~/.ssh/config: no values applied for %q", alias)
+	}
+	return b.String()
+}
+
+// summarizeSSHConfig renders the honored directives ssh-config actually APPLIED
+// to the dial (and nothing else) as a compact "User=… HostName=… …" string, for
+// the auth diagnostic. userApplied/portApplied gate User/Port so a value the URL
+// overrode is omitted (HostName/IdentityFile/IdentitiesOnly have no URL override
+// and are reported as-resolved). It returns "" when config applied nothing — the
+// signal cfg.ConfigFound is derived from.
+func summarizeSSHConfig(rc ResolvedSSHConfig, userApplied, portApplied bool) string {
+	var parts []string
+	if userApplied && rc.User != "" {
+		parts = append(parts, "User="+rc.User)
+	}
+	if rc.HostName != "" {
+		parts = append(parts, "HostName="+rc.HostName)
+	}
+	if portApplied && rc.Port > 0 {
+		parts = append(parts, "Port="+strconv.Itoa(rc.Port))
+	}
+	if rc.IdentitiesOnly {
+		parts = append(parts, "IdentitiesOnly=yes")
+	}
+	if len(rc.IdentityFiles) > 0 {
+		parts = append(parts, "IdentityFile="+strings.Join(rc.IdentityFiles, ","))
+	}
+	return strings.Join(parts, " ")
+}
+
+// classifyKey reports a private-key file's state for diagnostics WITHOUT leaking
+// its contents and WITHOUT prompting for a passphrase: absent / loaded /
+// encrypted / unreadable.
+func classifyKey(p string) string {
+	b, err := os.ReadFile(p) //nolint:gosec // path is the user's own key file; contents are not logged
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "absent"
+		}
+		return "unreadable"
+	}
+	if _, err := ssh.ParsePrivateKey(b); err == nil {
+		return "loaded"
+	} else {
+		var missing *ssh.PassphraseMissingError
+		if errors.As(err, &missing) {
+			return "encrypted"
+		}
+	}
+	return "unparseable"
+}
+
+// agentSummary describes the ssh-agent for diagnostics, bounded by a short
+// deadline so an already-failing connect never stalls on a wedged SSH_AUTH_SOCK.
+func agentSummary() string {
+	sock := os.Getenv("SSH_AUTH_SOCK")
+	if sock == "" {
+		return "none (SSH_AUTH_SOCK unset)"
+	}
+	conn, err := net.DialTimeout("unix", sock, 500*time.Millisecond) //nolint:gosec // trusted local agent socket from the user environment
+	if err != nil {
+		return "present (unreachable)"
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
+	keys, err := agent.NewClient(conn).List()
+	if err != nil {
+		return "present (key count unavailable)"
+	}
+	return fmt.Sprintf("present (%d keys)", len(keys))
+}
+
 // agentAuth returns an auth method backed by a running ssh-agent, or nil if none
 // is reachable.
 func agentAuth() ssh.AuthMethod {
@@ -513,22 +693,46 @@ func keyAuth(cfg Config) ssh.AuthMethod {
 	return ssh.PublicKeys(signers...)
 }
 
-// keyPaths returns the private-key files to try: an explicit --ssh-key, else the
-// conventional ~/.ssh defaults.
+// keyPaths returns the private-key files to try, in order. An explicit --ssh-key
+// is authoritative: it (plus any ~/.ssh/config IdentityFile) REPLACES the
+// ~/.ssh/id_* defaults, preserving the flag's "default: … id_*" contract. With
+// no --ssh-key, config IdentityFile(s) come first, then the id_* defaults UNLESS
+// IdentitiesOnly suppresses them (issue #498). The list is de-duped (preserving
+// order) so an IdentityFile that coincides with an id_* default is not offered
+// twice — each key is a separate attempt against the server's MaxAuthTries.
 func keyPaths(cfg Config) []string {
 	if cfg.KeyPath != "" {
-		return []string{cfg.KeyPath}
+		return dedupPaths(append([]string{cfg.KeyPath}, cfg.IdentityFiles...))
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil
+	paths := append([]string{}, cfg.IdentityFiles...)
+	if !cfg.IdentitiesOnly {
+		if home, err := os.UserHomeDir(); err == nil {
+			sshDir := filepath.Join(home, ".ssh")
+			paths = append(paths,
+				filepath.Join(sshDir, "id_ed25519"),
+				filepath.Join(sshDir, "id_ecdsa"),
+				filepath.Join(sshDir, "id_rsa"),
+			)
+		}
 	}
-	sshDir := filepath.Join(home, ".ssh")
-	return []string{
-		filepath.Join(sshDir, "id_ed25519"),
-		filepath.Join(sshDir, "id_ecdsa"),
-		filepath.Join(sshDir, "id_rsa"),
+	return dedupPaths(paths)
+}
+
+// dedupPaths removes duplicate paths while preserving first-seen order.
+func dedupPaths(in []string) []string {
+	if len(in) <= 1 {
+		return in
 	}
+	seen := make(map[string]struct{}, len(in))
+	out := in[:0:0]
+	for _, p := range in {
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	return out
 }
 
 // loadSigner reads and parses a private key, prompting on a TTY for a passphrase

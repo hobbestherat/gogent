@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,6 +51,15 @@ func disableRealSSHEnv(t *testing.T) {
 // --------------------------------------------------------------------------------
 
 func TestParseConnectURL(t *testing.T) {
+	// ParseConnectURL now consults ~/.ssh/config (issue #498). Isolate HOME so the
+	// developer's real config can never perturb these assertions (e.g. a `Host *`
+	// block with a User/HostName). Behavior is otherwise unchanged: with no user
+	// config present, ReadSSHConfig resolves nothing. (The system
+	// /etc/ssh/ssh_config is still read, but on a stock install its `Host *`
+	// carries no User/HostName/Port/IdentityFile, so it leaves these fields
+	// untouched.)
+	t.Setenv("HOME", t.TempDir())
+
 	currentUser := "" // the default ParseConnectURL falls back to
 	if cu, err := user.Current(); err == nil {
 		currentUser = cu.Username
@@ -1034,5 +1044,392 @@ func TestRestartAndDial_ConcurrentNoPanic(t *testing.T) {
 	// After the storm the tunnel must be usable.
 	if err := healthOver(tun); err != nil {
 		t.Fatalf("health over tunnel after concurrent storm: %v", err)
+	}
+}
+
+// --------------------------------------------------------------------------------
+// Issue #498 — ~/.ssh/config resolution, keyPaths merge, diagnostics
+// --------------------------------------------------------------------------------
+
+// writeUserSSHConfig isolates HOME to a fresh temp dir, writes a ~/.ssh/config
+// there, and returns that home dir. The caller's ParseConnectURL then resolves
+// against THIS config (plus the always-read /etc/ssh/ssh_config, whose stock
+// `Host *` sets no honored fields) instead of the developer's real config.
+func writeUserSSHConfig(t *testing.T, content string) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	p := filepath.Join(home, ".ssh", "config")
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		t.Fatalf("mkdir .ssh: %v", err)
+	}
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatalf("write ssh config: %v", err)
+	}
+	return home
+}
+
+// strSlice reports whether two []string are element-equal.
+func strSliceEq(a, b []string) bool { return reflect.DeepEqual(a, b) }
+
+// TestKeyPaths covers every keyPaths composition the design specifies (criterion
+// 3): an explicit --ssh-key is authoritative (replaces id_* defaults), config
+// IdentityFiles merge in, IdentitiesOnly suppresses the id_* defaults, and the
+// list is de-duped. HOME is isolated so the id_* default paths are stable.
+func TestKeyPaths(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	disableRealSSHEnv(t) // keep agent off so focus stays on file keys
+	sshDir := filepath.Join(home, ".ssh")
+	def := []string{
+		filepath.Join(sshDir, "id_ed25519"),
+		filepath.Join(sshDir, "id_ecdsa"),
+		filepath.Join(sshDir, "id_rsa"),
+	}
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+		want []string
+	}{
+		{"explicit key authoritative (no id_*)", Config{KeyPath: "/k"}, []string{"/k"}},
+		{"key plus config identityfiles", Config{KeyPath: "/k", IdentityFiles: []string{"/a", "/b"}}, []string{"/k", "/a", "/b"}},
+		{"identityfiles then id_* defaults", Config{IdentityFiles: []string{"/a"}}, append([]string{"/a"}, def...)},
+		{"identitiesonly skips id_*", Config{IdentityFiles: []string{"/a"}, IdentitiesOnly: true}, []string{"/a"}},
+		{"nothing -> id_* defaults", Config{}, def},
+		{"dedup key duplicated in identityfiles", Config{KeyPath: "/a", IdentityFiles: []string{"/a", "/b"}}, []string{"/a", "/b"}},
+		{"dedup identityfile colliding with id_* default", Config{IdentityFiles: []string{def[0]}}, []string{def[0], def[1], def[2]}},
+		{"identitiesonly with no keys -> empty", Config{IdentitiesOnly: true}, []string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := keyPaths(tc.cfg)
+			if !strSliceEq(got, tc.want) {
+				t.Errorf("keyPaths(%+v)\n  got  %v\n  want %v", tc.cfg, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseConnectURL_ConfigFillsMissingFields: with no user@ / :port in the URL
+// and no --ssh-key, the matching Host block fills User/Port/HostName/IdentityFile
+// (criterion 1). cfg.Alias retains the typed name; cfg.Host becomes the real
+// dial address.
+func TestParseConnectURL_ConfigFillsMissingFields(t *testing.T) {
+	home := writeUserSSHConfig(t, strings.Join([]string{
+		"Host myalias498",
+		"    HostName 192.168.1.5",
+		"    User pi",
+		"    Port 2222",
+		"    IdentityFile ~/.ssh/rpi5_key",
+		"    IdentitiesOnly yes",
+	}, "\n"))
+
+	cfg, err := ParseConnectURL("ssh://myalias498", "tok", "", "", false)
+	if err != nil {
+		t.Fatalf("ParseConnectURL: %v", err)
+	}
+	if cfg.Host != "192.168.1.5" {
+		t.Errorf("Host = %q, want HostName 192.168.1.5", cfg.Host)
+	}
+	if cfg.Alias != "myalias498" {
+		t.Errorf("Alias = %q, want myalias498 (original typed name)", cfg.Alias)
+	}
+	if cfg.User != "pi" {
+		t.Errorf("User = %q, want pi (from config)", cfg.User)
+	}
+	if cfg.Port != 2222 {
+		t.Errorf("Port = %d, want 2222 (from config)", cfg.Port)
+	}
+	if !cfg.IdentitiesOnly {
+		t.Errorf("IdentitiesOnly = false, want true")
+	}
+	if !cfg.ConfigFound {
+		t.Errorf("ConfigFound = false, want true")
+	}
+	wantKey := filepath.Join(home, ".ssh", "rpi5_key")
+	if !strSliceEq(cfg.IdentityFiles, []string{wantKey}) {
+		t.Errorf("IdentityFiles = %v, want [%s]", cfg.IdentityFiles, wantKey)
+	}
+}
+
+// TestParseConnectURL_URLUserOverridesConfig: an explicit user@ wins over the
+// config User (criterion 2 / precedence). HostName still applies (no host
+// override mechanism exists for HostName — it always maps alias→real address).
+func TestParseConnectURL_URLUserOverridesConfig(t *testing.T) {
+	writeUserSSHConfig(t, strings.Join([]string{
+		"Host myalias498",
+		"    HostName 192.168.1.5",
+		"    User pi",
+		"    Port 2222",
+	}, "\n"))
+	cfg, err := ParseConnectURL("ssh://bob@myalias498", "tok", "", "", false)
+	if err != nil {
+		t.Fatalf("ParseConnectURL: %v", err)
+	}
+	if cfg.User != "bob" {
+		t.Errorf("User = %q, want bob (URL user@ overrides config)", cfg.User)
+	}
+	if cfg.Host != "192.168.1.5" {
+		t.Errorf("Host = %q, want 192.168.1.5 (HostName applies)", cfg.Host)
+	}
+	if cfg.Port != 2222 {
+		t.Errorf("Port = %d, want 2222 (config fills, no URL port)", cfg.Port)
+	}
+}
+
+// TestParseConnectURL_URLPortOverridesConfig: an explicit :port wins over the
+// config Port.
+func TestParseConnectURL_URLPortOverridesConfig(t *testing.T) {
+	writeUserSSHConfig(t, "Host myalias498\n    HostName 192.168.1.5\n    Port 2222\n")
+	cfg, err := ParseConnectURL("ssh://myalias498:3333", "tok", "", "", false)
+	if err != nil {
+		t.Fatalf("ParseConnectURL: %v", err)
+	}
+	if cfg.Port != 3333 {
+		t.Errorf("Port = %d, want 3333 (URL :port overrides config 2222)", cfg.Port)
+	}
+	if cfg.Host != "192.168.1.5" {
+		t.Errorf("Host = %q, want 192.168.1.5", cfg.Host)
+	}
+}
+
+// TestParseConnectURL_ConfigAppliedReflectsPrecedence is a defect guard
+// (criterion 2). cfg.ConfigApplied / the diagnostic claim "what ssh-config
+// APPLIED", so the summary must NOT list a User/Port the URL explicitly
+// overrode — otherwise the auth diagnostic contradicts itself ("attempted
+// user=bob" yet "~/.ssh/config: applied ...: User=pi"). HostName and
+// IdentityFile have no URL override, so they remain accurate when reported.
+func TestParseConnectURL_ConfigAppliedReflectsPrecedence(t *testing.T) {
+	writeUserSSHConfig(t, strings.Join([]string{
+		"Host rpi5",
+		"    HostName 192.168.1.5",
+		"    User pi",
+		"    Port 2222",
+	}, "\n"))
+
+	cfg, err := ParseConnectURL("ssh://bob@rpi5:3333", "tok", "", "", false)
+	if err != nil {
+		t.Fatalf("ParseConnectURL: %v", err)
+	}
+	// Sanity: the URL really did win for the dial values.
+	if cfg.User != "bob" || cfg.Port != 3333 {
+		t.Fatalf("precedence wrong: User=%q Port=%d, want bob/3333", cfg.User, cfg.Port)
+	}
+	// Desired: the "applied" summary must not claim the overridden User/Port.
+	if strings.Contains(cfg.ConfigApplied, "User=pi") {
+		t.Errorf("ConfigApplied should omit the URL-overridden User (pi); the user actually used is bob, not pi\nConfigApplied=%q", cfg.ConfigApplied)
+	}
+	if strings.Contains(cfg.ConfigApplied, "Port=2222") {
+		t.Errorf("ConfigApplied should omit the URL-overridden Port (2222); the port actually used is 3333, not 2222\nConfigApplied=%q", cfg.ConfigApplied)
+	}
+	// HostName has no URL override, so it IS applied and should be reported.
+	if !strings.Contains(cfg.ConfigApplied, "HostName=192.168.1.5") {
+		t.Errorf("ConfigApplied should include the applied HostName; got %q", cfg.ConfigApplied)
+	}
+}
+
+// TestParseConnectURL_ConfigFoundFalseCorners locks the round-1 + round-2 fixes
+// to cfg.ConfigFound: it must be FALSE when config matched but contributed
+// nothing actually used — (a) a Host block with only non-honored directives (the
+// /etc `Host *` shape), and (b) a config whose ONLY honored value the URL
+// overrode. The diagnostic's "found/applied" signal (criterion 2) must not lie
+// in either case.
+func TestParseConnectURL_ConfigFoundFalseCorners(t *testing.T) {
+	t.Run("host matched but no honored directive", func(t *testing.T) {
+		writeUserSSHConfig(t, "Host rpi5\n    SendEnv FOO\n    Ciphers aes128-ctr\n")
+		cfg, err := ParseConnectURL("ssh://rpi5", "", "", "", false)
+		if err != nil {
+			t.Fatalf("ParseConnectURL: %v", err)
+		}
+		if cfg.ConfigFound {
+			t.Errorf("ConfigFound=true; want false (Host matched but no honored value applied): ConfigApplied=%q", cfg.ConfigApplied)
+		}
+		if cfg.ConfigApplied != "" {
+			t.Errorf("ConfigApplied=%q, want empty", cfg.ConfigApplied)
+		}
+	})
+	t.Run("only honored value overridden by URL", func(t *testing.T) {
+		writeUserSSHConfig(t, "Host rpi5\n    User pi\n") // only User; URL overrides it
+		cfg, err := ParseConnectURL("ssh://bob@rpi5", "", "", "", false)
+		if err != nil {
+			t.Fatalf("ParseConnectURL: %v", err)
+		}
+		if cfg.User != "bob" {
+			t.Fatalf("User=%q, want bob (URL wins)", cfg.User)
+		}
+		if cfg.ConfigFound {
+			t.Errorf("ConfigFound=true; want false (the only config value was URL-overridden, nothing applied): ConfigApplied=%q", cfg.ConfigApplied)
+		}
+	})
+}
+
+// TestParseConnectURL_FlagKeyPathPassesThrough: --ssh-key flows into KeyPath
+// untouched, and config IdentityFiles are still resolved alongside it (so the
+// explicit key is tried first, then the config key).
+func TestParseConnectURL_FlagKeyPathPassesThrough(t *testing.T) {
+	writeUserSSHConfig(t, "Host myalias498\n    HostName 192.168.1.5\n    IdentityFile ~/.ssh/cfgkey\n")
+	cfg, err := ParseConnectURL("ssh://myalias498", "tok", "/explicit/key", "", false)
+	if err != nil {
+		t.Fatalf("ParseConnectURL: %v", err)
+	}
+	if cfg.KeyPath != "/explicit/key" {
+		t.Errorf("KeyPath = %q, want /explicit/key", cfg.KeyPath)
+	}
+	if len(cfg.IdentityFiles) != 1 {
+		t.Errorf("IdentityFiles = %v, want the config key resolved", cfg.IdentityFiles)
+	}
+}
+
+// TestParseConnectURL_NoUserConfigLeavesFieldsUnchanged: with no matching user
+// config, ParseConnectURL behaves exactly as before the fix — host unchanged,
+// default port (0→22 at dial), OS user, no IdentityFiles. (ConfigFound is
+// intentionally NOT asserted: the stock /etc/ssh/ssh_config `Host *` matches
+// every host, so it is machine-dependent.)
+func TestParseConnectURL_NoUserConfigLeavesFieldsUnchanged(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // no user config
+	currentUser := ""
+	if cu, err := user.Current(); err == nil {
+		currentUser = cu.Username
+	}
+	cfg, err := ParseConnectURL("ssh://zzz-no-such-alias-498", "tok", "", "", false)
+	if err != nil {
+		t.Fatalf("ParseConnectURL: %v", err)
+	}
+	if cfg.Host != "zzz-no-such-alias-498" {
+		t.Errorf("Host = %q, want unchanged alias", cfg.Host)
+	}
+	if cfg.Alias != "zzz-no-such-alias-498" {
+		t.Errorf("Alias = %q, want the typed alias", cfg.Alias)
+	}
+	if cfg.Port != 0 {
+		t.Errorf("Port = %d, want 0 (no config port)", cfg.Port)
+	}
+	if cfg.User != currentUser {
+		t.Errorf("User = %q, want OS user %q", cfg.User, currentUser)
+	}
+	if len(cfg.IdentityFiles) != 0 {
+		t.Errorf("IdentityFiles = %v, want empty", cfg.IdentityFiles)
+	}
+}
+
+// TestEndToEnd_ConfigResolvedUserAndIdentityFile is the headline acceptance
+// test (criterion 1): a Host block that resolves User + IdentityFile lets
+// `gogent --connect ssh://<alias>` authenticate with NO --ssh-key — full
+// `ssh rpi5` parity. It exercises ParseConnectURL → keyPaths merge → keyAuth →
+// real handshake against the in-process SSH server.
+func TestEndToEnd_ConfigResolvedUserAndIdentityFile(t *testing.T) {
+	env := newSSHTestEnv(t) // disables SSH_AUTH_SOCK; gives sshAddr + clientKey
+	host, portStr, _ := net.SplitHostPort(env.sshAddr)
+	port, _ := strconv.Atoi(portStr)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeConfig(t, filepath.Join(home, ".ssh", "config"), strings.Join([]string{
+		"Host srv498",
+		"    HostName " + host,
+		"    Port " + portStr,
+		"    User test",
+		"    IdentityFile " + env.clientKey,
+		"    IdentitiesOnly yes",
+	}, "\n"))
+
+	cfg, err := ParseConnectURL("ssh://srv498", "tok", "", "", true)
+	if err != nil {
+		t.Fatalf("ParseConnectURL: %v", err)
+	}
+	// Config resolved exactly as ssh would.
+	if cfg.Host != host || cfg.Port != port || cfg.User != "test" || cfg.Alias != "srv498" {
+		t.Fatalf("config not resolved: %+v (want host=%s port=%d user=test)", cfg, host, port)
+	}
+	if !cfg.IdentitiesOnly || len(cfg.IdentityFiles) != 1 || cfg.IdentityFiles[0] != env.clientKey {
+		t.Fatalf("IdentityFile not resolved: %+v", cfg)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tun, err := New(ctx, cfg)
+	if err != nil {
+		t.Fatalf("New with config-resolved User+IdentityFile (no --ssh-key) should connect: %v", err)
+	}
+	defer tun.Close()
+	if _, err := tun.Discover(); err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if err := healthOver(tun); err != nil {
+		t.Fatalf("GET /api/health over the config-resolved tunnel failed: %v", err)
+	}
+}
+
+// TestNew_AuthFailureDiagnostic (criterion 2): an auth failure surfaces an
+// enriched error naming the user, the candidate keys (paths only), the agent
+// state, and whether/what config applied — without leaking private-key
+// contents.
+func TestNew_AuthFailureDiagnostic(t *testing.T) {
+	env := newSSHTestEnv(t)
+	host, portStr, _ := net.SplitHostPort(env.sshAddr)
+	wrongKey := writeRSAKeyFile(t) // loadable, but the test server does NOT accept it
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeConfig(t, filepath.Join(home, ".ssh", "config"), strings.Join([]string{
+		"Host diag498",
+		"    HostName " + host,
+		"    Port " + portStr,
+		"    User diaguser",
+		"    IdentityFile " + wrongKey,
+	}, "\n"))
+
+	cfg, err := ParseConnectURL("ssh://diag498", "tok", "", "", true)
+	if err != nil {
+		t.Fatalf("ParseConnectURL: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = New(ctx, cfg)
+	if err == nil {
+		t.Fatal("New with an unaccepted key should fail")
+	}
+	s := err.Error()
+
+	for _, want := range []string{"attempted user=diaguser", "keys=[", "agent=", "diag498"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("auth error missing %q\ngot: %s", want, s)
+		}
+	}
+	// The wrong key's PATH is named (for the user to act on)...
+	if !strings.Contains(s, wrongKey) {
+		t.Errorf("auth error should name the candidate key path %q\ngot: %s", wrongKey, s)
+	}
+	// ...but its CONTENTS are never leaked.
+	if strings.Contains(s, "PRIVATE KEY") || strings.Contains(s, "BEGIN RSA") {
+		t.Errorf("auth error leaked private-key contents:\n%s", s)
+	}
+	// And the underlying cause is still wrapped for errors.Is/As.
+	if !strings.Contains(s, "unable to authenticate") && !strings.Contains(s, "handshake") {
+		t.Errorf("auth error lost the underlying cause:\n%s", s)
+	}
+}
+
+// TestNew_AuthFailureDiagnosticNoConfig: without a matching user config, the
+// diagnostic reports "no match" for the alias (when no Host block matched at
+// all). Using a host that matches no Host line in either the (absent) user
+// config or the stock /etc file is machine-dependent, so this asserts only the
+// always-present fields and that the config line is present in some form.
+func TestNew_AuthFailureDiagnosticFieldsAlwaysPresent(t *testing.T) {
+	env := newSSHTestEnv(t)
+	cfg := env.insecureCfg()
+	cfg.KeyPath = writeRSAKeyFile(t) // wrong key → auth failure
+	// With an explicit --ssh-key, keyPaths returns [KeyPath] only (authoritative),
+	// so this also guards that the diagnostic path never reaches the id_* defaults.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := New(ctx, cfg)
+	if err == nil {
+		t.Fatal("New with an unaccepted key should fail")
+	}
+	s := err.Error()
+	for _, want := range []string{"attempted user=", "keys=[", "agent="} {
+		if !strings.Contains(s, want) {
+			t.Errorf("auth error missing %q\ngot: %s", want, s)
+		}
 	}
 }

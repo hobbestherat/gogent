@@ -96,7 +96,14 @@ func runAttached(homeDir, addr, token string, noColorFlag bool) error {
 		if perr != nil {
 			return fmt.Errorf("bad --connect %q: %w", addr, perr)
 		}
-		sshTarget = cfg.User + "@" + cfg.Host
+		// Use the alias the user typed (not the ~/.ssh/config-resolved HostName)
+		// so the "ssh <host> gogent daemon start" hint below matches what `ssh`
+		// itself accepts on this machine (issue #498).
+		hintHost := cfg.Alias
+		if hintHost == "" {
+			hintHost = cfg.Host
+		}
+		sshTarget = cfg.User + "@" + hintHost
 		connectCtx, connectCancel := context.WithTimeout(ctx, sshtunnel.DialTimeout)
 		t, nerr := sshtunnel.New(connectCtx, cfg)
 		connectCancel()
