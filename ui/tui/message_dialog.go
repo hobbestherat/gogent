@@ -90,10 +90,12 @@ func messageBodyHeight(height int) int {
 // top-scrolled body TextView, and the modal layer with resize-reflow installed
 // (NoEnterGrace, since these appear in direct response to a user action). The
 // caller adds its own buttons / Escape handler / focus. It returns the dialog, the
-// live layer, and the resolved content width + body height the caller needs to
-// place controls. Centralising layer creation here keeps a single source of truth
-// for it across showConfirm and showProgress (issue #478).
-func (w *Workbench) newMessageLayer(title, message, layerName string) (*tv.Dialog, *tv.Layer, int, int) {
+// live layer, the body TextView (so a caller that needs to rewrite the message
+// after open can do so — e.g. the daemon-aware quit dialog enriching its body in
+// place, issue #503), and the resolved content width + body height the caller
+// needs to place controls. Centralising layer creation here keeps a single source
+// of truth for it across showConfirm and showProgress (issue #478).
+func (w *Workbench) newMessageLayer(title, message, layerName string) (*tv.Dialog, *tv.Layer, *tv.TextView, int, int) {
 	spec := messageDialogSpec(w.app.Width(), w.app.Height(), message)
 	x, y, width, height := w.dialogRect(spec)
 	bodyH := messageBodyHeight(height)
@@ -127,7 +129,7 @@ func (w *Workbench) newMessageLayer(title, message, layerName string) (*tv.Dialo
 	installResizeReflow(w.desktop, dialog, layer, func() tv.DialogSpec {
 		return messageDialogSpec(w.app.Width(), w.app.Height(), message)
 	})
-	return dialog, layer, width, bodyH
+	return dialog, layer, body, width, bodyH
 }
 
 // showConfirm opens a modal confirm/message dialog. When onResult is non-nil the
@@ -137,7 +139,7 @@ func (w *Workbench) newMessageLayer(title, message, layerName string) (*tv.Dialo
 // when it overflows, and it renders with the dialog's own high-contrast palette
 // (issue #98).
 func (w *Workbench) showConfirm(title, message string, onResult func(bool)) {
-	dialog, layer, width, bodyH := w.newMessageLayer(title, message, "confirm-dialog")
+	dialog, layer, _, width, bodyH := w.newMessageLayer(title, message, "confirm-dialog")
 
 	dismiss := func(value bool) {
 		w.desktop.RemoveLayer(layer)
@@ -183,7 +185,7 @@ func (w *Workbench) showConfirm(title, message string, onResult func(bool)) {
 // programmatic-only lifecycle (disconnect_modal.go). The distinct layer name keeps
 // the progress modal unambiguously identifiable.
 func (w *Workbench) showProgress(title, message string) *tv.Layer {
-	_, layer, _, _ := w.newMessageLayer(title, message, "daemon-progress")
+	_, layer, _, _, _ := w.newMessageLayer(title, message, "daemon-progress")
 	// No focusable control; the modal swallows input until it is replaced. SetFocus
 	// is nil-safe, and RemoveLayer restores the pre-modal focus on teardown.
 	w.desktop.SetFocus(nil)
@@ -206,6 +208,54 @@ func confirmButtonRow(width, btnY int) (yes, no tv.Rect) {
 	yes = clampDialogRect(tv.Rect{X: startX, Y: btnY, W: yesW, H: 1}, leftX, rightX)
 	no = clampDialogRect(tv.Rect{X: startX + yesW + gap, Y: btnY, W: noW, H: 1}, leftX, rightX)
 	return yes, no
+}
+
+// quitButtonRow centres a row of N buttons (N == len(labels)) on row btnY across a
+// dialog of the given width, sizing each to its rendered label width with a constant
+// gap, and clamping each to the content margins so the row never escapes a narrow
+// dialog (issue #503). It returns one rect per label, in order. The daemon-aware
+// quit dialog uses it for its two- or three-button rows; the caller decides how many
+// labels to pass (it drops the middle handoff button when three will not fit — the
+// handoff stays reachable from the Daemon menu).
+func quitButtonRow(width, btnY int, labels ...string) []tv.Rect {
+	const gap = 4
+	widths := make([]int, len(labels))
+	total := 0
+	for i, label := range labels {
+		widths[i] = tv.ButtonLabelWidth(label)
+		total += widths[i]
+		if i > 0 {
+			total += gap
+		}
+	}
+	startX := (width - total) / 2
+	if startX < 2 {
+		startX = 2
+	}
+	leftX, rightX := 2, width-3
+	rects := make([]tv.Rect, len(labels))
+	x := startX
+	for i := range labels {
+		rects[i] = clampDialogRect(tv.Rect{X: x, Y: btnY, W: widths[i], H: 1}, leftX, rightX)
+		x += widths[i] + gap
+	}
+	return rects
+}
+
+// quitButtonRowFits reports whether N buttons with the given labels fit side by side
+// within the dialog's content interior (width-4, i.e. inside the two content
+// margins) at the constant gap quitButtonRow uses. The quit dialog consults it to
+// decide whether to drop the middle handoff button on a narrow terminal.
+func quitButtonRowFits(width int, labels ...string) bool {
+	const gap = 4
+	total := 0
+	for i, label := range labels {
+		total += tv.ButtonLabelWidth(label)
+		if i > 0 {
+			total += gap
+		}
+	}
+	return total <= width-4
 }
 
 // centeredButton centres a single button labelled by label on row btnY.
