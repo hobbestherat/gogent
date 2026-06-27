@@ -29,6 +29,16 @@ func (w *Workbench) OnConnectionLost(attempt int) {
 	w.desktop.Post(func() {
 		w.showDisconnectModal()
 		w.renderDisconnectBody(attempt)
+		// Reflect the drop in the menu-bar status indicator (issue #500). The first
+		// notification (attempt 1) is the fresh drop ("○ disconnected"); a later attempt
+		// is an active backoff retry ("○ reconnecting…"). This is purely presentational —
+		// the modal above still owns the attempt count and Retry/Quit.
+		if attempt > 1 {
+			w.connPhase = connReconnecting
+		} else {
+			w.connPhase = connDisconnected
+		}
+		w.refreshConnectionStatus()
 		w.desktop.RequestRedraw()
 	})
 }
@@ -40,6 +50,9 @@ func (w *Workbench) OnConnectionLost(attempt int) {
 func (w *Workbench) OnConnectionRestored() {
 	w.desktop.Post(func() {
 		w.dismissDisconnectModal()
+		// Back to the healthy attached state in the menu-bar status indicator (issue #500).
+		w.connPhase = connHealthy
+		w.refreshConnectionStatus()
 		w.desktop.RequestRedraw()
 	})
 	w.refreshAfterReconnect()

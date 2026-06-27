@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	tui "github.com/hobbestherat/turbotui"
 	tv "github.com/hobbestherat/turbotui/turbotv"
 )
 
@@ -208,4 +209,80 @@ func formatDaemonStatus(r DaemonStatusReport) string {
 		b.WriteString("\n" + r.Note + "\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// connPhase is the transient state of a remote daemon connection, used by the
+// always-visible menu-bar status indicator (issue #500). It is meaningful only in
+// attached-remote mode (the only mode with a reconnect loop); embedded and
+// attached-local always read as connHealthy.
+type connPhase int
+
+const (
+	// connHealthy is the normal, connected state (and the only state for embedded /
+	// attached-local). The indicator shows a filled ● marker.
+	connHealthy connPhase = iota
+	// connDisconnected is the moment the remote event stream drops, before the first
+	// re-open attempt (Reconnector.OnConnectionLost with attempt == 1). Shows ○.
+	connDisconnected
+	// connReconnecting is an active backoff retry after a failed re-open
+	// (OnConnectionLost with attempt > 1). Shows ○.
+	connReconnecting
+)
+
+// daemonIndicatorText derives the terse, right-anchored status string shown at the
+// top-right of the menu bar (issue #500). It is pure so the mapping can be unit
+// tested without a UI. remoteLabel is the terse SSH/tcp target (e.g. "ssh:user@host")
+// supplied by Handlers.ConnectionLabel and is only consulted in attached-remote mode.
+// The phase is only honoured for attached-remote; embedded/attached-local always read
+// as healthy. The indicator is purely presentational — the blocking disconnect modal
+// owns the attempt count and the Retry/Quit affordances, so neither appears here.
+func daemonIndicatorText(mode DaemonMode, remoteLabel string, phase connPhase) string {
+	switch mode {
+	case DaemonModeEmbedded:
+		return "● embedded"
+	case DaemonModeAttachedLocal:
+		return "● daemon"
+	case DaemonModeAttachedRemote:
+		switch phase {
+		case connDisconnected:
+			return "○ disconnected"
+		case connReconnecting:
+			return "○ reconnecting…"
+		}
+		if remoteLabel == "" {
+			return "● remote"
+		}
+		return "● " + remoteLabel
+	}
+	return "● embedded"
+}
+
+// daemonIndicatorColors picks the status string's foreground/background, reusing the
+// theme-tracked semantic colour vars (so it follows a live theme switch and degrades
+// under NO_COLOR without any dedicated theme role). The background is always the zero
+// Color, which makes turbotui fall back to the bar's own MenuBarBG so the slot reads
+// as part of the bar on every theme. Green = healthy attach, amber = reconnecting,
+// red = dropped, neutral = embedded.
+//
+// Embedded deliberately returns the ZERO foreground rather than a dim grey: the bar's
+// MenuBarBG and the dim role can collide on a theme (in the shipping default both are
+// ANSI 7), which would paint "● embedded" grey-on-grey and defeat the always-visible
+// goal. A zero foreground makes turbotui fall back to the bar's own MenuBarFG, which is
+// guaranteed to contrast with the bar on every theme — embedded then reads as quiet,
+// normal-weight chrome, set apart from the saturated green/amber/red of the active and
+// error states without ever being invisible.
+func daemonIndicatorColors(mode DaemonMode, phase connPhase) (fg, bg tui.Color) {
+	if mode == DaemonModeAttachedRemote {
+		switch phase {
+		case connDisconnected:
+			return colorError, tui.Color{}
+		case connReconnecting:
+			return colorTool, tui.Color{}
+		}
+	}
+	if mode == DaemonModeEmbedded {
+		// Zero fg -> turbotui falls back to the bar's MenuBarFG (always contrasting).
+		return tui.Color{}, tui.Color{}
+	}
+	return colorAgent, tui.Color{}
 }
