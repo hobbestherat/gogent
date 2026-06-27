@@ -44,10 +44,11 @@ type ResolvedSSHConfig struct {
 
 // ReadSSHConfig resolves the directives gogent honors for host from the user's
 // ~/.ssh/config (and, best-effort, the system /etc/ssh/ssh_config as a lower-
-// priority fallback). It is advisory and never hard-fails on a missing file: a
-// missing/empty config yields ResolvedSSHConfig{Found:false} and a nil error.
-// An error is returned only for an unexpected read failure on a file that does
-// exist; callers treat even that as non-fatal.
+// priority fallback). It is advisory and never hard-fails on a missing OR
+// unreadable file: such files are skipped, yielding ResolvedSSHConfig{Found:
+// false} and a nil error. A non-nil error is possible only when a file that
+// opened successfully fails mid-read (a scanner error); callers treat even that
+// as non-fatal.
 func ReadSSHConfig(host string) (ResolvedSSHConfig, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -106,11 +107,9 @@ func (a *sshConfigAccumulator) parseFile(path string, depth int) error {
 	}
 	f, err := os.Open(path) //nolint:gosec // path is a user/system ssh config file, not attacker-controlled
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // advisory: a missing config is not an error
-		}
-		// A file that exists but cannot be opened (e.g. permissions) is reported;
-		// the caller still treats it as non-fatal.
+		// Advisory posture: a missing config — or one we cannot open (e.g.
+		// permission denied) — is skipped, never fatal. A broken/unreadable
+		// ssh-config must not block a connect.
 		return nil
 	}
 	defer func() { _ = f.Close() }()

@@ -77,7 +77,8 @@ type Config struct {
 	Alias          string   // the original ssh:// host as typed (before HostName resolution), for diagnostics + the daemon-start hint
 	IdentityFiles  []string // IdentityFile(s) from ~/.ssh/config, merged into the key candidates
 	IdentitiesOnly bool     // IdentitiesOnly: offer only --ssh-key + IdentityFile keys (skip id_* defaults)
-	ConfigFound    bool     // a ~/.ssh/config Host block matched cfg.Alias (for auth diagnostics)
+	ConfigFound    bool     // ~/.ssh/config actually CONTRIBUTED an honored value for cfg.Alias (for auth diagnostics)
+	ConfigApplied  string   // human summary of what ssh-config applied (e.g. "User=pi HostName=192.168.1.5"); "" when nothing applied
 }
 
 func (c Config) sshPort() int {
@@ -148,9 +149,13 @@ func ParseConnectURL(addr, token, keyPath, knownHosts string, insecure bool) (Co
 	}
 	// ssh-config fallback (issue #498): fill MISSING fields only — the URL user@
 	// and :port set above, and the --ssh-* flags, take precedence. Best-effort:
-	// a missing/broken config is non-fatal (rc.Found stays false).
+	// a missing/broken config is non-fatal (rc.Found stays false). rc.Found gates
+	// on a matching `Host` block: directives before the first Host line (top-level
+	// globals) are intentionally NOT applied — issue #498 is scoped to `Host
+	// <alias>` blocks, and applying a bare global HostName to every host would be
+	// a footgun. (Globals still participate in first-value-wins WITHIN a matched
+	// block, as TestReadSSHConfig_GlobalBeforeHostWins asserts.)
 	if rc, _ := ReadSSHConfig(host); rc.Found {
-		cfg.ConfigFound = true
 		if cfg.User == "" && rc.User != "" {
 			cfg.User = rc.User
 		}
@@ -162,6 +167,13 @@ func ParseConnectURL(addr, token, keyPath, knownHosts string, insecure bool) (Co
 		}
 		cfg.IdentityFiles = rc.IdentityFiles
 		cfg.IdentitiesOnly = rc.IdentitiesOnly
+		// ConfigFound reflects whether config CONTRIBUTED an honored value, not
+		// merely that a Host block matched: on stock Debian/Ubuntu the system
+		// /etc/ssh/ssh_config carries `Host *` (which matches every host) so a
+		// bare block-match would mislabel default User/Port as config-applied in
+		// the auth diagnostic. ConfigApplied lists exactly what config provided.
+		cfg.ConfigApplied = summarizeSSHConfig(rc)
+		cfg.ConfigFound = cfg.ConfigApplied != ""
 	}
 	// OS-user fallback last, so a config User (above) wins over it.
 	if cfg.User == "" {
@@ -563,18 +575,39 @@ func authDiagnostic(cfg Config) string {
 	if alias == "" {
 		alias = cfg.Host
 	}
+	// Report ONLY what ssh-config actually contributed (cfg.ConfigApplied), not
+	// the merged/default dial values — otherwise a stock `Host *` in
+	// /etc/ssh/ssh_config makes this falsely claim config set the user/port.
 	if cfg.ConfigFound {
-		fmt.Fprintf(&b, "; ~/.ssh/config: matched %q → User=%s HostName=%s Port=%d", alias, cfg.User, cfg.Host, cfg.sshPort())
-		if cfg.IdentitiesOnly {
-			b.WriteString(" IdentitiesOnly=yes")
-		}
-		if len(cfg.IdentityFiles) > 0 {
-			fmt.Fprintf(&b, " IdentityFile=%s", strings.Join(cfg.IdentityFiles, ","))
-		}
+		fmt.Fprintf(&b, "; ~/.ssh/config: applied for %q: %s", alias, cfg.ConfigApplied)
 	} else {
-		fmt.Fprintf(&b, "; ~/.ssh/config: no match for %q", alias)
+		fmt.Fprintf(&b, "; ~/.ssh/config: no values applied for %q", alias)
 	}
 	return b.String()
+}
+
+// summarizeSSHConfig renders the honored directives ssh-config actually
+// resolved (and nothing else) as a compact "User=… HostName=… …" string, for
+// the auth diagnostic. It returns "" when config contributed nothing — the
+// signal cfg.ConfigFound is derived from.
+func summarizeSSHConfig(rc ResolvedSSHConfig) string {
+	var parts []string
+	if rc.User != "" {
+		parts = append(parts, "User="+rc.User)
+	}
+	if rc.HostName != "" {
+		parts = append(parts, "HostName="+rc.HostName)
+	}
+	if rc.Port > 0 {
+		parts = append(parts, "Port="+strconv.Itoa(rc.Port))
+	}
+	if rc.IdentitiesOnly {
+		parts = append(parts, "IdentitiesOnly=yes")
+	}
+	if len(rc.IdentityFiles) > 0 {
+		parts = append(parts, "IdentityFile="+strings.Join(rc.IdentityFiles, ","))
+	}
+	return strings.Join(parts, " ")
 }
 
 // classifyKey reports a private-key file's state for diagnostics WITHOUT leaking
