@@ -262,7 +262,15 @@ func daemonIndicatorText(mode DaemonMode, remoteLabel string, phase connPhase) s
 // under NO_COLOR without any dedicated theme role). The background is always the zero
 // Color, which makes turbotui fall back to the bar's own MenuBarBG so the slot reads
 // as part of the bar on every theme. Green = healthy attach, amber = reconnecting,
-// red = dropped, dim grey = embedded.
+// red = dropped, neutral = embedded.
+//
+// Embedded deliberately returns the ZERO foreground rather than a dim grey: the bar's
+// MenuBarBG and the dim role can collide on a theme (in the shipping default both are
+// ANSI 7), which would paint "● embedded" grey-on-grey and defeat the always-visible
+// goal. A zero foreground makes turbotui fall back to the bar's own MenuBarFG, which is
+// guaranteed to contrast with the bar on every theme — embedded then reads as quiet,
+// normal-weight chrome, set apart from the saturated green/amber/red of the active and
+// error states without ever being invisible.
 func daemonIndicatorColors(mode DaemonMode, phase connPhase) (fg, bg tui.Color) {
 	if mode == DaemonModeAttachedRemote {
 		switch phase {
@@ -273,7 +281,8 @@ func daemonIndicatorColors(mode DaemonMode, phase connPhase) (fg, bg tui.Color) 
 		}
 	}
 	if mode == DaemonModeEmbedded {
-		return colorNote, tui.Color{}
+		// Zero fg -> turbotui falls back to the bar's MenuBarFG (always contrasting).
+		return tui.Color{}, tui.Color{}
 	}
 	return colorAgent, tui.Color{}
 }

@@ -818,9 +818,16 @@ func (w *Workbench) modelByIndex(i int) *config.ModelConfig {
 	return w.models[i]
 }
 
-// SetHandlers registers the backend callbacks.
+// SetHandlers registers the backend callbacks. It also refreshes the menu-bar
+// connection-status indicator (issue #500) so a Handlers swap — e.g. attach setup
+// installing the remote handlers, or a daemon handoff switching modes — is reflected
+// immediately, without depending on a later rebuildMenu to reseed the slot.
+// refreshConnectionStatus is nil-safe before the first menu build and must run on the
+// UI thread; every SetHandlers caller already satisfies that (startup before the loop,
+// or the handoff controller via Post).
 func (w *Workbench) SetHandlers(h Handlers) {
 	w.handlers = h
+	w.refreshConnectionStatus()
 }
 
 // Post marshals fn onto the UI (event-loop) thread, so background goroutines —
