@@ -123,6 +123,12 @@ type Handlers struct {
 	// from UpdateModel which only replaces an existing entry. May be nil, in which
 	// case the catalog affordance is hidden.
 	AddModel func(config.ModelConfig) error
+	// RemoveModel deletes a configured model by Name (the unified Models… dialog's
+	// Remove action). It enforces the removal policy server-/core-side: removing
+	// the default while other models remain, or a model in use by a live session,
+	// returns an error the dialog surfaces; removing the last model is allowed and
+	// yields the empty-list state. May be nil (Remove then hidden/disabled).
+	RemoveModel func(name string) error
 	// GetModelCatalog returns the models.dev catalog (cached on disk with a TTL).
 	// force=true revalidates/refreshes. May be nil (catalog affordance hidden). It
 	// may perform a live network fetch, so callers MUST invoke it off the UI thread
@@ -1131,13 +1137,13 @@ func (w *Workbench) settingsItems() []*tv.MenuItem {
 	}
 	items := []*tv.MenuItem{
 		w.menuActionItem("&Sub-agents…", actionConfigSubagents),
-		tv.NewMenuItem("&Models…", func() { w.showModelEditor() }),
-	}
-	// "Add from catalog…" creates a NEW model from the models.dev catalog (issue
-	// #486); it works even with zero configured models, where the manual editor
-	// would early-return. Shown only when the catalog handlers are wired.
-	if w.catalogReady() {
-		items = append(items, tv.NewMenuItem("&Add Model from Catalog…", func() { w.showAddModelDialog() }))
+		// A single unified "Models…" dialog is the one home for add (Catalog +
+		// Empty-slot) / edit / remove / set-default (issue #509). It opens even with
+		// zero configured models and works offline for the Empty-slot add, so it is
+		// no longer gated on catalogReady() — the standalone "Add Model from
+		// Catalog…" entry is gone, the catalog flow is now one of the Add paths
+		// inside the dialog.
+		tv.NewMenuItem("&Models…", func() { w.showModelsDialog() }),
 	}
 	items = append(items, tv.NewMenuItem("&Resources…", func() { w.showResourcesDialog() }))
 	// Statistics is surfaced only when the backend wires the report handler.

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"os"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/hobbestherat/webapi"
 	"gogent/internal/config"
+	"gogent/internal/gogent"
 	"gogent/internal/tool"
 	"gogent/internal/vcs"
 )
@@ -63,6 +65,27 @@ func (svc modelsSvc) Update(r *http.Request, name string, req updateModelRequest
 		return nil, webapi.NewHTTPError(http.StatusNotFound, err.Error())
 	}
 	return modelToView(&updated), nil
+}
+
+// Delete handles DELETE /models/:name — remove a configured model. The removal
+// policy is enforced in core (gogent.RemoveModel) so embedded and remote behave
+// identically; here we only translate the sentinel errors to HTTP status:
+// unknown name -> 404, blocked (default-while-others / in-use) -> 409.
+func (svc modelsSvc) Delete(r *http.Request, name string) (interface{}, error) {
+	if err := requireHuman(r, svc.s.provider); err != nil {
+		return nil, err
+	}
+	if err := svc.s.g.RemoveModel(name); err != nil {
+		switch {
+		case errors.Is(err, gogent.ErrModelNotFound):
+			return nil, webapi.NewHTTPError(http.StatusNotFound, err.Error())
+		case errors.Is(err, gogent.ErrModelInUse), errors.Is(err, gogent.ErrModelIsDefault):
+			return nil, webapi.NewHTTPError(http.StatusConflict, err.Error())
+		default:
+			return nil, webapi.NewHTTPError(http.StatusInternalServerError, err.Error())
+		}
+	}
+	return map[string]any{"removed": name}, nil
 }
 
 // Scan handles POST /models/:name/scan — probe the backend's model list.

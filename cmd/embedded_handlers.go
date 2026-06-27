@@ -175,6 +175,9 @@ func embeddedHandlersFor(g *gogent.Gogent, wb *tuipkg.Workbench, noColor bool) t
 		AddModel: func(m config.ModelConfig) error {
 			return g.AddModel(m)
 		},
+		RemoveModel: func(name string) error {
+			return g.RemoveModel(name)
+		},
 		GetModelCatalog: func(ctx context.Context, force bool) (modelsdev.Catalog, error) {
 			return mdc.Catalog(ctx, force)
 		},

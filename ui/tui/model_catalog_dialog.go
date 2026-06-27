@@ -17,12 +17,13 @@ import (
 // This file implements the "Add model from catalog" flow (issue #486): a small
 // wizard that fetches the models.dev catalog, lets the user pick a PROVIDER then a
 // MODEL (both searchable), and opens a pre-filled, fully-editable review form that
-// — on Save — creates a NEW model config via handlers.AddModel. It is purely
-// additive: showModelEditor (the manual editor) is left untouched, and every entry
-// point degrades gracefully to the manual editor when the catalog is unreachable.
+// — on Save — creates a NEW model config via handlers.AddModel. Since issue #509
+// the wizard is reused unchanged as the "Add from Catalog…" path of the unified
+// Models… dialog (showModelsDialog); when the catalog is unreachable every entry
+// point degrades gracefully to that dialog's manual Add Empty… path.
 //
 // The catalog fetch can hit the network, so it always runs off the UI thread
-// behind a "Loading catalog…" layer (mirroring showModelEditor's scanModels
+// behind a "Loading catalog…" layer (mirroring the model form's scanModels
 // goroutine), posting the result back via desktop.Post.
 
 // catalogReady reports whether the catalog-assisted flow is wired (both the
@@ -55,11 +56,11 @@ func (w *Workbench) offerManualEditor(err error) {
 	if err != nil {
 		msg += ":\n" + err.Error()
 	}
-	if w.handlers.GetModels != nil && w.handlers.UpdateModel != nil {
-		msg += "\n\nOpen the manual model editor instead?"
+	if w.handlers.GetModels != nil && w.handlers.AddModel != nil {
+		msg += "\n\nOpen the Models dialog to add one manually instead?"
 		w.showConfirm("Add model", msg, func(ok bool) {
 			if ok {
-				w.showModelEditor()
+				w.showModelsDialog()
 			}
 		})
 		return
