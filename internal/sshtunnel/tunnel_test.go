@@ -1227,6 +1227,41 @@ func TestParseConnectURL_ConfigAppliedReflectsPrecedence(t *testing.T) {
 	}
 }
 
+// TestParseConnectURL_ConfigFoundFalseCorners locks the round-1 + round-2 fixes
+// to cfg.ConfigFound: it must be FALSE when config matched but contributed
+// nothing actually used — (a) a Host block with only non-honored directives (the
+// /etc `Host *` shape), and (b) a config whose ONLY honored value the URL
+// overrode. The diagnostic's "found/applied" signal (criterion 2) must not lie
+// in either case.
+func TestParseConnectURL_ConfigFoundFalseCorners(t *testing.T) {
+	t.Run("host matched but no honored directive", func(t *testing.T) {
+		writeUserSSHConfig(t, "Host rpi5\n    SendEnv FOO\n    Ciphers aes128-ctr\n")
+		cfg, err := ParseConnectURL("ssh://rpi5", "", "", "", false)
+		if err != nil {
+			t.Fatalf("ParseConnectURL: %v", err)
+		}
+		if cfg.ConfigFound {
+			t.Errorf("ConfigFound=true; want false (Host matched but no honored value applied): ConfigApplied=%q", cfg.ConfigApplied)
+		}
+		if cfg.ConfigApplied != "" {
+			t.Errorf("ConfigApplied=%q, want empty", cfg.ConfigApplied)
+		}
+	})
+	t.Run("only honored value overridden by URL", func(t *testing.T) {
+		writeUserSSHConfig(t, "Host rpi5\n    User pi\n") // only User; URL overrides it
+		cfg, err := ParseConnectURL("ssh://bob@rpi5", "", "", "", false)
+		if err != nil {
+			t.Fatalf("ParseConnectURL: %v", err)
+		}
+		if cfg.User != "bob" {
+			t.Fatalf("User=%q, want bob (URL wins)", cfg.User)
+		}
+		if cfg.ConfigFound {
+			t.Errorf("ConfigFound=true; want false (the only config value was URL-overridden, nothing applied): ConfigApplied=%q", cfg.ConfigApplied)
+		}
+	})
+}
+
 // TestParseConnectURL_FlagKeyPathPassesThrough: --ssh-key flows into KeyPath
 // untouched, and config IdentityFiles are still resolved alongside it (so the
 // explicit key is tried first, then the config key).
