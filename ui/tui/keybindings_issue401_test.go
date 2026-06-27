@@ -172,8 +172,8 @@ func TestIssue401GoModHasRequestedTurbotuiAndNoReplace(t *testing.T) {
 		t.Fatalf("read go.mod: %v", err)
 	}
 	text := string(b)
-	if !strings.Contains(text, "github.com/hobbestherat/turbotui v0.3.1-0.20260627085642-0ff08b27a8c2") {
-		t.Fatalf("go.mod does not pin turbotui 0ff08b27 pseudo-version (issue #500):\n%s", text)
+	if !strings.Contains(text, "github.com/hobbestherat/turbotui v0.3.1-0.20260627095617-54dc4b757884") {
+		t.Fatalf("go.mod does not pin turbotui 54dc4b7 pseudo-version (issue #501 paste-chip bump):\n%s", text)
 	}
 	if strings.Contains(text, "\nreplace ") || strings.Contains(text, "\nreplace(") {
 		t.Fatalf("go.mod contains a replace directive:\n%s", text)
