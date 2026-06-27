@@ -133,7 +133,13 @@ type transcriptRecord struct {
 	role      colorRole
 	lines     []styledLine
 	collapsed bool
-	entry     *tv.TextEntry
+	// restored marks a record built from the session snapshot by restore() rather
+	// than from a live event. The connect-path dedup (issue #516) matches only these
+	// when deciding whether a drained backlog event would duplicate the snapshot, so
+	// two live events are never deduped against each other (a turn may legitimately
+	// repeat a tool call or an identical answer).
+	restored bool
+	entry    *tv.TextEntry
 	// rich marks a record whose body should be rendered as formatted Markdown
 	// (issue #184) when rich rendering is enabled. lines still holds the raw text
 	// so copy/export/search are unchanged; the styled rendering is derived from it
@@ -213,34 +219,37 @@ func (m *transcriptModel) lastAssistantRecord() *transcriptRecord {
 	return nil
 }
 
-// duplicatesLastAnswer reports whether text is identical to the transcript's most
-// recent assistant answer with no newer user turn since — i.e. re-applying it as a
-// final answer would render the same reply twice. It guards the connect path (issue
-// #516): the global SSE stream is opened (fail-fast) before the initial Restore()
-// completes and is only drained afterwards, so a turn that finished in the window
-// between the stream opening and the transcript snapshot is present in BOTH the
-// restored snapshot AND the buffered live stream; draining that backlog onto the
-// now-open window would otherwise append the answer a second time.
+// restoredDuplicate reports whether a RESTORED record (one built from the session
+// snapshot by restore(), never a live event) of kind k for which match returns true
+// sits at the transcript tail with no newer user record since. It is the connect-path
+// dedup primitive (issue #516): the global SSE stream is opened (fail-fast) before
+// the initial Restore() completes and is drained only afterwards, so a turn that
+// finished in the window between the stream opening and the transcript snapshot is
+// present in BOTH the restored snapshot AND the buffered live stream; re-applying the
+// drained backlog must not duplicate what the snapshot already rendered.
 //
-// Scanning back from the tail, the FIRST user or assistant record decides: an
-// assistant whose body equals text is a duplicate; a user record (a new turn begun
-// since the last answer) means text is a genuine new reply, never a duplicate — so
-// two legitimately-identical answers in separate turns are both kept. Intervening
-// tool/thought/note records are transparent. The comparison rebuilds text the way
-// assistantRecord would store it (childLines split, joined on newlines) so it
-// matches body() exactly.
-func (m *transcriptModel) duplicatesLastAnswer(text string) bool {
-	want := strings.Join(childLines(text), "\n")
+// Two guards keep it from ever over-dropping a legitimate live event:
+//   - it matches only records flagged restored, so two live events are never deduped
+//     against each other (a turn may legitimately repeat a tool call or an identical
+//     answer — the earlier one is a live record and so never matches);
+//   - it stops at the first user record, so a genuinely new turn's events are always
+//     kept even when textually identical to an earlier turn's.
+//
+// Intervening live/other records are transparent. Callers pass a kind-specific match
+// (answer body, tool name, thought body); answer/thought comparisons rebuild the
+// text the way the record builders store it (childLines split, joined on newlines)
+// so they match body() exactly.
+func (m *transcriptModel) restoredDuplicate(k eventKind, match func(*transcriptRecord) bool) bool {
 	for i := len(m.records) - 1; i >= 0; i-- {
 		r := m.records[i]
 		if r == nil {
 			continue
 		}
-		switch r.kind {
-		case kindAssistant:
-			return r.body() == want
-		case kindUser:
+		if r.kind == kindUser {
 			return false
+		}
+		if r.restored && r.kind == k && match(r) {
+			return true
 		}
 	}
 	return false
