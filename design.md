@@ -82,19 +82,33 @@ Holds everything new, all in `package ui`:
    }
    type quitButtonKind int // quitClient, stopAndQuit, startAndQuit, cancel
    ```
-2. **`buildQuitModel(mode, report, haveReport bool, host string, canStop, canStart bool) quitDialogModel`**
+2. **`buildQuitModel(mode, report, haveReport bool, host, addr string, canStop, canStart bool) quitDialogModel`**
    — pure function deciding title/body/buttons/default from inputs. `canStop` =
    `Handlers.StopDaemon != nil`, `canStart` = `Handlers.StartDaemon != nil`.
-   Body text built by small pure helpers (see §4). **No UI, no goroutines** → unit
-   tested directly for all six states + fallbacks.
+   `host` is the display label (`reconnectHost`) used in "The daemon at {host}…";
+   **`addr` is the connect string** (`ReconnectAddress()`, "" when nil/unset)
+   used in the `gogent --connect {addr}` re-attach line — the two are distinct
+   parameters precisely so §4's "do not conflate" rule is enforced by the
+   signature, and so the pure test can assert the `--connect {addr}` line. When
+   `addr == ""` the re-attach line is omitted. Body text built by small pure
+   helpers (see §4). **No UI, no goroutines** → unit tested directly for all six
+   states + fallbacks.
 3. **`pluralSessions/pluralWatchers/pluralServers`** (or one
    `countLine(n int, noun string) string`) helper: "1 live session" vs
    "N live sessions" (the spec notes `formatDaemonStatus` does not pluralise; new
    helper added here, not retrofitted into the status dialog — no #500 overlap).
-4. **`showQuitDialog()`** — the wiring: builds the layer via `newMessageLayer`,
-   lays out buttons via `quitButtonRow`, wires actions, installs Escape, sets
-   default focus, then kicks the **non-blocking** status fetch (see §5).
-5. **`quitButtonAction(kind)`** closures for the three semantics (see §6),
+4. **`quitSizingBody(mode, host, addr string) string`** (pure) — the enriched
+   body *shape* with placeholder counts, used only to size the dialog so a later
+   in-place enrich never clips the re-attach line (see §5). For embedded/nil
+   modes (no enrichment) it returns the same body the model renders.
+5. **`reconnectAddress() string`** — nil-safe accessor:
+   `if w.handlers.ReconnectAddress != nil { return w.handlers.ReconnectAddress() }`
+   else `""`. Keeps the call sites and the pure model free of nil checks.
+6. **`showQuitDialog()`** — the wiring: builds the layer via `newMessageLayer`
+   (sized via `quitSizingBody`), renders the fallback body, lays out buttons via
+   `quitButtonRow`, wires actions, installs Escape, sets default focus, then
+   kicks the **non-blocking** status fetch (see §5).
+7. **`quitButtonAction(kind)`** closures for the three semantics (see §6),
    reusing `showProgress`/`dismissDaemonHandoffProgress`/`showConfirm`.
 
 ### `ui/tui/tui.go`
@@ -226,16 +240,42 @@ The dialog **opens immediately** with the mode-based **fallback** body (state
 2/4 text for attached; state 5 for embedded; states with no round-trip need
 nothing). For AttachedLocal/AttachedRemote we then fetch enrichment off the UI
 thread, mirroring `showDaemonStatusDialog` and the disconnect modal's
-update-in-place:
+update-in-place.
+
+**Sizing — "size for the enriched shape, render the fallback into it"
+(prevents the clip).** The enriched body (intro + 3 count bullets + re-attach
+line, ~8 rows) is taller than the fallback (~5 rows). If we sized the dialog to
+the fallback and later poured the enriched body in, the extra rows would overflow
+the body viewport and — since `rewriteBody` does `ScrollToTop` — the **bottom**
+line (`gogent --connect {addr}`, the headline re-attach command) would scroll out
+of view, exactly in the enriched remote state where it matters most.
+`installResizeReflow` (`dialog_sizing.go:201`) only resizes the outer window, not
+the inner body/buttons, so a resize won't rescue it either. We therefore **size
+the dialog at open to the enriched shape** and render the (shorter) fallback into
+that taller viewport, so the layout can stay frozen (focus/buttons never move)
+*and* the enriched body always fits. Concretely, `showQuitDialog` passes a
+**sizing string** = the enriched-shaped body for this mode built with placeholder
+counts (`quitSizingBody(mode, host, addr)`); the displayed body is then
+overwritten with the fallback text. Placeholder vs real counts differ by at most
+a couple of digits, so the line count is identical and the longest-line width is
+unchanged — the sizing is exact. `messageMaxHeight=24` leaves ~10 rows of
+headroom over the ~14-row (body+chrome) dialog, so nothing is capped.
 
 ```go
 func (w *Workbench) showQuitDialog() {
     mode := w.handlers.DaemonMode()
-    model := buildQuitModel(mode, DaemonStatusReport{}, false /*haveReport*/, w.reconnectHost,
-        w.handlers.StopDaemon != nil, w.handlers.StartDaemon != nil)
-    // newMessageLayer now hands back the body TextView (see §2) so we can enrich
-    // it in place — no hand-built dialog, no unreachable-body problem.
-    dialog, layer, body, width, bodyH := w.newMessageLayer(model.Title, model.Body, "quit-dialog")
+    host := w.reconnectHost
+    addr := w.reconnectAddress() // nil-safe: "" when Handlers.ReconnectAddress == nil
+    canStop, canStart := w.handlers.StopDaemon != nil, w.handlers.StartDaemon != nil
+
+    model := buildQuitModel(mode, DaemonStatusReport{}, false /*haveReport*/, host, addr, canStop, canStart)
+
+    // Size to the enriched shape so a later in-place enrich never clips the
+    // re-attach line; for embedded/nil the sizing string == the body (no enrich).
+    sizing := quitSizingBody(mode, host, addr) // == model.Body for non-enriching modes
+    // newMessageLayer hands back the body TextView (see §2) and sizes to `sizing`.
+    dialog, layer, body, width, bodyH := w.newMessageLayer(model.Title, sizing, "quit-dialog")
+    rewriteBody(body, model.Body) // render the fallback into the enriched-sized box
     w.quitDialogLayer = layer
     // ... lay out model.Buttons via quitButtonRow(width, bodyH+2, labels...),
     //     wire each to its action, install Escape=Cancel, SetFocus(default).
@@ -248,8 +288,8 @@ func (w *Workbench) showQuitDialog() {
             w.desktop.Post(func() {
                 if err != nil { return }                 // keep fallback text
                 if w.quitDialogLayer != layer { return } // user already acted / dialog gone
-                enriched := buildQuitModel(mode, report, true, w.reconnectHost, …)
-                rewriteBody(body, enriched.Body)         // Clear()+AddLine loop, ScrollToTop
+                enriched := buildQuitModel(mode, report, true, host, addr, canStop, canStart)
+                rewriteBody(body, enriched.Body)         // Clear()+AddLine loop, ScrollToTop — fits, no clip
                 w.desktop.RequestRedraw()
             })
         }()
@@ -260,12 +300,21 @@ func (w *Workbench) showQuitDialog() {
 Guards:
 - The fetch **never** blocks the quit; the box is interactive the instant it
   opens. If the daemon is unreachable / slow / errors, the fallback text stays.
+- `quitSizingBody` keeps `newMessageLayer`'s captured reflow message at the
+  enriched height, so a terminal resize *after* enrichment also stays tall — no
+  regression of the no-clip guarantee on resize.
+- Cosmetic trade-off (acknowledged): while the fallback is shown in the
+  enriched-sized box, a few blank rows sit between the text and the button row.
+  This is brief (enrichment normally lands sub-second) and, in the
+  fetch-failed-permanently case, a minor empty gap — strictly better than hiding
+  the re-attach command. No content is ever clipped.
 - A small `w.quitDialogLayer *tv.Layer` field tracks the live quit dialog (like
   `disconnectLayer`/`daemonHandoffLayer`); set on open, cleared on dismiss. The
   enrichment callback no-ops if the user already clicked a button (layer gone or
-  replaced). Button labels/focus are **not** rebuilt on enrichment — only the
-  body text is rewritten (counts never change which buttons exist), so focus and
-  layout stay stable. Touched only on the UI thread (open + `Post`ed callback).
+  replaced). Button labels/focus/positions are **not** rebuilt on enrichment —
+  only the body text is rewritten (counts never change which buttons exist, and
+  the box is pre-sized for the enriched body), so focus and layout stay stable.
+  Touched only on the UI thread (open + `Post`ed callback).
 - The quit box stacks **above** an open disconnect modal exactly as today (it is
   just another modal layer); we do not special-case that.
 
@@ -388,6 +437,11 @@ is no downstream effect on turbotui and no `go.mod` bump.
 - **`newMessageLayer` signature change:** two in-repo callers updated to discard
   the new body return; both behaviourally unchanged (covered by existing
   showConfirm/showProgress and #478 tests).
+- **Enriched body clipping the re-attach line:** resolved — the dialog is sized
+  for the enriched shape at open (`quitSizingBody`), so the taller enriched body
+  fits without scrolling and the `--connect {addr}` line stays visible (§5);
+  resize keeps the enriched height because the reflow message is the sizing
+  string. Cosmetic cost: a brief blank gap below the fallback text.
 
 ---
 
@@ -396,7 +450,11 @@ is no downstream effect on turbotui and no `go.mod` bump.
 
 - **Pure `buildQuitModel` table test** over all six states: assert Title, Body
   (enriched and fallback), ordered Button labels, and `DefaultIdx`. Covers
-  pluralisation ("1 live session" vs "3 live sessions") and the host/addr lines.
+  pluralisation ("1 live session" vs "3 live sessions"); the remote enriched case
+  passes a non-empty `addr` and asserts the body contains
+  `gogent --connect {addr}` (and that a "" `addr` omits the re-attach line) and
+  that `{host}` uses the display `host`, not `addr` — the two-param signature
+  makes both directly assertable.
 - **Button-omission:** `StopDaemon==nil` (local) / `StartDaemon==nil` (embedded)
   drop the middle button; AttachedRemote never has Stop.
 - **Nil `DaemonMode`:** `confirmQuit` builds the unchanged `confirm-dialog`
@@ -405,6 +463,10 @@ is no downstream effect on turbotui and no `go.mod` bump.
   dialog is up immediately with fallback text; on a released successful fetch the
   body is rewritten to enriched (assert via the body TextView's `AllText()`); on
   error the fallback text remains.
+- **No-clip sizing:** in the remote enriched state, assert the dialog/body height
+  is sized for the enriched body (computed from `quitSizingBody`) so the final
+  `gogent --connect {addr}` line is within the body viewport
+  (`messageBodyRows(enriched) <= bodyH`) — i.e. not scrolled off after enrich.
 - **Stop/Start-daemon-&-quit:** wire a channel-blocked `StopDaemon`/`StartDaemon`;
   assert the `daemon-progress` modal shows during the handoff, then on **success**
   `w.quit` is invoked (spy func), and on **failure** a result `confirm-dialog`
