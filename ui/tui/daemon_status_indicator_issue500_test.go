@@ -150,6 +150,7 @@ func TestIssue500IndicatorColorsContract(t *testing.T) {
 // in the shipping default theme equals MenuBarBG (both ANSI 7). The other states
 // (green/red/amber) all contrast on the grey bar and pass.
 func TestIssue500IndicatorVisibleAgainstMenuBarBG(t *testing.T) {
+	withThemeRestore(t) // ApplyTheme below mutates global colour vars; keep the test hermetic
 	// Install the shipping default theme so the package colour vars reflect what a
 	// user actually sees on a fresh install.
 	ApplyTheme(ResolveTheme(config.ThemeConfig{}, envOf(map[string]string{"TERM": "xterm"}), false))
@@ -464,6 +465,7 @@ func TestIssue500IndicatorRenderedRightAnchored(t *testing.T) {
 //
 // This FAILS today for the same reason as TestIssue500IndicatorVisibleAgainstMenuBarBG.
 func TestIssue500EmbeddedIndicatorCellIsVisible(t *testing.T) {
+	withThemeRestore(t) // ApplyTheme below mutates global colour vars; keep the test hermetic
 	ApplyTheme(ResolveTheme(config.ThemeConfig{}, envOf(map[string]string{"TERM": "xterm"}), false))
 	w := NewWorkbench([]*config.ModelConfig{{Name: "m", Model: "m"}})
 	w.rebuildMenu()
@@ -512,5 +514,95 @@ func TestIssue500IndicatorSurvivesAcrossRebuilds(t *testing.T) {
 	w.refreshConnectionStatus()
 	if got := w.menuBar.StatusText; got != "○ disconnected" {
 		t.Errorf("refresh after rebuild = %q, want ○ disconnected", got)
+	}
+}
+
+// indicatorCell renders an embedded workbench and returns the ● marker cell on the
+// menu bar (row 0), or the zero Cell and found=false if it is not painted.
+func indicatorCell(t *testing.T, w *Workbench) (c tui.Cell, found bool) {
+	t.Helper()
+	w.desktop.Redraw()
+	for x := 0; x < w.app.Width(); x++ {
+		if cell := w.app.ReadCell(x, 0); cell.Ch == '●' {
+			return cell, true
+		}
+	}
+	return tui.Cell{}, false
+}
+
+// TestIssue500IndicatorFollowsLiveThemeSwitch verifies gate 2 ("colours themed"): a
+// live theme switch (ApplyTheme + the rebuild RefreshTheme performs) must reseed the
+// menu bar, so the indicator cell is visible on EVERY theme and its painted background
+// actually changes with the theme. It is fully observable (reads rendered cells) so it
+// does not couple to turbotui's internal activeTheme plumbing.
+func TestIssue500IndicatorFollowsLiveThemeSwitch(t *testing.T) {
+	withThemeRestore(t) // cycles ApplyTheme across default/dark/high-contrast; restore after
+	w := NewWorkbench([]*config.ModelConfig{{Name: "m", Model: "m"}})
+	w.SetHandlers(Handlers{
+		DaemonMode:      func() DaemonMode { return DaemonModeEmbedded },
+		ConnectionLabel: func() string { return "" },
+	})
+	truecolor := envOf(map[string]string{"TERM": "xterm", "COLORTERM": "truecolor"})
+
+	bgByTheme := make(map[string]tui.Color, 3)
+	for _, cfg := range []string{"default", "dark", "high-contrast"} {
+		t.Run(cfg, func(t *testing.T) {
+			ApplyTheme(ResolveTheme(config.ThemeConfig{Name: cfg}, truecolor, false))
+			w.rebuildMenu() // mirrors RefreshTheme's menu rebuild on a theme switch
+
+			cell, found := indicatorCell(t, w)
+			if !found {
+				t.Fatalf("theme %q: ● marker not rendered on the menu bar", cfg)
+			}
+			if cell.FG == cell.BG {
+				t.Errorf("theme %q: embedded ● invisible (FG==BG %+v) after a live switch", cfg, cell.FG)
+			}
+			bgByTheme[cfg] = cell.BG
+		})
+	}
+	// The switch must have actually propagated to the painted bar: the default (grey)
+	// and dark (black) bar backgrounds differ. Guards against a stale bar surviving a
+	// theme change.
+	if bgByTheme["default"] == bgByTheme["dark"] {
+		t.Errorf("theme switch did not change the bar background: default BG %+v == dark BG %+v",
+			bgByTheme["default"], bgByTheme["dark"])
+	}
+}
+
+// TestIssue500LocalDisconnectKeepsHealthyMarker pins the per-spec behaviour that the
+// hollow disconnect phase is REMOTE-only (gate 1): a local-socket drop still raises the
+// blocking disconnect modal, but the indicator must not flip to a ○ marker in
+// attached-local mode. It also confirms the modal UX is independent of the indicator.
+func TestIssue500LocalDisconnectKeepsHealthyMarker(t *testing.T) {
+	w := NewWorkbench([]*config.ModelConfig{{Name: "m", Model: "m"}})
+	w.SetReconnectControls("local daemon", func() {})
+	w.SetHandlers(Handlers{
+		DaemonMode:      func() DaemonMode { return DaemonModeAttachedLocal },
+		ConnectionLabel: func() string { return "" },
+	})
+	w.rebuildMenu()
+	if got := w.menuBar.StatusText; got != "● daemon" {
+		t.Fatalf("pre-disconnect = %q, want ● daemon", got)
+	}
+
+	// An attached-local run still owns a RemoteClient, so a socket drop fires the hook.
+	w.OnConnectionLost(3)
+	drainPostedEventually(t, w)
+
+	if got := w.menuBar.StatusText; got != "● daemon" {
+		t.Errorf("local-disconnect indicator = %q, want ● daemon (disconnect phase is remote-only)", got)
+	}
+	if w.disconnectLayer == nil {
+		t.Error("disconnect modal was not raised on a local drop (modal UX must be independent of the indicator)")
+	}
+
+	// Restoring clears the modal; the local marker was already healthy throughout.
+	w.OnConnectionRestored()
+	drainPostedEventually(t, w)
+	if w.disconnectLayer != nil {
+		t.Error("disconnect modal not dismissed on restore")
+	}
+	if got := w.menuBar.StatusText; got != "● daemon" {
+		t.Errorf("post-restore local indicator = %q, want ● daemon", got)
 	}
 }
