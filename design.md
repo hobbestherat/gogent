@@ -100,6 +100,11 @@ func ReadSSHConfig(host string) (ResolvedSSHConfig, error)
   matched file **inline at that point** in processing order so first-value-wins
   ordering is preserved. Guard with a recursion `depth` cap (e.g. 16) to avoid
   cyclic includes.
+- **Malformed values are skipped, not propagated** (advisory-config posture):
+  `Port` is `strconv.Atoi`'d — a non-numeric / out-of-range value leaves
+  `rc.Port == 0` (unset) rather than erroring or storing a bogus `int`.
+  `IdentitiesOnly` enables only on `yes`/`true`; any other value leaves it
+  `false`. A single broken line never poisons the rest of the resolve.
 - **Token / path expansion** (kept minimal but correct for the reported case):
   - `HostName`: expand `%h` → original `host`, `%%` → `%`.
   - `IdentityFile`: expand leading `~` / `~user`-less `~/` → home dir; expand
@@ -154,29 +159,70 @@ flow into `hostKeyCallback` unchanged.
 
 ## Component 3 — `keyPaths` merge + `IdentitiesOnly` (`tunnel.go`)
 
+> **Revised after critique.** An earlier draft appended the `id_*` defaults
+> *unconditionally* (whenever `!IdentitiesOnly`), i.e. **even when `--ssh-key`
+> was set**. That silently changed the established `--ssh-key` contract
+> ("default: SSH agent + `~/.ssh/id_*`" ⇒ the flag *replaces* that default) and
+> — because every existing integration test sets `KeyPath` and
+> `disableRealSSHEnv` clears only `SSH_AUTH_SOCK`, **not `HOME`** — would make
+> the whole suite `os.ReadFile` the developer's real `~/.ssh/id_*`, including a
+> blocking passphrase prompt on an encrypted real key (`loadSigner` →
+> `promptPassphrase` returns true on a TTY, and the Pi5 suite runs from a
+> terminal). The corrected design below keeps `--ssh-key` authoritative so the
+> existing tests' candidate list is **byte-for-byte unchanged**.
+
 ```go
 func keyPaths(cfg Config) []string {
-    var paths []string
-    if cfg.KeyPath != "" {            // explicit --ssh-key first
-        paths = append(paths, cfg.KeyPath)
+    // An explicit --ssh-key is authoritative: it (and any config IdentityFile)
+    // REPLACES the id_* defaults — preserving the flag's established contract.
+    if cfg.KeyPath != "" {
+        return dedup(append([]string{cfg.KeyPath}, cfg.IdentityFiles...))
     }
-    paths = append(paths, cfg.IdentityFiles...)   // config IdentityFile(s), in order
-    if !cfg.IdentitiesOnly {                       // append id_* defaults only when not IdentitiesOnly
-        // existing ~/.ssh/id_ed25519, id_ecdsa, id_rsa
+    // No --ssh-key: config IdentityFile(s) first, then the conventional
+    // ~/.ssh/id_* defaults UNLESS IdentitiesOnly suppresses them.
+    paths := append([]string{}, cfg.IdentityFiles...)
+    if !cfg.IdentitiesOnly {
+        // existing ~/.ssh/id_ed25519, id_ecdsa, id_rsa (via os.UserHomeDir)
     }
     return dedup(paths)   // de-dup preserving order
 }
 ```
 
-- **`IdentitiesOnly true`** ⇒ offer only `--ssh-key` + config `IdentityFile`s,
-  **skip the `id_*` defaults** (required). De-dup matters: `keyAuth` bundles all
-  signers into one `ssh.PublicKeys(...)` method and each key is a separate
-  attempt against the server's `MaxAuthTries`, so duplicate paths waste tries.
+Resulting candidate lists:
+
+| inputs | candidate keys |
+|---|---|
+| `KeyPath` set (existing tests) | `[KeyPath]` — **identical to today** |
+| `KeyPath` set + config `IdentityFile` | `[KeyPath, IdentityFile…]` (no `id_*`) |
+| no `KeyPath`, config `IdentityFile`, `IdentitiesOnly=false` (the rpi5 case) | `[IdentityFile…, id_ed25519, id_ecdsa, id_rsa]` |
+| no `KeyPath`, config `IdentityFile`, `IdentitiesOnly=true` | `[IdentityFile…]` only |
+| nothing (no config, no flag) | `[id_ed25519, id_ecdsa, id_rsa]` — **identical to today** |
+
+- **rpi5 parity preserved:** the headline no-`--ssh-key` case still offers the
+  config `IdentityFile` *alongside* the `id_*` defaults (OpenSSH parity — issue
+  required-change #3 is satisfied for the reported case).
+- **`--ssh-key` authoritative (intentional, critic-endorsed):** when the user
+  passes `--ssh-key` they get exactly that key (+ any config `IdentityFile`),
+  **not** the `id_*` defaults. This (a) matches the flag's documented "default:
+  … `~/.ssh/id_*`" contract — the flag overrides the default rather than
+  augmenting it; (b) keeps the existing integration tests' candidate list
+  unchanged so they neither read real keys nor hang; (c) avoids offering an
+  unrelated personal key to an arbitrary host. This is a deliberate, narrow
+  deviation from the most-literal "`--ssh-key` *and* `id_*`" reading; called out
+  in the open questions.
+- **`IdentitiesOnly true`** ⇒ never the `id_*` defaults (required). De-dup
+  matters: `keyAuth` bundles all signers into one `ssh.PublicKeys(...)` method
+  and each key is a separate attempt against the server's `MaxAuthTries`, so
+  duplicate paths waste tries; the agent is tried first (its method is appended
+  first in `authMethods`), so a fat agent can starve the config `IdentityFile` —
+  de-dup limits the file-side count and keeping `--ssh-key` authoritative caps
+  the worst case.
 - **Agent under `IdentitiesOnly`:** the agent (`agentAuth`) is still offered.
-  OpenSSH's `IdentitiesOnly=yes` also filters the agent down to the listed
-  identities, but doing that precisely needs per-key agent filtering;
-  **accepted minimal deviation** — we keep the agent method and only enforce the
-  required `id_*`-skip. Noted here and in code.
+  OpenSSH's `IdentitiesOnly=yes` also filters the agent to the listed
+  identities; doing that precisely needs per-key agent filtering —
+  **accepted minimal deviation** (explicitly permitted by the issue), enforcing
+  only the required `id_*`-skip. Noted here and in code; a user expecting
+  `IdentitiesOnly` to constrain the agent is the one quiet surprise.
 - `keyAuth`/`agentAuth`/`authMethods` shapes are otherwise unchanged; `keyPaths`
   is the only behavioral edit.
 
@@ -198,10 +244,16 @@ ssh handshake 192.168.1.5:22: ssh: unable to authenticate …:
 
 - A small helper `authDiagnostic(cfg) string` builds this from `cfg.User`,
   `keyPaths(cfg)` (annotating each path `loaded`/`absent`/`encrypted` — **paths
-  only, no contents**), agent presence + key count (a one-shot agent query on the
-  failure path), and the config summary (`cfg.ConfigFound`, `cfg.Alias`,
-  `cfg.User`, `cfg.Host`, `cfg.Port`, `cfg.IdentityFiles`). If
-  `!cfg.ConfigFound`, it says `~/.ssh/config: no match for 'rpi5'`.
+  only, no contents**), agent presence + key count, and the config summary
+  (`cfg.ConfigFound`, `cfg.Alias`, `cfg.User`, `cfg.Host`, `cfg.Port`,
+  `cfg.IdentityFiles`). If `!cfg.ConfigFound`, it says
+  `~/.ssh/config: no match for 'rpi5'`.
+- **Bounded agent query:** the one-shot agent key count runs on the
+  already-failing path, so it must not stall on a wedged `SSH_AUTH_SOCK`. The
+  helper dials the agent socket with a short deadline (e.g. ~500ms,
+  `net.DialTimeout` + a read deadline on the `agent.Signers` call) and on any
+  error/timeout degrades to `agent=present (key count unavailable)` /
+  `agent=none`. It never blocks the error from surfacing.
 - This makes the headline failure self-diagnosing: the user sees *which* user,
   *which* keys, whether the agent was consulted, and whether/what config applied.
 
@@ -242,17 +294,33 @@ silent. The `ssh <alias> …` hint matches the user's own vocabulary.
 
 ### (3) No regressions
 - `hostKeyCallback`, `authMethods`, `agentAuth`, `keyAuth`, `New`, `Discover`,
-  `DialContext`, `Restart`, `Close` are unchanged except `keyPaths` (additive,
-  guarded by new empty-by-default fields) and the `dialClient` error-wrap
-  (message only).
-- A `Config{}` with no config fields behaves as before; all existing
-  integration tests (`insecureCfg`, host-key, restart, concurrency) are
-  unaffected — they construct `Config` literals that leave the new fields zero.
+  `DialContext`, `Restart`, `Close` are unchanged. The only behavioral edit is
+  `keyPaths`; `dialClient` changes the error-wrap *message* only.
+- **`keyPaths` is provably non-regressing for the existing tests.** With
+  `--ssh-key` kept authoritative (Component 3), any `Config` that sets `KeyPath`
+  and leaves the new fields zero — which is *every* existing integration test
+  (`insecureCfg()` at `tunnel_test.go:432-436`, `writeRSAKeyFile`-based cfgs,
+  `TestNew_*`, `TestHostKey_*`, `TestRestart_*`, `TestDialContext_*`) — returns
+  exactly `[KeyPath]`, byte-for-byte the old result. **No `os.UserHomeDir()` /
+  `id_*` read is reached on these paths**, so the developer's real
+  `~/.ssh/id_*` is never touched and the encrypted-key passphrase-prompt hang is
+  impossible. (This corrects the earlier draft, which appended `id_*`
+  unconditionally and *would* have read real keys + hung — see Component 3's
+  note.)
+- **Defense-in-depth: harden `disableRealSSHEnv`** (`tunnel_test.go:43-46`) to
+  also point `HOME` (and `USER`) at a `t.TempDir()`, not just clear
+  `SSH_AUTH_SOCK`. This makes the harness's stated invariant ("prevent
+  interference from the developer's real ssh-agent / keys") robust against
+  *future* changes to `keyPaths` as well as `id_*` defaults, and makes the new
+  config tests hermetic by construction. It is purely additive test isolation,
+  no production effect.
 - **`TestParseConnectURL` determinism:** `ParseConnectURL` now consults the real
-  `~/.ssh/config`. To keep the existing table test asserting unchanged behavior
-  on any machine, the test sets `HOME` to an empty `t.TempDir()` so
-  `ReadSSHConfig` finds nothing (`Found=false`) — same assertions, now hermetic.
-  No production behavior change; this is a test-isolation fix.
+  `~/.ssh/config`. The table test sets `HOME` to an empty `t.TempDir()` (it does
+  not use `disableRealSSHEnv`) so `ReadSSHConfig` finds nothing (`Found=false`)
+  — same assertions, now hermetic. No production behavior change.
+- Existing integration tests reach `New`/`dialClient` directly (not
+  `ParseConnectURL`), so `ReadSSHConfig` is **not** invoked on those paths;
+  config resolution is confined to the `ParseConnectURL` entry point.
 - gofmt/build/vet clean; golangci-lint v2 whole-repo 0 **new** issues; `go test
   ./...` green (no `-race` on Pi5). Pre-existing environmental
   `TestUserSessionSendMessage` 404 remains the only acceptable failure.
@@ -277,13 +345,39 @@ silent. The `ssh <alias> …` hint matches the user's own vocabulary.
   consistent. `hostKeyCallback` stays unchanged per the issue; the keyscan hint
   uses `cfg.Host` (the real host), which is correct. Documented, not a code
   change.
-- **MaxAuthTries:** merging IdentityFiles + id_* defaults + agent could, in
-  pathological configs, exceed a server's `MaxAuthTries`. De-dup in `keyPaths`
-  mitigates the common overlap; the count is otherwise the same order as before
-  (1 agent method + 1 multi-key method).
+- **MaxAuthTries:** merging config `IdentityFiles` + `id_*` defaults + the
+  (agent-first) agent grows the signer list, which in a pathological config
+  could exceed a server's `MaxAuthTries`. Mitigations: de-dup in `keyPaths`
+  collapses overlap (config `IdentityFile` == an `id_*`); `--ssh-key` stays
+  authoritative so the explicit-key path is capped; and the agent is offered as
+  before. The structure is still 1 agent method + 1 multi-key method, just with
+  a (de-duped) longer key list in the no-`--ssh-key` + config case — the same
+  growth OpenSSH itself incurs when a `Host` block adds `IdentityFile`s.
 - **Token expansion is intentionally partial** (`~`, `%h`, `%r`, `%%`, maybe
   `%d`). Other `%`-tokens (`%p`, `%L`, `%n`, …) are not expanded; they don't
   appear in the reported case and are left literal. Noted in code.
+
+## Tests (concrete)
+
+- **`sshconfig_test.go` (new, hermetic via `t.TempDir()` + explicit path or
+  `HOME`):** parse a sample config and assert `HostName/User/Port/IdentityFile(s)/
+  IdentitiesOnly`; `~` and `%h`/`%r` expansion; `Include`; glob `Host rpi*`;
+  first-value-wins precedence across multiple matching blocks; **missing file
+  ⇒ `Found=false`, `nil` error**; **malformed `Port`/`IdentitiesOnly` line is
+  skipped, not fatal**.
+- **`tunnel_test.go` (extend):**
+  - Harden `disableRealSSHEnv` to isolate `HOME`/`USER` (see criterion 3) — this
+    one change protects the whole existing suite.
+  - New end-to-end: write a temp `~/.ssh/config` (`Host alias` →
+    `HostName 127.0.0.1`, `Port <server>`, `User test`,
+    `IdentityFile <clientKey>`), `ParseConnectURL("ssh://alias", …, insecure=true)`,
+    then `New` connects against the in-process server — proving config-resolved
+    `User` + `IdentityFile` auth succeeds with **no `--ssh-key`**.
+  - `ParseConnectURL` cases: config **present** (fills User/Port/HostName/
+    IdentityFile) vs **absent** (`Found=false`, unchanged); **override** —
+    `ssh://bob@alias` keeps `bob`, `ssh://alias:2222` keeps `2222`, `--ssh-key`
+    keeps the flag key and suppresses `id_*` (assert via `keyPaths`).
+  - `keyPaths` unit cases for the five rows of the Component 3 table.
 
 ## Open questions
 
@@ -291,9 +385,17 @@ silent. The `ssh <alias> …` hint matches the user's own vocabulary.
    to `~/.ssh/config`? Leaning *include it, best-effort* (read after the user
    file, user file wins via first-value-wins); it is cheap and harmless. Flag if
    the reviewer prefers user-file-only for the first cut.
-2. **`IdentitiesOnly` + agent** — keep the agent method (proposed minimal
+2. **`--ssh-key` replaces vs augments `id_*`** — this design keeps `--ssh-key`
+   **authoritative** (it replaces the `id_*` defaults, preserving the flag's
+   contract and the test harness's real-key isolation). The most-literal reading
+   of the issue (`[--ssh-key, IdentityFile…, id_*]`) would also append `id_*`
+   when `--ssh-key` is set. Confirming the authoritative reading is preferred
+   (it is less surprising and the critic endorsed it); easy to flip if the
+   maintainer wants strict literalism — but that re-introduces the real-key test
+   leak unless `HOME` isolation is in place (which it now is).
+3. **`IdentitiesOnly` + agent** — keep the agent method (proposed minimal
    deviation) or also filter agent identities to the listed keys? Keeping it is
    the documented minimal choice; full agent filtering is a possible follow-up.
-3. **Negated `Host !pattern`** — support the simple case or defer? Plan is to
+4. **Negated `Host !pattern`** — support the simple case or defer? Plan is to
    support simple negation; deferring (treating `!` literally) is acceptable if
    it risks the gate. Will not block on this.
