@@ -2516,14 +2516,16 @@ func (sw *SessionWindow) appendThinkingDelta(delta string) {
 	}
 	if sw.liveThought == nil {
 		// On first connect a turn whose reasoning is already restored from the snapshot
-		// (a kindThinking record at the tail with no new user turn since) must not also
-		// stream a duplicate live "thinking…" block from the drained backlog (issue
-		// #516). Suppress the whole stream for this turn rather than matching text:
-		// deltas are token fragments, so a content match on the first one is unreliable,
-		// whereas the presence of a restored thought is a stable signal. liveThought
-		// stays nil, so every further delta short-circuits here and foldLiveThought is a
-		// no-op. The user-record stop means a genuinely new turn always streams normally.
-		if sw.transcript.restoredDuplicate(kindThinking, func(*transcriptRecord) bool { return true }) {
+		// (a kindThinking record still at the pristine tail) must not also stream a
+		// duplicate live "thinking…" block from the drained backlog (issue #516).
+		// Suppress the whole stream for this turn rather than matching text: deltas are
+		// token fragments, so a content match on the first one is unreliable, whereas the
+		// presence of a restored thought is a stable signal. liveThought stays nil, so
+		// every further delta short-circuits here and foldLiveThought is a no-op. Because
+		// this is a content-blind presence check, it uses restoredAtPristineTail (stops
+		// at the first live record), so an autonomous session resumes streaming as soon
+		// as it has any live activity rather than being suppressed indefinitely.
+		if sw.transcript.restoredAtPristineTail(kindThinking, func(*transcriptRecord) bool { return true }) {
 			return
 		}
 		sw.liveThought = sw.transcript.add(&transcriptRecord{

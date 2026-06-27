@@ -221,29 +221,53 @@ func (m *transcriptModel) lastAssistantRecord() *transcriptRecord {
 
 // restoredDuplicate reports whether a RESTORED record (one built from the session
 // snapshot by restore(), never a live event) of kind k for which match returns true
-// sits at the transcript tail with no newer user record since. It is the connect-path
+// precedes the transcript tail with no newer user turn since. It is the connect-path
 // dedup primitive (issue #516): the global SSE stream is opened (fail-fast) before
 // the initial Restore() completes and is drained only afterwards, so a turn that
 // finished in the window between the stream opening and the transcript snapshot is
 // present in BOTH the restored snapshot AND the buffered live stream; re-applying the
 // drained backlog must not duplicate what the snapshot already rendered.
 //
-// A drained backlog event can only duplicate snapshot records that are still at the
-// pristine tail, so the scan stops — returning false — at the first record that ends
-// that tail:
-//   - any user record (a turn boundary): a genuinely new turn's events are always
-//     kept, even when textually identical to an earlier turn's;
-//   - any live (non-restored) record: once live activity has appended to the window
-//     we are past the snapshot, so neither a backlog overlap nor a future turn is
-//     suppressed. This also means two live events are never deduped against each
-//     other, and an autonomous (user-less) session resumes streaming as soon as its
-//     first live record lands rather than being suppressed indefinitely.
+// The scan stops only at a user record (a turn boundary): a genuinely new turn's
+// events are always kept, even when textually identical to an earlier turn's. Every
+// other record — including LIVE (non-restored) ones — is transparent and scanned
+// past, because a drained backlog turn can interleave events the snapshot never held
+// (e.g. a Compaction, which restore() never renders) ahead of the dedupable event;
+// stopping at such a live record would re-open the very duplicate it guards against.
+// The match clause requires r.restored, so a live record is never itself matched —
+// two live events are never deduped against each other (a turn may legitimately
+// repeat a tool call or an identical answer).
 //
-// Non-matching restored records are transparent (the scan continues past them).
 // Callers pass a kind-specific match (answer body, tool name/header, thought body);
 // answer/thought comparisons rebuild the text the way the record builders store it
 // (childLines split, joined on newlines) so they match body() exactly.
 func (m *transcriptModel) restoredDuplicate(k eventKind, match func(*transcriptRecord) bool) bool {
+	for i := len(m.records) - 1; i >= 0; i-- {
+		r := m.records[i]
+		if r == nil {
+			continue
+		}
+		if r.kind == kindUser {
+			return false
+		}
+		if r.restored && r.kind == k && match(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// restoredAtPristineTail is the stricter sibling of restoredDuplicate for callers
+// that suppress on the mere PRESENCE of a restored record rather than a content match
+// (issue #516, the streaming ThinkingDelta path: deltas are token fragments, so the
+// only stable signal that a turn's reasoning is already restored is a restored
+// thought, not a text comparison). Because such a presence check is content-blind, it
+// must NOT reach back across live activity, or it would suppress an autonomous
+// (user-less) session's reasoning indefinitely. So this scan additionally stops at
+// the first live (non-restored) record: it fires only while the restored snapshot is
+// still the pristine tail, and an autonomous session resumes streaming as soon as its
+// first live record lands.
+func (m *transcriptModel) restoredAtPristineTail(k eventKind, match func(*transcriptRecord) bool) bool {
 	for i := len(m.records) - 1; i >= 0; i-- {
 		r := m.records[i]
 		if r == nil {
