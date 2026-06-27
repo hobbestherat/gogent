@@ -54,8 +54,9 @@ const overallBandHeight = overallSeparatorLines + overallSelectorLines + overall
 
 // overallAllModelsOption is the model-selector label for the aggregate view: every
 // metric below it shows the cluster-wide grand total across all models, reproducing
-// the pre-#191 behaviour. It maps to an empty model key.
-const overallAllModelsOption = "all models"
+// the pre-#191 behaviour. Capitalised for consistency with the "Overall" title
+// (issue #533). It maps to an empty model key.
+const overallAllModelsOption = "All models"
 
 // overallErrLineIdx is the metric-row index of the "errors" line, used to colour
 // a non-zero error count red in the rendered band. Pinned by a test so a
@@ -428,7 +429,7 @@ func mergeModelLifetime(models []stats.ModelStat, extra map[string]stats.Connect
 // buildOverallStats assembles the panel's view from the Statistics report joined
 // with the focused/selected model config (issue #107). It is pure and unit tested.
 //
-// selectedModel scopes the metrics (issue #191). When empty (the "all models"
+// selectedModel scopes the metrics (issue #191). When empty (the "All models"
 // option) the panel shows the cluster-wide grand total: the report's primary-backend
 // connector totals plus the sidebar's own session / sub-agent node counts (the
 // authoritative "what is on screen" counts). When a model config name is given,
