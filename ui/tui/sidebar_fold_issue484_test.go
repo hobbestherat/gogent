@@ -2,12 +2,12 @@ package ui
 
 // Tests for issues #484 / #490 / #510: TTL-based folding of finished sub-agents,
 // now collapsed into a SINGLE per-session summary line (issue #490) that both
-// renders the pipe-wrapped per-state counts ("|▶2 ‖1 ✓5 ✗1|") AND parents the
+// renders the pipe-wrapped per-state counts ("|▶2  ⏸1  ✓5  ✗1|") AND parents the
 // TTL-folded ("archived") completed agents — with no leading ▸/▾ (turbotui
 // HideMarker) and a trailing "+" (collapsed) / "-" (expanded) suffix that is the
 // only expand affordance, absent while the summary is childless. Issue #510 then
-// makes the bar always-on for every session: all four states (▶ ‖ ✓ ✗) are shown
-// including zero ("|▶0 ‖0 ✓0 ✗0|") even before any sub-agent exists, wrapped in
+// makes the bar always-on for every session: all four states (▶ ⏸ ✓ ✗) are shown
+// including zero ("|▶0  ⏸0  ✓0  ✗0|") even before any sub-agent exists, wrapped in
 // straight pipes instead of brackets, with the leading | aligned to the session
 // name's first character.
 //
@@ -141,8 +141,8 @@ func rowYContaining(rows []string, sub string) (int, bool) {
 
 // suffixAfterBar extracts the trailing suffix after the last '|' in a summary
 // label (issue #510: the counts bar is wrapped in pipes, not brackets). Returns
-// "" when the label ends at '|' (childless / no suffix). The waiting glyph ‖
-// (U+2016) is NOT a pipe byte, so it never matches here.
+// "" when the label ends at '|' (childless / no suffix). The waiting glyph ⏸
+// (U+23F8) is NOT a pipe byte, so it never matches here.
 func suffixAfterBar(label string) string {
 	if i := strings.LastIndexByte(label, '|'); i >= 0 {
 		return label[i+1:]
@@ -264,7 +264,7 @@ func TestFold_AlwaysOnSummaryWithWatchersOnly(t *testing.T) {
 		t.Fatalf("watcher-only session should have summary + watcher = 2 children, got %d", n)
 	}
 	// The bar is the all-zero state with no archived children and no suffix.
-	if got, want := summary.Label, "|▶0 ‖0 ✓0 ✗0|"; got != want {
+	if got, want := summary.Label, "|▶0  ⏸0  ✓0  ✗0|"; got != want {
 		t.Fatalf("watcher-only summary label = %q, want %q", got, want)
 	}
 	if got := suffixAfterBar(summary.Label); got != "" {
@@ -487,7 +487,7 @@ func TestFold_DismissFailedClearsRow(t *testing.T) {
 	// ✗ count dropped to 0 but the bar is always-on (issue #510): it still
 	// shows ✗0 (not ✗1), the running agent as ▶1, and stays put.
 	bar := summaryOf(s, "s1").Label
-	if got, want := bar, "|▶1 ‖0 ✓0 ✗0|"; got != want {
+	if got, want := bar, "|▶1  ⏸0  ✓0  ✗0|"; got != want {
 		t.Fatalf("summary after dismiss = %q, want %q", got, want)
 	}
 	if strings.Contains(bar, "✗1") {
@@ -512,7 +512,7 @@ func TestFold_DismissFailedKeepsAllZeroSummary(t *testing.T) {
 	if summary == nil {
 		t.Fatalf("summary node must persist after dismissing the only agent (issue #510 always-on)")
 	}
-	if got, want := summary.Label, "|▶0 ‖0 ✓0 ✗0|"; got != want {
+	if got, want := summary.Label, "|▶0  ⏸0  ✓0  ✗0|"; got != want {
 		t.Fatalf("summary label after dismiss = %q, want the all-zero bar %q", got, want)
 	}
 	if n := len(s.sessions["s1"].Children); n != 1 {
@@ -830,7 +830,7 @@ func TestFold_SyncFoldSuffixesDirect(t *testing.T) {
 	s.tickFolds()
 
 	summary := summaryOf(s, "s1")
-	before := summary.Label // "|▶0 ‖0 ✓1 ✗0|+" (all four states, one folded)
+	before := summary.Label // "|▶0  ⏸0  ✓1  ✗0|+" (all four states, one folded)
 	if got := suffixAfterBar(before); got != "+" {
 		t.Fatalf("setup suffix = %q, want +", got)
 	}
@@ -846,7 +846,7 @@ func TestFold_SyncFoldSuffixesDirect(t *testing.T) {
 		t.Fatalf("syncFoldSuffixes must re-derive suffix to -, got %q (label %q)", got, summary.Label)
 	}
 	// The counts bar is untouched (only the suffix changed). The sentinel is the
-	// closing '|' (issue #510), NOT ']' — and the waiting glyph ‖ must not be
+	// closing '|' (issue #510), NOT ']' — and the waiting glyph ⏸ must not be
 	// mistaken for it.
 	if base := summary.Label[:strings.LastIndexByte(summary.Label, '|')+1]; !strings.Contains(base, "✓1") {
 		t.Fatalf("syncFoldSuffixes must not alter the counts bar: %q", base)
@@ -945,7 +945,7 @@ func TestFold_ExpandToRevealOpensMonologue(t *testing.T) {
 // is absent while childless, "+" while collapsed, "-" while expanded; (b) there
 // is never a separate "|✓ N|" bucket row; (c) archived children hide/show with
 // the toggle. (Issue #510: the bar is pipe-wrapped, so the summary row is found
-// by its "|▶0 ‖0 ✓2 …" prefix, not a "[✓2" bracket.)
+// by its "|▶0  ⏸0  ✓2 …" prefix, not a "[✓2" bracket.)
 func TestFold_RenderNoLeadingMarkerTrailingSuffix(t *testing.T) {
 	w := NewWorkbench([]*config.ModelConfig{{Name: "m", Model: "m"}})
 	s := w.sidebar
@@ -959,9 +959,9 @@ func TestFold_RenderNoLeadingMarkerTrailingSuffix(t *testing.T) {
 	// Within TTL: summary shows ✓2, both rows visible, childless (no suffix), no
 	// leading marker on the summary, no bucket row.
 	rows := renderSidebar(w)
-	sumRow := rowContaining(rows, "|▶0 ‖0 ✓2")
+	sumRow := rowContaining(rows, "|▶0  ⏸0  ✓2")
 	if sumRow == "" {
-		t.Fatalf("within TTL the summary should show the |▶0 ‖0 ✓2 … bar:\n%s", strings.Join(rows, "\n"))
+		t.Fatalf("within TTL the summary should show the |▶0  ⏸0  ✓2 … bar:\n%s", strings.Join(rows, "\n"))
 	}
 	if strings.Contains(sumRow, "▸") || strings.Contains(sumRow, "▾") {
 		t.Fatalf("summary row must have NO leading ▸/▾ (HideMarker): %q", sumRow)
@@ -978,7 +978,7 @@ func TestFold_RenderNoLeadingMarkerTrailingSuffix(t *testing.T) {
 	c.add(5 * time.Second)
 	s.tickFolds()
 	rows = renderSidebar(w)
-	sumRow = rowContaining(rows, "|▶0 ‖0 ✓2")
+	sumRow = rowContaining(rows, "|▶0  ⏸0  ✓2")
 	if sumRow == "" {
 		t.Fatalf("summary should still show ✓2 after fold:\n%s", strings.Join(rows, "\n"))
 	}
@@ -999,7 +999,7 @@ func TestFold_RenderNoLeadingMarkerTrailingSuffix(t *testing.T) {
 	summary := summaryOf(s, "s1")
 	summary.Expanded = true
 	rows = renderSidebar(w)
-	sumRow = rowContaining(rows, "|▶0 ‖0 ✓2")
+	sumRow = rowContaining(rows, "|▶0  ⏸0  ✓2")
 	if !strings.Contains(sumRow, "-") {
 		t.Fatalf("expanded summary row must end with - suffix: %q", sumRow)
 	}
@@ -1011,7 +1011,7 @@ func TestFold_RenderNoLeadingMarkerTrailingSuffix(t *testing.T) {
 // --- status-bar counts ------------------------------------------------------
 
 // TestFold_StatusBarCountsMixed verifies the pipe-wrapped counts (issue #510):
-// all four states always shown in fixed order ▶running ‖waiting ✓completed
+// all four states always shown in fixed order ▶running ⏸waiting ✓completed
 // ✗failed even when some are zero, folded agents included in ✓, undismissed
 // failures in ✗, the idle • glyph never emitted, and folding adds the suffix
 // without changing the totals.
@@ -1028,10 +1028,10 @@ func TestFold_StatusBarCountsMixed(t *testing.T) {
 	summary := summaryOf(s, "s1")
 	bar := summary.Label
 	// All four states present in fixed order, pipe-wrapped, exact bar.
-	if got, want := bar, "|▶2 ‖1 ✓2 ✗1|"; got != want {
+	if got, want := bar, "|▶2  ⏸1  ✓2  ✗1|"; got != want {
 		t.Fatalf("summary label = %q, want %q", got, want)
 	}
-	for _, seg := range []string{"▶2", "‖1", "✓2", "✗1"} {
+	for _, seg := range []string{"▶2", "⏸1", "✓2", "✗1"} {
 		if !strings.Contains(bar, seg) {
 			t.Fatalf("summary %q should contain %q", bar, seg)
 		}
@@ -1050,13 +1050,13 @@ func TestFold_StatusBarCountsMixed(t *testing.T) {
 	c.add(5 * time.Second)
 	s.tickFolds()
 	bar = summary.Label
-	for _, seg := range []string{"▶2", "‖1", "✓2", "✗1"} {
+	for _, seg := range []string{"▶2", "⏸1", "✓2", "✗1"} {
 		if !strings.Contains(bar, seg) {
 			t.Fatalf("summary after fold %q should still contain %q (folded ✓ included)", bar, seg)
 		}
 	}
 	// Totals bar is byte-identical before/after the fold (only the suffix moves).
-	if base, want := bar[:strings.LastIndexByte(bar, '|')+1], "|▶2 ‖1 ✓2 ✗1|"; base != want {
+	if base, want := bar[:strings.LastIndexByte(bar, '|')+1], "|▶2  ⏸1  ✓2  ✗1|"; base != want {
 		t.Fatalf("summary bar after fold = %q, want %q (fold must not reshape it)", base, want)
 	}
 	if got := suffixAfterBar(bar); got != "+" {
@@ -1070,7 +1070,7 @@ func TestFold_StatusBarCountsMixed(t *testing.T) {
 // TestFold_StatusBarAllFourAlwaysPresent: a session with only completed + failed
 // agents (running/waiting zero) still shows ALL FOUR segments including the
 // zeros (issue #510) — it no longer omits running/waiting. Pinned in fixed order
-// ▶0 ‖0 ✓1 ✗1, pipe-wrapped, both before and after a fold.
+// ▶0  ⏸0  ✓1  ✗1, pipe-wrapped, both before and after a fold.
 func TestFold_StatusBarAllFourAlwaysPresent(t *testing.T) {
 	s, c := newFoldSidebar(t)
 	s.addSession("s1", "Session 1", false)
@@ -1079,10 +1079,10 @@ func TestFold_StatusBarAllFourAlwaysPresent(t *testing.T) {
 
 	// Before fold: all four present, including the zero running/waiting segments.
 	bar := summaryOf(s, "s1").Label
-	if got, want := bar, "|▶0 ‖0 ✓1 ✗1|"; got != want {
+	if got, want := bar, "|▶0  ⏸0  ✓1  ✗1|"; got != want {
 		t.Fatalf("summary bar = %q, want all-four %q", got, want)
 	}
-	for _, seg := range []string{"▶0", "‖0", "✓1", "✗1"} {
+	for _, seg := range []string{"▶0", "⏸0", "✓1", "✗1"} {
 		if !strings.Contains(bar, seg) {
 			t.Fatalf("summary %q should always contain %q (zeros included)", bar, seg)
 		}
@@ -1096,7 +1096,7 @@ func TestFold_StatusBarAllFourAlwaysPresent(t *testing.T) {
 	c.add(5 * time.Second)
 	s.tickFolds()
 	bar = summaryOf(s, "s1").Label
-	if base, want := bar[:strings.LastIndexByte(bar, '|')+1], "|▶0 ‖0 ✓1 ✗1|"; base != want {
+	if base, want := bar[:strings.LastIndexByte(bar, '|')+1], "|▶0  ⏸0  ✓1  ✗1|"; base != want {
 		t.Fatalf("summary bar after fold = %q, want %q", base, want)
 	}
 	if got := suffixAfterBar(bar); got != "+" {
@@ -1248,7 +1248,7 @@ func TestFold_RemoveSessionClearsFoldedState(t *testing.T) {
 	if summary == nil {
 		t.Fatalf("re-added session should get the always-on summary (issue #510)")
 	}
-	if got, want := summary.Label, "|▶0 ‖0 ✓0 ✗0|"; got != want {
+	if got, want := summary.Label, "|▶0  ⏸0  ✓0  ✗0|"; got != want {
 		t.Fatalf("re-added session summary should be the all-zero bar, got %q, want %q", got, want)
 	}
 	if n := len(s.sessions["s1"].Children); n != 1 {
@@ -1256,7 +1256,7 @@ func TestFold_RemoveSessionClearsFoldedState(t *testing.T) {
 	}
 	// A fresh agent is counted; no stale completed/failed counts leak through.
 	s.applySubAgent("s1", subEv("a2", "fresh", agent.StatusRunning))
-	if got, want := summaryOf(s, "s1").Label, "|▶1 ‖0 ✓0 ✗0|"; got != want {
+	if got, want := summaryOf(s, "s1").Label, "|▶1  ⏸0  ✓0  ✗0|"; got != want {
 		t.Fatalf("re-added session summary should show only the fresh agent, got %q, want %q", got, want)
 	}
 }
@@ -1404,7 +1404,7 @@ func TestFold_DismissFailedKeepsArchive(t *testing.T) {
 	// (no ✗1) while ✓1 still counts the archived completed agent. The summary
 	// still parents the archive, so it keeps the "+" suffix.
 	bar := summary.Label
-	if base, want := bar[:strings.LastIndexByte(bar, '|')+1], "|▶0 ‖0 ✓1 ✗0|"; base != want {
+	if base, want := bar[:strings.LastIndexByte(bar, '|')+1], "|▶0  ⏸0  ✓1  ✗0|"; base != want {
 		t.Fatalf("summary bar after dismiss = %q, want %q", base, want)
 	}
 	if strings.Contains(bar, "✗1") {

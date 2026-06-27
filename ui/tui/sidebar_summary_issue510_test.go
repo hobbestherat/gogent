@@ -5,9 +5,9 @@ package ui
 // Goal (gogent issue #510, maintainer kloune): every session row shows a summary
 // line beneath it — even sessions with zero sub-agents — and that line always
 // shows all four lifecycle states in fixed order
-//   ▶running  ‖waiting  ✓completed  ✗failed
+//   ▶running  ⏸waiting  ✓completed  ✗failed
 // each with its integer count INCLUDING 0 (so a fresh session reads
-// "|▶0 ‖0 ✓0 ✗0|"). The bar is wrapped in straight pipes |…| (not […]); the
+// "|▶0  ⏸0  ✓0  ✗0|"). The bar is wrapped in straight pipes |…| (not […]); the
 // trailing +/- expand-collapse suffix is unchanged and sits right after the
 // closing |; and the leading | stays aligned with the session name's first
 // character (no indent/padding added, no turbotui no-indent option).
@@ -29,7 +29,7 @@ import (
 )
 
 // allZeroBar is the canonical always-on label for a session with no sub-agents.
-const allZeroBar = "|▶0 ‖0 ✓0 ✗0|"
+const allZeroBar = "|▶0  ⏸0  ✓0  ✗0|"
 
 // =============================================================================
 // statusBarLabel — pure-function unit tests (criterion #1: all four, incl. 0)
@@ -44,13 +44,13 @@ func TestStatusBarLabel_AllFourAlwaysPresentIncludingZeros(t *testing.T) {
 		running, waiting, done, failed int
 		want                           string
 	}{
-		{"all zero", 0, 0, 0, 0, "|▶0 ‖0 ✓0 ✗0|"},
-		{"only running", 1, 0, 0, 0, "|▶1 ‖0 ✓0 ✗0|"},
-		{"only waiting", 0, 5, 0, 0, "|▶0 ‖5 ✓0 ✗0|"},
-		{"only completed", 0, 0, 3, 0, "|▶0 ‖0 ✓3 ✗0|"},
-		{"only failed", 0, 0, 0, 2, "|▶0 ‖0 ✓0 ✗2|"},
-		{"mixed", 2, 1, 2, 1, "|▶2 ‖1 ✓2 ✗1|"},
-		{"all non-zero", 7, 8, 9, 4, "|▶7 ‖8 ✓9 ✗4|"},
+		{"all zero", 0, 0, 0, 0, "|▶0  ⏸0  ✓0  ✗0|"},
+		{"only running", 1, 0, 0, 0, "|▶1  ⏸0  ✓0  ✗0|"},
+		{"only waiting", 0, 5, 0, 0, "|▶0  ⏸5  ✓0  ✗0|"},
+		{"only completed", 0, 0, 3, 0, "|▶0  ⏸0  ✓3  ✗0|"},
+		{"only failed", 0, 0, 0, 2, "|▶0  ⏸0  ✓0  ✗2|"},
+		{"mixed", 2, 1, 2, 1, "|▶2  ⏸1  ✓2  ✗1|"},
+		{"all non-zero", 7, 8, 9, 4, "|▶7  ⏸8  ✓9  ✗4|"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -63,11 +63,11 @@ func TestStatusBarLabel_AllFourAlwaysPresentIncludingZeros(t *testing.T) {
 	}
 }
 
-// TestStatusBarLabel_FixedOrder pins the segment order ▶ ‖ ✓ ✗ regardless of
+// TestStatusBarLabel_FixedOrder pins the segment order ▶ ⏸ ✓ ✗ regardless of
 // which counts are non-zero (guards against a future re-ordering regression).
 func TestStatusBarLabel_FixedOrder(t *testing.T) {
 	bar := statusBarLabel(1, 1, 1, 1)
-	order := []string{"▶1", "‖1", "✓1", "✗1"}
+	order := []string{"▶1", "⏸1", "✓1", "✗1"}
 	prev := -1
 	for _, seg := range order {
 		i := strings.Index(bar, seg)
@@ -92,10 +92,10 @@ func TestStatusBarLabel_PipesNotBrackets(t *testing.T) {
 		if !strings.HasPrefix(bar, "|") || !strings.HasSuffix(bar, "|") {
 			t.Fatalf("bar %q must be wrapped in leading+trailing '|'", bar)
 		}
-		// CRITICAL: the waiting glyph ‖ (U+2016) is NOT a pipe byte, so there are
+		// CRITICAL: the waiting glyph ⏸ (U+23F8) is NOT a pipe byte, so there are
 		// exactly two '|' bytes (the brackets) even when waiting > 0.
 		if got := strings.Count(bar, "|"); got != 2 {
-			t.Fatalf("bar %q has %d '|' bytes, want exactly 2 (the ‖ waiting glyph must not count)", bar, got)
+			t.Fatalf("bar %q has %d '|' bytes, want exactly 2 (the ⏸ waiting glyph must not count)", bar, got)
 		}
 	}
 }
@@ -120,7 +120,7 @@ func TestStatusBarLabel_NeverEmitsIdleGlyph(t *testing.T) {
 // pipe framing and fixed order are preserved (width sanity; no truncation here).
 func TestStatusBarLabel_MultiDigitCounts(t *testing.T) {
 	bar := statusBarLabel(12, 345, 6, 7890)
-	want := "|▶12 ‖345 ✓6 ✗7890|"
+	want := "|▶12  ⏸345  ✓6  ✗7890|"
 	if bar != want {
 		t.Fatalf("multi-digit bar = %q, want %q", bar, want)
 	}
@@ -195,7 +195,7 @@ func TestSummary_EagerFoldIsIdempotent(t *testing.T) {
 		t.Fatalf("exactly one synthetic summary after a sub-agent, got %d", got)
 	}
 	// Label advanced from all-zero to running=1, keeping all four segments.
-	if got, want := after.Label, "|▶1 ‖0 ✓0 ✗0|"; got != want {
+	if got, want := after.Label, "|▶1  ⏸0  ✓0  ✗0|"; got != want {
 		t.Fatalf("summary after running agent = %q, want %q", got, want)
 	}
 }
@@ -221,7 +221,7 @@ func TestSummary_AlwaysOnSurvivesFullLifecycle(t *testing.T) {
 			t.Fatalf("%s: label = %q, want %q", stage, got.Label, wantLabel)
 		}
 		// Every stage shows all four segments.
-		for _, seg := range []string{"▶", "‖", "✓", "✗"} {
+		for _, seg := range []string{"▶", "⏸", "✓", "✗"} {
 			if !strings.Contains(got.Label, seg) {
 				t.Fatalf("%s: label %q missing segment %q", stage, got.Label, seg)
 			}
@@ -231,21 +231,21 @@ func TestSummary_AlwaysOnSurvivesFullLifecycle(t *testing.T) {
 	check("fresh", allZeroBar)
 
 	s.applySubAgent("s1", subEv("a1", "r", agent.StatusRunning))
-	check("running", "|▶1 ‖0 ✓0 ✗0|")
+	check("running", "|▶1  ⏸0  ✓0  ✗0|")
 
 	s.applySubAgent("s1", subEv("a2", "w", agent.StatusWaiting))
-	check("waiting", "|▶1 ‖1 ✓0 ✗0|")
+	check("waiting", "|▶1  ⏸1  ✓0  ✗0|")
 
 	s.applySubAgent("s1", subEv("a3", "d", agent.StatusCompleted))
-	check("completed", "|▶1 ‖1 ✓1 ✗0|")
+	check("completed", "|▶1  ⏸1  ✓1  ✗0|")
 
 	s.applySubAgent("s1", subEv("a4", "f", agent.StatusFailed))
-	check("failed", "|▶1 ‖1 ✓1 ✗1|")
+	check("failed", "|▶1  ⏸1  ✓1  ✗1|")
 
 	// Fold the completed agent: summary gains children + "+" suffix; bar unchanged.
 	c.add(5 * time.Second)
 	s.tickFolds()
-	if base := summaryOf(s, "s1").Label; !strings.HasPrefix(base, "|▶1 ‖1 ✓1 ✗1|") {
+	if base := summaryOf(s, "s1").Label; !strings.HasPrefix(base, "|▶1  ⏸1  ✓1  ✗1|") {
 		t.Fatalf("post-fold label %q must keep the bar prefix", base)
 	}
 	if got := suffixAfterBar(summaryOf(s, "s1").Label); got != "+" {
@@ -497,8 +497,8 @@ func TestSummary_AlignmentHoldsWithArchiveExpanded(t *testing.T) {
 		summaryOf(s, "s1").Expanded = expanded
 		rows := renderSidebar(w)
 		sessionRow := rowContaining(rows, title)
-		// The summary row is the one containing the bar prefix "|▶0 ‖0 ✓1".
-		summaryRow := rowContaining(rows, "|▶0 ‖0 ✓1")
+		// The summary row is the one containing the bar prefix "|▶0  ⏸0  ✓1".
+		summaryRow := rowContaining(rows, "|▶0  ⏸0  ✓1")
 		if sessionRow == "" || summaryRow == "" {
 			t.Fatalf("expanded=%v: rows missing\n%s", expanded, strings.Join(rows, "\n"))
 		}
@@ -516,14 +516,14 @@ func TestSummary_AlignmentHoldsWithArchiveExpanded(t *testing.T) {
 // =============================================================================
 
 // TestSyncFoldSuffixes_PipeSentinelNotWaitingGlyph: syncFoldSuffixes re-derives
-// the suffix against the closing '|'. Because the waiting glyph ‖ (U+2016) is
+// the suffix against the closing '|'. Because the waiting glyph ⏸ (U+23F8) is
 // not a '|' (U+007C) byte, a summary with waiting agents must NOT have its bar
-// truncated at the ‖. This pins the subtle bracket->pipe sentinel correctness.
+// truncated at the ⏸. This pins the subtle bracket->pipe sentinel correctness.
 func TestSyncFoldSuffixes_PipeSentinelNotWaitingGlyph(t *testing.T) {
 	s, c := newFoldSidebar(t)
 	s.addSession("s1", "Session 1", false)
 	// Two completed (will fold -> summary gains children -> suffix) + a waiting
-	// agent so the bar contains a ‖ segment.
+	// agent so the bar contains a ⏸ segment.
 	s.applySubAgent("s1", subEv("a1", "d1", agent.StatusCompleted))
 	s.applySubAgent("s1", subEv("a2", "d2", agent.StatusCompleted))
 	s.applySubAgent("s1", subEv("a3", "w", agent.StatusWaiting))
@@ -535,17 +535,17 @@ func TestSyncFoldSuffixes_PipeSentinelNotWaitingGlyph(t *testing.T) {
 	summary.Expanded = true
 	s.syncFoldSuffixes()
 
-	// The full bar (with the ‖1 segment) must survive intact up to the closing |;
+	// The full bar (with the ⏸1 segment) must survive intact up to the closing |;
 	// only the suffix changed to "-".
 	base := summary.Label[:strings.LastIndexByte(summary.Label, '|')+1]
-	wantBar := "|▶0 ‖1 ✓2 ✗0|"
+	wantBar := "|▶0  ⏸1  ✓2  ✗0|"
 	if base != wantBar {
-		t.Fatalf("syncFoldSuffixes corrupted the bar (expected ‖1 segment preserved): base %q, want %q", base, wantBar)
+		t.Fatalf("syncFoldSuffixes corrupted the bar (expected ⏸1 segment preserved): base %q, want %q", base, wantBar)
 	}
 	if got := suffixAfterBar(summary.Label); got != "-" {
 		t.Fatalf("suffix after reconcile = %q, want -", got)
 	}
-	// And the ‖ was not mistaken for the bracket pipe: still exactly two '|'.
+	// And the ⏸ was not mistaken for the bracket pipe: still exactly two '|'.
 	if got := strings.Count(base, "|"); got != 2 {
 		t.Fatalf("bar base %q has %d '|' bytes, want 2", base, got)
 	}
@@ -600,8 +600,8 @@ func TestSummary_CountingRulesUnchangedByAlwaysOn(t *testing.T) {
 
 	// ✓ includes the folded (archived) agent; ✗ counts the undismissed failure.
 	bar := summaryOf(s, "s1").Label
-	if base := bar[:strings.LastIndexByte(bar, '|')+1]; base != "|▶0 ‖0 ✓1 ✗1|" {
-		t.Fatalf("bar before dismiss = %q, want |▶0 ‖0 ✓1 ✗1|", base)
+	if base := bar[:strings.LastIndexByte(bar, '|')+1]; base != "|▶0  ⏸0  ✓1  ✗1|" {
+		t.Fatalf("bar before dismiss = %q, want |▶0  ⏸0  ✓1  ✗1|", base)
 	}
 	// s.agents still holds both (folding is visibility-only).
 	if len(s.agents) != 2 {
@@ -611,8 +611,8 @@ func TestSummary_CountingRulesUnchangedByAlwaysOn(t *testing.T) {
 	// Dismiss the failure: ✗ drops to 0; ✓ unchanged; one agent leaves s.agents.
 	s.dismissFailed("s1")
 	bar = summaryOf(s, "s1").Label
-	if base := bar[:strings.LastIndexByte(bar, '|')+1]; base != "|▶0 ‖0 ✓1 ✗0|" {
-		t.Fatalf("bar after dismiss = %q, want |▶0 ‖0 ✓1 ✗0|", base)
+	if base := bar[:strings.LastIndexByte(bar, '|')+1]; base != "|▶0  ⏸0  ✓1  ✗0|" {
+		t.Fatalf("bar after dismiss = %q, want |▶0  ⏸0  ✓1  ✗0|", base)
 	}
 	if len(s.agents) != 1 {
 		t.Fatalf("s.agents = %d after dismiss, want 1", len(s.agents))

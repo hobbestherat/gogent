@@ -16,7 +16,7 @@ import (
 //
 // Glyph contract from #236 (locked in):
 //   - ○ idle (no turn in flight), ● active (a turn in flight);
-//   - distinct from the sub-agent lifecycle set used by statusIcon (▶ ‖ ✓ ✗ •), so a
+//   - distinct from the sub-agent lifecycle set used by statusIcon (▶ ⏸ ✓ ✗ •), so a
 //     session row — even one coordinating a working sub-agent — never reads as a
 //     sub-agent.
 
@@ -30,7 +30,7 @@ const (
 
 // subAgentGlyphs is statusIcon's lifecycle set. A session row must never show any of
 // these — the triangle ▶ in particular belongs to sub-agents only.
-var subAgentGlyphs = []string{"▶", "‖", "✓", "✗", "•"}
+var subAgentGlyphs = []string{"▶", "⏸", "✓", "✗", "•"}
 
 // --- glyph + label unit tests ----------------------------------------------
 

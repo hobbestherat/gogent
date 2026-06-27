@@ -51,7 +51,7 @@ const approvalBadge = "⏳"
 // watcherGlyph is the shared badge for a scheduled watcher in the session tree
 // (issue #329 Phase 4): ◷ (U+25F7, "clock with three o'clock"). It is a single
 // cell and deliberately distinct from every other sidebar glyph set — the session
-// idle/active markers (○/●), the sub-agent lifecycle icons (▶/‖/✓/✗/•) and the
+// idle/active markers (○/●), the sub-agent lifecycle icons (▶/⏸/✓/✗/•) and the
 // todo icons (☐/◐/✔) — so a watcher row reads as a watcher at a glance, whether it
 // is a free-running top-level entry or an attached child node. Both placements use
 // this same glyph; only the tree position (root vs nested) tells the two kinds
@@ -81,10 +81,10 @@ const subAgentFoldTTL = 60 * time.Second
 // that cannot affect ActiveSubAgentCount / ListAllAgents / slot counting.
 //
 // summaryNode is the single always-first synthetic child that both renders the
-// pipe-wrapped per-state counts ("|▶2 ‖1 ✓5 ✗1|") AND parents the TTL-folded
+// pipe-wrapped per-state counts ("|▶2  ⏸1  ✓5  ✗1|") AND parents the TTL-folded
 // completed ("archived") agents (issue #490, collapsing the old two-row status-bar
 // + "[✓ N]" bucket into one line). It is created eagerly for every session and is
-// always-on (issue #510): all four states are shown including zero ("|▶0 ‖0 ✓0 ✗0|")
+// always-on (issue #510): all four states are shown including zero ("|▶0  ⏸0  ✓0  ✗0|")
 // even when the session has no sub-agents, so the row never appears, disappears, or
 // reshapes. It carries tv.HideMarker so the tree paints a blank leading column
 // instead of a ▸/▾ even once it has children, and a trailing suffix glyph advertises
@@ -604,7 +604,7 @@ func (s *sidebar) addSession(id, title string, pinned bool) {
 	s.sessions[id] = node
 	s.tree.AddRoot(node)
 	// Eagerly create + paint the always-on summary row (issue #510) so every
-	// session shows |▶0 ‖0 ✓0 ✗0| from the moment it appears, before any sub-agent
+	// session shows |▶0  ⏸0  ✓0  ✗0| from the moment it appears, before any sub-agent
 	// event. ensureFold only builds the node + bookkeeping; refreshFoldChrome with
 	// no entries paints the all-zero bar (it no longer tears the node down).
 	s.ensureFold(id, node)
@@ -1166,7 +1166,7 @@ func (s *sidebar) foldOf(node *tv.TreeNode) *sessionFold {
 // +/- suffix (summarySuffix) when the summary parents archived agents. The summary
 // node is always-on (issue #510): when the session has no tracked sub-agents (e.g.
 // a fresh session, or one whose only agent was a dismissed failure) the loop below
-// naturally yields all-zeros and the row paints |▶0 ‖0 ✓0 ✗0| — it is never torn
+// naturally yields all-zeros and the row paints |▶0  ⏸0  ✓0  ✗0| — it is never torn
 // down here. Teardown happens only when the session itself closes (removeSession).
 // Runs on the UI thread.
 func (s *sidebar) refreshFoldChrome(sessionID string) {
@@ -1231,13 +1231,14 @@ func (s *sidebar) syncFoldSuffixes() {
 
 // statusBarLabel renders the per-state count row using the same glyphs as agent
 // rows (statusIcon). All four lifecycle states are always shown in fixed order
-// (▶running ‖waiting ✓completed ✗failed), each with its integer count INCLUDING
-// zero (issue #510) — the bar never reshapes as sub-agents come and go. It is
-// wrapped in straight pipes |…| (not [ ]) to read as a single fixed-width status
-// bar, visually distinct from real agent rows (which lead with a single status
-// glyph). The idle • glyph is never emitted here.
+// (▶running ⏸waiting ✓completed ✗failed), each with its integer count INCLUDING
+// zero (issue #510) — the bar never reshapes as sub-agents come and go. Each
+// glyph+count entry is separated from the next by two spaces (issue #515) for
+// legibility. It is wrapped in straight pipes |…| (not [ ]) to read as a single
+// fixed-width status bar, visually distinct from real agent rows (which lead with
+// a single status glyph). The idle • glyph is never emitted here.
 func statusBarLabel(running, waiting, completed, failed int) string {
-	return fmt.Sprintf("|%s%d %s%d %s%d %s%d|",
+	return fmt.Sprintf("|%s%d  %s%d  %s%d  %s%d|",
 		statusIcon(agent.StatusRunning), running,
 		statusIcon(agent.StatusWaiting), waiting,
 		statusIcon(agent.StatusCompleted), completed,
@@ -1448,7 +1449,7 @@ func todoLabel(it agent.TodoItem) string {
 
 // todoStatusIcon maps a todo status to a compact glyph for the middle TODO
 // region. The glyphs are deliberately distinct from statusIcon's sub-agent set
-// (▶ ‖ ✓ ✗ •) so a checklist row is unambiguous at a glance even though the two
+// (▶ ⏸ ✓ ✗ •) so a checklist row is unambiguous at a glance even though the two
 // kinds now live in separate regions (issue #190): pending ☐, in-progress ◐,
 // completed ✔. The completed glyph is the HEAVY check mark ✔ (U+2714), kept
 // deliberately distinct from the sub-agent completed icon ✓ (U+2713) so the two
@@ -1547,7 +1548,7 @@ func sessionLabelState(title string, busy, background, pinned, pending, clarify 
 // sessionStatusIcon maps a session's busy flag to its leading row glyph (issue
 // #236): ● when a turn is in flight (its own loop or a spawned sub-agent), ○ when
 // idle. These are deliberately distinct from statusIcon's sub-agent lifecycle set
-// (▶ ‖ ✓ ✗ •) so a session row — even one coordinating a working sub-agent — reads
+// (▶ ⏸ ✓ ✗ •) so a session row — even one coordinating a working sub-agent — reads
 // as a session, never as a sub-agent. The sub-agent triangle (▶) therefore never
 // appears on a session row. It is the two-state form retained for callers that have
 // no background notion; sessionStatusGlyph adds the third (◐) state.
@@ -1591,7 +1592,7 @@ func statusIcon(status agent.AgentStatus) string {
 	case agent.StatusRunning:
 		return "▶"
 	case agent.StatusWaiting:
-		return "‖"
+		return "⏸"
 	case agent.StatusCompleted:
 		return "✓"
 	case agent.StatusFailed:
