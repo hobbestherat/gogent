@@ -13,7 +13,7 @@ import (
 // TestWatcherGlyphDistinct is the glyph-disambiguation guard the issue calls for:
 // the shared watcher glyph ◷ must be a single distinct cell that collides with
 // none of the existing sidebar glyph sets — the session idle/active markers
-// (○/●), the sub-agent lifecycle icons (▶/‖/✓/✗/•) and the todo icons (☐/◐/✔) —
+// (○/●), the sub-agent lifecycle icons (▶/⏸/✓/✗/•) and the todo icons (☐/◐/✔) —
 // nor the per-row badges (★/⏳/❓). It also pins the exact intended glyph so a
 // future "tidy" cannot silently re-merge it.
 func TestWatcherGlyphDistinct(t *testing.T) {
