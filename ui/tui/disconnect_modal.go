@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"time"
 
 	tv "github.com/hobbestherat/turbotui/turbotv"
 )
@@ -13,6 +14,13 @@ import (
 // stays rendered beneath it. The RemoteClient drives the reconnect backoff in the
 // background and calls OnConnectionLost / OnConnectionRestored (the Reconnector
 // seam); those marshal every UI mutation onto the event-loop thread via Post.
+
+// reconnectCoalesceWindow is the production leading-edge debounce window for the
+// reconnect jump-to-present refresh (issue #520). It sits below the reconnect
+// backoff floor (500ms) and is roughly one approval-poll interval, so it collapses
+// the sub-second flap storm of an early stream flap while leaving any genuinely
+// later reconnect (well outside this window) to refresh in full.
+const reconnectCoalesceWindow = 750 * time.Millisecond
 
 // SetReconnectControls wires the disconnect modal's host label and its "Retry now"
 // action (the RemoteClient's RetryNow). It is called once during attach setup,
@@ -144,7 +152,22 @@ func (w *Workbench) dismissDisconnectModal() {
 // Restore (GET /sessions + transcripts) is the precise §7 contract, so it is
 // preferred; GetTranscript is a fallback that at least re-syncs open windows when
 // no Restore handler is wired.
+//
+// Two §520 refinements keep an early stream flap from rebuilding the same
+// transcript over and over:
+//   - Per window, reloadIfChanged skips the clear+rebuild when the fetched
+//     transcript is identical to the one the window already shows.
+//   - Across flaps, a leading-edge coalesce window collapses a burst of rapid
+//     reconnects into a single Restore()+resync (see coalesceReconnectRefresh).
+//
+// This stays a jump-to-present, not a replay: a change that lands during a
+// coalesced sub-second outage is reconciled by the next reconnect or the resumed
+// live stream, never replayed from a cursor (Direction C is out of scope; see the
+// no-replay note on reconnect() in remote_handlers.go).
 func (w *Workbench) refreshAfterReconnect() {
+	if w.coalesceReconnectRefresh() {
+		return
+	}
 	if w.handlers.Restore != nil {
 		open := make(map[string]bool)
 		for _, id := range w.SessionIDs() {
@@ -174,7 +197,7 @@ func (w *Workbench) refreshAfterReconnect() {
 						sw := w.sessions[rs.ID]
 						w.mu.Unlock()
 						if sw != nil && !sw.readOnly {
-							sw.reload(msgs)
+							sw.reloadIfChanged(msgs)
 						}
 					})
 					continue
@@ -184,7 +207,7 @@ func (w *Workbench) refreshAfterReconnect() {
 					sw := w.sessions[rs.ID]
 					w.mu.Unlock()
 					if sw != nil && !sw.readOnly {
-						sw.reload(rs.Messages)
+						sw.reloadIfChanged(rs.Messages)
 					}
 				})
 				continue
@@ -206,10 +229,35 @@ func (w *Workbench) refreshAfterReconnect() {
 			sw := w.sessions[id]
 			w.mu.Unlock()
 			if sw != nil && !sw.readOnly {
-				sw.reload(msgs)
+				sw.reloadIfChanged(msgs)
 			}
 		})
 	}
+}
+
+// coalesceReconnectRefresh implements the leading-edge debounce that dedupes a
+// burst of rapid early reconnects (issue #520). It runs synchronously on the
+// reconnect goroutine (refreshAfterReconnect's caller), so it never races the SSE
+// consumer and cannot reorder a reload behind a freshly-streamed live event.
+//
+// It returns true when this invocation should be skipped: a refresh ran within the
+// last reconnectCoalesce window, so re-running the full Restore()+resync would only
+// rebuild the same just-fetched state. The FIRST flap in a burst runs normally and
+// stamps reconnectRefreshAt; a reconnect AFTER the window (stale stamp) refreshes
+// fully again, so a legitimately-later change is never permanently coalesced. A
+// non-positive reconnectCoalesce disables the debounce (every call refreshes),
+// which is the mode narrow tests run in.
+func (w *Workbench) coalesceReconnectRefresh() bool {
+	if w.reconnectCoalesce <= 0 {
+		return false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.reconnectRefreshAt.IsZero() && time.Since(w.reconnectRefreshAt) < w.reconnectCoalesce {
+		return true
+	}
+	w.reconnectRefreshAt = time.Now()
+	return false
 }
 
 // disconnectButtonRow centres the "Retry now" / "Quit" pair on row btnY, sizing

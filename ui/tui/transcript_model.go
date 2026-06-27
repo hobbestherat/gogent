@@ -1,7 +1,10 @@
 package ui
 
 import (
+	"encoding/binary"
 	"fmt"
+	"hash/fnv"
+	"io"
 	"strings"
 
 	tui "github.com/hobbestherat/turbotui"
@@ -232,10 +235,58 @@ type transcriptModel struct {
 	// The oldest records are dropped once it is exceeded; the newest — including
 	// any in-flight tool entry — are always kept.
 	limit int
+	// srcLen/srcHash fingerprint the ChatMessage slice this model was last built
+	// from via restore() (issue #520). They let the reconnect jump-to-present skip
+	// a redundant clear+rebuild when the daemon returns a transcript identical to
+	// the one the window already shows (the common case on an early stream flap).
+	// They track the SOURCE slice, not the records, so trim() dropping old records
+	// never invalidates them. Both are zero on a model that was never restored
+	// (e.g. a deferred shell that only ever showed its placeholder).
+	srcLen  int
+	srcHash uint64
 }
 
 func newTranscriptModel(view *tv.TextView) *transcriptModel {
 	return &transcriptModel{view: view, limit: defaultTranscriptLimit}
+}
+
+// transcriptSourceSig fingerprints a ChatMessage slice as (count, FNV-64a hash)
+// so the reconnect refresh can cheaply tell whether a fetched transcript is
+// identical to the one a window already shows (issue #520). It hashes every field
+// restore() consumes — lower-cased Role (mirroring restore()'s strings.ToLower so
+// a casing change never forces a spurious reload), Content, Reasoning, Tool and
+// Args — each length-delimited so no value can alias across a field boundary. The
+// field set is a complete superset of restore()'s inputs, so two slices with the
+// same signature build byte-identical records: a false "unchanged" verdict is
+// structurally impossible, and the only risk (a hash collision) is closed by the
+// length-delimiting plus the paired count check.
+func transcriptSourceSig(msgs []ChatMessage) (int, uint64) {
+	h := fnv.New64a()
+	var buf [8]byte
+	// fnv's Write never returns an error; the returns are discarded explicitly.
+	write := func(s string) {
+		binary.LittleEndian.PutUint64(buf[:], uint64(len(s)))
+		_, _ = h.Write(buf[:])
+		_, _ = io.WriteString(h, s)
+	}
+	for _, m := range msgs {
+		write(strings.ToLower(m.Role))
+		write(m.Content)
+		write(m.Reasoning)
+		write(m.Tool)
+		write(m.Args)
+	}
+	return len(msgs), h.Sum64()
+}
+
+// matchesSource reports whether the model's current transcript was built from a
+// ChatMessage slice with the given (count, hash) signature (issue #520). It is a
+// plain equality: every window that reaches the reconnect reload path went through
+// restore() at least once, and an empty restore sets srcHash to the FNV offset
+// basis (never the uint64 zero value), so a genuinely-empty window still matches a
+// genuinely-empty refetch while a never-restored model (srcHash == 0) does not.
+func (m *transcriptModel) matchesSource(n int, h uint64) bool {
+	return m.srcLen == n && m.srcHash == h
 }
 
 // filtering reports whether a search or any type filter is currently active.

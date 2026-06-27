@@ -661,6 +661,13 @@ type Workbench struct {
 	// are read only on the UI thread.
 	reconnectHost  string
 	reconnectRetry func()
+	// reconnectCoalesce is the leading-edge debounce window for refreshAfterReconnect
+	// (issue #520): a burst of rapid early reconnects collapses to a single
+	// Restore()+resync. reconnectRefreshAt stamps the last refresh that actually ran.
+	// Both are guarded by w.mu (the refresh runs on the reconnect goroutine, not the
+	// UI thread). 0 disables the debounce; NewWorkbench sets the production default.
+	reconnectCoalesce  time.Duration
+	reconnectRefreshAt time.Time
 	// disconnectLayer is the live BLOCKING modal while the daemon connection is
 	// down, nil when connected; disconnectBody is its message TextView, updated as
 	// the reconnect attempt count climbs. Touched only on the UI thread (the
@@ -707,6 +714,7 @@ func NewWorkbench(models []*config.ModelConfig) *Workbench {
 		pinned:              make(map[string]bool),
 		sidebarPinned:       true,
 		sidebarW:            defaultSidebarWidth,
+		reconnectCoalesce:   reconnectCoalesceWindow,
 		// Use default window config (resizable, minimizable and maximizable by default)
 		windowConfig: config.WindowConfig{
 			Resizable:   true,

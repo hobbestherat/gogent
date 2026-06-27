@@ -2756,6 +2756,31 @@ func (sw *SessionWindow) reload(msgs []ChatMessage) {
 	sw.restore(msgs)
 }
 
+// reloadIfChanged is the reconnect jump-to-present's per-window resync (issue
+// #520): it reloads only when the fetched transcript actually differs from the one
+// the window already shows, so an early stream flap that re-fetches the unchanged
+// transcript is a no-op rather than a full clear+rebuild that flickers the view.
+// A nil slice (failed fetch) keeps the current content, exactly like reload(). It
+// must run on the UI thread.
+//
+// The comparison is a cheap fingerprint of the source ChatMessage slice (count +
+// hash), not a record diff: msg→record fan-out is not 1:1 and live-streamed
+// records are formatted differently from restored ones, so only the source slice
+// is a reliable equality key. A matching fingerprint means restore() would rebuild
+// byte-identical records, so skipping is safe; any difference falls through to a
+// real reload. (Direction C — a "messages-since-cursor" append — is out of scope;
+// see the jump-to-present no-replay note at remote_handlers.go reconnect().)
+func (sw *SessionWindow) reloadIfChanged(msgs []ChatMessage) {
+	if msgs == nil {
+		return
+	}
+	n, h := transcriptSourceSig(msgs)
+	if sw.transcript.matchesSource(n, h) {
+		return
+	}
+	sw.reload(msgs)
+}
+
 // markDeferred seeds a faint placeholder into a window whose transcript was not
 // fetched up front (issue #517), so a restored-but-not-yet-loaded session reads as
 // "loads on focus" rather than as a confusingly empty conversation. The placeholder
@@ -2832,6 +2857,12 @@ func (sw *SessionWindow) restore(msgs []ChatMessage) {
 		}
 	}
 	sw.transcript.addAll(records)
+	// Record the fingerprint of the source slice so a later reconnect refresh can
+	// skip a redundant rebuild when the daemon returns this same transcript (issue
+	// #520). restore() is the single funnel for every build path (eager adopt,
+	// lazy focus-load, reload), so the fingerprint always reflects what the window
+	// currently shows.
+	sw.transcript.srcLen, sw.transcript.srcHash = transcriptSourceSig(msgs)
 }
 
 // formatArgs renders tool arguments as readable key/value lines.
