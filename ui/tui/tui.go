@@ -141,7 +141,12 @@ type Handlers struct {
 	GetDefaultModel func() string
 	SetDefaultModel func(string) error
 	// GetTranscript returns a (sub-)agent's message transcript for the monologue
-	// popup. May be nil.
+	// popup and for the deferred lazy-load on focus (issue #517). The return value
+	// encodes success vs failure: a successful load is always non-nil (an empty
+	// transcript is a non-nil empty slice), while nil signals the fetch FAILED.
+	// Consumers rely on this distinction — nil leaves shown content/placeholders
+	// intact and retries; a non-nil empty result clears them. May be nil (the field
+	// itself, meaning the capability is unavailable).
 	GetTranscript func(sessionID, agentID string) []ChatMessage
 	// GetSkills returns the loaded skills with active state and usage stats.
 	// SetSkillActive toggles whether a skill is active (offered to the model and
@@ -1844,10 +1849,11 @@ func (w *Workbench) ensureTranscript(id string) {
 		w.desktop.Post(func() {
 			w.mu.Lock()
 			sw := w.sessions[id]
-			if sw != nil && len(msgs) == 0 {
-				// A transient fetch failure (the handler yields nil on error) leaves the
-				// placeholder in place (reload is a no-op on empty); re-arm the deferred
-				// flag so a refocus retries instead of stranding an empty window.
+			if sw != nil && msgs == nil {
+				// A failed fetch (the handler returns nil only on error) leaves the
+				// placeholder in place (reload is a no-op on nil); re-arm the deferred
+				// flag so a refocus retries. A successful but empty transcript (non-nil)
+				// is NOT re-armed: reload clears the placeholder to a genuine empty window.
 				w.deferredTranscripts[id] = true
 			}
 			w.mu.Unlock()
