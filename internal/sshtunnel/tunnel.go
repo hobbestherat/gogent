@@ -523,21 +523,63 @@ func remoteHome(client *ssh.Client) (string, error) {
 
 // --- auth ------------------------------------------------------------------
 
-// authMethods builds the SSH auth method list: the agent (SSH_AUTH_SOCK) first,
-// then key files (an explicit --ssh-key, else the ~/.ssh/id_* defaults). At least
-// one usable method is required.
+// authMethods builds the SSH auth as a SINGLE "publickey" method whose signer
+// callback offers the agent's signers (SSH_AUTH_SOCK) followed by the loaded
+// file-key signers (an explicit --ssh-key, else the ~/.ssh/id_* defaults),
+// de-duped by public-key blob. Merging matters: golang.org/x/crypto/ssh de-dupes
+// candidate auth methods BY NAME, so two separate "publickey" methods (agent +
+// files) would let the first one tried mask the second — an empty ssh-agent
+// would shadow a valid IdentityFile key, and a bad file key would shadow a valid
+// agent key (issue #502). Offering every candidate within one method makes that
+// impossible: the server sees them all. At least one candidate source (a
+// reachable agent OR a loadable key file) is required.
 func authMethods(cfg Config) ([]ssh.AuthMethod, error) {
-	var methods []ssh.AuthMethod
-	if m := agentAuth(); m != nil {
-		methods = append(methods, m)
-	}
-	if m := keyAuth(cfg); m != nil {
-		methods = append(methods, m)
-	}
-	if len(methods) == 0 {
+	// File-key signers are loaded eagerly here (as keyAuth did before): this is
+	// where loadSigner's TTY passphrase prompt fires, and it lets us decide the
+	// "nothing to try" gate below without prompting twice. authMethods is re-run
+	// on every dialClient (including Restart redials), so this is not a one-time
+	// snapshot — a redial re-loads the files just as before.
+	fileSigners := fileSigners(cfg)
+
+	// Agent conn: dialed ONCE here, captured by the callback, and queried LAZILY
+	// (agent.NewClient(conn).Signers()) INSIDE the callback during the handshake —
+	// so a Restart redial, which re-runs authMethods and re-dials the agent, picks
+	// up keys added to the agent after the tunnel opened. The conn MUST stay open
+	// for the handshake's lifetime (not be closed right after listing): the signers
+	// that Signers() returns sign by calling back over this same conn, and signing
+	// happens AFTER this callback returns (x/crypto lists candidate keys first,
+	// then asks the chosen one to sign). It is captured by the closure, which lives
+	// through ssh.NewClientConn; afterwards it is unreferenced and the fd finalizer
+	// reclaims it — one agent conn per dial/redial, matching the pre-fix agentAuth.
+	agentConn := dialAgent()
+
+	// Preserve the existing gate: an unreachable agent AND zero loadable file keys
+	// is the only "nothing to try" case. A reachable-but-empty agent is NOT an
+	// error here (as before: agentAuth returned non-nil regardless of key count) —
+	// the handshake proceeds and, if nothing is accepted, fails with the server's
+	// message enriched by authDiagnostic.
+	if agentConn == nil && len(fileSigners) == 0 {
 		return nil, errors.New("no ssh auth available: start an ssh-agent (SSH_AUTH_SOCK) or pass --ssh-key")
 	}
-	return methods, nil
+
+	return []ssh.AuthMethod{
+		ssh.PublicKeysCallback(func() ([]ssh.Signer, error) {
+			var signers []ssh.Signer
+			// Agent first (queried lazily, per handshake), then file keys —
+			// preserving the pre-fix order (agentAuth was appended before keyAuth)
+			// and OpenSSH's "agent identities before on-disk keys" spirit. De-dupe
+			// by marshaled public-key blob so a key present in both the agent and a
+			// file is offered once; agent-first means the agent's (already-unlocked)
+			// copy wins the dup.
+			if agentConn != nil {
+				if as, err := agent.NewClient(agentConn).Signers(); err == nil {
+					signers = append(signers, as...)
+				}
+			}
+			signers = append(signers, fileSigners...)
+			return dedupeSigners(signers), nil
+		}),
+	}, nil
 }
 
 // isAuthError reports whether an ssh handshake error is an authentication
@@ -662,9 +704,12 @@ func agentSummary() string {
 	return fmt.Sprintf("present (%d keys)", len(keys))
 }
 
-// agentAuth returns an auth method backed by a running ssh-agent, or nil if none
-// is reachable.
-func agentAuth() ssh.AuthMethod {
+// dialAgent dials a running ssh-agent via SSH_AUTH_SOCK and returns the open
+// connection, or nil if SSH_AUTH_SOCK is unset or undialable. The caller keeps
+// the conn open for the handshake's lifetime and queries it lazily (see
+// authMethods), so newly-added agent keys are picked up on a Restart redial and
+// the returned signers can still reach the agent to sign.
+func dialAgent() net.Conn {
 	sock := os.Getenv("SSH_AUTH_SOCK")
 	if sock == "" {
 		return nil
@@ -673,24 +718,42 @@ func agentAuth() ssh.AuthMethod {
 	if err != nil {
 		return nil
 	}
-	// conn stays open for the tunnel's lifetime; the agent is consulted lazily
-	// during each handshake (including Restart redials).
-	return ssh.PublicKeysCallback(agent.NewClient(conn).Signers)
+	return conn
 }
 
-// keyAuth returns a public-key auth method over the loadable private keys, or nil
-// if none load.
-func keyAuth(cfg Config) ssh.AuthMethod {
+// fileSigners loads the signers for every loadable private key in keyPaths
+// (skipping missing/unparseable/wrong-passphrase keys), in keyPaths order. It is
+// the file-key half of authMethods' candidate set; loadSigner still prompts for
+// a passphrase on a TTY for encrypted keys.
+func fileSigners(cfg Config) []ssh.Signer {
 	var signers []ssh.Signer
 	for _, p := range keyPaths(cfg) {
 		if s := loadSigner(p); s != nil {
 			signers = append(signers, s)
 		}
 	}
-	if len(signers) == 0 {
-		return nil
+	return signers
+}
+
+// dedupeSigners removes signers sharing a public key, preserving first-seen
+// order. Keyed on the marshaled public-key blob (the canonical SSH identity), so
+// a key present in both the agent and a file is offered to the server once —
+// each offer otherwise costs a separate attempt against the server's MaxAuthTries.
+func dedupeSigners(in []ssh.Signer) []ssh.Signer {
+	if len(in) <= 1 {
+		return in
 	}
-	return ssh.PublicKeys(signers...)
+	seen := make(map[string]struct{}, len(in))
+	out := make([]ssh.Signer, 0, len(in))
+	for _, s := range in {
+		k := string(s.PublicKey().Marshal())
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, s)
+	}
+	return out
 }
 
 // keyPaths returns the private-key files to try, in order. An explicit --ssh-key

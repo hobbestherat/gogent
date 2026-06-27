@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
@@ -193,8 +194,9 @@ func TestParseAddrTCPNoPort(t *testing.T) {
 // forward to. addrContent is what `cat ~/.gogent/daemon.addr` returns; an empty
 // value makes that exec fail (exit 1) to exercise the absent-file fallback.
 type sshTestEnv struct {
-	sshAddr    string // "127.0.0.1:PORT" of the SSH server
-	clientKey  string // path to a PEM private key the server accepts
+	sshAddr    string          // "127.0.0.1:PORT" of the SSH server
+	clientKey  string          // path to a PEM private key the server accepts
+	clientPriv *rsa.PrivateKey // the accepted key itself (to load into a fake agent)
 	hostPub    ssh.PublicKey
 	hostLine   string // "[host]:port" form for known_hosts
 	daemonUnix string // unix socket path of the test daemon
@@ -203,6 +205,13 @@ type sshTestEnv struct {
 	addrContent atomic.Value // string returned by `cat .../daemon.addr` ("" => exec fails)
 	home        string       // returned by `printf %s "$HOME"`
 	accepts     atomic.Int64 // number of SSH TCP conns accepted (for Restart assertions)
+
+	// offered records the marshaled public-key blobs the CLIENT offered, in offer
+	// order (across all conns served), via the server-side PublicKeyCallback. Used
+	// by the #502 tests to assert an agent key and a file key are offered within
+	// ONE handshake and that the agent key is offered first.
+	offMu   sync.Mutex
+	offered []string
 
 	close func()
 }
@@ -237,7 +246,7 @@ func newSSHTestEnv(t *testing.T) *sshTestEnv {
 		t.Fatalf("write client key: %v", err)
 	}
 
-	env := &sshTestEnv{clientKey: keyFile, hostPub: hostPub, home: "/home/test"}
+	env := &sshTestEnv{clientKey: keyFile, clientPriv: clientPriv, hostPub: hostPub, home: "/home/test"}
 
 	// --- SSH server listener ---
 	sshLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -251,6 +260,7 @@ func newSSHTestEnv(t *testing.T) *sshTestEnv {
 	serverCfg := &ssh.ServerConfig{
 		MaxAuthTries: 6,
 		PublicKeyCallback: func(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			env.recordOffered(key.Marshal()) // for offer-order assertions (issue #502)
 			if bytes.Equal(key.Marshal(), clientPubBytes) {
 				return nil, nil
 			}
@@ -1431,5 +1441,545 @@ func TestNew_AuthFailureDiagnosticFieldsAlwaysPresent(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Errorf("auth error missing %q\ngot: %s", want, s)
 		}
+	}
+}
+
+// --------------------------------------------------------------------------------
+// Issue #502 — merged publickey auth: agent + file keys in ONE method
+// --------------------------------------------------------------------------------
+//
+// The bug: authMethods built TWO "publickey" methods (agentAuth then keyAuth).
+// golang.org/x/crypto/ssh de-dupes candidate auth methods BY NAME, so once the
+// agent method ran — even yielding ZERO keys from an empty agent — "publickey"
+// was marked tried and the second "publickey" method (the loaded
+// IdentityFile/--ssh-key) was silently dropped. The handshake then died with
+// "no supported methods remain" even though the key was loaded and `ssh <host>`
+// worked. The fix offers every candidate (agent + file signers, de-duped) within
+// a SINGLE "publickey" method. These tests pin the fix and hunt regressions.
+
+// startTestAgent serves an in-process ssh-agent (golang.org/x/crypto/ssh/agent)
+// over a Unix socket in a temp dir, loads the given RSA keys into it, and points
+// SSH_AUTH_SOCK at it for the test. It returns the agent handle so a test can
+// Add/Remove keys at runtime (to exercise lazy re-query on reconnect). An empty
+// keys list yields a reachable-but-empty agent — the reported bug's trigger.
+// It never touches the developer's real ~/.ssh or a real agent.
+func startTestAgent(t *testing.T, keys ...*rsa.PrivateKey) (agent.Agent, string) {
+	t.Helper()
+	keyring := agent.NewKeyring()
+	for _, k := range keys {
+		if err := keyring.Add(agent.AddedKey{PrivateKey: k}); err != nil {
+			t.Fatalf("agent add key: %v", err)
+		}
+	}
+	sock := filepath.Join(t.TempDir(), "agent.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("agent listen: %v", err)
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			// ServeAgent serves ONE connection until it closes; the production
+			// dialAgent keeps its conn open for the handshake's lifetime, so each
+			// accepted conn maps to one dialClient (incl. a Restart redial).
+			go func(c net.Conn) {
+				_ = agent.ServeAgent(keyring, c)
+				_ = c.Close()
+			}(c)
+		}
+	}()
+	t.Setenv("SSH_AUTH_SOCK", sock)
+	t.Cleanup(func() { _ = ln.Close() })
+	return keyring, sock
+}
+
+// genRSAKey generates a fresh RSA private key for a test (used as an unaccepted
+// agent/file key, or loaded into the fake agent).
+func genRSAKey(t *testing.T) *rsa.PrivateKey {
+	t.Helper()
+	k, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa key: %v", err)
+	}
+	return k
+}
+
+// rsaPubBlob returns the marshaled SSH public-key blob of an RSA private key —
+// the canonical identity dedupeSigners keys on, and what the server's
+// PublicKeyCallback observes — for offer-order assertions.
+func rsaPubBlob(priv *rsa.PrivateKey) string {
+	pub, err := ssh.NewPublicKey(&priv.PublicKey)
+	if err != nil {
+		panic(fmt.Sprintf("rsa public key: %v", err))
+	}
+	return string(pub.Marshal())
+}
+
+// recordOffered records a client-offered public key (server-side), in offer
+// order. Additive only — existing tests never read it.
+func (e *sshTestEnv) recordOffered(blob []byte) {
+	e.offMu.Lock()
+	defer e.offMu.Unlock()
+	e.offered = append(e.offered, string(blob))
+}
+
+// offeredKeys returns a copy of the marshaled pub-key blobs the client offered,
+// in offer order (across all connections served by this env).
+func (e *sshTestEnv) offeredKeys() []string {
+	e.offMu.Lock()
+	defer e.offMu.Unlock()
+	out := make([]string, len(e.offered))
+	copy(out, e.offered)
+	return out
+}
+
+// mustDialAndDiscover opens a tunnel against the env with cfg, failing the test
+// on any error, and runs Discover so the authed session is proven functional.
+// The caller defers Close on the returned tunnel.
+func (e *sshTestEnv) mustDialAndDiscover(t *testing.T, cfg Config) *Tunnel {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tun, err := New(ctx, cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := tun.Discover(); err != nil {
+		_ = tun.Close()
+		t.Fatalf("Discover: %v", err)
+	}
+	return tun
+}
+
+// TestNew_EmptyAgentDoesNotBlockFileKey is THE reported bug (#502): an ssh-agent
+// that is reachable but holds ZERO keys must not shadow a valid IdentityFile /
+// --ssh-key. Pre-fix this failed with "no supported methods remain"; post-fix the
+// file key authenticates because agent + file signers share one publickey method.
+func TestNew_EmptyAgentDoesNotBlockFileKey(t *testing.T) {
+	env := newSSHTestEnv(t)
+	startTestAgent(t)        // reachable but EMPTY agent — the bug's trigger
+	cfg := env.insecureCfg() // KeyPath = the accepted client key
+
+	tun := env.mustDialAndDiscover(t, cfg)
+	defer tun.Close()
+	if err := healthOver(tun); err != nil {
+		t.Fatalf("health over tunnel authed via file key (empty agent present): %v", err)
+	}
+}
+
+// TestNew_EmptyAgentDoesNotBlockConfigIdentityFile is the LITERAL #502 repro: a
+// user whose ~/.ssh/config has `Host <alias> / IdentityFile <key> / IdentitiesOnly
+// yes` and a reachable-but-EMPTY ssh-agent. `ssh <alias>` works; pre-fix gogent
+// failed. Unlike the --ssh-key sibling above, this drives the config-resolution
+// path: ParseConnectURL -> ssh-config -> keyPaths (IdentityFile branch, no
+// --ssh-key) -> merged callback, with the empty agent present.
+func TestNew_EmptyAgentDoesNotBlockConfigIdentityFile(t *testing.T) {
+	env := newSSHTestEnv(t)
+	startTestAgent(t) // EMPTY agent — the bug's trigger
+
+	host, portStr, _ := net.SplitHostPort(env.sshAddr)
+	writeUserSSHConfig(t, strings.Join([]string{
+		"Host srv502",
+		"    HostName " + host,
+		"    Port " + portStr,
+		"    User test",
+		"    IdentityFile " + env.clientKey,
+		"    IdentitiesOnly yes",
+	}, "\n"))
+
+	cfg, err := ParseConnectURL("ssh://srv502", "tok", "", "", true)
+	if err != nil {
+		t.Fatalf("ParseConnectURL: %v", err)
+	}
+	tun := env.mustDialAndDiscover(t, cfg)
+	defer tun.Close()
+	if err := healthOver(tun); err != nil {
+		t.Fatalf("health over config-resolved tunnel (empty agent present): %v", err)
+	}
+}
+
+// TestNew_UnacceptedFileKeyDoesNotBlockAgentKey proves the mirror of the fix: an
+// unaccepted file key must not shadow a valid agent key. Both live in one
+// candidate list, so the accepted agent key wins regardless of file-key state.
+func TestNew_UnacceptedFileKeyDoesNotBlockAgentKey(t *testing.T) {
+	env := newSSHTestEnv(t)
+	startTestAgent(t, env.clientPriv) // agent holds the ACCEPTED key
+	cfg := env.insecureCfg()
+	cfg.KeyPath = writeRSAKeyFile(t) // an UNaccepted file key
+
+	tun := env.mustDialAndDiscover(t, cfg)
+	defer tun.Close()
+	if err := healthOver(tun); err != nil {
+		t.Fatalf("health over tunnel authed via agent key (unaccepted file key present): %v", err)
+	}
+}
+
+// TestNew_AcceptedFileKeyAlone is the control: no agent, accepted file key — the
+// pre-#502 happy path, unchanged by the fix.
+func TestNew_AcceptedFileKeyAlone(t *testing.T) {
+	env := newSSHTestEnv(t) // disables SSH_AUTH_SOCK
+	cfg := env.insecureCfg()
+	tun := env.mustDialAndDiscover(t, cfg)
+	defer tun.Close()
+	if err := healthOver(tun); err != nil {
+		t.Fatalf("health: %v", err)
+	}
+}
+
+// TestNew_AcceptedAgentKeyAlone proves the agent side of the merged method
+// authenticates at all: the accepted key lives ONLY in the agent (no file key).
+func TestNew_AcceptedAgentKeyAlone(t *testing.T) {
+	env := newSSHTestEnv(t)
+	startTestAgent(t, env.clientPriv) // agent holds the accepted key
+	t.Setenv("HOME", t.TempDir())     // no id_* defaults, no --ssh-key
+
+	cfg := env.insecureCfg()
+	cfg.KeyPath = "" // agent is the sole candidate source
+	tun := env.mustDialAndDiscover(t, cfg)
+	defer tun.Close()
+	if err := healthOver(tun); err != nil {
+		t.Fatalf("health over agent-only tunnel: %v", err)
+	}
+}
+
+// TestNew_AgentKeyOfferedBeforeFileKey locks the documented offer order
+// (agent-first) and, more importantly, proves an agent key and a file key are
+// BOTH offered within the SAME successful handshake — the core #502 invariant
+// that two separate publickey methods could never satisfy.
+func TestNew_AgentKeyOfferedBeforeFileKey(t *testing.T) {
+	env := newSSHTestEnv(t)
+	agentKey := genRSAKey(t) // distinct, NOT accepted by the server
+	startTestAgent(t, agentKey)
+	cfg := env.insecureCfg() // KeyPath = the accepted client key
+
+	tun := env.mustDialAndDiscover(t, cfg)
+	defer tun.Close()
+
+	offered := env.offeredKeys()
+	agentBlob := rsaPubBlob(agentKey)
+	fileBlob := rsaPubBlob(env.clientPriv)
+	agentIdx, fileIdx := -1, -1
+	for i, b := range offered {
+		switch b {
+		case agentBlob:
+			agentIdx = i
+		case fileBlob:
+			fileIdx = i
+		}
+	}
+	if agentIdx < 0 || fileIdx < 0 {
+		t.Fatalf("expected BOTH an agent key and a file key offered in one handshake; got %d offers", len(offered))
+	}
+	if agentIdx >= fileIdx {
+		t.Errorf("agent key should be offered before the file key (agent-first); got agent@%d file@%d in %v", agentIdx, fileIdx, offered)
+	}
+}
+
+// TestNew_DuplicateKeyInAgentAndFileAuthenticates: the same key present in BOTH
+// the agent and a file must still authenticate (de-duped to one offer, so it does
+// not cost a redundant MaxAuthTries attempt).
+func TestNew_DuplicateKeyInAgentAndFileAuthenticates(t *testing.T) {
+	env := newSSHTestEnv(t)
+	startTestAgent(t, env.clientPriv) // agent holds the accepted key
+	cfg := env.insecureCfg()          // KeyPath = the SAME accepted key (on disk)
+
+	tun := env.mustDialAndDiscover(t, cfg)
+	defer tun.Close()
+	if err := healthOver(tun); err != nil {
+		t.Fatalf("health: %v", err)
+	}
+}
+
+// TestNew_ManyUnacceptedAgentKeysThenAcceptedFileKey probes the MaxAuthTries
+// edge the merge introduces: with agent-first ordering, every unaccepted agent
+// signer costs one failed publickey probe against the server's MaxAuthTries (6).
+// With FEW unaccepted agent keys the accepted file key is still reached
+// (robustness); with MANY (>= MaxAuthTries) the server disconnects first — the
+// inherent SSH ceiling, not a regression (pre-fix this case already failed).
+func TestNew_ManyUnacceptedAgentKeysThenAcceptedFileKey(t *testing.T) {
+	env := newSSHTestEnv(t)
+
+	t.Run("few unaccepted agent keys still reach the file key", func(t *testing.T) {
+		var bad []*rsa.PrivateKey
+		for i := 0; i < 4; i++ { // well under MaxAuthTries=6
+			bad = append(bad, genRSAKey(t))
+		}
+		startTestAgent(t, bad...)
+		cfg := env.insecureCfg() // accepted file key
+
+		tun := env.mustDialAndDiscover(t, cfg)
+		defer tun.Close()
+		if err := healthOver(tun); err != nil {
+			t.Fatalf("health: %v", err)
+		}
+	})
+
+	t.Run("many unaccepted agent keys hit the SSH MaxAuthTries ceiling", func(t *testing.T) {
+		var bad []*rsa.PrivateKey
+		for i := 0; i < 8; i++ { // exceeds MaxAuthTries=6
+			bad = append(bad, genRSAKey(t))
+		}
+		startTestAgent(t, bad...)
+		cfg := env.insecureCfg() // accepted file key, but never reached
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err := New(ctx, cfg)
+		if err == nil {
+			t.Fatal(">= MaxAuthTries unaccepted agent keys should fail: the server disconnects before the file key is offered")
+		}
+	})
+}
+
+// TestAuthMethods_NoCandidatesErrors: with no reachable agent and no loadable
+// file key, authMethods returns the unchanged "no ssh auth available" error.
+func TestAuthMethods_NoCandidatesErrors(t *testing.T) {
+	disableRealSSHEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	cfg := Config{User: "u", Host: "h", KeyPath: "/no/such/key", IdentitiesOnly: true}
+
+	methods, err := authMethods(cfg)
+	if err == nil {
+		t.Fatalf("expected 'no ssh auth available' error, got methods=%v", methods)
+	}
+	if !strings.Contains(err.Error(), "no ssh auth available") {
+		t.Fatalf("error = %q, want it to mention 'no ssh auth available'", err.Error())
+	}
+	if methods != nil {
+		t.Errorf("expected nil methods on error, got %v", methods)
+	}
+}
+
+// TestAuthMethods_ReachableEmptyAgentIsNotNothingToTry: a reachable-but-EMPTY
+// agent is NOT an error — the gate only fires when the agent is unreachable AND
+// there are no file keys. The handshake proceeds; if nothing is accepted it fails
+// with the server's message. Guards the gate semantics: an empty agent must not
+// short-circuit into the "no ssh auth available" error.
+func TestAuthMethods_ReachableEmptyAgentIsNotNothingToTry(t *testing.T) {
+	startTestAgent(t) // reachable, empty
+	t.Setenv("HOME", t.TempDir())
+	cfg := Config{User: "u", Host: "h", KeyPath: "/no/such/key", IdentitiesOnly: true}
+
+	methods, err := authMethods(cfg)
+	if err != nil {
+		t.Fatalf("a reachable empty agent must not be treated as 'nothing to try': %v", err)
+	}
+	if len(methods) != 1 {
+		t.Fatalf("expected exactly one (merged) auth method with a reachable agent, got %d", len(methods))
+	}
+}
+
+// TestAuthMethods_ReturnsSinglePublickeyMethod is the structural core of the fix:
+// regardless of which candidate sources are present, authMethods returns EXACTLY
+// ONE method. The bug was TWO "publickey" methods; reverting to that would fail here.
+func TestAuthMethods_ReturnsSinglePublickeyMethod(t *testing.T) {
+	t.Run("file only", func(t *testing.T) {
+		disableRealSSHEnv(t)
+		t.Setenv("HOME", t.TempDir())
+		cfg := Config{User: "u", Host: "h", KeyPath: writeRSAKeyFile(t)}
+
+		methods, err := authMethods(cfg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(methods) != 1 {
+			t.Fatalf("file-only: expected 1 merged method, got %d", len(methods))
+		}
+	})
+	t.Run("agent + file", func(t *testing.T) {
+		startTestAgent(t, genRSAKey(t))
+		cfg := Config{User: "u", Host: "h", KeyPath: writeRSAKeyFile(t)}
+
+		methods, err := authMethods(cfg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(methods) != 1 {
+			t.Fatalf("agent+file: expected 1 merged method, got %d", len(methods))
+		}
+	})
+}
+
+// TestDedupeSigners covers the de-dupe helper: identical public keys collapse to
+// one (first-seen wins, so the agent's unlocked copy beats a file copy when
+// agent-first), distinct keys are all kept, order is preserved, and edge cases
+// (nil/empty/single) are safe. Each extra offer otherwise costs a MaxAuthTries
+// attempt, so de-dupe is both a correctness and a pressure concern.
+func TestDedupeSigners(t *testing.T) {
+	a := genRSAKey(t)
+	b := genRSAKey(t)
+
+	signerFromKey := func(priv *rsa.PrivateKey) ssh.Signer {
+		s, err := ssh.NewSignerFromKey(priv)
+		if err != nil {
+			t.Fatalf("signer: %v", err)
+		}
+		return s
+	}
+	sa, sb := signerFromKey(a), signerFromKey(b)
+
+	t.Run("nil and empty pass through", func(t *testing.T) {
+		if got := dedupeSigners(nil); len(got) != 0 {
+			t.Errorf("nil -> %v, want empty", got)
+		}
+		if got := dedupeSigners([]ssh.Signer{}); len(got) != 0 {
+			t.Errorf("empty -> %v, want empty", got)
+		}
+	})
+	t.Run("single passes through", func(t *testing.T) {
+		got := dedupeSigners([]ssh.Signer{sa})
+		if len(got) != 1 || got[0] != sa {
+			t.Errorf("single not preserved: %v", got)
+		}
+	})
+	t.Run("distinct keys all kept, order preserved", func(t *testing.T) {
+		got := dedupeSigners([]ssh.Signer{sa, sb})
+		if len(got) != 2 || got[0] != sa || got[1] != sb {
+			t.Errorf("distinct/order not preserved: %v", got)
+		}
+	})
+	t.Run("same key parsed twice collapses to one", func(t *testing.T) {
+		// Two signer objects built independently from the SAME key (mirrors a key
+		// present in both the agent and on disk) must de-dupe to one.
+		sa2 := signerFromKey(a)
+		got := dedupeSigners([]ssh.Signer{sa, sa2})
+		if len(got) != 1 {
+			t.Errorf("duplicate key not collapsed: got %d signers, want 1", len(got))
+		}
+	})
+	t.Run("first-seen wins among duplicates", func(t *testing.T) {
+		sa2 := signerFromKey(a)
+		got := dedupeSigners([]ssh.Signer{sa, sa2})
+		if len(got) != 1 || got[0] != sa {
+			t.Errorf("first-seen signer should win the dup, got %v", got)
+		}
+	})
+}
+
+// TestAgentLaziness_RequeryPicksUpAddedKey proves the laziness mechanism the
+// merged callback relies on: each dialClient dials a FRESH agent conn and calls
+// agent.NewClient(conn).Signers(), so a Restart redial (a fresh dial) picks up
+// keys added to the agent after the tunnel opened. NB: each query uses its OWN
+// agent conn + agent.Client — agent.NewClient spawns a per-client readLoop
+// (x/crypto/ssh/agent.newPipeline), so two clients sharing one conn would race on
+// the conn's reads and desync the agent protocol; we never share a conn across
+// queries (the production code doesn't either — one NewClient per fresh dial).
+func TestAgentLaziness_RequeryPicksUpAddedKey(t *testing.T) {
+	keyring, _ := startTestAgent(t, genRSAKey(t)) // one key initially
+
+	// queryAgent mirrors one dialClient's agent use: a fresh conn + a single
+	// agent.Client + one Signers() query, then the conn is closed.
+	queryAgent := func(t *testing.T) int {
+		t.Helper()
+		conn := dialAgent()
+		if conn == nil {
+			t.Fatal("dialAgent returned nil with SSH_AUTH_SOCK set")
+		}
+		defer conn.Close()
+		s, err := agent.NewClient(conn).Signers()
+		if err != nil {
+			t.Fatalf("agent Signers: %v", err)
+		}
+		return len(s)
+	}
+
+	if n := queryAgent(t); n != 1 {
+		t.Fatalf("initial query: %d signers, want 1", n)
+	}
+
+	// Add a SECOND key after the first query, then re-dial + re-query (a redial).
+	if err := keyring.Add(agent.AddedKey{PrivateKey: genRSAKey(t)}); err != nil {
+		t.Fatalf("agent add: %v", err)
+	}
+
+	if n := queryAgent(t); n != 2 {
+		t.Fatalf("lazy re-query: %d signers, want 2 (newly-added agent key not picked up on redial)", n)
+	}
+}
+
+// TestNew_AgentKeyPickedUpOnReconnect is the integration form of the laziness
+// test: open the tunnel via a file key (empty agent), then load the accepted key
+// into the agent AND remove the file from disk, then force a reconnect. The redial
+// can succeed ONLY by re-querying the agent and using the newly-added key —
+// proving Restart redials re-pick-up agent keys (the documented invariant).
+func TestNew_AgentKeyPickedUpOnReconnect(t *testing.T) {
+	env := newSSHTestEnv(t)
+	keyring, _ := startTestAgent(t) // EMPTY agent initially
+
+	cfg := env.insecureCfg() // KeyPath = the accepted client key (opens via the file)
+	tun := env.mustDialAndDiscover(t, cfg)
+	defer tun.Close()
+
+	// Load the accepted key into the agent AFTER the tunnel opened, and remove the
+	// file so the reconnect cannot lean on it.
+	if err := keyring.Add(agent.AddedKey{PrivateKey: env.clientPriv}); err != nil {
+		t.Fatalf("agent add: %v", err)
+	}
+	if err := os.Remove(cfg.KeyPath); err != nil {
+		t.Fatalf("remove key file: %v", err)
+	}
+
+	// Kill the live client so Restart must probe-fail and redial.
+	if tun.client == nil {
+		t.Fatal("no client after New")
+	}
+	_ = tun.client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	redialed, err := tun.Restart(ctx)
+	if err != nil {
+		t.Fatalf("reconnect did not re-auth via the newly-added agent key: %v", err)
+	}
+	if !redialed {
+		t.Fatalf("expected a redial after killing the client, got redialed=false")
+	}
+	if err := healthOver(tun); err != nil {
+		t.Fatalf("health over the reconnected tunnel: %v", err)
+	}
+}
+
+// TestNew_AuthFailureDiagnosticWithAgent strengthens the diagnostic coverage for
+// #502: with a reachable (empty) agent present and an unaccepted file key, the
+// auth-failure error still names the user, the candidate key PATHS, and the agent
+// state — and leaks no private-key contents.
+func TestNew_AuthFailureDiagnosticWithAgent(t *testing.T) {
+	env := newSSHTestEnv(t)
+	startTestAgent(t) // reachable, empty agent (so the diagnostic reports it present)
+	wrongKey := writeRSAKeyFile(t)
+	cfg := env.insecureCfg()
+	cfg.KeyPath = wrongKey
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := New(ctx, cfg)
+	if err == nil {
+		t.Fatal("an unaccepted key with an empty agent should fail to authenticate")
+	}
+	s := err.Error()
+
+	for _, want := range []string{"attempted user=", "keys=[", "agent="} {
+		if !strings.Contains(s, want) {
+			t.Errorf("auth error missing %q\ngot: %s", want, s)
+		}
+	}
+	// A reachable agent is reported as present (with 0 keys), not "unset".
+	if !strings.Contains(s, "present") {
+		t.Errorf("diagnostic should report the reachable agent as present\ngot: %s", s)
+	}
+	// The candidate key PATH is named for the user to act on...
+	if !strings.Contains(s, wrongKey) {
+		t.Errorf("auth error should name the candidate key path %q\ngot: %s", wrongKey, s)
+	}
+	// ...but its CONTENTS are never leaked.
+	if strings.Contains(s, "PRIVATE KEY") || strings.Contains(s, "BEGIN RSA") {
+		t.Errorf("auth error leaked private-key contents:\n%s", s)
+	}
+	// The underlying cause is preserved.
+	if !strings.Contains(s, "unable to authenticate") && !strings.Contains(s, "no supported methods") && !strings.Contains(s, "handshake") {
+		t.Errorf("auth error lost the underlying cause:\n%s", s)
 	}
 }
