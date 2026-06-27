@@ -2747,6 +2747,21 @@ func (sw *SessionWindow) reload(msgs []ChatMessage) {
 	sw.restore(msgs)
 }
 
+// markDeferred seeds a faint placeholder into a window whose transcript was not
+// fetched up front (issue #517), so a restored-but-not-yet-loaded session reads as
+// "loads on focus" rather than as a confusingly empty conversation. The placeholder
+// is one of the records reload() clears when the real transcript arrives.
+func (sw *SessionWindow) markDeferred() {
+	sw.transcript.add(&transcriptRecord{
+		kind:      kindSystem,
+		header:    "[System] Transcript loads when this window is focused.",
+		color:     colorInfo,
+		role:      roleInfo,
+		collapsed: true,
+	})
+	sw.transcript.render()
+}
+
 // restore replays a saved transcript into the model so a re-opened session is
 // searchable and filterable like a live one. It mirrors renderTranscript's
 // role-to-entry mapping.

@@ -106,6 +106,20 @@ type transcriptQuery struct {
 	Agent string `json:"agent"`
 }
 
+// listSessionsQuery binds the optional ?live=&limit=&offset= params on
+// GET /sessions (issue #517). All are absent-by-default; an absent param preserves
+// the pre-#517 full, ID-sorted listing, so any other caller is unaffected.
+//
+// Live is a string, not a bool, deliberately: the webapi query binder only binds
+// string and int/int64 struct fields, so a bool would be silently dropped. It is
+// parsed truthy for "true"/"1" — restricting the listing to live sessions, which
+// excludes archived/closed ones (they are persisted-but-not-live).
+type listSessionsQuery struct {
+	Live   string `json:"live"`   // "true"/"1" => live sessions only (archived excluded)
+	Limit  int    `json:"limit"`  // <=0 => no cap
+	Offset int    `json:"offset"` // <0 => 0; >len => empty slice
+}
+
 // --- Session control --------------------------------------------------------
 
 type injectRequest struct {

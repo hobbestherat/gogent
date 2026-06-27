@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -428,6 +429,35 @@ func (c *APIClient) Health() error {
 func (c *APIClient) ListSessions() ([]SessionDTO, error) {
 	var out []SessionDTO
 	if err := c.do(http.MethodGet, "/sessions", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ListSessionsBounded lists sessions with the issue #517 bounding params applied
+// (index metadata only; no transcript replay). live=true restricts the result to
+// live sessions — excluding archived/closed ones — and orders it most-recent-first;
+// limit<=0 means no cap and offset<0 is treated as 0. It backs Restore, which must
+// not pay one round-trip per session against an unbounded on-disk list. With
+// live=false, limit<=0 and offset<=0 the server falls back to the full ListSessions
+// listing, so callers wanting the legacy behaviour use ListSessions instead.
+func (c *APIClient) ListSessionsBounded(live bool, limit, offset int) ([]SessionDTO, error) {
+	q := url.Values{}
+	if live {
+		q.Set("live", "true")
+	}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	if offset > 0 {
+		q.Set("offset", strconv.Itoa(offset))
+	}
+	path := "/sessions"
+	if enc := q.Encode(); enc != "" {
+		path += "?" + enc
+	}
+	var out []SessionDTO
+	if err := c.do(http.MethodGet, path, nil, &out); err != nil {
 		return nil, err
 	}
 	return out, nil

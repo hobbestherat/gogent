@@ -153,6 +153,32 @@ func (w *Workbench) refreshAfterReconnect() {
 		for _, rs := range w.handlers.Restore() {
 			rs := rs
 			if open[rs.ID] {
+				// A deferred restore (issue #517) carries no transcript, so reloading
+				// rs.Messages would BLANK an open window. Handle the two deferred cases:
+				// an unloaded shell is left untouched (it still loads on focus); a
+				// window the user had already loaded before the drop is re-synced with a
+				// fresh transcript fetch, on this background goroutine.
+				if rs.Deferred {
+					w.mu.Lock()
+					stillShell := w.deferredTranscripts[rs.ID]
+					w.mu.Unlock()
+					if stillShell {
+						continue
+					}
+					if w.handlers.GetTranscript == nil {
+						continue
+					}
+					msgs := w.handlers.GetTranscript(rs.ID, "root")
+					w.desktop.Post(func() {
+						w.mu.Lock()
+						sw := w.sessions[rs.ID]
+						w.mu.Unlock()
+						if sw != nil && !sw.readOnly {
+							sw.reload(msgs)
+						}
+					})
+					continue
+				}
 				w.desktop.Post(func() {
 					w.mu.Lock()
 					sw := w.sessions[rs.ID]
@@ -163,7 +189,8 @@ func (w *Workbench) refreshAfterReconnect() {
 				})
 				continue
 			}
-			// Became live on the daemon during the outage: reopen its window.
+			// Became live on the daemon during the outage: reopen its window (a
+			// deferred one adopts as a shell and loads on focus, like first connect).
 			w.desktop.Post(func() { w.AdoptSession(rs) })
 		}
 		return
