@@ -637,3 +637,80 @@ func TestStartGated_DrainsBacklogOntoRestoredWindowWithoutDuplicating(t *testing
 			"restored window produced %d records, want 1 (the live Final duplicated the snapshot)", n)
 	}
 }
+
+// --- driver fixes-round-1: the Final-only dedup guard -------------------------
+//
+// The driver addressed the double-apply not by reopening a fresh stream at begin()
+// (which would have no backlog to duplicate) but by adding a tail-match dedup in
+// SessionWindow.apply: a SessionEventFinal whose text equals the transcript's last
+// assistant answer (with no newer user turn) is dropped. The two tests below probe
+// that guard: (a) it is Final-SPECIFIC, so other append events that overlap the
+// restored transcript still double-apply; (b) it correctly does NOT over-drop a
+// legitimate identical answer in a brand-new turn.
+
+// TestConnectOrder_DedupCoversFinalButNotToolCall restores a window whose transcript
+// already contains a completed turn that used a tool (both the tool call and the final
+// answer are in the snapshot), then drains the buffered live ToolCall + Final for that
+// same turn (what consume does post-begin). The Final is deduped (1 answer record), but
+// the ToolCall is NOT — apply()'s guard covers SessionEventFinal only, so tool calls
+// (and, by the same gap, thoughts/errors/compactions) that overlap the restored
+// transcript still double-apply. The daemon transcript format does carry tool messages
+// (see reconnect_skip_unchanged_issue520_test.go / export_test.go), so this is
+// reachable on connect for any tool-using turn that finished during restore.
+func TestConnectOrder_DedupCoversFinalButNotToolCall(t *testing.T) {
+	w := newTestWorkbench(t)
+	silenceNotifications(w)
+	sw := w.AdoptSession(RestoredSession{ID: "s1", Messages: []ChatMessage{
+		{Role: "assistant", Content: "DUP-ANS-7X", Tool: "ZZTOOLDUP516", Args: `{"p":"q"}`},
+	}})
+	drainPosted(t, w)
+	if got := countRecordsContaining(sw, "DUP-ANS-7X"); got != 1 {
+		t.Fatalf("baseline: %d answer records, want 1", got)
+	}
+	if got := countRecordsContaining(sw, "ZZTOOLDUP516"); got != 1 {
+		t.Fatalf("baseline: %d tool records, want 1", got)
+	}
+
+	// The deferred consumer drains the buffered live ToolCall + Final for the same turn.
+	w.deliverSessionEvent("s1", agent.SessionEvent{Type: agent.SessionEventToolCall, CallID: "c1", Tool: "ZZTOOLDUP516", Args: map[string]interface{}{"p": "q"}})
+	w.deliverSessionEvent("s1", agent.SessionEvent{Type: agent.SessionEventFinal, Text: "DUP-ANS-7X"})
+
+	// The Final IS deduped by the fix: still exactly one answer record.
+	if got := countRecordsContaining(sw, "DUP-ANS-7X"); got != 1 {
+		t.Fatalf("Final was not deduped: %d answer records, want 1", got)
+	}
+	// But the ToolCall is NOT deduped -> it duplicates the restored tool block. This is
+	// the remaining gap: apply()'s guard is Final-only.
+	if got := countRecordsContaining(sw, "ZZTOOLDUP516"); got != 1 {
+		t.Fatalf("issue #516 (remaining gap): a buffered live ToolCall overlapping the restored "+
+			"transcript duplicated the tool block: %d tool records, want 1 (the dedup guards only "+
+			"SessionEventFinal; ToolCall/Thought/Error/Compaction are not covered)", got)
+	}
+}
+
+// TestConnectOrder_DedupKeepsIdenticalAnswerAcrossSeparateTurns pins the dedup's
+// correctness property so the heuristic cannot over-drop: two legitimately-identical
+// answers in two separate turns must both be kept, because the second turn's user
+// record intervenes between them. (Guards against the guard becoming too aggressive.)
+func TestConnectOrder_DedupKeepsIdenticalAnswerAcrossSeparateTurns(t *testing.T) {
+	w := newTestWorkbench(t)
+	silenceNotifications(w)
+	sw := w.AdoptSession(RestoredSession{ID: "s1", Messages: []ChatMessage{
+		{Role: "user", Content: "q"},
+		{Role: "assistant", Content: "SAME-ANS-7X"},
+	}})
+	drainPosted(t, w)
+	if n := countAssistantRecords(sw); n != 1 {
+		t.Fatalf("baseline: %d assistant records, want 1", n)
+	}
+
+	// A new turn: its user message is recorded first, then the model replies with the
+	// SAME text as the previous turn.
+	sw.addUser("q-again")
+	w.deliverSessionEvent("s1", agent.SessionEvent{Type: agent.SessionEventFinal, Text: "SAME-ANS-7X"})
+
+	if n := countAssistantRecords(sw); n != 2 {
+		t.Fatalf("dedup over-dropped a legitimate identical answer in a separate turn: "+
+			"%d assistant records, want 2 (a user record must protect a genuine new reply)", n)
+	}
+}
