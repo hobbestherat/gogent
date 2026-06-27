@@ -729,6 +729,19 @@ func NewModelConnection() *ModelConnection {
 	}
 }
 
+// NewUnroutableConnection returns a connection that carries a deferred configErr and
+// therefore fails every completion/scan call with a clear, actionable message instead
+// of silently dialing the DefaultModelURL placeholder. gogent uses it when no routable
+// model is configured (e.g. every configured entry was swept as unroutable at load),
+// preserving the #505/#511 "no silent localhost 404" guarantee even in that case: a
+// bare NewModelConnection() has configErr == nil and would target localhost, so it must
+// not be used as the no-model fallback.
+func NewUnroutableConnection(message string) *ModelConnection {
+	conn := NewModelConnection()
+	conn.configErr = &ModelError{Type: ErrorGeneric, Message: message}
+	return conn
+}
+
 // NewModelConnectionFromConfig creates a model connection from config. The
 // configured APIType selects the provider conventions; the endpoint may be a
 // full chat-completions URL or just a base URL (or empty, to use the provider
@@ -795,6 +808,16 @@ func NewModelConnectionFromConfig(modelConfig *config.ModelConfig) *ModelConnect
 //
 // Returns nil for every valid config, including base-URL-deriving providers and local
 // "openai" servers with an explicit endpoint, so existing configs are unaffected.
+// ValidateModelConfig is the exported wrapper over validateRoutableConfig so callers
+// outside this package (gogent's save/load/use paths, issue #532) can reject an
+// unroutable config at the source — at save time, at load time, and when resolving a
+// default — instead of only lazily at connection-build time. It returns the same
+// model-named, field-naming *ModelError (or nil for a valid config), so there is a
+// single routability rule with no duplicated logic.
+func ValidateModelConfig(cfg *config.ModelConfig) error {
+	return validateRoutableConfig(cfg)
+}
+
 func validateRoutableConfig(cfg *config.ModelConfig) error {
 	if cfg == nil {
 		return nil

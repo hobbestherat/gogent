@@ -70,7 +70,9 @@ func TestAddModelRejectsDuplicateName(t *testing.T) {
 	dir := t.TempDir()
 	g := NewGogent(dir)
 
-	cfg := config.ModelConfig{Name: "catalog-dup", Model: "m1"}
+	// A routable config (api_type/endpoint set) so save-time validation (issue #532)
+	// is satisfied — this test exercises the duplicate-name guard, not validation.
+	cfg := config.ModelConfig{Name: "catalog-dup", Model: "m1", APIType: "openai", Endpoint: "https://api.example.com/v1"}
 	if err := g.AddModel(cfg); err != nil {
 		t.Fatalf("first AddModel: %v", err)
 	}

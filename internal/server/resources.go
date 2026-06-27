@@ -39,6 +39,12 @@ func (svc modelsSvc) Create(r *http.Request, req updateModelRequest) (interface{
 	}
 	cfg := req.ModelConfig
 	if err := svc.s.g.AddModel(cfg); err != nil {
+		// An unroutable config is a client error (400, issue #532); a name conflict
+		// is 409. AddModel wraps the validation failure with gogent.ErrModelInvalid;
+		// the duplicate-name case is a plain error.
+		if errors.Is(err, gogent.ErrModelInvalid) {
+			return nil, webapi.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
 		return nil, webapi.NewHTTPError(http.StatusConflict, err.Error())
 	}
 	return modelToView(&cfg), nil
@@ -46,7 +52,14 @@ func (svc modelsSvc) Create(r *http.Request, req updateModelRequest) (interface{
 
 // Update handles PUT /models/:name. An empty api_key in the body preserves the
 // existing key (so a GET→edit→PUT round-trip doesn't wipe it).
-func (svc modelsSvc) Update(r *http.Request, name string, req updateModelRequest) (interface{}, error) {
+//
+// The body struct must be the index-1 parameter for webapi to bind it from the
+// request body; a path-param string at index 1 makes webapi ignore the body and
+// bind the struct from the query string instead. The param order here therefore
+// matches the codebase convention (cf. watchersSvc.Update / commandsSvc.Update):
+// (r, body, pathParam). The previous (r, name, req) order silently dropped the
+// body, which validation (issue #532) would otherwise reject as unroutable.
+func (svc modelsSvc) Update(r *http.Request, req updateModelRequest, name string) (interface{}, error) {
 	if err := requireHuman(r, svc.s.provider); err != nil {
 		return nil, err
 	}
@@ -62,6 +75,12 @@ func (svc modelsSvc) Update(r *http.Request, name string, req updateModelRequest
 		}
 	}
 	if err := svc.s.g.UpdateModel(updated); err != nil {
+		// An unroutable config is a client error (400, issue #532); an unknown name
+		// is 404. UpdateModel wraps the validation failure with gogent.ErrModelInvalid;
+		// the not-found case is a plain error.
+		if errors.Is(err, gogent.ErrModelInvalid) {
+			return nil, webapi.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
 		return nil, webapi.NewHTTPError(http.StatusNotFound, err.Error())
 	}
 	return modelToView(&updated), nil

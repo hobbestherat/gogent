@@ -40,13 +40,20 @@ type Gogent struct {
 	// by turn, so a botched edit can be rolled back with UndoLastTurn / Rewind
 	// without the user resorting to their own VCS (issue #41). Nil when the file
 	// system could not be built.
-	checkpoints   *fileops.Checkpointer
-	toolRegistry  *tool.ToolRegistry
-	config        *config.Config
-	workspaceRoot string
-	homeDir       string
-	store         *SessionStore
-	skills        *skill.SkillRegistry
+	checkpoints  *fileops.Checkpointer
+	toolRegistry *tool.ToolRegistry
+	config       *config.Config
+	// configWarnings holds one human-readable notice per model config that was
+	// dropped at load time because it is unroutable (issue #532). It is populated
+	// once during construction and surfaced read-only via ConfigWarnings() so the
+	// TUI can tell the user which entries were ignored and where to fix them. The
+	// load sweep never rewrites the file, so these persist across launches until
+	// the user edits ~/.gogent/config.json.
+	configWarnings []string
+	workspaceRoot  string
+	homeDir        string
+	store          *SessionStore
+	skills         *skill.SkillRegistry
 	// log routes diagnostics (warnings, errors) to a sink that never corrupts
 	// the TUI's alternate screen: a file in TUI mode, stderr when headless
 	// (issue #17). Defaults to stderr; the TUI entry point redirects it via
@@ -192,11 +199,22 @@ func NewGogentWithWorkspace(homeDir, workspaceRoot string) *Gogent {
 		cfg = config.GetDefaultConfig()
 	}
 
+	// Validate model configs at load time (issue #532): an unroutable entry (no
+	// api_type AND no endpoint, or a hosted gateway with no model) that was written
+	// by a pre-validation build would otherwise load silently and break the first
+	// send of any new/restored session that defaults to it. Policy is WARN-AND-SKIP:
+	// drop the bad entry from the in-memory config and record a user-visible notice,
+	// but never rewrite the file — the user fixes/removes it themselves. This sweep
+	// lives here (not in internal/config) to avoid a config->model import cycle, and
+	// reuses model.ValidateModelConfig so there is a single routability rule.
+	configWarnings := sweepUnroutableModels(cfg, log)
+
 	g := &Gogent{
 		userSessions:     make(map[string]*agent.UserSession),
 		hooks:            make(map[string]func(event HookEvent)),
 		toolRegistry:     tool.NewToolRegistry(),
 		config:           cfg,
+		configWarnings:   configWarnings,
 		workspaceRoot:    workspaceRoot,
 		homeDir:          homeDir,
 		sessionTitles:    make(map[string]string),
@@ -1962,24 +1980,87 @@ func (g *Gogent) CheckpointCount(sessionID string) int {
 	return g.checkpoints.Count(sessionID)
 }
 
-// defaultConnection builds a model connection for the configured default model.
-func (g *Gogent) defaultConnection() *model.ModelConnection {
-	if g.config != nil {
-		var def *config.ModelConfig
-		for _, m := range g.config.ModelConfigs {
-			if m.Name == g.config.DefaultModel {
-				def = m
-				break
+// sweepUnroutableModels drops every unroutable model config from cfg in place and
+// returns one human-readable notice per dropped entry (issue #532). It is the load-time
+// half of the persist/load/use hardening: it reuses model.ValidateModelConfig (the same
+// rule enforced at save time) so a stale on-disk entry that can't be routed never reaches
+// a session's default. It logs each drop and never rewrites the file. A nil/empty config
+// or one with no bad entries is a no-op (returns nil).
+func sweepUnroutableModels(cfg *config.Config, log *diag.Logger) []string {
+	if cfg == nil || len(cfg.ModelConfigs) == 0 {
+		return nil
+	}
+	var warnings []string
+	kept := make([]*config.ModelConfig, 0, len(cfg.ModelConfigs))
+	for _, m := range cfg.ModelConfigs {
+		if m == nil {
+			continue
+		}
+		if verr := model.ValidateModelConfig(m); verr != nil {
+			warnings = append(warnings, verr.Error())
+			if log != nil {
+				log.Warnf("ignoring unroutable model config: %v", verr)
 			}
+			continue
 		}
-		if def == nil && len(g.config.ModelConfigs) > 0 {
-			def = g.config.ModelConfigs[0]
+		kept = append(kept, m)
+	}
+	cfg.ModelConfigs = kept
+	return warnings
+}
+
+// ConfigWarnings returns the notices for model configs that were dropped as unroutable
+// at load time (issue #532), so the UI can tell the user which entries were ignored and
+// where to fix them (~/.gogent/config.json). It returns a copy and is safe to call
+// concurrently; an empty result means every configured model is routable.
+func (g *Gogent) ConfigWarnings() []string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if len(g.configWarnings) == 0 {
+		return nil
+	}
+	out := make([]string, len(g.configWarnings))
+	copy(out, g.configWarnings)
+	return out
+}
+
+// routableDefaultConfig resolves the model config a new session should use: the
+// configured default when it exists and is routable, else the first routable configured
+// model, else nil (no routable model is configured). It skips nil and unroutable entries
+// so a bad default can never be inherited (issue #532, goal 4). It takes a config
+// snapshot rather than reading g.config so callers control locking.
+func routableDefaultConfig(cfg *config.Config) *config.ModelConfig {
+	if cfg == nil {
+		return nil
+	}
+	var def, first *config.ModelConfig
+	for _, m := range cfg.ModelConfigs {
+		if m == nil || model.ValidateModelConfig(m) != nil {
+			continue
 		}
-		if def != nil {
-			return g.buildConnection(def)
+		if first == nil {
+			first = m
+		}
+		if m.Name == cfg.DefaultModel {
+			def = m
 		}
 	}
-	return model.NewModelConnection()
+	if def != nil {
+		return def
+	}
+	return first
+}
+
+// defaultConnection builds a model connection for the configured default model. It
+// resolves a routable default (never an unroutable one — issue #532); when no routable
+// model is configured it returns a connection that fails with a clear, actionable error
+// on first use rather than the bare localhost placeholder, which would silently 404.
+func (g *Gogent) defaultConnection() *model.ModelConnection {
+	if def := routableDefaultConfig(g.config); def != nil {
+		return g.buildConnection(def)
+	}
+	return model.NewUnroutableConnection(
+		"no routable model is configured — add a model with an api_type or endpoint in the Models… dialog (or fix ~/.gogent/config.json)")
 }
 
 // GetFileSystem returns the file system service
@@ -2291,16 +2372,19 @@ func (g *Gogent) ListBackendModels(modelName string) ([]model.ModelInfo, error) 
 
 	var selected *config.ModelConfig
 	for _, m := range cfg.ModelConfigs {
-		if m.Name == target {
+		if m != nil && m.Name == target {
 			selected = m
 			break
 		}
 	}
-	if selected == nil && len(cfg.ModelConfigs) > 0 {
-		selected = cfg.ModelConfigs[0]
+	// Fall back to a routable default rather than the first entry unconditionally
+	// (issue #532), so the all-unroutable case fails clearly here too — consistent
+	// with defaultConnection.
+	if selected == nil {
+		selected = routableDefaultConfig(cfg)
 	}
 	if selected == nil {
-		return nil, fmt.Errorf("no model backend configured")
+		return nil, fmt.Errorf("no routable model is configured")
 	}
 
 	conn := g.buildConnection(selected)
@@ -2557,10 +2641,20 @@ func (g *Gogent) SendMessageToSessionWithModelAndEffort(ctx context.Context, ses
 	// If no config found, use default
 	if selectedConfig == nil {
 		for _, m := range cfg.ModelConfigs {
-			if m.Name == cfg.DefaultModel {
+			if m != nil && m.Name == cfg.DefaultModel {
 				selectedConfig = m
 				break
 			}
+		}
+		// Never route a turn through an unroutable default (issue #532, goal 4). If the
+		// resolved default is unroutable, drop to the first routable entry. This guard
+		// is deliberately narrow: an empty/unmatched DefaultModel leaves selectedConfig
+		// nil and the session keeps its existing connection (unchanged behavior, see the
+		// `if selectedConfig != nil` rebuild below); only a matched-but-unroutable
+		// default is redirected. The load sweep already removes unroutable entries from
+		// memory, so this is defense-in-depth.
+		if selectedConfig != nil && model.ValidateModelConfig(selectedConfig) != nil {
+			selectedConfig = routableDefaultConfig(cfg)
 		}
 	}
 
@@ -3318,6 +3412,17 @@ func (g *Gogent) AddModel(cfg config.ModelConfig) error {
 			return fmt.Errorf("model %q already exists", cfg.Name)
 		}
 	}
+	// Reject an unroutable config before it can be persisted (issue #532): a model
+	// with no api_type AND no endpoint (or a hosted gateway with no model) could not
+	// be routed and would break the first send of any session that defaulted to it.
+	// Validate after the duplicate-name check and before any mutation/SaveConfig, so a
+	// rejected save leaves g.config.ModelConfigs untouched and writes nothing to disk.
+	// The wrapped detail is model-named and actionable; the TUI editor surfaces it
+	// via showConfirm and the HTTP seam maps the ErrModelInvalid sentinel to 400.
+	if err := model.ValidateModelConfig(&cfg); err != nil {
+		g.mu.Unlock()
+		return fmt.Errorf("%w: %w", ErrModelInvalid, err)
+	}
 	added := cfg
 	g.config.ModelConfigs = append(g.config.ModelConfigs, &added)
 	g.mu.Unlock()
@@ -3340,6 +3445,12 @@ var (
 	// ErrModelIsDefault means the model is the configured default for new sessions
 	// and other models remain; the default must be reassigned before removal.
 	ErrModelIsDefault = errors.New("model is the default; set another default first")
+	// ErrModelInvalid means a model config failed save-time routability validation
+	// (issue #532): no api_type AND no endpoint, or a hosted gateway with no model.
+	// AddModel/UpdateModel wrap the model-named validation detail with this sentinel
+	// so callers can classify it (the HTTP seam maps it to 400 via errors.Is, distinct
+	// from the 409 duplicate-name / 404 not-found cases) without string-matching.
+	ErrModelInvalid = errors.New("invalid model configuration")
 )
 
 // RemoveModel deletes the configured model with the given Name and persists the
@@ -3429,14 +3540,21 @@ func (g *Gogent) UpdateModel(updated config.ModelConfig) error {
 			break
 		}
 	}
-	if found != nil {
-		*found = updated
-	}
-	g.mu.Unlock()
-
 	if found == nil {
+		g.mu.Unlock()
 		return fmt.Errorf("model %q not found", updated.Name)
 	}
+	// Reject an unroutable replacement before overwriting (issue #532): not-found
+	// still wins, but a found entry must not be overwritten with — or persisted as —
+	// a config that cannot be routed. Validate before the in-place overwrite and
+	// SaveConfig so a rejected update leaves the existing entry intact and writes
+	// nothing to disk.
+	if err := model.ValidateModelConfig(&updated); err != nil {
+		g.mu.Unlock()
+		return fmt.Errorf("%w: %w", ErrModelInvalid, err)
+	}
+	*found = updated
+	g.mu.Unlock()
 	if err := g.SaveConfig(); err != nil {
 		g.warnf("Failed to persist config: %v", err)
 	}
