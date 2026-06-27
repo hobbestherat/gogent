@@ -155,6 +155,12 @@ func ParseConnectURL(addr, token, keyPath, knownHosts string, insecure bool) (Co
 	// <alias>` blocks, and applying a bare global HostName to every host would be
 	// a footgun. (Globals still participate in first-value-wins WITHIN a matched
 	// block, as TestReadSSHConfig_GlobalBeforeHostWins asserts.)
+	// Capture whether the URL supplied user@/:port BEFORE the config block fills
+	// them, so the "applied" summary can exclude a config User/Port the URL
+	// overrode (the URL wins for the dial; the diagnostic must not claim config
+	// applied a value it did not).
+	urlHadUser := cfg.User != ""
+	urlHadPort := cfg.Port != 0
 	if rc, _ := ReadSSHConfig(host); rc.Found {
 		if cfg.User == "" && rc.User != "" {
 			cfg.User = rc.User
@@ -167,12 +173,14 @@ func ParseConnectURL(addr, token, keyPath, knownHosts string, insecure bool) (Co
 		}
 		cfg.IdentityFiles = rc.IdentityFiles
 		cfg.IdentitiesOnly = rc.IdentitiesOnly
-		// ConfigFound reflects whether config CONTRIBUTED an honored value, not
-		// merely that a Host block matched: on stock Debian/Ubuntu the system
-		// /etc/ssh/ssh_config carries `Host *` (which matches every host) so a
-		// bare block-match would mislabel default User/Port as config-applied in
-		// the auth diagnostic. ConfigApplied lists exactly what config provided.
-		cfg.ConfigApplied = summarizeSSHConfig(rc)
+		// ConfigFound/ConfigApplied report what config ACTUALLY applied to the
+		// dial — not merely what a Host block resolved. Two corrections matter:
+		// (a) a stock /etc `Host *` that matches but sets nothing honored yields
+		// "" → ConfigFound=false (no false "applied" claim); (b) a User/Port the
+		// URL overrode is excluded, so the diagnostic never contradicts itself
+		// ("attempted user=bob" vs "applied User=pi"). HostName/IdentityFile/
+		// IdentitiesOnly have no URL override, so they report as-resolved.
+		cfg.ConfigApplied = summarizeSSHConfig(rc, !urlHadUser, !urlHadPort)
 		cfg.ConfigFound = cfg.ConfigApplied != ""
 	}
 	// OS-user fallback last, so a config User (above) wins over it.
@@ -586,19 +594,21 @@ func authDiagnostic(cfg Config) string {
 	return b.String()
 }
 
-// summarizeSSHConfig renders the honored directives ssh-config actually
-// resolved (and nothing else) as a compact "User=… HostName=… …" string, for
-// the auth diagnostic. It returns "" when config contributed nothing — the
+// summarizeSSHConfig renders the honored directives ssh-config actually APPLIED
+// to the dial (and nothing else) as a compact "User=… HostName=… …" string, for
+// the auth diagnostic. userApplied/portApplied gate User/Port so a value the URL
+// overrode is omitted (HostName/IdentityFile/IdentitiesOnly have no URL override
+// and are reported as-resolved). It returns "" when config applied nothing — the
 // signal cfg.ConfigFound is derived from.
-func summarizeSSHConfig(rc ResolvedSSHConfig) string {
+func summarizeSSHConfig(rc ResolvedSSHConfig, userApplied, portApplied bool) string {
 	var parts []string
-	if rc.User != "" {
+	if userApplied && rc.User != "" {
 		parts = append(parts, "User="+rc.User)
 	}
 	if rc.HostName != "" {
 		parts = append(parts, "HostName="+rc.HostName)
 	}
-	if rc.Port > 0 {
+	if portApplied && rc.Port > 0 {
 		parts = append(parts, "Port="+strconv.Itoa(rc.Port))
 	}
 	if rc.IdentitiesOnly {
