@@ -878,3 +878,38 @@ func TestConnectOrder_LiveRecordBeforeFinalDefeatsDedup(t *testing.T) {
 			"records, want 1 (the scan stops at the first non-restored record)", n)
 	}
 }
+
+// --- driver fixes-round-4 pin -------------------------------------------------
+//
+// Round 4 split the two dedup semantics: restoredDuplicate (Final/ToolCall/Thought)
+// is transparent past live records; restoredAtPristineTail (the content-blind
+// ThinkingDelta presence check) stops at the first live record so an autonomous
+// session resumes streaming once any live activity lands, rather than being
+// suppressed indefinitely. This test pins that stop-at-live choice so a future
+// refactor cannot silently fold ThinkingDelta back into the transparent scan.
+
+// TestConnectOrder_ThinkingDeltaStreamsOnceLiveActivityLands pins restoredAtPristineTail's
+// stop-at-first-live-record semantics: after a live record lands (here a Compaction the
+// snapshot never held), a subsequent ThinkingDelta must stream rather than be
+// suppressed against the earlier restored thought.
+func TestConnectOrder_ThinkingDeltaStreamsOnceLiveActivityLands(t *testing.T) {
+	w := newTestWorkbench(t)
+	silenceNotifications(w)
+	sw := w.AdoptSession(RestoredSession{ID: "s1", Messages: []ChatMessage{
+		{Role: "assistant", Reasoning: "OLD-REASON-7X", Content: "ans"},
+	}})
+	drainPosted(t, w)
+	if n := countRecordsOfKind(sw, kindThinking); n != 1 {
+		t.Fatalf("baseline: %d thinking records, want 1", n)
+	}
+
+	// A live record lands (a Compaction the snapshot never held), then reasoning streams.
+	w.deliverSessionEvent("s1", agent.SessionEvent{Type: agent.SessionEventCompaction, Step: 1000, Text: "sum"})
+	w.deliverSessionEvent("s1", agent.SessionEvent{Type: agent.SessionEventThinkingDelta, Text: "NEW-AFTER-LIVE-7X\n"})
+	drainPosted(t, w)
+
+	if n := countRecordsOfKind(sw, kindThinking); n != 2 {
+		t.Fatalf("ThinkingDelta suppressed past live activity: %d thinking records, want 2 "+
+			"(restored thought + new live thought; restoredAtPristineTail must stop at the first live record)", n)
+	}
+}
