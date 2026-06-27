@@ -479,6 +479,131 @@ func TestIssue515_BarAcrossFullLifecycle(t *testing.T) {
 }
 
 // =============================================================================
+// Edge cases: magnitude, width budget at minSidebarWidth, error inputs
+// =============================================================================
+
+// TestIssue515_StatusBarLabelNeverTruncatesByMagnitude: statusBarLabel is a pure
+// formatter — it must NEVER pre-truncate or clip the bar regardless of how large
+// the counts are. The string it returns is the sentinel source syncFoldSuffixes
+// reads, so it must always carry exactly the two framing pipes and no ellipsis.
+func TestIssue515_StatusBarLabelNeverTruncatesByMagnitude(t *testing.T) {
+	for _, tc := range []struct{ r, w, c, f int }{
+		{0, 0, 0, 0}, {9, 9, 9, 9}, {10, 10, 10, 10},
+		{99, 99, 99, 99}, {123, 456, 789, 0}, {1_000_000, 0, 0, 0},
+	} {
+		bar := statusBarLabel(tc.r, tc.w, tc.c, tc.f)
+		if got := strings.Count(bar, "|"); got != 2 {
+			t.Errorf("counts %v: bar %q has %d '|', want 2 (never pre-truncated)", tc, bar, got)
+		}
+		if !strings.HasPrefix(bar, "|") || !strings.HasSuffix(bar, "|") {
+			t.Errorf("counts %v: bar %q must be pipe-framed top and tail", tc, bar)
+		}
+		if strings.Contains(bar, "…") {
+			t.Errorf("counts %v: bar %q must not contain an ellipsis", tc, bar)
+		}
+	}
+}
+
+// TestIssue515_WidthDeltaUniformAcrossMagnitudes: the headline "+3 cells" claim of
+// #515 must hold for ANY count magnitude, not just the all-zero bar — the three
+// extra inter-entry spaces add a constant 3 columns regardless of digit width, and
+// the glyph swap (‖→⏸) is width-neutral. Pins the uniform-alignment property.
+func TestIssue515_WidthDeltaUniformAcrossMagnitudes(t *testing.T) {
+	for _, tc := range []struct{ r, w, c, f int }{
+		{0, 0, 0, 0}, {9, 9, 9, 9}, {12, 345, 6, 7890}, {99, 99, 99, 99},
+	} {
+		newW := tui.StringWidth(wantBar(tc.r, tc.w, tc.c, tc.f))
+		oldW := tui.StringWidth(fmt.Sprintf("|▶%d ‖%d ✓%d ✗%d|", tc.r, tc.w, tc.c, tc.f))
+		if newW-oldW != 3 {
+			t.Errorf("counts %v: width delta = %d, want 3 (uniform +3)", tc, newW-oldW)
+		}
+	}
+}
+
+// TestIssue515_RenderMultiDigitAtMinWidthKeepsStoredLabelComplete: the width-budget
+// boundary. At minSidebarWidth=24 the bar has ~18 render columns; a 2-digit-in-all-
+// states bar is 20 cells and the DISPLAYED row may be clipped. But the STORED label
+// (what syncFoldSuffixes' LastIndexByte reads) must stay complete — both framing
+// pipes intact — so display truncation can never corrupt the suffix sentinel. This
+// is the seam between render-time clipping and the pipe-sentinel contract.
+func TestIssue515_RenderMultiDigitAtMinWidthKeepsStoredLabelComplete(t *testing.T) {
+	w := NewWorkbench([]*config.ModelConfig{{Name: "m", Model: "m"}})
+	s := w.sidebar
+	s.addSession("s1", "S", false)
+	// 2-digit counts in every segment -> the widest realistic bar (20 cells).
+	for i := 0; i < 10; i++ {
+		s.applySubAgent("s1", subEv(fmt.Sprintf("run%d", i), "r", agent.StatusRunning))
+		s.applySubAgent("s1", subEv(fmt.Sprintf("wait%d", i), "w", agent.StatusWaiting))
+		s.applySubAgent("s1", subEv(fmt.Sprintf("done%d", i), "d", agent.StatusCompleted))
+		s.applySubAgent("s1", subEv(fmt.Sprintf("fail%d", i), "f", agent.StatusFailed))
+	}
+	want := wantBar(10, 10, 10, 10) // |▶10  ⏸10  ✓10  ✗10|  — 20 cells
+
+	// Render at the minimum width so the bar exceeds the render budget.
+	s.panel.SetBounds(tv.Rect{X: 0, Y: 0, W: minSidebarWidth, H: 12})
+	w.desktop.Redraw()
+	abs := s.panel.AbsoluteBounds()
+
+	// Hard invariant: the STORED label base is the full bar, both pipes — display
+	// clipping (if any) must not reach the sentinel source.
+	label := summaryOf(s, "s1").Label
+	base := label[:strings.LastIndexByte(label, '|')+1]
+	if base != want {
+		t.Fatalf("stored label base = %q, want the full bar %q (render must not corrupt the sentinel source)",
+			base, want)
+	}
+
+	// Capture the rendered summary row and surface its clipping state for the record.
+	var rendered string
+	for y := 0; y < abs.H; y++ {
+		var b strings.Builder
+		for x := 0; x < abs.W; x++ {
+			ch := w.app.ReadCell(abs.X+x, abs.Y+y).Ch
+			if ch == 0 {
+				ch = ' '
+			}
+			b.WriteRune(ch)
+		}
+		if strings.Contains(b.String(), pauseGlyph) {
+			rendered = b.String()
+			break
+		}
+	}
+	if rendered == "" {
+		t.Fatalf("no summary row rendered at minSidebarWidth=%d", minSidebarWidth)
+	}
+	t.Logf("minSidebarWidth=%d, 2-digit bar=%q (%d cells): rendered row=%q",
+		minSidebarWidth, want, tui.StringWidth(want), rendered)
+	// The leading framing pipe and the pause glyph must still be visible on screen
+	// even when the closing side clips.
+	if !strings.Contains(rendered, "|") {
+		t.Errorf("rendered row lost even the leading pipe: %q", rendered)
+	}
+	if !strings.Contains(rendered, pauseGlyph) {
+		t.Errorf("rendered row lost the pause glyph: %q", rendered)
+	}
+}
+
+// TestIssue515_StatusBarLabelNegativeCountsDoNotPanic: negative counts never occur
+// in practice (counts are len()-derived, ≥0), but the pure formatter must degrade
+// gracefully on a malformed input — no panic, and the 2-space / 2-pipe structure
+// still holds. Covers the "error input" handling of the changed function.
+func TestIssue515_StatusBarLabelNegativeCountsDoNotPanic(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("statusBarLabel with negative counts panicked: %v", r)
+		}
+	}()
+	bar := statusBarLabel(-1, -2, -3, -4)
+	if want := "|▶-1  ⏸-2  ✓-3  ✗-4|"; bar != want {
+		t.Errorf("negative-count bar = %q, want %q (structure must hold)", bar, want)
+	}
+	if got := strings.Count(bar, "|"); got != 2 {
+		t.Errorf("negative-count bar %q has %d '|', want 2", bar, got)
+	}
+}
+
+// =============================================================================
 // tiny local helpers (kept unexported, test-file scoped)
 // =============================================================================
 
