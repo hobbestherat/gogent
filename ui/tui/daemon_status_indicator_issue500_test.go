@@ -450,10 +450,10 @@ func TestIssue500IndicatorRenderedRightAnchored(t *testing.T) {
 	}
 	// Help (last left menu) must be left of Daemon (right group), which must be left
 	// of the indicator.
-	if helpIdx >= 0 && daemonIdx >= 0 && !(helpIdx < daemonIdx) {
+	if helpIdx >= 0 && daemonIdx >= 0 && helpIdx >= daemonIdx {
 		t.Errorf("expected Help left of Daemon; Help@%d Daemon@%d:\n%s", helpIdx, daemonIdx, row)
 	}
-	if daemonIdx >= 0 && !(daemonIdx < statusIdx) {
+	if daemonIdx >= 0 && daemonIdx >= statusIdx {
 		t.Errorf("expected Daemon left of the indicator; Daemon@%d status@%d:\n%s", daemonIdx, statusIdx, row)
 	}
 }
