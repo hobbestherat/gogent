@@ -1786,11 +1786,25 @@ func styledChildLines(text string, role colorRole) []styledLine {
 }
 
 // addUser appends the user's message.
-func (sw *SessionWindow) addUser(text string) {
-	sw.transcript.add(&transcriptRecord{
+// userRecord builds the "You:" transcript record for a user message, or nil when
+// the text is blank. Returning nil for blank folds the skip guard that addUser and
+// restore previously applied inline into one place, so the live add path and the
+// batched restore path share a single source of truth for the record's shape and
+// its blank-skip rule (issue #519).
+func userRecord(text string) *transcriptRecord {
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	return &transcriptRecord{
 		kind: kindUser, header: "You:", color: colorUser, role: roleUser,
 		lines: styledChildLines(text, roleUser),
-	})
+	}
+}
+
+func (sw *SessionWindow) addUser(text string) {
+	if r := userRecord(text); r != nil {
+		sw.transcript.add(r)
+	}
 }
 
 // addClarification appends an interjected message as the user's own input
@@ -2417,8 +2431,23 @@ func (sw *SessionWindow) echoCommand(cmd, summary string, err error) {
 }
 
 // addAssistant appends the assistant's final answer (expanded, not folded).
-func (sw *SessionWindow) addAssistant(text string) {
+// assistantRecord builds the "Gogent:" answer record, or nil when the text is
+// blank. The record is rich so its body renders as styled Markdown children
+// (issue #519 shares this builder between the live add path and batched restore).
+func assistantRecord(text string) *transcriptRecord {
 	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	return &transcriptRecord{
+		kind: kindAssistant, header: "Gogent:", color: colorAgent, role: roleAgent,
+		lines: styledChildLines(text, roleAgent),
+		rich:  true,
+	}
+}
+
+func (sw *SessionWindow) addAssistant(text string) {
+	r := assistantRecord(text)
+	if r == nil {
 		return
 	}
 	// The final answer is what the user asked for, so re-anchor the transcript on it
@@ -2428,22 +2457,26 @@ func (sw *SessionWindow) addAssistant(text string) {
 	// agent silently dropping its reply (issue #227). Streaming events (thoughts,
 	// tool calls/results) intentionally do not re-anchor, so reading scrolled-up
 	// history during a turn is undisturbed until the answer lands.
-	sw.transcript.addAndReveal(&transcriptRecord{
-		kind: kindAssistant, header: "Gogent:", color: colorAgent, role: roleAgent,
-		lines: styledChildLines(text, roleAgent),
-		rich:  true,
-	})
+	sw.transcript.addAndReveal(r)
+}
+
+// thoughtRecord builds the collapsed-by-default "thought" record for a model's
+// retained chain-of-thought, or nil when the text is blank (issue #519).
+func thoughtRecord(text string) *transcriptRecord {
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	return &transcriptRecord{
+		kind: kindThinking, header: "thought", color: colorNote, role: roleNote, collapsed: true,
+		lines: styledChildLines(text, roleNote),
+	}
 }
 
 // addThought appends a collapsed-by-default "thought" entry.
 func (sw *SessionWindow) addThought(text string) {
-	if strings.TrimSpace(text) == "" {
-		return
+	if r := thoughtRecord(text); r != nil {
+		sw.transcript.add(r)
 	}
-	sw.transcript.add(&transcriptRecord{
-		kind: kindThinking, header: "thought", color: colorNote, role: roleNote, collapsed: true,
-		lines: styledChildLines(text, roleNote),
-	})
 }
 
 // appendThinkingDelta streams a chunk of the model's chain-of-thought into a
@@ -2699,43 +2732,59 @@ func (sw *SessionWindow) copyLastCode() {
 	sw.addNote(fmt.Sprintf("copied code (%d chars) to clipboard", utf8.RuneCountInString(code)))
 }
 
-// restore replays a saved transcript into the model so a re-opened session is
-// searchable and filterable like a live one. It mirrors renderTranscript's
-// role-to-entry mapping.
 // reload replaces the window's transcript with msgs, discarding the current
 // records first. It backs the jump-to-present refresh after a daemon reconnect
 // (issue #358 §7): the frozen last-known transcript is swapped for the daemon's
 // current state in one shot, rather than replaying missed events. It must run on
 // the UI thread.
+//
+// It clears the records, then defers entirely to restore(), which builds the new
+// records and composes the view exactly once via addAll. Clearing the slice before
+// restore means addAll appends onto a fresh slice, so the single render() rebuilds
+// the whole view — exactly one compose, no intermediate clear-render (issue #519).
 func (sw *SessionWindow) reload(msgs []ChatMessage) {
 	sw.transcript.records = nil
-	sw.transcript.render()
 	sw.restore(msgs)
-	sw.transcript.render()
 }
 
+// restore replays a saved transcript into the model so a re-opened session is
+// searchable and filterable like a live one. It mirrors renderTranscript's
+// role-to-entry mapping.
+//
+// It builds every record up front and appends them in one batch via addAll, which
+// composes the view a single time rather than the per-record renderOne() a
+// per-message add() loop would do. First-connect restore of a large session is
+// then an O(1) compose instead of O(M) UI-thread appends (issue #519); the final
+// view — record set, order, fold state, Markdown and scroll position — is
+// unchanged. Blank-text records are dropped by their builders (returning nil) and
+// skipped by addAll, so the record slice never holds a nil.
 func (sw *SessionWindow) restore(msgs []ChatMessage) {
+	records := make([]*transcriptRecord, 0, len(msgs))
 	for _, m := range msgs {
 		switch strings.ToLower(m.Role) {
 		case "user":
-			if strings.TrimSpace(m.Content) != "" {
-				sw.addUser(m.Content)
+			// userRecord returns nil for blank content, folding the old explicit
+			// blank-skip guard into the builder.
+			if r := userRecord(m.Content); r != nil {
+				records = append(records, r)
 			}
 		case "assistant":
 			// A restored reasoning-only or partial turn renders its retained
 			// chain-of-thought as the same collapsed "thought" entry the live
 			// appendThinkingDelta/foldLiveThought path produces, ahead of the answer
 			// (issue #402).
-			if strings.TrimSpace(m.Reasoning) != "" {
-				sw.addThought(m.Reasoning)
+			if r := thoughtRecord(m.Reasoning); r != nil {
+				records = append(records, r)
 			}
-			sw.addAssistant(m.Content)
+			if r := assistantRecord(m.Content); r != nil {
+				records = append(records, r)
+			}
 			if m.Tool != "" {
 				lines := make([]styledLine, 0)
 				for _, line := range childLines(m.Args) {
 					lines = append(lines, styledLine{text: "  " + line, color: colorTool, role: roleTool})
 				}
-				sw.transcript.add(&transcriptRecord{
+				records = append(records, &transcriptRecord{
 					kind: kindTool, header: fmt.Sprintf("tool: %s", m.Tool),
 					color: colorTool, role: roleTool, collapsed: true, lines: lines,
 				})
@@ -2745,19 +2794,20 @@ func (sw *SessionWindow) restore(msgs []ChatMessage) {
 			for _, line := range childLines(m.Content) {
 				lines = append(lines, styledLine{text: "  " + line, color: colorResult, role: roleResult})
 			}
-			sw.transcript.add(&transcriptRecord{
+			records = append(records, &transcriptRecord{
 				kind: kindTool, header: fmt.Sprintf("result: %s", m.Tool),
 				color: colorResult, role: roleResult, collapsed: true, lines: lines,
 			})
 		default: // system / other
 			if strings.TrimSpace(m.Content) != "" {
-				sw.transcript.add(&transcriptRecord{
+				records = append(records, &transcriptRecord{
 					kind: kindSystem, header: "[System]", color: colorInfo, role: roleInfo, collapsed: true,
 					lines: styledChildLines(m.Content, roleInfo),
 				})
 			}
 		}
 	}
+	sw.transcript.addAll(records)
 }
 
 // formatArgs renders tool arguments as readable key/value lines.
