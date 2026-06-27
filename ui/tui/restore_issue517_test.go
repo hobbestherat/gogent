@@ -621,6 +621,43 @@ func TestReconnectFailedFetchKeepsContentLoaded(t *testing.T) {
 	}
 }
 
+func TestReconnectSyncsLoadedWindowToGenuinelyEmptyTranscript(t *testing.T) {
+	// Symmetric to the nil-failure case: a *successful* re-sync that returns a
+	// genuinely-empty transcript ([]ChatMessage{}, non-nil) is the daemon's
+	// authoritative "this session now has no messages" state, so the loaded window
+	// must sync to empty — distinct from a nil failure, which keeps the content.
+	// This guards the msgs==nil (not len==0) distinction on the reconnect path too.
+	w := issue517Workbench()
+	var initial atomic.Int32
+	w.handlers.OnCreate = func(id, title string) {}
+	w.handlers.GetTranscript = func(id, agent string) []ChatMessage {
+		initial.Add(1)
+		return []ChatMessage{{Role: "assistant", Content: "first-load"}}
+	}
+	sw := w.AdoptSession(RestoredSession{ID: "d1", Title: "D", Deferred: true})
+	w.Focus("d1")
+	wait517(t, &initial, 1, "initial focus load")
+	drainPostedEventually(t, w)
+	if !transcriptTextContains(sw, "first-load") {
+		t.Fatal("setup: initial transcript did not load")
+	}
+
+	// Daemon now reports an empty transcript (non-nil).
+	w.handlers.GetTranscript = func(id, agent string) []ChatMessage { return []ChatMessage{} }
+	w.handlers.Restore = func() []RestoredSession {
+		return []RestoredSession{{ID: "d1", Title: "D", Deferred: true}}
+	}
+	w.refreshAfterReconnect()
+	drainPostedEventually(t, w)
+
+	if transcriptTextContains(sw, "first-load") {
+		t.Fatal("reconnect did not sync the loaded window to the daemon's now-empty transcript")
+	}
+	if transcriptHasPlaceholder(sw) {
+		t.Fatal("a loaded window re-synced to empty must not show the deferred placeholder")
+	}
+}
+
 func TestReconnectAdoptsSessionLiveDuringOutage(t *testing.T) {
 	// A session that became live on the daemon during the outage is adopted (a
 	// deferred one as a shell that loads on focus, like first connect).
