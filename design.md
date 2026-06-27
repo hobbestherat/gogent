@@ -35,6 +35,27 @@ func ValidateModelConfig(cfg *config.ModelConfig) error { return validateRoutabl
 `model.ValidateModelConfig` from gogent introduces **no import cycle**. (This is exactly why the
 load-sweep lives in gogent, not in `internal/config`.)
 
+Also add an exported constructor for the **no-routable-model fail-safe** (see Goal 4 / Defect 1.1).
+`NewModelConnection()` (`connection.go:718`) deliberately leaves `configErr == nil` and points at
+the `DefaultModelURL` localhost placeholder (locked by `TestRoutableValidation_BareNewModelConnectionUntouched`),
+so gogent must **not** fall back to it — that would re-introduce the silent localhost-404 that
+#505/#511 eliminated. Instead:
+
+```go
+// NewUnroutableConnection returns a connection that carries a deferred configErr and
+// therefore fails every completion/scan call with a clear message, instead of silently
+// dialing the DefaultModelURL placeholder. gogent uses it when no routable model is
+// configured, preserving the #505/#511 "no silent localhost 404" guarantee even when
+// every configured entry was swept as unroutable.
+func NewUnroutableConnection(message string) *ModelConnection {
+    conn := NewModelConnection()
+    conn.configErr = &ModelError{Type: ErrorGeneric, Message: message}
+    return conn
+}
+```
+This keeps the private `configErr` field encapsulated in `internal/model` (gogent cannot set it
+directly) while giving gogent a fail-safe connection.
+
 ### GOAL 1 — validate at SAVE time (`internal/gogent/gogent.go`)
 - **`AddModel` (`:3313`)**: after the existing duplicate-name check, before `append` + `SaveConfig`:
   `if err := model.ValidateModelConfig(&cfg); err != nil { unlock; return err }`. No mutation of
@@ -81,7 +102,7 @@ the user's file (they edit/remove it themselves).
 
 ```go
 var warnings []string
-kept := cfg.ModelConfigs[:0]
+kept := make([]*config.ModelConfig, 0, len(cfg.ModelConfigs)) // fresh slice, no [:0] tail-aliasing (Defect 3.2)
 for _, m := range cfg.ModelConfigs {
     if m == nil { continue }
     if verr := model.ValidateModelConfig(m); verr != nil {
@@ -107,19 +128,25 @@ Consequences that fall out for free:
   wired in `cmd/embedded_handlers.go` to `g.ConfigWarnings()`. Left **nil in attached/remote**
   mode (config is daemon-owned there — same precedent as `GetDefaultModel` being nil while
   attached, `cmd/attach.go:322`); nil handler ⇒ no notice, no crash.
-- Surface once at startup in `(*Workbench).Run` right beside the welcome dialog (`ui/tui/tui.go:2879`):
+- Surface at startup in `(*Workbench).Run` **after** the welcome-dialog block (`ui/tui/tui.go:2879-2881`),
+  so the config-warnings modal is the topmost layer and is dismissed *first* (a config error
+  outranks onboarding), with the welcome dialog behind it — deterministic stacking, not a noisy race:
   `if w.handlers.ConfigWarnings != nil { if ws := w.handlers.ConfigWarnings(); len(ws) > 0 { w.showConfirm("Model config", "These configured models were ignored because they cannot be routed:\n\n• "+strings.Join(ws, "\n• ")+"\n\nEdit or remove them in ~/.gogent/config.json.", nil) } }`.
-  Shown after the welcome modal is queued so it stacks predictably. This is the one user-facing
-  TUI addition; it's read-only and additive.
+  This is the one user-facing TUI addition; it's read-only and additive.
+- **Recurrence is intentional, not "one-time".** Because the sweep deliberately never rewrites the
+  file, a bad entry persists and the notice re-fires on **every** launch until the user fixes/removes
+  it. This is a deliberate decision (a persistent reminder is safer than a silently-rewritten config
+  and beats a one-shot toast the user may miss); the alternative — auto-rewriting the file on first
+  load — is explicitly rejected (we never silently mutate the user's config). Documented as a choice.
 
 ### GOAL 4 — new/restored sessions never inherit an unroutable default
-Add a small reuse helper (both call sites currently duplicate the "find default by name, else
-first" logic):
+Add a small reuse helper (three call sites — `defaultConnection`, the `SendMessage…` fallback, and
+the model-listing path — currently duplicate "find default by name, else first"):
 
 ```go
 // routableDefaultConfig returns the configured default model when it exists and is
-// routable, else the first routable configured model, else nil. Operates on a passed
-// config snapshot so callers control locking.
+// routable, else the first routable configured model, else nil. Skips nil/unroutable
+// entries. Operates on a passed config snapshot so callers control locking.
 func routableDefaultConfig(cfg *config.Config) *config.ModelConfig {
     if cfg == nil { return nil }
     var def, first *config.ModelConfig
@@ -132,23 +159,64 @@ func routableDefaultConfig(cfg *config.Config) *config.ModelConfig {
     return first
 }
 ```
-- `defaultConnection` (`:1966`): `if def := routableDefaultConfig(g.config); def != nil { return g.buildConnection(def) }; return model.NewModelConnection()`.
-- `SendMessageToSessionWithModelAndEffort` default fallback (`:2558-2565`): replace the
-  inline default-by-name loop with `selectedConfig = routableDefaultConfig(cfg)` (using the
-  `cfg` snapshot already taken under `RLock` at `:2523`). An explicit `modelName` that matched a
-  config is left as-is; only the *default fallback* gets the routable guard.
 
-Belt-and-suspenders with Goal 2: even if an unroutable entry somehow remained in memory, the
-default resolution skips it to a routable one; if none is routable, `defaultConnection` returns
-the placeholder connection and the send fails with the **clear** deferred `configErr` (existing
-behavior) — never a silent doomed send.
+**`defaultConnection` (`:1966`)** — builds a connection for NEW sessions, so it must always yield a
+routable connection or a *clear-error* one (never the silent localhost placeholder):
+```go
+if def := routableDefaultConfig(g.config); def != nil {
+    return g.buildConnection(def)
+}
+return model.NewUnroutableConnection(
+    "no routable model is configured — add a model with an api_type or endpoint in the Models… dialog (or fix ~/.gogent/config.json)")
+```
+**This is the fix for Defect 1.1.** The previous `model.NewModelConnection()` fall-through has
+`configErr == nil` and dials `DefaultModelURL` (localhost) → opaque connection-refused/404. With
+`NewUnroutableConnection` the all-unroutable case fails with a **clear, actionable** error on first
+send, satisfying the acceptance line *"fails safe (routable fallback OR clear error), no silent
+doomed send."*
+
+**`SendMessageToSessionWithModelAndEffort` default fallback (`:2558-2565`)** — operates on an
+*existing* session that already has a connection. Behavior contract: an empty/unmatched
+`DefaultModel` leaves `selectedConfig == nil`, and the downstream `if selectedConfig != nil` guard
+(`:2580`) then **keeps the session's current connection** — that must be preserved. So we keep the
+existing default-by-name loop and add a *narrow* routability guard that only fires when the resolved
+default is actually unroutable (defense-in-depth; after the load sweep an unroutable default is
+already gone from memory):
+```go
+if selectedConfig == nil {
+    for _, m := range cfg.ModelConfigs {
+        if m != nil && m.Name == cfg.DefaultModel { selectedConfig = m; break }
+    }
+    // Issue #532: never route a turn through an unroutable default. If the resolved
+    // default is unroutable, drop to the first routable entry. If the default was
+    // empty/unmatched, selectedConfig stays nil and the session keeps its existing
+    // connection (unchanged behavior — see :2580).
+    if selectedConfig != nil && model.ValidateModelConfig(selectedConfig) != nil {
+        selectedConfig = routableDefaultConfig(cfg) // skips the unroutable default → first routable (or nil)
+    }
+}
+```
+This is **zero behavior change in every routable case** and **does not touch the nil-keeps-current
+path** (resolves Defect 3.1): it only redirects when a matched default is itself unroutable, which
+the sweep already prevents — so it is pure belt-and-suspenders, and is pinned by a test (Goal 3).
+
+**Model-listing path (`:2299-2304`)** — currently independently resolves
+`selected = cfg.ModelConfigs[0]` for the fallback, then errors "no model backend configured" when
+empty. Route its fallback through the same helper for uniform, clear failure (Defect 1.2):
+```go
+if selected == nil { selected = routableDefaultConfig(cfg) }
+if selected == nil { return nil, fmt.Errorf("no routable model is configured") }
+```
+(The explicit-name match above it is unchanged.) This makes the all-unroutable case fail clearly
+here too, consistent with `defaultConnection`.
 
 ## Files touched
 gogent:
-- `internal/model/connection.go` — add `ValidateModelConfig` wrapper (1 fn).
+- `internal/model/connection.go` — add `ValidateModelConfig` wrapper + `NewUnroutableConnection` fail-safe (2 fns).
 - `internal/gogent/gogent.go` — `AddModel`, `UpdateModel` (save-time reject); load sweep at `:189`;
   `configWarnings` field + `ConfigWarnings()` accessor; `routableDefaultConfig` helper;
-  `defaultConnection` + `SendMessage…` default fallback rewired.
+  `defaultConnection` (`:1966`) + `SendMessage…` default fallback (`:2558`) + model-listing fallback
+  (`:2299`) routed through the helper.
 - `internal/server/resources.go` — `Create`/`Update` add 400 path via `errors.As(*model.ModelError)`; add `internal/model` import.
 - `ui/tui/tui.go` — `Handlers.ConfigWarnings` field; one-time startup `showConfirm` in `Run`.
 - `cmd/embedded_handlers.go` — wire `ConfigWarnings` to `g.ConfigWarnings()`.
@@ -166,10 +234,19 @@ turbotui: **none.** The optional disabled-option enhancement is an explicit out-
 - `internal/gogent` (new `load_sweep_test.go`): seed `config.json` with one bad + one good entry +
   `default_model` = bad name → `NewGogent` keeps only good, `ConfigWarnings()` non-empty,
   `defaultConnection()`/`routableDefaultConfig` resolve to the good entry, no panic.
+- `internal/gogent` **all-unroutable fail-safe (Defect 1.1)**: seed `config.json` where *every*
+  entry is unroutable + a bad `default_model` → after sweep `ModelConfigs` is empty;
+  `defaultConnection()` returns a connection whose first completion/scan yields the **clear**
+  "no routable model is configured" error (assert via the `configErr` path, the
+  `routable_config_validation_test.go` `configErrOf` precedent) and **never** dials `DefaultModelURL`.
+- `internal/gogent` **routable-default helper / narrow fallback (Defect 3.1)**: table test for
+  `routableDefaultConfig` (default-routable→default; default-unroutable→first-routable;
+  none-routable→nil); plus a `SendMessage`-fallback test asserting (a) an unmatched/empty
+  `DefaultModel` leaves the session's existing connection untouched (selectedConfig stays nil),
+  and (b) a *matched-but-unroutable* default (injected directly into `g.config`, bypassing the
+  sweep) redirects to the first routable entry. This pins the intentional narrowed semantics.
 - `internal/server` (extend models tests): `POST /models` with `{name, api_key, rest empty}` → **400**,
   not persisted; duplicate name still **409**; `PUT` validation → **400**, not-found still 404.
-- `internal/gogent`: restored/new session whose stored/default model is unroutable → resolves to a
-  routable fallback (no connection whose `configErr` is set when a routable model exists).
 
 ## Design criteria
 1. **Goal match** — fixes exactly the persist/load/use gap: unroutable config can't be saved
@@ -182,9 +259,12 @@ turbotui: **none.** The optional disabled-option enhancement is an explicit out-
    valid config, including local `openai` servers with an explicit endpoint and empty model).
 3. **No regressions** — duplicate-name (409) and not-found (404) HTTP paths preserved by ordering
    the `errors.As` branch first; `defaultConnection`'s default-by-name precedence preserved when all
-   models are routable; load sweep never calls `SaveConfig` (no surprise disk rewrite); sessions
-   pinned to a now-dropped model fall back via existing restore logic. No `ui/tui`→`daemon`/`server`
-   import added.
+   models are routable; the `SendMessage` fallback's nil-keeps-current-connection path is preserved
+   exactly (the routability guard is narrow and only fires on a matched-but-unroutable default); the
+   all-unroutable case now fails with a **clear** error instead of the silent localhost-404 it would
+   otherwise have produced (Defect 1.1); load sweep never calls `SaveConfig` (no surprise disk
+   rewrite); sessions pinned to a now-dropped model fall back via existing restore logic. No
+   `ui/tui`→`daemon`/`server` import added.
 4. **Holistic / cross-repo** — load sweep and helpers sit in gogent to dodge a `config`→`model`
    cycle; the validator lives once in `internal/model` (its home) and is reused everywhere; the
    gogent↔turbotui seam is untouched (TUI consumes turbotui widgets only; the notice uses the
@@ -202,6 +282,22 @@ turbotui: **none.** The optional disabled-option enhancement is an explicit out-
   `g.config` exactly as the current code reads it (no new lock interleaving).
 - **Over-rejection**: validator is unchanged, so `openai`+explicit-endpoint+empty-model and all
   base-URL-deriving providers still pass — no valid config becomes unsavable.
+- **All-unroutable fail-safe (Defect 1.1)**: the *only* path that previously could fall to a bare
+  `NewModelConnection()` (silent localhost) was the empty/all-bad config; `NewUnroutableConnection`
+  replaces it with a clear deferred error. The common all-routable case is byte-for-byte unchanged
+  (still `g.buildConnection(def)`).
+- **`SendMessage` fallback semantics (Defect 3.1)**: the narrowed guard means an unmatched/empty
+  `DefaultModel` still yields `selectedConfig == nil` → session keeps its current connection,
+  identical to today; the redirect only triggers for a matched-but-unroutable default (which the
+  load sweep already prevents from existing in memory). Pinned by test.
+
+## Resolved decisions (previously open)
+- **No-routable-model fail-safe**: returns a `NewUnroutableConnection` with a clear deferred
+  `configErr`, never the bare localhost placeholder (Defect 1.1 fixed).
+- **`SendMessage` default-fallback scope**: narrowed so it preserves the nil-keeps-current-connection
+  behavior and only redirects a matched-but-unroutable default (Defect 3.1 fixed + tested).
+- **Notice recurrence**: intentionally re-fires every launch until the user fixes the file; we never
+  auto-rewrite the config. Modal stacks above (and is dismissed before) the welcome dialog.
 
 ## Open questions
 - **Notice in attached/remote mode**: left silent (handler nil) to avoid daemon-notice plumbing,
