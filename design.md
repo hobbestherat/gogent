@@ -97,11 +97,27 @@ need to confirm it isn't clipped by the widget's `Truncate(…,"…")` at the si
 minimum width, especially behind long session names. Mitigated by the fact that the
 summary node is a child row rendered on its own line (not appended to the session name),
 so it has the full sidebar width; +3 cells on a `\|▶N  ⏸N  ✓N  ✗N\|`-style line is well
-within typical sidebar width. **Resolved, not merely flagged:** the new bar is 16 cells
-(`|▶0  ⏸0  ✓0  ✗0|`; was 13) on its own indented child line, and `minSidebarWidth = 24`
-(sidebar.go:27), so it fits with headroom even behind the child indent. This is locked
-by the existing `TestSummary_BarFitsAtMinSidebarWidth` (:453), which passes transitively
-once the `allZeroBar` const is updated.
+within typical sidebar width. **Common case resolved:** the all-zero / single-digit bar
+is 16 cells (`|▶0  ⏸0  ✓0  ✗0|`; was 13) on its own indented child line; at
+`minSidebarWidth = 24` (sidebar.go:27) the rendered budget is 18 cells (col-0 border +
+5-space indent → bar starts col 6), so it fits with 2 cells of headroom. Locked by the
+existing `TestSummary_BarFitsAtMinSidebarWidth` (:453), which passes transitively once
+the `allZeroBar` const is updated.
+
+**Acknowledged limitation (multi-digit at minimum width).** Measured in turbotui cells:
+the all-zero bar is 16, but a bar with two-digit counts in *all four* states
+(`|▶99  ⏸99  ✓99  ✗99|`) is 20 cells — over the 18-cell budget only when the sidebar is
+dragged to its absolute minimum (24). Under #510's 1-space form that same case was 17
+cells and fit; #515's +3 crosses the truncation boundary for this extreme. This is a
+*deliberate, accepted* consequence of the issue's required 2-space form, not a fixable
+defect: any code change that narrowed the bar back would fail goal-match (criterion 1).
+It is **display-only and sentinel-safe** — the stored `summaryNode.Label` always holds
+the full bar with both framing pipes, so the widget's `Truncate(…,"…")` only affects the
+painted glyphs, never `syncFoldSuffixes`'s `LastIndexByte(base,'|')` (which reads the
+stored label, not the truncated cells). It requires ≥10 sub-agents in every one of the
+four states simultaneously *and* a manually minimized sidebar — vanishingly rare. No
+production change is warranted; the existing min-width test covers the common case and
+the partner's `TestIssue515_BarRendersUntruncatedAtMinSidebarWidth` confirms it.
 
 **(3) No regressions.** Two invariants are the load-bearing ones, both preserved:
   - *Pipe-sentinel contract.* `syncFoldSuffixes` re-derives the fold suffix by
