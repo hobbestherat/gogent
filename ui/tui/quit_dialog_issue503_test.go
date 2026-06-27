@@ -16,13 +16,12 @@ package ui
 //       the &-in-labels is escaped so turbotui's mnemonic parser renders them.
 //
 // Note on observability: turbotui exposes no public path from a VisualComponent
-// back to its Widget, so the rendered body TextView's text and the Button labels
-// cannot be read off the dialog. We therefore (a) assert the pure buildQuitModel
-// for the exact title/body/labels (it IS the source the dialog renders), and (b)
-// drive the real dialog via BubbleType(Enter) / OnTypeFn(Escape) for the action
-// semantics. The in-place enriched body text itself is asserted at the unit level
-// (buildQuitModel enriched + rewriteBody), since the live body TextView is a local
-// in showQuitDialog and is not reachable from a test.
+// back to its Widget, so the rendered Button labels cannot be read off the dialog.
+// We therefore (a) assert the pure buildQuitModel for the exact title/body/labels
+// (it IS the source the dialog renders), (b) drive the real dialog via
+// BubbleType(Enter) / OnTypeFn(Escape) for the action semantics, and (c) read the
+// live body text via the retained w.quitDialogBody TextView (issue #503 fix) for the
+// in-place enrichment assertions.
 
 import (
 	"fmt"
@@ -516,23 +515,17 @@ func TestIssue503QuitDialogButtonCountPerMode(t *testing.T) {
 	}
 }
 
-// DEFECT (intentionally failing — surfaces a real bug against the acceptance
-// criteria). The narrow-terminal button drop is keyed off the CONTENT-SIZED dialog
-// width (the body's longest line + messagePad), NOT the terminal width. So on a
-// normal 120-column terminal:
-//   - Embedded: the body caps the dialog at ~61 cols, but its three buttons need
-//     ~65, so "Start daemon & quit" is dropped and never shown.
-//   - Attached-local once a status snapshot is fetched: the dialog is pre-sized to
-//     the (narrower) enriched shape (~41 cols), so "Stop daemon & quit" is dropped.
-//
-// Both violate "embedded offers Start daemon & quit" and "attached-local buttons:
-// Quit client / Stop daemon & quit / Cancel". The dialog width should be at least
-// the button-row width (max of body width and row width); today it is body-only.
-func TestIssue503Defect_MiddleButtonDroppedOnNormalWidthDialog(t *testing.T) {
+// Regression guard for the dialog-width fix (issue #503). The narrow-terminal
+// button drop must key off the TERMINAL width, not the content-sized dialog width.
+// Previously messageDialogSpec sized the dialog to the body only, so on a normal
+// 120-col terminal embedded (body ~61 wide) and attached-local-once-enriched
+// (body ~41 wide) were narrower than their own 3-button row and the middle handoff
+// button was silently dropped. widenForButtonRow now sizes the dialog to
+// max(body, buttonRow), so all three buttons render on a normal terminal.
+func TestIssue503DialogFitsAllThreeButtonsOnNormalTerminal(t *testing.T) {
 	cases := []struct {
 		name string
 		h    Handlers
-		want int // acceptance-criteria button count
 	}{
 		{
 			"embedded-with-start",
@@ -540,7 +533,6 @@ func TestIssue503Defect_MiddleButtonDroppedOnNormalWidthDialog(t *testing.T) {
 				DaemonMode:  func() DaemonMode { return DaemonModeEmbedded },
 				StartDaemon: func() error { return nil },
 			},
-			3,
 		},
 		{
 			"attached-local-with-status",
@@ -551,7 +543,6 @@ func TestIssue503Defect_MiddleButtonDroppedOnNormalWidthDialog(t *testing.T) {
 					return DaemonStatusReport{Mode: DaemonModeAttachedLocal, LiveSessions: 2}, nil
 				},
 			},
-			3,
 		},
 	}
 	for _, c := range cases {
@@ -560,11 +551,15 @@ func TestIssue503Defect_MiddleButtonDroppedOnNormalWidthDialog(t *testing.T) {
 			w.showQuitDialog()
 			got := len(quitButtons(w))
 			dw := w.quitDialogLayer.Root.Bounds.W
-			if got != c.want {
-				t.Fatalf("DEFECT: on a 120-col terminal %s rendered %d buttons (dialog width %d), "+
-					"want %d — the middle handoff button was dropped because the body-sized dialog "+
-					"is narrower than the button row. Fix: size the dialog to max(body, buttonRow).",
-					c.name, got, dw, c.want)
+			if got != 3 {
+				t.Fatalf("on a 120-col terminal %s rendered %d buttons (dialog width %d), want 3 — "+
+					"the middle handoff button was dropped; widenForButtonRow should size the dialog "+
+					"to max(body, buttonRow)", c.name, got, dw)
+			}
+			// And the dialog must actually be wide enough that the row fits (regression
+			// for the body-only sizing).
+			if !quitButtonRowFits(dw, quitLabels(quitOpenModel(w).Buttons)...) {
+				t.Fatalf("dialog width %d still does not fit the 3-button row", dw)
 			}
 		})
 	}
@@ -717,28 +712,23 @@ func TestIssue503StopDaemonAndQuitFailureStaysAlive(t *testing.T) {
 	}
 }
 
-// Start daemon & quit on SUCCESS quits (daemon stays up, work survives). Driven
-// through runStartDaemon with the exact continuation showQuitDialog wires to its
-// Start button, because the embedded dialog drops that button on a normal-width
-// terminal (see TestIssue503Defect_MiddleButtonDropped) so it cannot be click-
-// tested. This still validates the handoff + continuation contract end-to-end.
+// Start daemon & quit on SUCCESS quits (daemon stays up, work survives), driven by
+// pressing the real embedded "Start daemon && quit" button (now that the dialog is
+// sized wide enough to render it).
 func TestIssue503StartDaemonAndQuitSucceedsThenQuits(t *testing.T) {
 	release := make(chan struct{})
 	w := newQuitWorkbench(t, Handlers{
 		DaemonMode:  func() DaemonMode { return DaemonModeEmbedded },
 		StartDaemon: func() error { <-release; return nil },
 	})
-	quitAndQuit := func(err error) { // mirrors showQuitDialog's quitStartAndQuit action
-		if err != nil {
-			w.showConfirm("Start daemon", "Could not start the daemon:\n"+err.Error(), nil)
-			return
-		}
-		if w.quit != nil {
-			w.quit()
-		}
+	w.showQuitDialog()
+	pressQuitButton(t, w, quitStartAndQuit)
+
+	if w.quitDialogLayer != nil {
+		t.Fatal("Start-and-quit must dismiss the quit dialog once the handoff starts")
 	}
-	if !w.runStartDaemon(quitAndQuit) {
-		t.Fatal("runStartDaemon did not start a handoff")
+	if w.daemonHandoffLayer == nil {
+		t.Fatal("daemonHandoffLayer must be set while the handoff runs")
 	}
 	if got := topLayerName(w); got != "daemon-progress" {
 		t.Fatalf("in-flight top = %q, want daemon-progress", got)
@@ -761,15 +751,8 @@ func TestIssue503StartDaemonAndQuitFailureStaysAlive(t *testing.T) {
 		DaemonMode:  func() DaemonMode { return DaemonModeEmbedded },
 		StartDaemon: func() error { return fmt.Errorf("bind refused") },
 	})
-	w.runStartDaemon(func(err error) { // mirrors showQuitDialog's quitStartAndQuit action
-		if err != nil {
-			w.showConfirm("Start daemon", "Could not start the daemon:\n"+err.Error(), nil)
-			return
-		}
-		if w.quit != nil {
-			w.quit()
-		}
-	})
+	w.showQuitDialog()
+	pressQuitButton(t, w, quitStartAndQuit)
 	drainPostedEventually(t, w)
 
 	if quitTriggered(w) {
@@ -868,16 +851,15 @@ func TestIssue503QuitDialogEnrichNoOpsAfterDismiss(t *testing.T) {
 	// Now release the fetch; the Posted enrichment must no-op (layer guard).
 	results <- DaemonStatusReport{LiveSessions: 9}
 	drainPostedEventually(t, w)
-	// Nothing to assert visibly (body is unreachable), but the drain must not panic
-	// and the workbench must remain in a consistent (not-quit) state.
+	// The dialog is gone and quitDialogBody is nil, so the late enrichment must not
+	// have rewritten anything; the workbench stays consistent and not-quit.
 	if quitTriggered(w) {
 		t.Fatal("late enrichment after dismiss must not quit")
 	}
 }
 
 // rewriteBody is the in-place enrichment mechanism: clear, re-add each line, and
-// scroll to the top. Asserted directly on a fresh TextView (the live body is a local
-// in showQuitDialog and unreachable from tests).
+// scroll to the top. Asserted directly on a fresh TextView.
 func TestIssue503RewriteBodyReplacesContentAndScrollsTop(t *testing.T) {
 	body := tv.NewTextView("initial", tv.Rect{X: 0, Y: 0, W: 40, H: 5})
 	body.AddLine("kept")
@@ -890,6 +872,160 @@ func TestIssue503RewriteBodyReplacesContentAndScrollsTop(t *testing.T) {
 	}
 	// nil body must be safe (defensive).
 	rewriteBody(nil, "anything")
+}
+
+// ---------------------------------------------------------------------------
+// (2) In-place enrichment, end-to-end via the retained quitDialogBody (issue #503)
+// ---------------------------------------------------------------------------
+
+// The fallback body is shown immediately; once the background status snapshot
+// arrives the body is rewritten in place to the enriched counts. Read directly off
+// the retained quitDialogBody TextView.
+func TestIssue503EnrichedBodyRewrittenInPlaceLocal(t *testing.T) {
+	w := newQuitWorkbench(t, Handlers{
+		DaemonMode: func() DaemonMode { return DaemonModeAttachedLocal },
+		StopDaemon: func() error { return nil },
+		DaemonStatusInfo: func() (DaemonStatusReport, error) {
+			return DaemonStatusReport{
+				Mode: DaemonModeAttachedLocal, LiveSessions: 3, Watchers: 1,
+				MCPServers: []string{"git", "fs"},
+			}, nil
+		},
+	})
+	w.showQuitDialog()
+
+	// Before the fetch lands, the fallback body is shown.
+	if body := w.quitDialogBody; body == nil {
+		t.Fatal("quitDialogBody must be retained while the dialog is open")
+	} else if !strings.Contains(body.AllText(), "continue in the background") {
+		t.Fatalf("fallback body not shown before enrichment:\n%s", body.AllText())
+	}
+
+	drainPostedEventually(t, w)
+
+	got := w.quitDialogBody.AllText()
+	for _, want := range []string{
+		"The local daemon keeps running:",
+		"3 live sessions",
+		"1 watcher",
+		"2 MCP servers",
+		"Re-attach later with:  gogent",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("enriched local body missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// Remote enriched body names the host and shows the verbatim --connect {addr}.
+func TestIssue503EnrichedBodyRewrittenInPlaceRemote(t *testing.T) {
+	w := newQuitWorkbench(t, Handlers{
+		DaemonMode:       func() DaemonMode { return DaemonModeAttachedRemote },
+		ReconnectAddress: func() string { return "ssh://u@db.example" },
+		DaemonStatusInfo: func() (DaemonStatusReport, error) {
+			return DaemonStatusReport{Mode: DaemonModeAttachedRemote, LiveSessions: 2}, nil
+		},
+	})
+	w.SetReconnectControls("db.example:8080", nil)
+	w.showQuitDialog()
+	drainPostedEventually(t, w)
+
+	got := w.quitDialogBody.AllText()
+	if !strings.Contains(got, "The daemon at db.example:8080 keeps running:") {
+		t.Errorf("enriched remote body missing host phrase:\n%s", got)
+	}
+	if !strings.Contains(got, "Re-attach later with:  gogent --connect ssh://u@db.example") {
+		t.Errorf("enriched remote body missing --connect addr line:\n%s", got)
+	}
+	if !strings.Contains(got, "2 live sessions") {
+		t.Errorf("enriched remote body missing counts:\n%s", got)
+	}
+}
+
+// quitDialogBody is set on open and cleared on dismiss (mirrors disconnectBody).
+func TestIssue503QuitDialogBodyClearedOnDismiss(t *testing.T) {
+	w := newQuitWorkbench(t, Handlers{
+		DaemonMode: func() DaemonMode { return DaemonModeAttachedRemote },
+	})
+	w.showQuitDialog()
+	if w.quitDialogBody == nil {
+		t.Fatal("quitDialogBody must be set while the dialog is open")
+	}
+	pressQuitButton(t, w, quitCancel)
+	if w.quitDialogBody != nil {
+		t.Fatal("quitDialogBody must be cleared on dismiss")
+	}
+	if w.quitDialogLayer != nil {
+		t.Fatal("quitDialogLayer must be cleared on dismiss")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// (3) Dismiss ordering — a declined handoff must NOT strand the user
+// ---------------------------------------------------------------------------
+
+// If runStopDaemon declines (a handoff already in flight) the quit dialog must stay
+// open rather than dismissing and leaving the user with nothing. (issue #503 fix:
+// dismiss only when the handoff actually started.)
+func TestIssue503StopButtonKeepsDialogWhenHandoffDeclines(t *testing.T) {
+	w := newQuitWorkbench(t, Handlers{
+		DaemonMode: func() DaemonMode { return DaemonModeAttachedLocal },
+		StopDaemon: func() error { return nil },
+	})
+	w.showQuitDialog()
+	// Pretend a handoff is already in flight (e.g. started from the Daemon menu).
+	w.daemonHandoffLayer = w.showProgress("Start daemon", "migrating")
+
+	pressQuitButton(t, w, quitStopAndQuit)
+
+	if w.quitDialogLayer == nil {
+		t.Fatal("quit dialog must stay open when the handoff declined (do not strand the user)")
+	}
+	if quitTriggered(w) {
+		t.Fatal("a declined handoff must not quit")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// (3) Pure layout helpers introduced by the width fix
+// ---------------------------------------------------------------------------
+
+func TestIssue503QuitButtonRowWidth(t *testing.T) {
+	three := quitButtonRowWidth("Quit client", "Stop daemon && quit", "Cancel")
+	two := quitButtonRowWidth("Quit client", "Cancel")
+	if three <= two {
+		t.Fatalf("3-button row width %d should exceed 2-button %d", three, two)
+	}
+	// Equals sum of each rendered label + 2 gaps of 4.
+	want := tv.ButtonLabelWidth("Quit client") + tv.ButtonLabelWidth("Stop daemon && quit") +
+		tv.ButtonLabelWidth("Cancel") + 2*4
+	if three != want {
+		t.Fatalf("quitButtonRowWidth = %d, want %d", three, want)
+	}
+}
+
+// widenForButtonRow pads the sizing text's first line (invisibly) so the dialog is
+// at least as wide as the button row; a no-op when the body is already wide enough.
+func TestIssue503WidenForButtonRow(t *testing.T) {
+	// Already wide enough → unchanged.
+	wide := strings.Repeat("x", 80) + "\nsecond"
+	if got := widenForButtonRow(wide, 40); got != wide {
+		t.Errorf("widenForButtonRow changed an already-wide body")
+	}
+	// Narrow body → first line padded to rowW, later lines preserved.
+	got := widenForButtonRow("short\nsecond line", 30)
+	first, _, _ := strings.Cut(got, "\n")
+	if w := tui.StringWidth(first); w < 30 {
+		t.Errorf("padded first line width = %d, want >= 30", w)
+	}
+	if !strings.Contains(got, "second line") {
+		t.Errorf("widenForButtonRow dropped later lines: %q", got)
+	}
+	// Single-line body (no newline) still pads.
+	got = widenForButtonRow("short", 25)
+	if tui.StringWidth(got) < 25 || strings.Contains(got, "\n") {
+		t.Errorf("single-line widen wrong: %q", got)
+	}
 }
 
 // reconnectAddress is nil-safe: "" when ReconnectAddress is unwired.
