@@ -18,6 +18,7 @@ import (
 	"gogent/internal/modelsdev"
 	"gogent/internal/notify"
 	"gogent/internal/stats"
+	"log"
 	"os"
 	"strings"
 	"sync"
@@ -1602,7 +1603,21 @@ func (w *Workbench) AdoptSession(rs RestoredSession) *SessionWindow {
 	if n := parseSessionNum(rs.ID); n > w.nextNum {
 		w.nextNum = n
 	}
+	// Duplicate-window guard (issue #518): if a window for this id is already open,
+	// raise it and return the SAME window rather than opening a second one (which
+	// would orphan the first on-screen and leave a single map entry → split-brain).
+	// This mirrors openWatcherSession's already-open branch. We deliberately do NOT
+	// reload rs.Messages here: AdoptSession is also reached via the Saved Sessions
+	// "Continue" button, whose rs.Messages is a (possibly stale) file read, so a
+	// reload could clobber a live transcript the user is typing into. The §7
+	// reconnect jump-to-present reloads open windows inline in refreshAfterReconnect
+	// and only routes new ids through AdoptSession, so it is unaffected.
+	existing := w.sessions[rs.ID]
 	w.mu.Unlock()
+	if existing != nil {
+		w.Focus(rs.ID)
+		return existing
+	}
 	title := rs.Title
 	if title == "" {
 		title = rs.ID
@@ -1673,6 +1688,18 @@ func (w *Workbench) openWindow(id, title string) *SessionWindow {
 // from the Sessions browser.
 func (w *Workbench) openWindowAny(id, title string, readOnly bool) *SessionWindow {
 	w.mu.Lock()
+	// Collision tripwire (issue #518): this is the sole w.sessions[id]= write site,
+	// so it is the last line of defense against a duplicate window. The callers
+	// (NewSession, ForkSession, AdoptSession, OpenAnalysisSession) all generate or
+	// guard ids that are unique here, so reaching this is a programming error
+	// upstream. Return the existing window — keeping the *SessionWindow contract so
+	// callers don't nil-panic and never orphaning the on-screen window — and log
+	// rather than silently overwriting the map entry.
+	if existing := w.sessions[id]; existing != nil {
+		w.mu.Unlock()
+		log.Printf("tui: openWindowAny: window for session %q already exists; returning existing (duplicate-open guard, issue #518)", id)
+		return existing
+	}
 	// Cascade windows so they don't perfectly overlap. New windows open in the
 	// area left of the sidebar (with a fallback to the full width on a terminal
 	// too narrow to spare it); dragging/resizing/maximizing then keep them there
@@ -2653,7 +2680,17 @@ func (w *Workbench) Run() error {
 		if w.handlers.LoadLayout != nil {
 			layout = w.handlers.LoadLayout()
 		}
+		// Skip ids already adopted this pass (issue #518): defends against a
+		// duplicate id appearing twice in the restored list and against a
+		// concurrent reconnect-triggered restore that already opened a window.
+		// AdoptSession is itself idempotent on an open id, so this is a cheap,
+		// explicit belt-and-suspenders that also documents the loop's intent.
+		seen := make(map[string]bool, len(restored))
 		for _, rs := range orderByLayout(restored, layout) {
+			if seen[rs.ID] {
+				continue
+			}
+			seen[rs.ID] = true
 			w.AdoptSession(rs)
 		}
 		w.applyLayout(layout)
