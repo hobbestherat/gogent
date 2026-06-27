@@ -3363,6 +3363,13 @@ var (
 // each session's own lock via PrimaryModel() — never holding g.mu across s.mu —
 // and finally re-acquire g.mu to delete.
 func (g *Gogent) RemoveModel(name string) error {
+	// An empty name matches no configured model — and would otherwise alias every
+	// idle session's PrimaryModel()=="" in the in-use scan below, yielding a
+	// spurious in-use block. Reject it up front as not-found.
+	if name == "" {
+		return fmt.Errorf("%w: %q", ErrModelNotFound, name)
+	}
+
 	// 1) In-use scan: snapshot session pointers under g.mu, release, then probe
 	// each session lock-free so g.mu is never held across the session's s.mu.
 	g.mu.RLock()

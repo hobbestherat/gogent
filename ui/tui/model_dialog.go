@@ -82,17 +82,23 @@ func (w *Workbench) showModelsDialog() {
 
 	addEmpty := func() {
 		w.showModelForm("Add model — empty", config.ModelConfig{}, true, w.handlers.AddModel, func() {
-			w.refreshModelsList()
+			// Add/edit/set-default always leave a non-empty list, so the guarded
+			// refresh is correct AND resilient: a transient GetModels failure (remote
+			// mode returns nil on error) preserves the live dropdowns rather than
+			// blanking them. Only remove uses the unconditional refreshModelsList,
+			// where an empty result is the legitimate expected post-state (D1).
+			w.refreshModelsAfterSave()
 			reopen()
 		})
 	}
 	addCatalog := func() {
-		// Reuse the existing catalog wizard UNCHANGED. It manages its own modal
-		// layers and refreshes the dropdowns on save; we close this list first so
-		// the user is never left looking at a stale list behind the wizard. They can
-		// reopen Models… to keep managing.
+		// Reuse the existing catalog wizard. Close this list while the wizard runs,
+		// then reopen a FRESH list when the wizard finishes — on success OR cancel —
+		// so the newly-added model is visible and the user can keep managing (the
+		// onClose continuation; the wizard already refreshes the live dropdowns on
+		// save). reopen() rebuilds from the authoritative GetModels.
 		w.desktop.RemoveLayer(layer)
-		w.showAddModelDialog()
+		w.showAddModelDialog(func() { w.showModelsDialog() })
 	}
 	edit := func() {
 		m, ok := selected()
@@ -104,7 +110,7 @@ func (w *Workbench) showModelsDialog() {
 			title = m.Name
 		}
 		w.showModelForm("Edit model — "+title, m, false, w.handlers.UpdateModel, func() {
-			w.refreshModelsList()
+			w.refreshModelsAfterSave()
 			reopen()
 		})
 	}
@@ -140,7 +146,7 @@ func (w *Workbench) showModelsDialog() {
 			w.showConfirm("Default model", "Could not set default:\n"+err.Error(), nil)
 			return
 		}
-		w.refreshModelsList()
+		w.refreshModelsAfterSave()
 		reopen()
 	}
 
@@ -233,8 +239,11 @@ func (w *Workbench) showModelsDialog() {
 		list.OnActivate = func(*tv.TreeNode) { edit() } // Enter on a row == Edit
 	}
 
-	dialog.Window.AddContent(dialogLabel("Enter edit · Tab move · Esc close",
-		tv.Rect{X: 2, Y: hintY, W: width - 4, H: 1}))
+	hint := "Add a model to begin · Esc close"
+	if len(models) > 0 {
+		hint = "Enter edit · Tab move · Esc close"
+	}
+	dialog.Window.AddContent(dialogLabel(hint, tv.Rect{X: 2, Y: hintY, W: width - 4, H: 1}))
 
 	footer := footerButtonRects(labels, 2, width-3, buttonY, tv.DefaultButtonGap)
 	for i, a := range acts {
