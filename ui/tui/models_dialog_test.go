@@ -1,11 +1,13 @@
 package ui
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 
 	"gogent/internal/config"
+	"gogent/internal/modelsdev"
 
 	tv "github.com/hobbestherat/turbotui/turbotv"
 )
@@ -143,6 +145,67 @@ func TestRefreshModelsListUpdatesWhenNonEmpty(t *testing.T) {
 	}
 	if len(w.modelNames) != 1 || w.modelNames[0] != "Alpha" {
 		t.Errorf("modelNames = %v, want [Alpha]", w.modelNames)
+	}
+}
+
+// TestRefreshModelsAfterSavePreservesDropdownsWhenGetModelsEmpty locks the B1 fix:
+// addEmpty / edit / setDefault use refreshModelsAfterSave (the GUARDED refresh),
+// which must NOT blank the live dropdowns when GetModels returns empty — exactly
+// what happens in remote mode when ListModels fails right after a successful
+// mutate. Contrast with refreshModelsList (used only by remove), which is
+// intentionally empty-aware (D1).
+func TestRefreshModelsAfterSavePreservesDropdownsWhenGetModelsEmpty(t *testing.T) {
+	w := newTestWorkbench(t) // starts with one model ("test")
+	before := len(w.modelNames)
+	w.SetHandlers(Handlers{GetModels: func() []config.ModelConfig { return nil }})
+
+	w.refreshModelsAfterSave()
+
+	if len(w.modelNames) != before {
+		t.Errorf("modelNames = %v after a guarded refresh that returned empty, want preserved %d "+
+			"(B1: a transient remote GetModels failure must not blank the live dropdowns)", w.modelNames, before)
+	}
+	if len(w.models) != before {
+		t.Errorf("models = %+v after a guarded empty refresh, want preserved", w.models)
+	}
+}
+
+// TestModelsDialogAddCatalogCancelReturnsToList locks the B2 fix: the catalog
+// wizard now threads an onClose continuation so cancelling (or finishing) it
+// returns the user to a fresh Models… list, instead of leaving them with no dialog.
+// It drives the real async load (stubbed catalog) via drainPosted, then cancels at
+// the provider step and asserts the models-dialog layer is back on top.
+func TestModelsDialogAddCatalogCancelReturnsToList(t *testing.T) {
+	w := newTestWorkbench(t)
+	w.SetHandlers(Handlers{
+		GetModels: func() []config.ModelConfig {
+			return []config.ModelConfig{{Name: "x", DisplayName: "X", Model: "m", APIType: "openai"}}
+		},
+		GetDefaultModel: func() string { return "x" },
+		UpdateModel:     func(config.ModelConfig) error { return nil },
+		AddModel:        func(config.ModelConfig) error { return nil },
+		RemoveModel:     func(string) error { return nil },
+		SetDefaultModel: func(string) error { return nil },
+		GetModelCatalog: func(context.Context, bool) (modelsdev.Catalog, error) {
+			return modelsdev.Catalog{
+				"prov": modelsdev.Provider{ID: "prov", Name: "Prov", Models: map[string]modelsdev.Model{"m": {ID: "m", Name: "M"}}},
+			}, nil
+		},
+	})
+	w.showModelsDialog()
+
+	clickTopButtonByText(t, w, "Catalog") // "Add from Catalog…" (mnemonic stripped on render)
+	drainPostedEventually(t, w)           // off-thread catalog load -> provider picker
+
+	if got := topLayerName(w); got != "catalog-picker" {
+		t.Fatalf("after Add from Catalog, top layer = %q, want catalog-picker (the wizard did not advance)", got)
+	}
+
+	clickTopButtonByText(t, w, "Cancel") // abandon the wizard at the provider step
+
+	if got := topLayerName(w); got != "models-dialog" {
+		t.Fatalf("after cancelling the catalog wizard, top layer = %q, want models-dialog "+
+			"(B2: cancelling must return to the Models… list, not leave no dialog open)", got)
 	}
 }
 

@@ -220,3 +220,93 @@ func hasModel(g *Gogent, name string) bool {
 	}
 	return false
 }
+
+// TestRemoveModelEmptyNameReturnsNotFound locks the fixes-round-1 guard: an empty
+// name matches no configured model and must be rejected up front as not-found.
+// Without the guard, the in-use scan below would compare PrimaryModel()=="" ==
+// name and spuriously block on every idle session.
+func TestRemoveModelEmptyNameReturnsNotFound(t *testing.T) {
+	g := removeTestGogent(t,
+		&config.ModelConfig{Name: "main", Model: "m1"},
+		&config.ModelConfig{Name: "alt", Model: "m2"},
+	)
+	err := g.RemoveModel("")
+	if !errors.Is(err, ErrModelNotFound) {
+		t.Fatalf("RemoveModel(\"\") err = %v, want ErrModelNotFound", err)
+	}
+	if errors.Is(err, ErrModelInUse) {
+		t.Fatalf("RemoveModel(\"\") must not be reported as in-use (the empty-name/idle-session aliasing bug): %v", err)
+	}
+	// Nothing removed.
+	if len(g.Models()) != 2 {
+		t.Fatalf("models after RemoveModel(\"\") = %v, want both untouched", g.Models())
+	}
+}
+
+// TestRemoveModelEmptyNameDoesNotAliasIdleSession is the precise regression for the
+// bug: an idle session reports PrimaryModel()=="", so before the guard
+// RemoveModel("") returned ErrModelInUse whenever any idle session existed.
+func TestRemoveModelEmptyNameDoesNotAliasIdleSession(t *testing.T) {
+	g := removeTestGogent(t,
+		&config.ModelConfig{Name: "main", Model: "m1"},
+		&config.ModelConfig{Name: "alt", Model: "m2"},
+	)
+	g.NewSession("idle") // never sends -> PrimaryModel()==""
+
+	err := g.RemoveModel("")
+	if !errors.Is(err, ErrModelNotFound) || errors.Is(err, ErrModelInUse) {
+		t.Fatalf("RemoveModel(\"\") with an idle session = %v; want ErrModelNotFound only "+
+			"(the idle session's empty PrimaryModel must not be treated as in-use)", err)
+	}
+}
+
+// TestRemoveModelInUseReportsASession: with several sessions mid-use on the model,
+// the block names one of them (map iteration order is non-deterministic, so assert
+// it names SOME live session id, not which one).
+func TestRemoveModelInUseReportsASession(t *testing.T) {
+	g := removeTestGogent(t,
+		&config.ModelConfig{Name: "main", Model: "m1"},
+		&config.ModelConfig{Name: "alt", Model: "m2"},
+	)
+	for _, id := range []string{"sess-a", "sess-b", "sess-c"} {
+		g.NewSession(id).SetPrimaryModel("alt")
+	}
+
+	err := g.RemoveModel("alt")
+	if !errors.Is(err, ErrModelInUse) {
+		t.Fatalf("RemoveModel(in-use by 3) err = %v, want ErrModelInUse", err)
+	}
+	named := false
+	for _, id := range []string{"sess-a", "sess-b", "sess-c"} {
+		if strings.Contains(err.Error(), id) {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("in-use error %v should name one of the blocking sessions", err)
+	}
+	if !hasModel(g, "alt") {
+		t.Error("the in-use model must not have been removed")
+	}
+}
+
+// TestRemoveModelStaleDefaultDoesNotBlockNonDefault: a DefaultModel that points at
+// a nonexistent model (stale) must not interfere with removing a real, non-default
+// model. The block only applies when the removed model IS the default.
+func TestRemoveModelStaleDefaultDoesNotBlockNonDefault(t *testing.T) {
+	g := removeTestGogent(t,
+		&config.ModelConfig{Name: "main", Model: "m1"},
+		&config.ModelConfig{Name: "alt", Model: "m2"},
+	)
+	g.config.DefaultModel = "ghost" // stale: references no configured model
+
+	if err := g.RemoveModel("alt"); err != nil {
+		t.Fatalf("RemoveModel(alt) with a stale default = %v, want nil", err)
+	}
+	if hasModel(g, "alt") {
+		t.Fatal("alt should have been removed")
+	}
+	if got := g.DefaultModelName(); got != "ghost" {
+		t.Fatalf("DefaultModel changed to %q; a non-default removal must not touch it", got)
+	}
+}
