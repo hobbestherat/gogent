@@ -38,14 +38,35 @@ surface). Concretely:
 - **`internal/server/wire.go`** — add `DefaultModel string \`json:"default_model"\``
   to `settingsView`.
 - **`internal/server/resources.go`** — `settingsSvc.Get` returns
-  `DefaultModel: svc.s.g.DefaultModelName()`. `settingsSvc.Set` applies it via
-  `svc.s.g.SetDefaultModel(req.DefaultModel)` **only when** `req.DefaultModel != ""`
-  **and** differs from the current value (so an unrelated PUT — e.g. a budget change —
-  never re-validates/clears it), and **returns that error** when `SetDefaultModel`
-  reports "model not found", so a bad name surfaces to the caller instead of being
-  swallowed. The other field setters are unchanged; because every realistic caller
-  does a read-modify-write, the other fields equal their current values and remain
-  effective no-ops even if Set returns early on the default-model error.
+  `DefaultModel: svc.s.g.DefaultModelName()`. `settingsSvc.Set` applies the
+  default-model change **first, before any other setter** (fail-fast), and **only
+  when** `req.DefaultModel != ""` **and** it differs from the current value (so an
+  unrelated PUT — e.g. a budget change, or an older client that omits the field —
+  never re-validates or clears it):
+
+  ```go
+  if req.DefaultModel != "" && req.DefaultModel != svc.s.g.DefaultModelName() {
+      if err := svc.s.g.SetDefaultModel(req.DefaultModel); err != nil {
+          // g.SetDefaultModel returns a bare fmt.Errorf("model %q not found")
+          // (gogent.go:3400). A bare error maps to HTTP 500 in webapi
+          // (webapi.go: http.Error(..., StatusInternalServerError)); an invalid
+          // model name is user-correctable input, so wrap it as a 400 to match the
+          // repo-wide pattern (resources.go:40/63/81, approvals_handlers.go:33).
+          return nil, webapi.NewHTTPError(http.StatusBadRequest, err.Error())
+      }
+  }
+  // ... only AFTER default_model validated/applied do the other setters run:
+  svc.s.g.SetSubAgentSettings(req.SubAgents)
+  svc.s.g.SetTimeouts(req.Timeouts)
+  svc.s.g.SetBudget(req.Budget)
+  if req.ReviewEdits != svc.s.g.ReviewEdits() { svc.s.g.SetReviewEdits(req.ReviewEdits) }
+  ```
+
+  Applying `default_model` first means a bad name fails the whole PUT **before** any
+  other field is persisted — correct even for a non-RMW caller (a browser/script doing
+  a full PUT with a changed budget *and* an invalid model gets no partial write). This
+  removes any reliance on the RMW "no-op" rationalization.
+  `webapi` and `net/http` are already imported in `resources.go`.
 - **`ui/tui/api_client.go`** — add `DefaultModel string \`json:"default_model"\``
   to `SettingsDTO` (keeps the read-modify-write round-trip lossless, mirroring the
   server view).
@@ -56,9 +77,12 @@ surface). Concretely:
     error). `SetDefaultModel` must **return** the error (its signature is
     `func(string) error`, and `model_editor.go:299` / `model_catalog_dialog.go:477`
     surface it), so it does its own GET → set `DefaultModel` → `c.SetSettings(cur)`
-    and returns that result. `APIClient.SetSettings` already converts a daemon
-    non-2xx (the 400 "model not found") into a Go error, so the daemon's validation
-    propagates to the dialog.
+    and returns that result. `APIClient.SetSettings`/`do` already turns a daemon
+    non-2xx response into a Go error carrying the body (`api_client.go:215-217`), so
+    the daemon's **400 "model not found"** (from the wrapped `NewHTTPError` above)
+    propagates to the editor dialog. (Minor DRY note: this inlines a GET→mutate→PUT
+    rather than adding an error-returning sibling of `mutateSettings`; that is
+    deliberate, because the two have opposite error semantics — swallow vs return.)
 - **`cmd/attach.go::installPresentationHandlers`** — **remove** the
   `h.GetDefaultModel`/`h.SetDefaultModel` local-`g` assignments. They now come from
   `rc.Handlers()` (installed before `installPresentationHandlers`, which no longer
@@ -68,11 +92,13 @@ surface). Concretely:
   `{sub_agents, timeouts, budget, review_edits, default_model}`.
 
 Why settingsView over a dedicated `/api/settings/default-model`: the issue lists the
-settingsView field as PREFERRED; it reuses the existing route, mirrors budget 1:1,
-and needs no new api.go route wiring. The only nuance (error propagation on an
-invalid name) is handled by returning the error from `settingsSvc.Set` and by
-`RemoteClient.SetDefaultModel` doing an explicit RMW rather than the silent
-`mutateSettings`.
+settingsView field as PREFERRED; it reuses the existing route, mirrors budget 1:1
+(budget likewise has **no** dedicated APIClient method — it rides `GetSettings`/
+`SetSettings`), and needs no new api.go route wiring. The only nuances (HTTP status
+for an invalid name; partial-write ordering) are handled by the wrapped
+`NewHTTPError(400)` and the validate-first ordering above, and by
+`RemoteClient.SetDefaultModel` doing an explicit error-returning RMW rather than the
+silent `mutateSettings`.
 
 ### 2) Notification ownership — CLIENT-LOCAL (documented), the simplest defensible policy
 
@@ -160,25 +186,43 @@ if a doc comment there helps; default is **no change**.
 
 ## Tests
 
-- **`internal/server`** (new test file, e.g. `default_model_issue507_test.go`):
-  GET `/api/settings` reflects `g.DefaultModelName()`; PUT `/api/settings` with a
-  valid `default_model` updates `g.DefaultModelName()`; PUT with an unknown name
-  returns a non-2xx error and leaves the default unchanged; existing
-  `/settings`/`/settings/notifications` round-trips unchanged (assert the notify
-  endpoint is independent of default_model).
-- **`ui/tui`** (extend the remote-client test set, mirroring the budget test pattern
-  in `remote_client_phase2_test.go`): a stub daemon server; `GetDefaultModel` hits
-  GET `/api/settings`; `SetDefaultModel` issues GET+PUT and returns the daemon's
-  error on a 400.
-- **REGRESSION** (`cmd` or `ui/tui` with a temp HOME + in-process daemon server):
-  seed a client `~/.gogent/config.json` with `default_model:"client-model"`; stand up
-  a daemon whose default is `"daemon-model"`; build the attached handlers; call
-  `GetDefaultModel()` → expect `"daemon-model"` (NOT the client's), and
-  `SetDefaultModel("daemon-model-2")` → expect the **client** `config.json`
-  byte-unchanged (and its `default_model` still `"client-model"`), while the daemon's
-  `DefaultModelName()` is now `"daemon-model-2"`. Because notifications are
-  client-local by policy, the test does **not** assert config.json unchanged after a
-  notify change.
+- **`internal/server`** (new test file, e.g. `default_model_issue507_test.go`),
+  driving the real handler via `server.NewServer(...)` + `srv.Handler()`
+  (`api.go:88,267`) with a loopback (human) request:
+  GET `/api/settings` reflects `g.DefaultModelName()`; PUT with a valid
+  `default_model` updates `g.DefaultModelName()`; PUT with an **unknown** name returns
+  exactly **HTTP 400** (`rec.Code == http.StatusBadRequest`, not merely "non-2xx" —
+  this is what catches the bare-error→500 trap) and leaves the default **and the other
+  fields** unchanged (proves validate-first ordering: send a changed budget + invalid
+  model in one PUT, assert budget did **not** persist); a PUT that omits
+  `default_model` (`""`) leaves the daemon default unchanged. Assert the existing
+  `/settings/notifications` round-trip is independent of `default_model`.
+- **`ui/tui`** (new test, e.g. `default_model_issue507_test.go`): copy the
+  **stub-server + recorded-request** style of `TestRemoteHandlersMapCallsToHTTPRequests`
+  (`remote_client_phase2_test.go:417`) — note there is no existing budget/settings
+  handler-mapping test to mirror, only the session-handler one, so reuse its harness,
+  not a budget precedent. Build `NewRemoteClient(client,…).Handlers()` against the stub
+  and assert: `GetDefaultModel()` issues `GET /api/settings` and returns the stub's
+  `default_model`; `SetDefaultModel("x")` issues `GET` then `PUT /api/settings` with
+  `default_model:"x"`; and a stub `PUT` returning 400 makes `SetDefaultModel` return a
+  non-nil error.
+- **REGRESSION** (`cmd` test — both seams are package-callable; `runAttached` itself is
+  not unit-callable because it inlines signal/SSH/TUI setup, so the test composes the
+  handler set the same way `runAttached` does, minus the loop): temp `HOME`; seed a
+  client `~/.gogent/config.json` with `default_model:"client-model"`; stand up an
+  in-process daemon (`server.NewServer` + `httptest`/unix socket) whose core's default
+  is `"daemon-model"`; build `handlers := rc.Handlers()` then
+  `installPresentationHandlers(&handlers, g, wb, false)`. Assert:
+  (a) `installPresentationHandlers` does **not** overwrite the daemon-backed
+  `GetDefaultModel`/`SetDefaultModel` — set a sentinel via `rc.Handlers()` first and
+  confirm it survives (guards against a future re-introduction of the local wiring);
+  (b) `handlers.GetDefaultModel()` → `"daemon-model"` (NOT the client's);
+  (c) after `handlers.SetDefaultModel("daemon-model-2")`, the **client** `config.json`
+  is **byte-unchanged** AND its `default_model` field is still `"client-model"` (the
+  field check is robust even if a future load normalizes unrelated bytes), while the
+  daemon core's `DefaultModelName()` is now `"daemon-model-2"`. Because notifications
+  are client-local by policy, the test does **not** assert config.json unchanged after
+  a notify change.
 - Keep existing suites green: `attach_phase2_test`, `handoff_issue358_test`,
   `ssh_attach_issue482_test`, model-catalog (#486), `server_test`,
   `notifications_issue358_test`, etc. (adding a field to `settingsView` is
@@ -196,10 +240,12 @@ UI, no scope creep (frontend-only NewGogent deferred to a comment).
 daemon sessions honour it. The model selector resolves the daemon's default against
 the daemon's own list — eliminating the silent index-0 fallback for the user's real
 choice (`tui.go:1506`). An invalid name surfaces the daemon's "model not found" error
-in the editor dialog (error is propagated, not swallowed). Default-model now follows
-the same daemon-owned pattern as budget, so the three settings behave consistently.
-The user still controls *their* terminal's notifications locally, which is the
-expected behaviour for a desktop bell.
+in the editor dialog as a **400** (error propagated, not swallowed). Default-model now
+follows the same daemon-owned HTTP pattern as **budget** (both ride `/api/settings`).
+Notifications deliberately stay **client-owned** — the user controls *their* terminal's
+bell locally — so the model is "two daemon-owned settings (default-model, budget) +
+one explicitly client-owned (notifications)", each consistent within its tier and each
+documented. (This is an intentional split, not an inconsistency.)
 
 **(3) No regressions.** Embedded path untouched (local `g` still backs these
 handlers; server change doesn't touch embedded). Adding a JSON field to
@@ -230,13 +276,15 @@ build). No go.mod bump, no new deps.
   (`gogent.go:176-236`). Mitigation if a future migration changes this: the
   regression test also asserts the `default_model` **field value** is unchanged
   (robust even if unrelated bytes are normalized), in addition to byte-identity.
-- **`settingsSvc.Set` returning an error mid-apply** could in principle leave a
-  partial write. Because the only realistic caller (RemoteClient) does a
-  read-modify-write, the non-default fields equal current values, so the SetXxx calls
-  are no-ops and an early return on the default-model error is harmless. Documented in
-  the handler comment.
-- **Empty `default_model` in a PUT** (e.g. an older client) must not clear the
-  daemon's default: Set ignores `req.DefaultModel == ""`. Covered by test.
+- **Partial write on a bad default name** — resolved by ordering: `default_model` is
+  validated/applied **first**, so a 400 aborts the PUT before any other setter runs.
+  No reliance on RMW. Tested by the "changed budget + invalid model" case.
+- **Wrong HTTP status** — `g.SetDefaultModel`'s bare error would map to **500**;
+  wrapped as `NewHTTPError(http.StatusBadRequest, …)` to match the repo-wide pattern.
+  The server test asserts `http.StatusBadRequest` specifically (not "non-2xx").
+- **Empty `default_model` in a PUT** (e.g. an older client that doesn't send the
+  field) must not clear the daemon's default: Set ignores `req.DefaultModel == ""`.
+  Covered by test.
 
 ## Open questions
 
