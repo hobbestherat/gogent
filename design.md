@@ -20,7 +20,12 @@ for all three quit gestures:
 - Ctrl+C (`~L2557`), File→Exit `actionAppQuit` (`~L958`), command-palette "Quit"
   (`command_palette.go:277`) all call `confirmQuit()`.
 
-Updating `confirmQuit()` therefore covers every gesture. Today it is:
+Updating `confirmQuit()` therefore covers all three *confirmable* quit gestures.
+One quit path deliberately bypasses it: the disconnect modal's "Quit" button
+(`disconnect_modal.go:93`) calls `w.QuitFunc()` directly. That is intentional and
+unchanged — the disconnect modal's own body already states the daemon survives,
+and re-confirming inside a blocking "connection lost" modal would be hostile, so
+this design leaves that path alone. Today `confirmQuit` is:
 
 ```go
 func (w *Workbench) confirmQuit() {
@@ -42,14 +47,25 @@ No quit gesture, no `w.quit()` call site, and no `showConfirm` signature changes
 
 ## 2. Files & functions touched
 
-### `ui/tui/message_dialog.go` (layout helper only)
+### `ui/tui/message_dialog.go` (layout helper + one return-value change)
 - **Add** `quitButtonRow(width, btnY int, labels ...string) []tv.Rect` next to
   `confirmButtonRow`/`disconnectButtonRow`. Centres N (2 or 3) buttons on row
   `btnY`, each sized via `tv.ButtonLabelWidth`, constant `gap = 4`, each rect
   clamped to `[2, width-3]` via `clampDialogRect` (same idiom as the existing
   two helpers). Returns one rect per label, in order.
-- No change to `newMessageLayer`/`showConfirm`/`showProgress` — they are reused
-  verbatim.
+- **Change `newMessageLayer` to also return the body `*tv.TextView`.** Today it
+  returns `(*tv.Dialog, *tv.Layer, int, int)` and the body TextView it builds at
+  `message_dialog.go:105` is unreachable by callers — so the quit dialog could
+  not enrich it in place (see §5). New signature:
+  `(*tv.Dialog, *tv.Layer, *tv.TextView, int, int)` (dialog, layer, body, width,
+  bodyH). The two existing callers — `showConfirm` (`L140`) and `showProgress`
+  (`L186`) — are updated to discard the new value
+  (`dialog, layer, _, width, bodyH := …` / `_, layer, _, _, _ := …`); both are
+  behaviourally unchanged (they never enrich their body). This keeps the shared
+  content-sizing + resize-reflow in one place rather than forcing the quit dialog
+  to hand-build its body like `showDisconnectModal` does (which would lose that
+  reuse). This is the *only* turbotui-adjacent surface touched — and it is in
+  gogent, not turbotui (turbotui already exposes `TextView.AllText()` for tests).
 
 ### `ui/tui/quit_dialog.go` (NEW file — keeps the quit path localized & off the
 contended `tui.go`/`theme.go` lines that #500g/#501g also touch)
@@ -83,8 +99,20 @@ Holds everything new, all in `package ui`:
 
 ### `ui/tui/tui.go`
 - Rewrite `confirmQuit()` to branch (nil → old box; else `showQuitDialog`).
-- **No new `Handlers` field unless required** — see §7 (`ReconnectAddress` is an
-  open question; default plan reuses `reconnectHost`).
+- **Add `Handlers.ReconnectAddress func() string`** (cheap, synchronous, like
+  `ConnectionLabel`; may be nil) returning the raw `--connect` argument for the
+  attached-remote re-attach line. Required for SSH correctness — see §7. The
+  field declaration lives in `ui/tui/tui.go` (the `Handlers` struct); a new
+  `w.reconnectAddr` field is *not* added (the closure is enough).
+
+### `cmd/` (wiring only — populate the new handler)
+- Where `wb.SetReconnectControls(hostLabel(addr), …)` is called
+  (`cmd/attach.go:183`, `cmd/handoff.go:282`), also set
+  `ReconnectAddress: func() string { return addr }` so the re-attach line shows
+  the *actual* connect string. `addr` is already in scope at both sites. This is
+  the only edit outside `ui/tui`; it adds no dependency and changes no existing
+  behaviour (the field is otherwise unread). ui/tui stays free of
+  `internal/daemon`/`internal/server`.
 
 ### turbotui
 - **None.** `Dialog`, `ModalLayer`, `Button`, `newMessageLayer`,
@@ -102,6 +130,19 @@ Holds everything new, all in `package ui`:
 | 4 | AttachedRemote | no/slow/fail | same | same (un-enriched body) | Cancel |
 | 5 | Embedded | n/a | `Quit Gogent — stops all sessions` | Quit (stops all) / Start daemon & quit / Cancel | Cancel |
 | 6 | `DaemonMode == nil` | n/a | `Quit Gogent` | Yes / No (unchanged box) | No |
+
+**Button-label `&` escaping (render-correctness — required).** The displayed
+labels above contain a literal ampersand: `Stop daemon & quit`,
+`Start daemon & quit`. turbotui's `tv.Button` runs every label through
+`ParseMnemonic` (`turbotv/measure.go:46`), which treats a lone `&` as a mnemonic
+marker — it strips the `&` and flags the *next* rune as the hotkey. So the string
+passed to `newButton` must escape it as `&&` (verified: `measure_test.go:58`
+`"a&&b"` → `"a&b"`). The labels we construct are therefore
+`"Stop daemon && quit"` and `"Start daemon && quit"`; they render as the single
+literal `&` the issue specifies. (No mnemonic is added — see Open questions Q1.)
+`Quit client`, `Quit (stops all)`, `Cancel` contain no `&` and pass through
+unchanged. `tv.ButtonLabelWidth` measures the *rendered* width, so the row
+helper sizes correctly regardless.
 
 Button omission (graceful degradation):
 - Omit **Stop daemon & quit** if `Handlers.StopDaemon == nil` (state 1/2 → two
@@ -147,10 +188,20 @@ Re-attach later with:  gogent
 **AttachedRemote-fallback** (state 4): `…your sessions and watchers continue in
 the background.` + the `--connect {addr}` re-attach line.
 
-`{host}`/`{addr}`: reuse `w.reconnectHost` (already wired by
-`SetReconnectControls`, same source the disconnect modal uses). **Omit the
-re-attach line entirely if `reconnectHost == ""`** (per spec). See §7 / open
-questions re. `{addr}` vs `{host}`.
+`{host}` (display) vs `{addr}` (connect string) are **different sources** — do
+not conflate them:
+- `{host}` in "The daemon at {host} keeps running:" → `w.reconnectHost` (the
+  human display label `hostLabel(addr)`, same value the disconnect modal shows).
+- `{addr}` in "Re-attach later with:  gogent --connect {addr}" →
+  `Handlers.ReconnectAddress()` (the *raw* connect argument).
+
+`hostLabel` (`cmd/handoff.go:529`) returns only `u.Host` — for an
+`ssh://user@host` attach it yields the bare `host`, dropping the `ssh://` scheme
+and the user, so `gogent --connect <reconnectHost>` would be parsed as TCP and be
+**wrong**. Hence `{addr}` must come from `ReconnectAddress`, not `reconnectHost`
+(see §7). **Omit the entire re-attach line** when `ReconnectAddress` is nil or
+returns `""` (per spec); also omit "The daemon at {host}" host phrasing when
+`reconnectHost == ""`, falling back to "The daemon keeps running:".
 
 **Embedded** (state 5):
 ```
@@ -182,8 +233,10 @@ func (w *Workbench) showQuitDialog() {
     mode := w.handlers.DaemonMode()
     model := buildQuitModel(mode, DaemonStatusReport{}, false /*haveReport*/, w.reconnectHost,
         w.handlers.StopDaemon != nil, w.handlers.StartDaemon != nil)
-    dialog, layer, width, bodyH := w.newMessageLayer(model.Title, model.Body, "quit-dialog")
-    body := /* the dialog's body TextView (kept, like w.disconnectBody) */
+    // newMessageLayer now hands back the body TextView (see §2) so we can enrich
+    // it in place — no hand-built dialog, no unreachable-body problem.
+    dialog, layer, body, width, bodyH := w.newMessageLayer(model.Title, model.Body, "quit-dialog")
+    w.quitDialogLayer = layer
     // ... lay out model.Buttons via quitButtonRow(width, bodyH+2, labels...),
     //     wire each to its action, install Escape=Cancel, SetFocus(default).
 
@@ -254,14 +307,17 @@ degradation. `showQuitDialog` computes this from the resolved `width` and the
 already-known labels, so the dropped-button decision and the wiring agree (we
 only wire actions for buttons we actually place).
 
-`{host}`/`{addr}`: **plan A (default)** reuse `w.reconnectHost` for both the
-`{host}` in the body and the `{addr}` in `gogent --connect {addr}`. It is the
-attach target already surfaced to the user in the disconnect modal. **Plan B**
-(only if A proves wrong — e.g. `reconnectHost` is a display label that is not a
-valid `--connect` argument) add `Handlers.ReconnectAddress func() string`
-(cheap, synchronous, like `ConnectionLabel`) and use it for `{addr}` only. This
-is the *single* candidate new `Handlers` field and is gated on need — see Open
-questions.
+`{host}`/`{addr}`: **add `Handlers.ReconnectAddress func() string`** and use it
+for `{addr}` in `gogent --connect {addr}`; keep `w.reconnectHost` for the
+human-readable `{host}` only. This is settled, not optional: `reconnectHost` is a
+*display label* (`hostLabel` → bare `u.Host`), which is wrong as a `--connect`
+argument for SSH attachments (scheme + user dropped) and unverified for bare TCP.
+`ReconnectAddress` returns the verbatim attach `addr` (e.g. `ssh://user@host`,
+`host:port`), which is exactly what `--connect` accepts. It is cheap and
+synchronous (a closure over `addr`), mirroring `ConnectionLabel`. When it is nil
+or returns `""`, **omit the re-attach line** (the fallback bodies in states 2/4
+already read sensibly without it). This is the single new `Handlers` field; its
+cmd-side wiring is in §2.
 
 ---
 
@@ -294,21 +350,28 @@ Graceful degradation when `DaemonStatusInfo`/`StartDaemon`/`StopDaemon` are nil
 (fallback body; button omitted). The status fetch is `Post`-marshalled and
 no-ops if the dialog is gone, so no off-thread mutation and no use-after-dismiss.
 The shared handoff helper keeps `stopDaemonFromMenu`/`startDaemonFromMenu`
-behaviour identical (same messages, same #478 single-dialog guarantee). gofmt /
+behaviour identical (same messages, same #478 single-dialog guarantee). The
+`newMessageLayer` return-value widening is absorbed by its two callers (discard),
+behaviourally inert; the new `ReconnectAddress` cmd wiring is an otherwise-unread
+closure, so it cannot regress any existing path. gofmt /
 go vet / build / `golangci-lint` (0 NEW) / `go test ./...` (no `-race`, per the
 Pi5 dev gate) must stay green; pre-existing `TestUserSessionSendMessage` 404 is
 the only accepted failure.
 
 ### (4) Holistic design (both repos)
-The change sits where the seam dictates: **all** behaviour in `ui/tui`
-(`quit_dialog.go` + a layout helper in `message_dialog.go` + the `confirmQuit`
-rewrite in `tui.go`), reusing the existing `newMessageLayer`/`showProgress`/
-`dismissDaemonHandoffProgress`/handoff primitives. ui/tui stays free of
-`internal/daemon` and `internal/server` (it consumes only the
-`Handlers`/`DaemonStatusReport` UI-facing types, exactly as the status dialog
-does). turbotui needs nothing — its `Dialog`/`Button`/`ModalLayer`/`WrapText`
-primitives already cover a 3-button content-sized dialog — so the repo seam is
-respected and there is no downstream effect on turbotui and no `go.mod` bump.
+The change sits where the seam dictates: the behaviour is in `ui/tui`
+(`quit_dialog.go` + a layout helper and a one-line return-value widening in
+`message_dialog.go` + the `confirmQuit` rewrite in `tui.go`), reusing the
+existing `newMessageLayer`/`showProgress`/`dismissDaemonHandoffProgress`/handoff
+primitives. The **only** edit outside `ui/tui` is wiring the new
+`ReconnectAddress` closure in `cmd/attach.go`/`cmd/handoff.go` where `addr` is
+already in scope — the backend, not the UI, is the right owner of the connect
+string, so the seam is respected (ui/tui still consumes only the
+`Handlers`/`DaemonStatusReport` UI-facing types and stays free of
+`internal/daemon`/`internal/server`, exactly as `daemon_menu.go` does). turbotui
+needs nothing — its `Dialog`/`Button`/`ModalLayer`/`WrapText`/`TextView.AllText`
+primitives already cover a 3-button content-sized, enrichable dialog — so there
+is no downstream effect on turbotui and no `go.mod` bump.
 
 ### Regression risks (called out)
 - **Orchestration:** #500g/#501g also edit `ui/tui` (`tui.go`/`theme.go`).
@@ -317,9 +380,14 @@ respected and there is no downstream effect on turbotui and no `go.mod` bump.
 - **Narrow terminal:** mitigated by the documented middle-button drop; tested.
 - **Enrichment race:** mitigated by the `w.quitDialogLayer == layer` guard +
   UI-thread-only mutation.
-- **`{addr}` correctness:** if `reconnectHost` is not a valid `--connect` arg the
-  re-attach line could mislead — Open question Q1; Plan B (`ReconnectAddress`)
-  is the fallback.
+- **`{addr}` correctness:** resolved — `ReconnectAddress` returns the verbatim
+  attach `addr`, so the re-attach command is copy-pasteable for SSH and TCP; the
+  line is omitted when no address is available rather than shown wrong.
+- **`&` in labels:** resolved — labels escape the literal ampersand as `&&` so
+  `ParseMnemonic` renders one `&` instead of consuming it as a mnemonic marker.
+- **`newMessageLayer` signature change:** two in-repo callers updated to discard
+  the new body return; both behaviourally unchanged (covered by existing
+  showConfirm/showProgress and #478 tests).
 
 ---
 
@@ -341,25 +409,28 @@ respected and there is no downstream effect on turbotui and no `go.mod` bump.
   assert the `daemon-progress` modal shows during the handoff, then on **success**
   `w.quit` is invoked (spy func), and on **failure** a result `confirm-dialog`
   shows and `w.quit` is **not** called (STAY ALIVE).
-- Keep existing quit/showConfirm tests passing; assert ui/tui imports neither
-  `internal/daemon` nor `internal/server` (an import-guard test already exists in
-  the suite pattern — extend or rely on it).
+- Keep existing quit/showConfirm tests passing. Decoupling from
+  `internal/daemon`/`internal/server` is preserved by construction (the new code
+  consumes only `Handlers`/`DaemonStatusReport`) and verified at the dev gate via
+  `go list -deps ./ui/tui` / review — there is **no** existing import-guard test
+  to extend (grep over `ui/tui/*_test.go` finds none). Adding one is optional and
+  out of scope for this issue.
 
 ---
 
 ## Open questions
 
-1. **`{addr}` vs `{host}` for the remote re-attach line.** Is `w.reconnectHost`
-   a valid `gogent --connect` argument (host:port / ssh target), or only a
-   display label? If the latter, adopt Plan B (`Handlers.ReconnectAddress`).
-   Default assumption: reuse `reconnectHost`; omit the line when empty. *(Does
-   not block design or the pure-model tests, which take `host` as a parameter.)*
-2. **Mnemonics on the three buttons.** `tv.Button` derives a mnemonic from `&`
-   in the label. The issue's labels ("Quit client", "Stop daemon & quit", …)
-   have no `&`. Add Alt-mnemonics (e.g. `&Quit client`, `S&top daemon & quit`)?
-   Low-risk nicety; default is to follow the issue's exact label text (no `&`)
-   unless you want mnemonics — easy to add.
-3. **Embedded + no `StartDaemon`:** body still warns "start the daemon first"
-   while no Start button is offered. Keep the copy (it is still true advice — the
-   daemon can be started another way) or trim the last sentence when
-   `StartDaemon==nil`? Default: keep the issue's exact copy.
+1. **Mnemonics on the buttons.** Since the labels already contain a literal `&`
+   (escaped to `&&`), adding an Alt-mnemonic marker would mean a *second*,
+   un-escaped `&` (e.g. `S&top daemon && quit` → mnemonic on "t", literal " & ").
+   Workable but fiddly. Default: **no mnemonics** — buttons are reachable by
+   Tab/click/Enter/Escape, matching `confirmButtonRow`/`disconnectButtonRow`
+   which also ship without per-button mnemonics. Trivial to add later if desired.
+2. **Embedded + no `StartDaemon`:** the body still advises "start the daemon
+   first" while no Start button is offered (it was omitted because
+   `StartDaemon==nil`). Keep the copy (still true advice — the daemon can be
+   started by relaunching) or trim that sentence when `StartDaemon==nil`?
+   Default: keep the issue's exact copy.
+
+*(The earlier `{addr}`-source and `&`-rendering questions are now resolved in the
+body of the design — `ReconnectAddress` and `&&` escaping respectively.)*
