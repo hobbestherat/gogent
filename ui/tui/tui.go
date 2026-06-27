@@ -760,7 +760,14 @@ func NewWorkbench(models []*config.ModelConfig) *Workbench {
 		if w.sidebar == nil || w.ActiveID() == w.sidebar.focused {
 			return
 		}
-		w.refreshOverall()
+		// AddLayer fires this hook synchronously, so a connect/restore burst that opens
+		// N windows would otherwise run N synchronous GetStatistics fetches here — the
+		// per-window Overall recompute issue #521 targets. Keep the cheap focus/TODO
+		// tracking immediate (it also updates sidebar.focused so the guard above dedupes
+		// the next fire) but defer the expensive recompute to the 250ms coalescer, so the
+		// burst folds into one fetch ~250ms after it settles. Mirrors openWindowAny.
+		w.sidebar.focusSession(w.ActiveID())
+		w.scheduleOverallRefresh()
 		w.desktop.RequestRedraw()
 	})
 	// Keep the sidebar pinned to the right edge across terminal resizes.
@@ -1059,8 +1066,9 @@ func (w *Workbench) rebuildMenu() {
 	// OpenAnalysisSession), so a synchronous Redraw here repainted the whole frame N
 	// times during a burst. RequestRedraw defers to the run loop's single per-iteration
 	// flush, and is serviced in every context this runs: the pre-loop restore folds into
-	// Run's initial Apply, a reconnect (Post) into the post-drain flush, and in-loop user
-	// actions (rename/pin/close/reorder) into the event-dispatch flush.
+	// Desktop.Run's initial compose+Apply (it composes the final state when the loop
+	// starts, independent of the dirty flag), a reconnect (Post) into the post-drain
+	// flush, and in-loop user actions (rename/pin/close/reorder) into the dispatch flush.
 	w.desktop.RequestRedraw()
 }
 
