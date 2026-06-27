@@ -327,10 +327,16 @@ type approvalDecisionRequest struct {
 // --- Settings ---------------------------------------------------------------
 
 type settingsView struct {
-	SubAgents   config.SubAgentConfig `json:"sub_agents"`
-	Timeouts    config.TimeoutConfig  `json:"timeouts"`
-	Budget      config.BudgetConfig   `json:"budget"`
-	ReviewEdits bool                  `json:"review_edits"`
+	SubAgents config.SubAgentConfig `json:"sub_agents"`
+	Timeouts  config.TimeoutConfig  `json:"timeouts"`
+	Budget    config.BudgetConfig   `json:"budget"`
+	// DefaultModel is the daemon's default-model name for new sessions (issue #507).
+	// It is daemon-owned: an attached TUI reads and writes it here over HTTP rather
+	// than from the client machine's config, exactly as budget is. Empty in a PUT
+	// leaves the daemon's default unchanged (an older client that omits the field
+	// never clears it).
+	DefaultModel string `json:"default_model"`
+	ReviewEdits  bool   `json:"review_edits"`
 }
 
 type reviewEditsView struct {

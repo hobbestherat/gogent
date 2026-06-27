@@ -189,18 +189,33 @@ func (svc settingsSvc) Get(r *http.Request) (interface{}, error) {
 		return nil, err
 	}
 	return settingsView{
-		SubAgents:   svc.s.g.SubAgentSettings(),
-		Timeouts:    svc.s.g.Timeouts(),
-		Budget:      svc.s.g.Budget(),
-		ReviewEdits: svc.s.g.ReviewEdits(),
+		SubAgents:    svc.s.g.SubAgentSettings(),
+		Timeouts:     svc.s.g.Timeouts(),
+		Budget:       svc.s.g.Budget(),
+		DefaultModel: svc.s.g.DefaultModelName(),
+		ReviewEdits:  svc.s.g.ReviewEdits(),
 	}, nil
 }
 
-// Set handles PUT /settings — merge + persist. Only the sub_agents/timeouts/
-// budget blocks are updated here; notifications have their own endpoint.
+// Set handles PUT /settings — merge + persist. The sub_agents/timeouts/budget/
+// default_model/review_edits blocks are updated here; notifications have their own
+// endpoint.
+//
+// default_model is validated and applied FIRST (issue #507): an invalid model name is
+// user-correctable input, so it must fail the whole PUT with a 400 BEFORE any other
+// field is persisted — otherwise a full PUT carrying a changed budget plus a bad model
+// name would leave a partial write. g.SetDefaultModel returns a bare error, which
+// webapi would otherwise map to 500; it is wrapped as 400 to match the repo-wide
+// pattern. An empty default_model is ignored so an older client that omits the field
+// never clears the daemon's default.
 func (svc settingsSvc) Set(r *http.Request, req settingsView) (interface{}, error) {
 	if err := requireHuman(r, svc.s.provider); err != nil {
 		return nil, err
+	}
+	if req.DefaultModel != "" && req.DefaultModel != svc.s.g.DefaultModelName() {
+		if err := svc.s.g.SetDefaultModel(req.DefaultModel); err != nil {
+			return nil, webapi.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
 	}
 	svc.s.g.SetSubAgentSettings(req.SubAgents)
 	svc.s.g.SetTimeouts(req.Timeouts)

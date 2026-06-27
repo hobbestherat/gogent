@@ -190,8 +190,22 @@ All settings endpoints require `human`.
 | GET    | `/api/settings/review-edits`      | —                | Read edit-review toggle.                    | `{"enabled":bool}`        |
 | PUT    | `/api/settings/review-edits`      | `reviewEditsView`| Update edit-review toggle.                  | `{"enabled":bool}`        |
 
-**`settingsView`**: `{sub_agents, timeouts, budget, review_edits}`.
+**`settingsView`**: `{sub_agents, timeouts, budget, default_model, review_edits}`.
 **`reviewEditsView`**: `{enabled}`.
+
+`default_model` is the daemon's default-model name for new sessions (issue #507). It is
+**daemon-owned**: an attached/remote TUI reads and writes it here over HTTP rather than
+from the client machine's config, exactly as `budget` is. On `PUT /api/settings` an
+unknown model name is rejected with **400** (validated before any other field is
+applied, so a bad name never leaves a partial write); an empty `default_model` is
+ignored so a client that omits the field never clears the daemon's default.
+
+**Settings ownership (attached mode).** The daemon owns `sub_agents`, `timeouts`,
+`budget`, `default_model`, `review_edits`, and the daemon-side notification *fallback*
+(`/api/settings/notifications`, used only when no client is attached). The attached
+**client** owns its own presentation config locally (theme, keybindings, layout,
+welcome) and its live desktop notifier (the bell fires on the client machine); the
+client does not read or write the daemon's notification block.
 
 ### System
 

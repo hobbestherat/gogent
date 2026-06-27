@@ -568,7 +568,9 @@ func editDecisionToWire(d gogent.EditReviewDecision) string {
 // Handlers builds the Handlers struct that drives the daemon over HTTP/SSE. It
 // populates only the fields that map to an existing /api endpoint; the attach
 // wiring (cmd) fills the TUI-machine presentation handlers (theme, keybindings,
-// layout, notifications, default model). Handlers explicitly deferred from this
+// layout, notifications). The default model is daemon-owned (issue #507) and so is
+// wired HERE (over /api/settings), not by the attach wiring. Handlers explicitly
+// deferred from this
 // bounded slice — OnFork, OnRename (the window title still persists via the local
 // layout), StreamThinking, the supervisor check, the @-file workspace bridge, and
 // the watcher-management API — are intentionally left nil and degrade gracefully
@@ -774,6 +776,28 @@ func (rc *RemoteClient) Handlers() Handlers {
 		},
 		SetReviewEdits: func(enabled bool) {
 			rc.mutateSettings(func(s *SettingsDTO) { s.ReviewEdits = enabled })
+		},
+		// Default model is daemon-owned (issue #507): the dropdown is populated from
+		// the daemon's models, so the default must be resolved against — and persisted
+		// to — the daemon, not the client's config. Get rides GET /settings like budget.
+		GetDefaultModel: func() string {
+			s, err := c.GetSettings()
+			if err != nil {
+				return ""
+			}
+			return s.DefaultModel
+		},
+		// SetDefaultModel does its OWN read-modify-write (rather than the error-
+		// swallowing rc.mutateSettings) because its Handlers signature returns an error
+		// the model editor surfaces: an invalid name comes back from the daemon as a
+		// 400, which APIClient.SetSettings turns into a Go error propagated here.
+		SetDefaultModel: func(name string) error {
+			cur, err := c.GetSettings()
+			if err != nil {
+				return fmt.Errorf("read settings: %w", err)
+			}
+			cur.DefaultModel = name
+			return c.SetSettings(cur)
 		},
 
 		// --- models ---
