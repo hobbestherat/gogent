@@ -415,6 +415,70 @@ func TestFocusFailedFetchKeepsPlaceholder(t *testing.T) {
 	}
 }
 
+func TestFocusRetriesAfterFailedFetch(t *testing.T) {
+	// Companion to TestFocusFailedFetchKeepsPlaceholder: a failed fetch must not just
+	// preserve the placeholder — it must RE-ARM the deferred flag so a subsequent
+	// focus retries, instead of stranding the window (the exactly-once guard must
+	// yield to retry-on-failure).
+	w := issue517Workbench()
+	var loads atomic.Int32
+	w.handlers.OnCreate = func(id, title string) {}
+	w.handlers.GetTranscript = func(id, agent string) []ChatMessage {
+		if loads.Add(1) == 1 {
+			return nil // first attempt fails
+		}
+		return []ChatMessage{{Role: "assistant", Content: "loaded-on-retry"}}
+	}
+	sw := w.AdoptSession(RestoredSession{ID: "d1", Title: "D", Deferred: true})
+
+	w.Focus("d1") // fails (nil)
+	wait517(t, &loads, 1, "first (failed) focus fetch")
+	drainPostedEventually(t, w)
+	if !transcriptHasPlaceholder(sw) {
+		t.Fatal("placeholder should remain after a failed fetch")
+	}
+
+	w.Focus("d1") // retries and succeeds
+	wait517(t, &loads, 2, "retry focus fetch")
+	drainPostedEventually(t, w)
+	if got := loads.Load(); got != 2 {
+		t.Fatalf("fetches = %d, want 2 (one failed attempt + one retry)", got)
+	}
+	if transcriptHasPlaceholder(sw) {
+		t.Fatal("placeholder remained after a successful retry fetch")
+	}
+	if !transcriptTextContains(sw, "loaded-on-retry") {
+		t.Fatal("retry did not render the transcript")
+	}
+}
+
+func TestFocusEmptyTranscriptClearsPlaceholder(t *testing.T) {
+	// A *successful* load of a genuinely-empty transcript ([]ChatMessage{}, non-nil
+	// — distinct from a nil failure, which the remote GetTranscript handler returns
+	// only on error) must still clear the "loads on focus" placeholder: the
+	// transcript HAS loaded, it simply has no messages. The eager path renders an
+	// empty window for the same session, so the deferred path must not strand the
+	// user on a perpetual placeholder (nor, with the flag re-armed, re-fetch on
+	// every refocus). reload()'s len==0 no-op must not conflate empty-success with
+	// nil-failure.
+	w := issue517Workbench()
+	var loads atomic.Int32
+	w.handlers.OnCreate = func(id, title string) {}
+	w.handlers.GetTranscript = func(id, agent string) []ChatMessage {
+		loads.Add(1)
+		return []ChatMessage{} // success, but empty
+	}
+	sw := w.AdoptSession(RestoredSession{ID: "d1", Title: "D", Deferred: true})
+	w.Focus("d1")
+	wait517(t, &loads, 1, "empty-transcript focus load")
+	drainPostedEventually(t, w)
+
+	if transcriptHasPlaceholder(sw) {
+		t.Fatal("a successfully-loaded empty transcript left the 'loads on focus' " +
+			"placeholder in place (empty-success conflated with nil-failure); the window reads as never-loaded and will re-fetch on every refocus")
+	}
+}
+
 func TestFocusNonDeferredWindowDoesNotFetch(t *testing.T) {
 	// Focusing an eagerly-restored window must be a no-op for transcript loading.
 	w := issue517Workbench()
