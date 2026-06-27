@@ -127,13 +127,13 @@ propagates it to live widgets, so a runtime theme switch recolours the chip
 without a restart. Under NO_COLOR both roles have degraded to the terminal
 default, so the install is colour-neutral.
 
-> **Footprint / #500g overlap:** I deliberately do **not** touch
+> **Footprint:** I deliberately do **not** touch
 > `neutralTVTheme`/`blackCanvasTVTheme` (the unconditional install already covers
-> them) and propose **not** adding a `paste-chip` finding to `paletteContrast`
-> (see Open Questions) — both to keep the diff minimal and reduce rebase
-> conflicts with the concurrent #500g status-indicator work, which also edits
-> `theme.go`. Every gogent edit sits adjacent to the existing TextSelection*
-> lines, so a rebase is mechanical.
+> them). Whether to add a `paste-chip` finding to `paletteContrast` is a separate
+> judgment call deferred to Open Q 1 (the rationale there is the
+> findings-contract-test churn, **not** the #500g overlap, which is negligible for
+> an additive line). Every gogent edit sits adjacent to the existing
+> TextSelection* lines, so the (low-likelihood) #500g rebase is mechanical.
 
 ---
 
@@ -145,10 +145,19 @@ default, so the install is colour-neutral.
 - Paste multi-line text → collapses to one highlighted `[pasted N lines]` chip,
   atomic to caret/backspace/selection (turbotui), now painted in gogent's
   palette (magenta / Okabe purple / mauve per theme).
-- Submit / Interject send the **verbatim original** text, newlines intact —
-  because `submit()`/`interject()` read `sw.input.GetText()`
-  (`session_window.go:383,401`, ...), which expands every chip
+- Submit / Interject send the original text with **newlines intact** — because
+  `submit()` (`session_window.go:401`) and `interject()`
+  (`session_window.go:~1343`) read `sw.input.GetText()`, which expands every chip
   (`widget_multiline_input.go:111-117`). **No submit-path change.**
+
+> **"Verbatim" caveat.** turbotui's `handlePaste` stores `sanitizePaste(text)`
+> (`paste_chip.go:167-187`): CRLF→LF (`\r` dropped), other control runes `<0x20`
+> stripped, any pre-existing PUA sentinels removed. So a `\r\n` paste round-trips
+> as `\n`. This is turbotui's behaviour and is **identical for the chip and the
+> literal single-line paste paths**, so it is not a gogent regression and is out
+> of gogent's scope (merged + tested in turbotui). "Verbatim" throughout this doc
+> means "verbatim modulo turbotui's paste sanitisation", inheriting the wording
+> from the acceptance criteria.
 
 ---
 
@@ -160,13 +169,27 @@ The chip is a single **sentinel rune** in the Private-Use plane
 
 1. **@-file mention completer** (`mention_completer.go`,
    `mentions.go::mentionToken`): `update()` parses the *raw* buffer line
-   `in.Lines[in.CursorY]` and rune-index `in.CursorX` — not `GetText()`. A chip
-   rune is an ordinary non-`@` rune, so it acts as a left boundary for
-   `mentionToken` exactly like any other character; `slashMatches` bails because
-   `line[0] != '/'`. Cursor math is in rune units and the chip is one rune, so
-   no off-by-N. `accept()` rune-slices the line and reassigns it, preserving the
-   sentinel rune (and thus the chips-store entry), so `GetText()` still expands.
-   **No mis-parse, no corruption.** → assertion test, no code change.
+   `in.Lines[in.CursorY]` and rune-index `in.CursorX` — not `GetText()`. Be
+   precise about how `mentionToken` (`mentions.go:60-69`) scans: walking back from
+   `cursorX-1` it special-cases **only** two runes — `@` opens a token, any
+   `unicode.IsSpace` closes (returns `ok=false`). Every *other* rune is **folded
+   into the partial query** `string(line[start+1:cursorX])`, **not** treated as a
+   boundary. The chip sentinel is neither `@` nor whitespace, so:
+     - **Lone chip / chip not after an active `@`** → no `@` precedes the cursor →
+       completer inactive. Correct, and the common case.
+     - **Chip *adjacent inside* an active mention** (e.g. type `@fi`, paste a
+       block, keep typing, cursor at end → `@fi⧉le`) → `mentionToken` returns a
+       query string **containing the PUA sentinel**, `filterPaths` finds no match,
+       and the popup shows empty. This is a **new, cosmetic, popup-only** effect
+       (no PUA rune could appear in `Lines` before #501): no crash, no corruption,
+       and `accept()` rune-slices around `[spanStart:spanEnd]` so the sentinel
+       outside the replaced span is preserved (`mention_completer.go:286-289`) and
+       `GetText()` still expands. It is self-correcting (more typing / a cursor
+       move re-resolves) and requires contrived chip-mid-mention adjacency.
+   `slashMatches` is unaffected (`line[0] != '/'`; sentinel ≠ `/`). Cursor math is
+   in rune units and the chip is one rune, so no off-by-N. → **no production
+   change**; covered by two assertions (lone-chip inactive *and* adjacent-chip
+   yields a non-matching/sentinel-bearing query, not a real path completion).
 
 2. **Slash commands** (`/stop`, `/undo`, `/review-*`): detected from
    `GetText()` (and `slashMatches` from the raw line). A chip at the start is a
@@ -187,9 +210,11 @@ The chip is a single **sentinel rune** in the Private-Use plane
    > regression (pre-#501 there were no chips, and multi-line recall always
    > spilled into lines). Switching recall to `SetTextChip` would wrongly chip
    > every hand-typed multi-line prompt — explicitly out of scope. → no change.
+   > (Verified: `SetTextChip` has **0 call sites anywhere in gogent**.)
 
-4. **submit() / interject()** read `GetText()` → chips expand → verbatim sent.
-   No change expected or made.
+4. **submit() / interject()** read `GetText()` (`session_window.go:401` and
+   `~1343`) → chips expand → original text sent (newlines intact; see the
+   "verbatim" caveat in §2). No change expected or made.
 
 5. **Typing-idle / deferred-modal drain** (`session_window.go:383-397`): the
    trigger is the non-empty→empty edge `before != "" && input.GetText() == ""`.
@@ -223,8 +248,14 @@ a real `sw.input`:
   verbatim original (incl. newlines).
 - Assert the gogent **submit path** delivers that verbatim text (capture via the
   session's submit handler / queued-input seam).
-- Assert a chip at line start is **not** taken as a slash command and a chip is
-  **not** parsed as an @mention (drive `completer.update()`, expect inactive).
+- Assert a chip at line start is **not** taken as a slash command, and a **lone**
+  chip is **not** parsed as an @mention (drive `completer.update()`, expect
+  inactive).
+- Assert the **adjacent-chip** edge (§3.1): with a buffer like `@fi⧉le` and the
+  cursor at end, `mentionToken(line, cursorX)` returns a query that **contains the
+  sentinel rune** (or, equivalently, `filterPaths` yields no real path) — i.e. the
+  completer never offers a bogus completion and never crashes. This pins the
+  cosmetic-only nature of the new behavior rather than leaving it unasserted.
 - History round-trip: `GetText()` → store → `SetText()` → `GetText()` equals the
   original (content faithful; not asserting a chip is recreated, per §3.3).
 
@@ -240,12 +271,16 @@ already use (`gogent/internal/config`).
    change, no scope creep into turbotui.
 2. **Usability** — chip themed consistently with `InputFocus*`/`TextSelection*`
    (muted accent, AA-readable, distinct so a selected chip still reads as a
-   chip); paste shows a chip, submit sends the verbatim original; @mention /
-   slash / history / submit / typing-idle all behave as before.
+   chip); paste shows a chip, submit sends the original (newlines intact);
+   @mention / slash / history / submit / typing-idle all behave as before.
 3. **No regressions** — only additive theme roles + tests; `gofmt`/`build`/`vet`
    clean; new contrast assertions enforce legibility; `go test ./...` green
    (pre-existing `TestUserSessionSendMessage` 404 the sole accepted failure);
-   `go.mod` bumped, `go mod tidy` clean; no `-race`.
+   `go.mod` bumped, `go mod tidy` clean; no `-race`. The one genuinely new
+   behaviour #501 introduces in the prompt box — a chip sentinel landing *inside*
+   an active `@`-mention query (§3.1) — is **cosmetic and popup-only** (empty
+   completion list, self-correcting, no crash/corruption/submit impact), not a
+   functional regression, and is pinned by an explicit test.
 4. **Holistic across both repos** — the seam is respected: turbotui owns the chip
    *mechanics* and exposes `PasteChip*` roles; gogent owns the *palette* and only
    maps those roles, exactly as it already does for every turbotui role
@@ -259,18 +294,25 @@ already use (`gogent/internal/config`).
 ## Open questions
 
 1. **`paletteContrast` audit finding.** Every prior role added a finding to the
-   central audit *and* updates `TestIssue202DefaultPaletteFindingsContract` (an
-   exact-set test). I propose **not** adding a `paste-chip` finding — the
-   dedicated contrast assertion in `theme_issue501_test.go` already enforces
-   legibility, and skipping it (a) avoids editing the findings-contract test and
-   (b) minimises `theme.go` overlap with the concurrent #500g work, as the brief
-   requests. If the maintainer prefers full parity with the other roles, it is a
-   one-line `finding("paste-chip", t.PasteChipFG, t.PasteChipBG, minContrastText)`
-   plus the contract-count bump. **Recommend: skip; revisit post-#500g rebase.**
+   central audit *and* updated `TestIssue202DefaultPaletteFindingsContract` (an
+   exact-set test) plus the all-fidelities default audit. I propose **not** adding
+   a `paste-chip` finding — the dedicated contrast assertion in
+   `theme_issue501_test.go` already enforces `>= minContrastText` for all three
+   palettes, so legibility is guaranteed; skipping the central finding only avoids
+   the findings-contract-test churn. The reason is that test churn, **not** #500g
+   overlap (an additive `finding(...)` line does not collide with the
+   status-indicator work — I withdraw that argument). If the maintainer prefers
+   full parity, it is one line —
+   `finding("paste-chip", t.PasteChipFG, t.PasteChipBG, minContrastText)` — plus
+   the contract-count bump, and my chosen colours already clear it at every
+   fidelity (default ANSI is fidelity-invariant; the HC/dark RGB picks both
+   quantise to `ANSI 7` grey at `Color16`, keeping black-FG ≈ 9:1).
+   **Recommend: skip; trivially reversible if requested.**
 2. **Theme editor exposure.** I propose **not** adding `paste_chip_*` to
-   `themeRoles` (the scrolling editor) for the same overlap reason; the override
-   still works via config. Add later if desired (it would also need a string in
-   the editor labels). **Recommend: skip for now.**
+   `themeRoles` (the scrolling editor); config override still works (precedented —
+   `button_focus_*`/`input_focus_*` are config-only, carried by
+   `carryUnexposedOverrides`). Add later if desired (also needs an editor label
+   string). **Recommend: skip for now.**
 3. **Recall-as-chip UX.** Confirmed out of scope (§3.3) — flag only if the
    maintainer actually wants recalled pastes to re-collapse (would require
    `SetTextChip` and contradicts turbotui's editable-recall intent).
