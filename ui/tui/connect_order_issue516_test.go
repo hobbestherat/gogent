@@ -788,3 +788,93 @@ func TestConnectOrder_DedupDoesNotCoverThinkingDelta(t *testing.T) {
 			"(apply() dedup covers Final/ToolCall/AssistantStep but not SessionEventThinkingDelta)", n)
 	}
 }
+
+// --- driver fixes-round-3 probes ----------------------------------------------
+//
+// Round 3 (a) guarded ThinkingDelta by suppressing the live stream when a restored
+// thought is at the pristine tail, (b) narrowed the finishToolCall orphan guard to
+// match only the RESULT record, and (c) changed restoredDuplicate to STOP at the
+// first live (non-restored) record. The three tests below pin (a)/(b)'s positive
+// behavior and probe a consequence of (c): a drained LIVE record ahead of a
+// dedupable event now makes the dedup stop early.
+
+// TestConnectOrder_ThinkingDeltaStreamsForNewTurnAfterUserMessage pins the
+// over-suppression guard: a restored thought must NOT suppress reasoning for a
+// genuinely new turn, because the new turn's user record stops the scan.
+func TestConnectOrder_ThinkingDeltaStreamsForNewTurnAfterUserMessage(t *testing.T) {
+	w := newTestWorkbench(t)
+	silenceNotifications(w)
+	sw := w.AdoptSession(RestoredSession{ID: "s1", Messages: []ChatMessage{
+		{Role: "assistant", Reasoning: "OLD-REASON-7X", Content: "old"},
+	}})
+	drainPosted(t, w)
+	if n := countRecordsOfKind(sw, kindThinking); n != 1 {
+		t.Fatalf("baseline: %d thinking records, want 1", n)
+	}
+
+	// A new turn: its user record intervenes, so the restored-thought suppression must
+	// not apply — the new reasoning streams as a second thinking record.
+	sw.addUser("new question")
+	w.deliverSessionEvent("s1", agent.SessionEvent{Type: agent.SessionEventThinkingDelta, Text: "NEW-REASON-7X\n"})
+	drainPosted(t, w)
+
+	if n := countRecordsOfKind(sw, kindThinking); n != 2 {
+		t.Fatalf("new-turn ThinkingDelta over-suppressed: %d thinking records, want 2 "+
+			"(restored thought + new live thought)", n)
+	}
+}
+
+// TestConnectOrder_ToolResultRendersWhenCallRestoredButResultNot pins round-3's
+// finishToolCall narrowing: when the snapshot holds a tool CALL but not its RESULT,
+// a drained result must still render (the orphan guard matches only the "result:"
+// record, which the snapshot lacks).
+func TestConnectOrder_ToolResultRendersWhenCallRestoredButResultNot(t *testing.T) {
+	w := newTestWorkbench(t)
+	silenceNotifications(w)
+	sw := w.AdoptSession(RestoredSession{ID: "s1", Messages: []ChatMessage{
+		{Role: "assistant", Content: "ans", Tool: "ZZRESULT516", Args: `{"p":"q"}`},
+	}})
+	drainPosted(t, w)
+
+	// Drained backlog: the ToolCall is deduped (call already in snapshot, so it never
+	// registers in pendingTools), then the ToolResult hits finishToolCall's orphan
+	// branch. The snapshot has the call but not the result, so the result must render.
+	w.deliverSessionEvent("s1", agent.SessionEvent{Type: agent.SessionEventToolResult, CallID: "c1", Tool: "ZZRESULT516", Result: "ZZRESBODY-7X"})
+	drainPosted(t, w)
+
+	if !transcriptTextContains(sw, "ZZRESBODY-7X") {
+		t.Fatalf("a drained ToolResult whose result was absent from the snapshot was dropped " +
+			"(over-dedup of the orphan branch); want it rendered")
+	}
+}
+
+// TestConnectOrder_LiveRecordBeforeFinalDefeatsDedup probes a consequence of round-
+// 3's restoredDuplicate change (stop at the first LIVE record). A turn that compacted
+// mid-turn and finished during [T0, T_get] carries, in its drained backlog, a
+// SessionEventCompaction (emitted before the Final). restore() never builds a
+// compaction record, so addCompaction lands a LIVE kindCompaction at the tail; the
+// subsequent Final's dedup scan then stops at that live record and the answer is
+// duplicated — the very symptom #516 targets. (Round 2's transparent scan deduped
+// this correctly; round 3 regressed it.)
+func TestConnectOrder_LiveRecordBeforeFinalDefeatsDedup(t *testing.T) {
+	w := newTestWorkbench(t)
+	silenceNotifications(w)
+	sw := w.AdoptSession(RestoredSession{ID: "s1", Messages: []ChatMessage{
+		{Role: "assistant", Content: "DUPVIACOMP-7X"},
+	}})
+	drainPosted(t, w)
+	if n := countRecordsContaining(sw, "DUPVIACOMP-7X"); n != 1 {
+		t.Fatalf("baseline: %d answer records, want 1", n)
+	}
+
+	// Drained backlog: a mid-turn Compaction lands first (a live kindCompaction the
+	// snapshot never held), then the turn's Final whose answer is already restored.
+	w.deliverSessionEvent("s1", agent.SessionEvent{Type: agent.SessionEventCompaction, Step: 5000, Text: "summary"})
+	w.deliverSessionEvent("s1", agent.SessionEvent{Type: agent.SessionEventFinal, Text: "DUPVIACOMP-7X"})
+
+	if n := countRecordsContaining(sw, "DUPVIACOMP-7X"); n != 1 {
+		t.Fatalf("issue #516 (round-3 regression): a drained live record (Compaction) ahead of "+
+			"the Final made restoredDuplicate stop early, so the Final was not deduped: %d answer "+
+			"records, want 1 (the scan stops at the first non-restored record)", n)
+	}
+}
