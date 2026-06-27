@@ -22,10 +22,12 @@ func TestBuildOverallStats(t *testing.T) {
 		// totals, to avoid double counting.
 		Fast: stats.ConnectorStat{Requests: 9, TokensIn: 9999, TokensOut: 9999},
 	}}
+	// Issue #534: the aggregate view (selectedModel == "") leaves the model/api
+	// rows empty even though a focused-session model config is threaded through.
 	got := buildOverallStats(report, 3, 5,
 		&config.ModelConfig{Name: "groq-free", DisplayName: "Groq", Endpoint: "https://api.groq.com/openai/v1/chat/completions"}, "")
 	want := overallStats{Sessions: 3, SubAgents: 5, TokensIn: 1000, TokensOut: 500,
-		Requests: 42, Errors: 3, CacheHitPct: 25, Model: "Groq", APIEndpoint: "api.groq.com"}
+		Requests: 42, Errors: 3, CacheHitPct: 25, Model: "", APIEndpoint: ""}
 	if got != want {
 		t.Fatalf("buildOverallStats = %+v, want %+v", got, want)
 	}
@@ -43,7 +45,10 @@ func TestBuildOverallStatsEmpty(t *testing.T) {
 
 // TestBuildOverallStatsModel covers the model / endpoint derivation (issue #107):
 // the display name falls back to the config Name, and the endpoint is reduced to
-// its host (or provider label) by formatEndpoint.
+// its host (or provider label) by formatEndpoint. Issue #534 gates the populate
+// block on a non-empty selectedModel, so the model's own Name is passed as the
+// selection to keep the derivation path under test (otherwise the aggregate would
+// blank the rows and stop exercising it).
 func TestBuildOverallStatsModel(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -66,7 +71,7 @@ func TestBuildOverallStatsModel(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildOverallStats(stats.Report{}, 0, 0, tc.model, "")
+			got := buildOverallStats(stats.Report{}, 0, 0, tc.model, tc.model.Name)
 			if got.Model != tc.wantModel {
 				t.Errorf("Model = %q, want %q", got.Model, tc.wantModel)
 			}
@@ -108,16 +113,24 @@ func TestFormatOverallStats(t *testing.T) {
 	}
 }
 
-// TestFormatOverallStatsPlaceholders verifies the model / api rows render a "-"
-// placeholder before any active model is known (no session open yet), so the row
-// count is stable while nothing misleading is shown.
+// TestFormatOverallStatsPlaceholders verifies the model / api rows render BLANK
+// (empty value column) in the aggregate / no-active-model view (issue #534), so
+// the row count is stable while nothing misleading is shown. The rows keep their
+// labels so the value column stays aligned.
 func TestFormatOverallStatsPlaceholders(t *testing.T) {
 	got := formatOverallStats(overallStats{})
-	if got[len(got)-2] != "model      -" {
-		t.Errorf("model row = %q, want %q", got[len(got)-2], "model      -")
+	// Value column is empty, but the labels survive (rows stay present + aligned).
+	if v := got[len(got)-2][overallLabelWidth+1:]; v != "" {
+		t.Errorf("model row value = %q, want blank (aggregate view, issue #534)", v)
 	}
-	if got[len(got)-1] != "api        -" {
-		t.Errorf("api row = %q, want %q", got[len(got)-1], "api        -")
+	if !strings.HasPrefix(got[len(got)-2], "model") {
+		t.Errorf("model row = %q, lost its label", got[len(got)-2])
+	}
+	if v := got[len(got)-1][overallLabelWidth+1:]; v != "" {
+		t.Errorf("api row value = %q, want blank (aggregate view, issue #534)", v)
+	}
+	if !strings.HasPrefix(got[len(got)-1], "api") {
+		t.Errorf("api row = %q, lost its label", got[len(got)-1])
 	}
 }
 
@@ -199,9 +212,12 @@ func TestSidebarRefreshOverallStats(t *testing.T) {
 	if s.overall.CacheHitPct != 20 {
 		t.Errorf("CacheHitPct = %d, want 20", s.overall.CacheHitPct)
 	}
-	// The active model config is threaded through to the model / api rows.
-	if s.overall.Model != "Groq" || s.overall.APIEndpoint != "api.groq.com" {
-		t.Errorf("Model/API = %q/%q, want Groq/api.groq.com", s.overall.Model, s.overall.APIEndpoint)
+	// Issue #534: even though a non-nil (focused-session) model config is threaded
+	// through by refreshOverallStats, the aggregate view (selectedModel == "") must
+	// leave the model/api rows blank — a cluster-wide total names no single backend.
+	if s.overall.Model != "" || s.overall.APIEndpoint != "" {
+		t.Errorf("Model/API = %q/%q, want blank (aggregate view ignores the passed config, issue #534)",
+			s.overall.Model, s.overall.APIEndpoint)
 	}
 }
 

@@ -15,9 +15,10 @@ import (
 // sub-agent node counts, so the panel renders one small typed struct rather than
 // an untyped map (cross-ref the GetStats typing point in issue #6).
 //
-// Model and APIEndpoint (issue #107) identify the focused session's backend so
-// the global state is visible at a glance: the model's display name and a short
-// host/provider label for the endpoint it talks to.
+// Model and APIEndpoint (issue #107) identify the selected model's backend so it
+// is visible at a glance: the model's display name and a short host/provider label
+// for the endpoint it talks to. They are blank in the aggregate "All models" view,
+// where a cluster-wide total has no single backend to name (issue #534).
 type overallStats struct {
 	Sessions    int    // open sessions (sidebar nodes)
 	SubAgents   int    // sub-agents tracked across all sessions (sidebar nodes)
@@ -26,8 +27,8 @@ type overallStats struct {
 	Requests    int    // primary-model backend requests
 	Errors      int    // primary-model backend errors
 	CacheHitPct int    // prompt-cache hit share of input tokens, whole-number %
-	Model       string // focused session's model display name ("" before one is open)
-	APIEndpoint string // focused session's endpoint host or provider label
+	Model       string // selected model's display name; "" in the aggregate "All models" view (issue #534)
+	APIEndpoint string // selected model's endpoint host or provider label; "" in the aggregate view (issue #534)
 }
 
 // overallMetricLines is the number of metric rows formatOverallStats emits
@@ -464,7 +465,14 @@ func buildOverallStats(report stats.Report, sessions, subAgents int, model *conf
 		o.Errors = ms.Connector.Errors
 		o.CacheHitPct = ms.Connector.CacheHitPercent()
 	}
-	if model != nil {
+	if selectedModel != "" && model != nil {
+		// Identify the backend only when a specific model is scoped. In the
+		// aggregate "All models" view (selectedModel == "") the model/api rows
+		// describe nothing meaningful — a cluster-wide total has no single backend
+		// — so they are left empty and the formatter renders them blank (issue
+		// #534). This narrows the #107 "show the focused session's backend"
+		// behaviour to the model-scoped view.
+		//
 		// Prefer the human-friendly display name, falling back to the stable
 		// config Name when no display name was set.
 		o.Model = model.DisplayName
@@ -510,17 +518,13 @@ func formatOverallStats(s overallStats) []string {
 		kv("requests", strconv.Itoa(s.Requests)),
 		kv("errors", strconv.Itoa(s.Errors)),
 		kv("cache hit", strconv.Itoa(s.CacheHitPct)+"%"),
-		kv("model", overallValue(s.Model)),
-		kv("api", overallValue(s.APIEndpoint)),
+		// The model/api values render verbatim, blank included: the aggregate "All
+		// models" view (and the first frame before any model is known) leaves them
+		// empty (issue #534), which prints the padded label and an empty value
+		// column. The rows themselves always remain, so the panel's row count is
+		// unchanged. A specific-model selection fills them with the backend's name
+		// and endpoint (issue #107).
+		kv("model", s.Model),
+		kv("api", s.APIEndpoint),
 	}
-}
-
-// overallValue returns v, or a compact "-" placeholder when empty, so a metric
-// row keeps a value column even before an active model is known (no session open
-// yet) without varying the panel's row count.
-func overallValue(v string) string {
-	if v == "" {
-		return "-"
-	}
-	return v
 }
