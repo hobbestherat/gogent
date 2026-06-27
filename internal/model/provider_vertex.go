@@ -37,11 +37,12 @@ func init() {
 		adapter: openAIAdapter{},
 		// OpenAI-compatible surface: response_format works; reasoning_effort /
 		// thinking are native-Gemini features not exposed through the compat shim.
-		caps:      Capabilities{SupportsResponseFormat: true},
-		endpoints: staticBaseEndpoints{baseURLFunc: vertexOpenAIBaseURL, chatPath: "/endpoints/openapi/chat/completions"},
-		auth:      adcAuth{},
-		lister:    vertexPublisherLister{publisher: "google", format: googlePublisherModelID, keep: hasPrefixAny("gemini", "gemma")},
-		validate:  vertexValidate,
+		caps:        Capabilities{SupportsResponseFormat: true},
+		endpoints:   staticBaseEndpoints{baseURLFunc: vertexOpenAIBaseURL, chatPath: "/endpoints/openapi/chat/completions"},
+		auth:        adcAuth{},
+		lister:      vertexPublisherLister{publisher: "google", format: googlePublisherModelID, keep: hasPrefixAny("gemini", "gemma")},
+		validate:    vertexValidate,
+		derivesBase: true, // base URL is derived from project/location; an empty endpoint is routable
 	})
 
 	registerProvider(&provider{
@@ -49,11 +50,12 @@ func init() {
 		adapter: geminiAdapter{},
 		// Native Gemini: structured output via responseSchema and thinking via
 		// thinkingConfig; Gemini accepts temperature normally.
-		caps:      Capabilities{SupportsResponseFormat: true, SupportsThinking: true},
-		endpoints: modelURLEndpoints{baseURLFunc: vertexNativeBaseURL, chatURLFunc: vertexNativeChatURL, streamURLFunc: vertexNativeStreamURL},
-		auth:      adcAuth{},
-		lister:    vertexPublisherLister{publisher: "google", format: bareModelID, keep: hasPrefixAny("gemini", "gemma")},
-		validate:  vertexValidate,
+		caps:        Capabilities{SupportsResponseFormat: true, SupportsThinking: true},
+		endpoints:   modelURLEndpoints{baseURLFunc: vertexNativeBaseURL, chatURLFunc: vertexNativeChatURL, streamURLFunc: vertexNativeStreamURL},
+		auth:        adcAuth{},
+		lister:      vertexPublisherLister{publisher: "google", format: bareModelID, keep: hasPrefixAny("gemini", "gemma")},
+		validate:    vertexValidate,
+		derivesBase: true, // base URL is derived from project/location; an empty endpoint is routable
 	})
 }
 

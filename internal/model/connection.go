@@ -751,11 +751,16 @@ func NewModelConnectionFromConfig(modelConfig *config.ModelConfig) *ModelConnect
 		retryMaxDelay:  defaultRetryMaxDelay,
 	}
 
-	// Deferred config validation (e.g. a Vertex model missing project/location,
-	// which would otherwise fail as an opaque DNS/HTTP error). Surfaced clearly on
-	// the first completion call instead of here, since the constructor has no error
-	// result.
-	if err := p.validateConfig(modelConfig); err != nil {
+	// Deferred config validation, surfaced clearly on the first completion/scan call
+	// instead of here (the constructor has no error result) and instead of as an
+	// opaque HTTP failure. Two layers: a generic routability check (an unroutable
+	// entry — e.g. empty api_type AND endpoint — would otherwise silently target the
+	// localhost placeholder and 404), then the provider's own check (e.g. a Vertex
+	// model missing project/location). The routability check runs first so the
+	// clearest, most actionable message wins.
+	if err := validateRoutableConfig(modelConfig); err != nil {
+		conn.configErr = err
+	} else if err := p.validateConfig(modelConfig); err != nil {
 		conn.configErr = err
 	}
 
@@ -766,6 +771,68 @@ func NewModelConnectionFromConfig(modelConfig *config.ModelConfig) *ModelConnect
 	conn.client = newClient(30*time.Second, p.auth.roundTripper(modelConfig))
 
 	return conn
+}
+
+// validateRoutableConfig rejects model configs that cannot be routed, returning a
+// deferred *ModelError that names the model and the missing field(s). It is the fix
+// for the silent localhost:8080 fallback (issue #505): without it an entry that has
+// neither an explicit endpoint nor a base-URL-deriving api_type is sent to the
+// generic OpenAI provider's placeholder default and fails with an opaque 404.
+//
+// It rejects in two cases:
+//
+//  1. Routability: the endpoint is empty AND the api_type does not supply a base URL.
+//     "Supplies a base URL" means a base-URL-deriving provider (provider.derivesBase:
+//     zai/openrouter/anthropic/vertex*) OR the explicit "openai" api_type, whose
+//     localhost default is a documented, intentional local-server target. So only an
+//     empty or unrecognized api_type (both of which silently fall back to localhost)
+//     is rejected. The unrecognized case echoes the raw api_type so a typo is visible.
+//  2. Hosted-gateway empty model: the model is empty on a known hosted gateway
+//     (openrouter/zai) where an empty model name is almost certainly a mistake. This
+//     is deliberately narrow — api_type "openai" with an explicit endpoint may
+//     legitimately omit the model (some local servers auto-select it), and Vertex is
+//     left to its own validation.
+//
+// Returns nil for every valid config, including base-URL-deriving providers and local
+// "openai" servers with an explicit endpoint, so existing configs are unaffected.
+func validateRoutableConfig(cfg *config.ModelConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	rawType := strings.ToLower(strings.TrimSpace(cfg.APIType))
+	resolved := StringToAPIType(cfg.APIType)
+
+	// 1. Routability: empty endpoint with no way to determine the base URL.
+	if strings.TrimSpace(cfg.Endpoint) == "" &&
+		!providerFor(resolved).derivesBase && rawType != "openai" {
+		if rawType == "" {
+			return &ModelError{
+				Type: ErrorGeneric,
+				Message: fmt.Sprintf(
+					"model %q is misconfigured: api_type and endpoint are both empty (cannot determine where to send requests)",
+					configModelName(cfg)),
+			}
+		}
+		return &ModelError{
+			Type: ErrorGeneric,
+			Message: fmt.Sprintf(
+				"model %q is misconfigured: endpoint is empty and api_type %q is unrecognized (set an explicit endpoint or use a known api_type)",
+				configModelName(cfg), cfg.APIType),
+		}
+	}
+
+	// 2. Hosted gateway with no model name.
+	if strings.TrimSpace(cfg.Model) == "" &&
+		(resolved == APITypeOpenRouter || resolved == APITypeZAI) {
+		return &ModelError{
+			Type: ErrorGeneric,
+			Message: fmt.Sprintf(
+				"model %q is misconfigured: model is empty (api_type %q requires a model name)",
+				configModelName(cfg), cfg.APIType),
+		}
+	}
+
+	return nil
 }
 
 // APIKeyRoundTripper injects a provider's auth into every request. headers holds
@@ -1665,6 +1732,20 @@ func (c *ModelConnection) analyzeError(statusCode int, response string) *ModelEr
 				Message:        "content policy refusal",
 				RawResponse:    response,
 			}
+		}
+	case 404:
+		// A genuine wrong-endpoint/route 404 (the misconfiguration that escapes
+		// validateRoutableConfig — e.g. a wrong but non-empty endpoint or model path).
+		// Stays non-retryable (isRetryableStatus omits 404) and still counts as a
+		// generic error; this only makes the message more descriptive than the catch-all.
+		c.Stats.Mutex.Lock()
+		c.Stats.GenericErrorCount++
+		c.Stats.Mutex.Unlock()
+		return &ModelError{
+			Type:           ErrorGeneric,
+			HTTPStatusCode: statusCode,
+			Message:        "not found (status 404): the endpoint or model path is wrong — check api_type/endpoint/model",
+			RawResponse:    response,
 		}
 	case 429:
 		c.Stats.Mutex.Lock()

@@ -17,7 +17,8 @@ func init() {
 		// x-api-key + the required anthropic-version header on every request.
 		auth: keyAuth{mode: authXAPIKey, extraHeaders: map[string]string{"anthropic-version": anthropicVersion}},
 		// Anthropic's GET /v1/models returns the OpenAI {"data":[...]} shape.
-		lister: openAILister{chatPath: "/v1/messages", modelsPath: "/v1/models"},
+		lister:      openAILister{chatPath: "/v1/messages", modelsPath: "/v1/models"},
+		derivesBase: true, // base URL is api.anthropic.com; an empty endpoint is routable
 	})
 
 	registerProvider(&provider{
@@ -32,8 +33,9 @@ func init() {
 			chatURLFunc:   vertexAnthropicChatURL,
 			streamURLFunc: vertexAnthropicStreamURL,
 		},
-		auth:     adcAuth{},
-		lister:   vertexPublisherLister{publisher: "anthropic", format: bareModelID, keep: hasPrefixAny("claude")},
-		validate: vertexValidate,
+		auth:        adcAuth{},
+		lister:      vertexPublisherLister{publisher: "anthropic", format: bareModelID, keep: hasPrefixAny("claude")},
+		validate:    vertexValidate,
+		derivesBase: true, // base URL is derived from project/location; an empty endpoint is routable
 	})
 }

@@ -35,9 +35,10 @@ func init() {
 			SupportsThinking:        true,
 			SupportsResponseFormat:  true,
 		},
-		endpoints: staticBaseEndpoints{defaultBaseURL: "https://api.z.ai/api/paas/v4", chatPath: "/chat/completions"},
-		auth:      keyAuth{mode: authBearer},
-		lister:    openAILister{chatPath: "/chat/completions", modelsPath: "/models"},
+		endpoints:   staticBaseEndpoints{defaultBaseURL: "https://api.z.ai/api/paas/v4", chatPath: "/chat/completions"},
+		auth:        keyAuth{mode: authBearer},
+		lister:      openAILister{chatPath: "/chat/completions", modelsPath: "/models"},
+		derivesBase: true, // base URL is the Z.AI default; an empty endpoint is routable
 	})
 
 	registerProvider(&provider{
@@ -49,6 +50,7 @@ func init() {
 			"HTTP-Referer": openRouterReferer,
 			"X-Title":      openRouterTitle,
 		}},
-		lister: openAILister{chatPath: "/chat/completions", modelsPath: "/models"},
+		lister:      openAILister{chatPath: "/chat/completions", modelsPath: "/models"},
+		derivesBase: true, // base URL is the OpenRouter default; an empty endpoint is routable
 	})
 }

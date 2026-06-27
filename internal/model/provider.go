@@ -95,6 +95,22 @@ func StringToAPIType(s string) APIType {
 	return APITypeOpenAI
 }
 
+// configModelName identifies a model config in user-facing errors, preferring its
+// Name, then DisplayName, falling back to "<unnamed>" so a misconfiguration message
+// always names something even when both are blank.
+func configModelName(cfg *config.ModelConfig) string {
+	if cfg == nil {
+		return "<unnamed>"
+	}
+	if n := strings.TrimSpace(cfg.Name); n != "" {
+		return n
+	}
+	if n := strings.TrimSpace(cfg.DisplayName); n != "" {
+		return n
+	}
+	return "<unnamed>"
+}
+
 // APITypeIDs lists the selectable api_type values in display order (first is the
 // default). Config UIs use this to populate an API-type dropdown.
 func APITypeIDs() []string {
@@ -189,6 +205,15 @@ type provider struct {
 	// validate returns a deferred config error (e.g. Vertex missing
 	// project/location); nil = always valid.
 	validate func(cfg *config.ModelConfig) error
+	// derivesBase reports that this provider synthesizes its own request base URL
+	// (from the api_type alone, or from project/location) when the config leaves
+	// Endpoint empty, so an empty endpoint is still a complete, routable config. The
+	// generic OpenAI provider leaves this false: its localhost default is a
+	// placeholder, so there an empty endpoint is NOT routable. This is the registry's
+	// single source of truth for the api_types that mirror
+	// modelsdev.deriveBaseAPITypes; routability validation
+	// (NewModelConnectionFromConfig) reads it instead of a separate hardcoded list.
+	derivesBase bool
 }
 
 func (p *provider) validateConfig(cfg *config.ModelConfig) error {
@@ -233,6 +258,13 @@ func providerFor(t APIType) *provider {
 // specific (e.g. Vertex's X-Goog-User-Project); the auth header is added by the
 // round-tripper.
 func (c *ModelConnection) doJSON(ctx context.Context, method, rawURL string, extraHeaders http.Header) ([]byte, error) {
+	// A deferred config error (e.g. an unroutable entry, issue #505) short-circuits
+	// here too, so model listing / Scan fails fast with the clear misconfiguration
+	// message instead of dialing the localhost placeholder, matching the completion
+	// path (complete/completeStream).
+	if c.configErr != nil {
+		return nil, c.configErr
+	}
 	req, err := http.NewRequestWithContext(ctx, method, rawURL, nil)
 	if err != nil {
 		return nil, &ModelError{Type: ErrorConnection, Message: fmt.Sprintf("failed to create request: %v", err)}
