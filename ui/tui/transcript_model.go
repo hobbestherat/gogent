@@ -228,27 +228,31 @@ func (m *transcriptModel) lastAssistantRecord() *transcriptRecord {
 // present in BOTH the restored snapshot AND the buffered live stream; re-applying the
 // drained backlog must not duplicate what the snapshot already rendered.
 //
-// Two guards keep it from ever over-dropping a legitimate live event:
-//   - it matches only records flagged restored, so two live events are never deduped
-//     against each other (a turn may legitimately repeat a tool call or an identical
-//     answer — the earlier one is a live record and so never matches);
-//   - it stops at the first user record, so a genuinely new turn's events are always
-//     kept even when textually identical to an earlier turn's.
+// A drained backlog event can only duplicate snapshot records that are still at the
+// pristine tail, so the scan stops — returning false — at the first record that ends
+// that tail:
+//   - any user record (a turn boundary): a genuinely new turn's events are always
+//     kept, even when textually identical to an earlier turn's;
+//   - any live (non-restored) record: once live activity has appended to the window
+//     we are past the snapshot, so neither a backlog overlap nor a future turn is
+//     suppressed. This also means two live events are never deduped against each
+//     other, and an autonomous (user-less) session resumes streaming as soon as its
+//     first live record lands rather than being suppressed indefinitely.
 //
-// Intervening live/other records are transparent. Callers pass a kind-specific match
-// (answer body, tool name, thought body); answer/thought comparisons rebuild the
-// text the way the record builders store it (childLines split, joined on newlines)
-// so they match body() exactly.
+// Non-matching restored records are transparent (the scan continues past them).
+// Callers pass a kind-specific match (answer body, tool name/header, thought body);
+// answer/thought comparisons rebuild the text the way the record builders store it
+// (childLines split, joined on newlines) so they match body() exactly.
 func (m *transcriptModel) restoredDuplicate(k eventKind, match func(*transcriptRecord) bool) bool {
 	for i := len(m.records) - 1; i >= 0; i-- {
 		r := m.records[i]
 		if r == nil {
 			continue
 		}
-		if r.kind == kindUser {
+		if r.kind == kindUser || !r.restored {
 			return false
 		}
-		if r.restored && r.kind == k && match(r) {
+		if r.kind == k && match(r) {
 			return true
 		}
 	}

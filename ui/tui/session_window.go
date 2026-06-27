@@ -2515,6 +2515,17 @@ func (sw *SessionWindow) appendThinkingDelta(delta string) {
 		return
 	}
 	if sw.liveThought == nil {
+		// On first connect a turn whose reasoning is already restored from the snapshot
+		// (a kindThinking record at the tail with no new user turn since) must not also
+		// stream a duplicate live "thinking…" block from the drained backlog (issue
+		// #516). Suppress the whole stream for this turn rather than matching text:
+		// deltas are token fragments, so a content match on the first one is unreliable,
+		// whereas the presence of a restored thought is a stable signal. liveThought
+		// stays nil, so every further delta short-circuits here and foldLiveThought is a
+		// no-op. The user-record stop means a genuinely new turn always streams normally.
+		if sw.transcript.restoredDuplicate(kindThinking, func(*transcriptRecord) bool { return true }) {
+			return
+		}
 		sw.liveThought = sw.transcript.add(&transcriptRecord{
 			kind: kindThinking, header: "thinking…", color: colorNote, role: roleNote,
 		})
@@ -2606,11 +2617,13 @@ func (sw *SessionWindow) finishToolCall(id, name, result string) {
 	} else {
 		// No pending call for this result. On first connect this is the drained
 		// backlog result of a tool turn whose call was already deduped against the
-		// snapshot (issue #516): if the snapshot already holds this tool block, skip
-		// the fallback record so the result is not orphaned into a duplicate. restore()
-		// builds the call as "tool: <name>" and the result as "result: <name>".
+		// snapshot (issue #516): skip the fallback record only when the snapshot
+		// already shows this tool's RESULT, so the result is not orphaned into a
+		// duplicate. Matching the result record specifically (restore() builds it as
+		// "result: <name>") — not the call "tool: <name>" — means a result that a
+		// partial snapshot never persisted is still rendered rather than dropped.
 		if sw.transcript.restoredDuplicate(kindTool, func(r *transcriptRecord) bool {
-			return r.header == "tool: "+name || r.header == "result: "+name
+			return r.header == "result: "+name
 		}) {
 			return
 		}
