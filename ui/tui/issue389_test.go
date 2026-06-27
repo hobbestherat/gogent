@@ -100,7 +100,14 @@ func TestIssue389SetModelsPreservesDuplicateDisplayLabelByStableName(t *testing.
 	}
 }
 
-func TestIssue389ModelEditorSaveRefreshesWorkbenchFromAuthoritativeModels(t *testing.T) {
+// Issue #509: the standalone model editor (showModelEditor) was removed and its
+// field set folded into the shared showModelForm builder the unified Models…
+// dialog uses for Edit and Add Empty…. These two tests preserve the #389 invariant
+// (a model edit refreshes the open session dropdown from the authoritative backend
+// list, by stable Name) by driving that form directly in Edit mode with
+// refreshModelsList as the post-save hook — the exact wiring the dialog's Edit
+// action uses.
+func TestIssue389ModelFormSaveRefreshesWorkbenchFromAuthoritativeModels(t *testing.T) {
 	backend := []config.ModelConfig{{Name: "solo", DisplayName: "Before", Model: "provider-before"}}
 	w := NewWorkbench([]*config.ModelConfig{{Name: "solo", DisplayName: "Before", Model: "provider-before"}})
 	sw := w.NewSession()
@@ -117,17 +124,17 @@ func TestIssue389ModelEditorSaveRefreshesWorkbenchFromAuthoritativeModels(t *tes
 		},
 	})
 
-	w.showModelEditor()
-	issue389ClickModelEditorSave(t, w)
+	w.showModelForm("Edit model — solo", backend[0], false, w.handlers.UpdateModel, w.refreshModelsList)
+	clickModelFormSave(t, w)
 
 	if got := sw.modelSelect.Value(); got != "After" {
-		t.Fatalf("open session label after editor save = %q, want After", got)
+		t.Fatalf("open session label after form save = %q, want After", got)
 	}
 	if got := sw.selectedModelName(); got != "solo" {
-		t.Fatalf("selectedModelName() after editor save = %q, want solo", got)
+		t.Fatalf("selectedModelName() after form save = %q, want solo", got)
 	}
 	if got := w.models[0].Model; got != "provider-after" {
-		t.Fatalf("workbench model id after editor save = %q, want provider-after", got)
+		t.Fatalf("workbench model id after form save = %q, want provider-after", got)
 	}
 }
 
@@ -149,23 +156,23 @@ func TestIssue389ModelEditorDoesNotRefreshAfterFailedUpdate(t *testing.T) {
 		},
 	})
 
-	w.showModelEditor()
-	getCalls = 0 // ignore the dialog's initial load
-	issue389ClickModelEditorSave(t, w)
+	w.showModelForm("Edit model — solo", backend[0], false, w.handlers.UpdateModel, w.refreshModelsList)
+	getCalls = 0 // the form does not call GetModels on open; reset keeps the assertion honest
+	clickModelFormSave(t, w)
 
 	if getCalls != 0 {
-		t.Fatalf("GetModels called %d time(s) after failed UpdateModel; refresh should wait for a successful update loop", getCalls)
+		t.Fatalf("GetModels called %d time(s) after failed UpdateModel; onSaved must not run on a failed save", getCalls)
 	}
 	if got := sw.modelSelect.Value(); got != "Before" {
 		t.Fatalf("open session label changed after failed save = %q, want Before", got)
 	}
 }
 
-func issue389ClickModelEditorSave(t *testing.T, w *Workbench) {
+func clickModelFormSave(t *testing.T, w *Workbench) {
 	t.Helper()
 	top := w.desktop.TopLayer()
 	if top == nil || top.Root == nil {
-		t.Fatal("model editor did not open")
+		t.Fatal("model form did not open")
 	}
 	root := top.Root
 	saveBounds := tv.Rect{X: root.Bounds.W - 24, Y: root.Bounds.H - 3, W: 9, H: 1}
