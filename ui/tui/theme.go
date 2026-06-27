@@ -321,6 +321,19 @@ type Theme struct {
 	TextSelectionFG tui.Color
 	TextSelectionBG tui.Color
 
+	// Paste-chip colours (issue #501). turbotui's TextBox/MultiLineInput collapse a
+	// multi-line paste into a single atomic "[pasted N lines]" chip and repaint its
+	// cells to PasteChipFG on PasteChipBG (a slot distinct from TextSelection*, which
+	// keeps driving the selection highlight). The chip is drawn over the focused-input
+	// fill, so — like the text-selection roles — it must contrast with InputFocusBG
+	// rather than re-use the focus accent; it is also kept distinct from TextSelectionBG
+	// so a *selected* chip still reads as a chip. These roles default to a muted accent
+	// that clears both backgrounds and the body-text contrast tier; ApplyTheme installs
+	// them onto tv.DefaultTheme's PasteChip* slots, which the widgets read at draw time.
+	// Under NO_COLOR both degrade to the terminal default like every other role.
+	PasteChipFG tui.Color
+	PasteChipBG tui.Color
+
 	// CodeBG is the background painted behind fenced/indented code blocks in the
 	// rich-Markdown transcript (issue #184). It is a theme role, not a hardcoded
 	// black, so code blocks read as part of the active theme rather than a black
@@ -449,6 +462,14 @@ func defaultPalette() Theme {
 		// rather than re-using the accent the field already wears (the #279 collision).
 		TextSelectionFG: tui.ANSIColor(15),
 		TextSelectionBG: tui.ANSIColor(0),
+		// Paste chip (issue #501): dark magenta (ANSI 5) with bright-white text — a muted
+		// tag distinct from both the cyan focused-input fill (InputFocusBG, ANSI 6) and the
+		// black text-selection box (TextSelectionBG, ANSI 0), so a chip reads as a chip and
+		// a selected chip stays legible. White-on-magenta clears the body-text contrast
+		// tier (~6.4:1), and being 16-colour ANSI it is fidelity-invariant. Matches
+		// turbotui's own default chip hue.
+		PasteChipFG: tui.ANSIColor(15),
+		PasteChipBG: tui.ANSIColor(5),
 		// Fenced-code panel: a dark navy inset — a subtle shade of the desktop blue
 		// (issue #200) so code reads as a distinct themed panel rather than the old
 		// black-on-blue island. It is the one RGB role in this otherwise 16-colour
@@ -535,6 +556,13 @@ func highContrastPalette() Theme {
 		// a black box — so a selection is unmistakable on the high-contrast canvas.
 		TextSelectionFG: white,
 		TextSelectionBG: black,
+		// Paste chip (issue #501): the Okabe–Ito purple with black text — a colour-blind-safe
+		// tag distinct from both the yellow focused-input fill (InputFocusBG, okabeYellow) and
+		// the black text-selection box, so a chip reads as a chip on the high-contrast canvas.
+		// The purple is mid-luminance, so black text clears the body-text tier (~6.9:1) where
+		// white would not.
+		PasteChipFG: black,
+		PasteChipBG: okabePurple,
 		// Unused: applyMarkdownPalette suppresses the code background for this
 		// pure-black preset (a black panel on black would vanish), but the role is
 		// set for completeness so the Theme is fully populated.
@@ -609,6 +637,12 @@ func darkPalette() Theme {
 		// on a black box — so a selection reads against the warm focus fill.
 		TextSelectionFG: softWhite,
 		TextSelectionBG: black,
+		// Paste chip (issue #501): the palette's soft-mauve (the Result tone) with black text
+		// — cohesive with the dark aesthetic and distinct from both the amber focused-input
+		// fill (InputFocusBG) and the black text-selection box. The mauve is light, so black
+		// text clears the body-text tier (~8.3:1) where soft-white would not.
+		PasteChipFG: black,
+		PasteChipBG: tui.RGBColor(0xC6, 0x8F, 0xD6),
 		// Code blocks render directly on the pure-black canvas (no distinct panel).
 		CodeBG: black,
 		// Dialog lists (issue #327): pure-black canvas with soft-white text (==
@@ -669,6 +703,8 @@ func ResolveTheme(cfg config.ThemeConfig, env func(string) string, noColorFlag b
 	t.InputFocusBG = degrade(t.InputFocusBG, level)
 	t.TextSelectionFG = degrade(t.TextSelectionFG, level)
 	t.TextSelectionBG = degrade(t.TextSelectionBG, level)
+	t.PasteChipFG = degrade(t.PasteChipFG, level)
+	t.PasteChipBG = degrade(t.PasteChipBG, level)
 	t.CodeBG = degrade(t.CodeBG, level)
 	t.ListBG = degrade(t.ListBG, level)
 	t.ListFG = degrade(t.ListFG, level)
@@ -777,6 +813,10 @@ func applyOverrides(t *Theme, overrides map[string]string) {
 			t.TextSelectionFG = c
 		case "text_selection_bg":
 			t.TextSelectionBG = c
+		case "paste_chip_fg":
+			t.PasteChipFG = c
+		case "paste_chip_bg":
+			t.PasteChipBG = c
 		case "code_bg":
 			t.CodeBG = c
 		case "list_bg":
@@ -1171,6 +1211,17 @@ func ApplyTheme(t Theme) {
 	// the roles; under NO_COLOR both have degraded to the terminal default.
 	tv.DefaultTheme.TextSelectionFG = t.TextSelectionFG
 	tv.DefaultTheme.TextSelectionBG = t.TextSelectionBG
+
+	// Paste-chip roles (issue #501). turbotui's TextBox/MultiLineInput read
+	// activeTheme.PasteChip* at draw time to paint a collapsed multi-line-paste chip,
+	// so install them onto tv.DefaultTheme's PasteChip* slots here; the tv.SetTheme
+	// below propagates them so a live theme switch recolours the chip without a restart.
+	// This single unconditional install covers all three chrome paths — it runs after the
+	// switch has chosen baseTVTheme/blackCanvasTVTheme/neutralTVTheme and overwrites
+	// whatever they left in the slot, mirroring the Window*/MenuBar*/TextSelection*
+	// installs. Under NO_COLOR both roles have degraded to the terminal default.
+	tv.DefaultTheme.PasteChipFG = t.PasteChipFG
+	tv.DefaultTheme.PasteChipBG = t.PasteChipBG
 
 	// Button and input roles (issue #265). turbotui carries Button*/Input* slots that
 	// both freshly built widgets and the live reseed path (reseedButton, the input
