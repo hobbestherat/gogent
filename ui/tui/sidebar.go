@@ -81,16 +81,18 @@ const subAgentFoldTTL = 60 * time.Second
 // that cannot affect ActiveSubAgentCount / ListAllAgents / slot counting.
 //
 // summaryNode is the single always-first synthetic child that both renders the
-// bracketed per-state counts ("[▶2 ‖1 ✓5 ✗1]") AND parents the TTL-folded
+// pipe-wrapped per-state counts ("|▶2 ‖1 ✓5 ✗1|") AND parents the TTL-folded
 // completed ("archived") agents (issue #490, collapsing the old two-row status-bar
-// + "[✓ N]" bucket into one line). It carries tv.HideMarker so the tree paints a
-// blank leading column instead of a ▸/▾ even once it has children, and a trailing
-// suffix glyph advertises and drives the fold: "" while it parents nothing
-// (empty-bucket rule), "+" collapsed (archived hidden, can expand), "-" expanded
-// (archived shown, can fold) — see summarySuffix. Folding an agent moves its node
-// under this (collapsed) node, reusing the tree's existing collapse mechanic; the
-// node is never detached on emptying (unlike the old bucket) because it is also the
-// always-present status bar — it is torn down only when no entries remain at all.
+// + "[✓ N]" bucket into one line). It is created eagerly for every session and is
+// always-on (issue #510): all four states are shown including zero ("|▶0 ‖0 ✓0 ✗0|")
+// even when the session has no sub-agents, so the row never appears, disappears, or
+// reshapes. It carries tv.HideMarker so the tree paints a blank leading column
+// instead of a ▸/▾ even once it has children, and a trailing suffix glyph advertises
+// and drives the fold: "" while it parents nothing (empty-bucket rule), "+" collapsed
+// (archived hidden, can expand), "-" expanded (archived shown, can fold) — see
+// summarySuffix. Folding an agent moves its node under this (collapsed) node, reusing
+// the tree's existing collapse mechanic; the node is never detached on emptying —
+// it is torn down only when the session itself closes (removeSession).
 type sessionFold struct {
 	summaryNode *tv.TreeNode
 	entries     map[string]*foldEntry // agent key -> fold metadata (same key applySubAgent derives)
@@ -601,6 +603,12 @@ func (s *sidebar) addSession(id, title string, pinned bool) {
 	node.Data = nodeRef{sessionID: id, name: title}
 	s.sessions[id] = node
 	s.tree.AddRoot(node)
+	// Eagerly create + paint the always-on summary row (issue #510) so every
+	// session shows |▶0 ‖0 ✓0 ✗0| from the moment it appears, before any sub-agent
+	// event. ensureFold only builds the node + bookkeeping; refreshFoldChrome with
+	// no entries paints the all-zero bar (it no longer tears the node down).
+	s.ensureFold(id, node)
+	s.refreshFoldChrome(id)
 }
 
 // removeSession removes a session node and any of its sub-agent nodes.
@@ -1008,12 +1016,14 @@ func (s *sidebar) applySubAgent(sessionID string, ev agent.SessionEvent) {
 }
 
 // ensureFold returns the session's fold bookkeeping, creating it (and the single
-// always-first summary node) on first use. The summary node is inserted at child
-// index 0, shifting any existing children (e.g. attached watchers) right. It is
-// created childless and collapsed with its ▸/▾ marker hidden (issue #490): while it
-// parents no archived agent it renders as just the totals bracket with no +/-
-// suffix (empty-bucket rule); the suffix and the archived children appear only once
-// foldAgent moves a completed agent under it.
+// always-first summary node) on first use. It is called eagerly from addSession so
+// the summary row exists for every session before any sub-agent event (issue #510),
+// and is idempotent — a later sub-agent event reuses the existing fold. The summary
+// node is inserted at child index 0, shifting any existing children (e.g. attached
+// watchers) right. It is created childless and collapsed with its ▸/▾ marker hidden
+// (issue #490): while it parents no archived agent it renders as just the totals bar
+// with no +/- suffix (empty-bucket rule); the suffix and the archived children appear
+// only once foldAgent moves a completed agent under it.
 func (s *sidebar) ensureFold(sessionID string, parent *tv.TreeNode) *sessionFold {
 	if fold := s.folds[sessionID]; fold != nil {
 		return fold
@@ -1074,8 +1084,8 @@ func (s *sidebar) foldAgent(fold *sessionFold, parent, node *tv.TreeNode) {
 
 // unfoldAgent moves an agent node from under the summary node back into the visible
 // child list (issue #490). The summary node is NOT detached when it empties — it is
-// also the always-present status bar, so it simply reverts to a plain bracket with
-// no +/- suffix (refreshFoldChrome); teardown happens only when no entries remain.
+// also the always-on status bar, so it simply reverts to the all-zero counts bar with
+// no +/- suffix (refreshFoldChrome); teardown happens only when the session closes.
 func (s *sidebar) unfoldAgent(fold *sessionFold, parent, node *tv.TreeNode) {
 	if fold.summaryNode == nil {
 		return
@@ -1152,26 +1162,16 @@ func (s *sidebar) foldOf(node *tv.TreeNode) *sessionFold {
 
 // refreshFoldChrome recomputes the session's single summary label from its fold
 // entries (issue #490). The ✓ count includes folded (archived) agents; the ✗ count
-// excludes dismissed failures. The label is the bracketed totals plus a trailing
-// +/- suffix (summarySuffix) when the summary parents archived agents. When the
-// session has no tracked sub-agents at all (e.g. its only agent was a dismissed
-// failure), the summary node is torn down and the fold entry dropped, returning the
-// row to its clean pre-agent state. Runs on the UI thread.
+// excludes dismissed failures. The label is the pipe-wrapped totals plus a trailing
+// +/- suffix (summarySuffix) when the summary parents archived agents. The summary
+// node is always-on (issue #510): when the session has no tracked sub-agents (e.g.
+// a fresh session, or one whose only agent was a dismissed failure) the loop below
+// naturally yields all-zeros and the row paints |▶0 ‖0 ✓0 ✗0| — it is never torn
+// down here. Teardown happens only when the session itself closes (removeSession).
+// Runs on the UI thread.
 func (s *sidebar) refreshFoldChrome(sessionID string) {
 	fold := s.folds[sessionID]
 	if fold == nil {
-		return
-	}
-	parent := s.sessions[sessionID]
-	if len(fold.entries) == 0 {
-		// No tracked sub-agents remain (e.g. the only agent was a dismissed failure):
-		// drop the summary row and the bookkeeping so the session row returns to its
-		// clean pre-agent state. Keyed on the entry set rather than on the visible
-		// counts so an agent in a non-counted transient status never orphans its node.
-		if parent != nil && fold.summaryNode != nil {
-			removeChild(parent, fold.summaryNode)
-		}
-		delete(s.folds, sessionID)
 		return
 	}
 	var running, waiting, completed, failed int
@@ -1212,9 +1212,9 @@ func summarySuffix(n *tv.TreeNode) string {
 // child paints so the suffix tracks Expanded no matter how it changed — a click
 // (OnToggle), a keyboard Left/Right/Space (which flips Expanded natively with no
 // host hook), or a programmatic flip. It only rewrites the suffix on the existing
-// label (everything up to and including the last ']' is the counts bracket), never
-// mutating tree structure or tearing a node down, so it is safe to run every frame.
-// Runs on the UI thread.
+// label (everything up to and including the last '|' is the counts bar — issue
+// #510), never mutating tree structure or tearing a node down, so it is safe to
+// run every frame. Runs on the UI thread.
 func (s *sidebar) syncFoldSuffixes() {
 	for _, fold := range s.folds {
 		n := fold.summaryNode
@@ -1222,36 +1222,26 @@ func (s *sidebar) syncFoldSuffixes() {
 			continue
 		}
 		base := n.Label
-		if i := strings.LastIndexByte(base, ']'); i >= 0 {
+		if i := strings.LastIndexByte(base, '|'); i >= 0 {
 			base = base[:i+1]
 		}
 		n.Label = base + summarySuffix(n)
 	}
 }
 
-// statusBarLabel renders the bracketed per-state count row using the same glyphs
-// as agent rows (statusIcon). Zero counts are omitted; the brackets make it
-// visually distinct from real agent rows (which lead with a single status glyph).
+// statusBarLabel renders the per-state count row using the same glyphs as agent
+// rows (statusIcon). All four lifecycle states are always shown in fixed order
+// (▶running ‖waiting ✓completed ✗failed), each with its integer count INCLUDING
+// zero (issue #510) — the bar never reshapes as sub-agents come and go. It is
+// wrapped in straight pipes |…| (not [ ]) to read as a single fixed-width status
+// bar, visually distinct from real agent rows (which lead with a single status
+// glyph). The idle • glyph is never emitted here.
 func statusBarLabel(running, waiting, completed, failed int) string {
-	var b strings.Builder
-	b.WriteByte('[')
-	first := true
-	add := func(status agent.AgentStatus, n int) {
-		if n == 0 {
-			return
-		}
-		if !first {
-			b.WriteByte(' ')
-		}
-		fmt.Fprintf(&b, "%s%d", statusIcon(status), n)
-		first = false
-	}
-	add(agent.StatusRunning, running)
-	add(agent.StatusWaiting, waiting)
-	add(agent.StatusCompleted, completed)
-	add(agent.StatusFailed, failed)
-	b.WriteByte(']')
-	return b.String()
+	return fmt.Sprintf("|%s%d %s%d %s%d %s%d|",
+		statusIcon(agent.StatusRunning), running,
+		statusIcon(agent.StatusWaiting), waiting,
+		statusIcon(agent.StatusCompleted), completed,
+		statusIcon(agent.StatusFailed), failed)
 }
 
 // dismissFailed manually clears every undismissed failed sub-agent of a session:
