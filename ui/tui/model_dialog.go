@@ -194,7 +194,10 @@ func (w *Workbench) showModelsDialog() {
 	if paneRows > 12 {
 		paneRows = 12
 	}
-	height0 := paneRows + 7 // top label + list + hint row + button row + borders
+	// The footer buttons render 2 rows tall (issue #529), so the dialog is one row
+	// taller than the 1-row-footer dialogs: top label + list + hint row + 2-row
+	// button row + borders.
+	height0 := paneRows + 8
 
 	spec := tv.DialogSpec{MinW: width0, MinH: height0, MaxH: height0, PreferredW: width0}
 	x, y, width, height := w.dialogRect(spec)
@@ -206,9 +209,17 @@ func (w *Workbench) showModelsDialog() {
 	listX := 2
 	listW := width - 4
 	listY := 2
-	hintY := height - 4
-	buttonY := height - 3
-	paneH := height - listY - 5
+	// The footer buttons are 2 rows tall (issue #529), so the button row starts one
+	// row higher than a 1-row footer (height-4 instead of height-3): its two rows
+	// then occupy the last two interior rows (height-4, height-3) with the bottom
+	// border at height-2, exactly as a 1-row footer sits flush at height-3. The hint
+	// moves up in step (height-5) and the list keeps its paneRows rows (height-listY-6
+	// — one row tighter than the 1-row case, where the extra height0 row went). This
+	// keeps the caption (turbotui draws it on the lower of the two button rows) inside
+	// the dialog instead of on the border.
+	hintY := height - 5
+	buttonY := height - 4
+	paneH := height - listY - 6
 	if paneH < 1 {
 		paneH = 1
 	}
@@ -245,7 +256,9 @@ func (w *Workbench) showModelsDialog() {
 	}
 	dialog.Window.AddContent(dialogLabel(hint, tv.Rect{X: 2, Y: hintY, W: width - 4, H: 1}))
 
-	footer := footerButtonRects(labels, 2, width-3, buttonY, tv.DefaultButtonGap)
+	// 2-row-tall footer buttons (issue #529): the Models… dialog opts into the
+	// taller footer; every other dialog stays on the 1-row footerButtonRects path.
+	footer := footerButtonRectsH(labels, 2, width-3, buttonY, tv.DefaultButtonGap, 2)
 	for i, a := range acts {
 		dialog.Window.AddContent(newButton(a.label, footer[i], a.fn))
 	}
