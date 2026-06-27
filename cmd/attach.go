@@ -211,13 +211,18 @@ func runAttached(homeDir, addr, token string, noColorFlag bool) error {
 	// Establish the remote event stream + approvals polling BEFORE entering the
 	// TUI loop, so a daemon that went away between the health check and the
 	// subscribe fails cleanly without ever launching (and tearing down) UI state.
-	// The consumer's posts are queued on the workbench desktop and delivered once
-	// the loop below starts. ctx is the one created at the top, so a SIGINT during
-	// startup cancels it too.
-	if err := rc.Start(ctx); err != nil {
+	// StartGated opens the stream synchronously (preserving that fail-fast) but
+	// defers DRAINING it into the UI until the first Restore() completes: it returns
+	// a begin closure we hand to the workbench so the live consumer starts only after
+	// restore has populated the windows, never flooding the UI thread mid-restore
+	// (issue #516). ctx is the one created at the top, so a SIGINT during startup
+	// cancels it too.
+	begin, err := rc.StartGated(ctx)
+	if err != nil {
 		rc.Close()
 		return fmt.Errorf("start remote event stream: %w", err)
 	}
+	wb.SetAfterRestore(begin)
 
 	// Run the TUI loop.
 	go func() {

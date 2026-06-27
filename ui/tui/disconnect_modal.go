@@ -30,6 +30,14 @@ func (w *Workbench) SetReconnectControls(host string, retryNow func()) {
 	w.reconnectRetry = retryNow
 }
 
+// SetAfterRestore installs a callback Run invokes once, after its initial Restore()
+// loop has populated the workbench. The attach path uses it to start the deferred
+// SSE consumer only after restore, so live daemon events cannot flood the UI thread
+// while Restore is still running (issue #516). It is called once during attach
+// setup, before the UI loop starts, so it needs no synchronisation; a nil callback
+// (the embedded path) leaves Run unchanged.
+func (w *Workbench) SetAfterRestore(fn func()) { w.afterRestore = fn }
+
 // OnConnectionLost raises (or, on a later attempt, updates) the blocking modal.
 // It is called from the RemoteClient's background goroutine, so it marshals the UI
 // work onto the event-loop thread.
