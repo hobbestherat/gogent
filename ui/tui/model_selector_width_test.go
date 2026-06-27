@@ -94,7 +94,8 @@ func openModelsDialog(t *testing.T, displayCells, screenW, screenH int) tv.Rect 
 // sizes to its CONTENT, NOT the 160×42 percentage balloon that motivated #309. The
 // width follows the footer button row (wider than the 64 comfort floor once
 // Add/Edit/Remove/Set Default/Done are all laid out) but stays under the 160 cap;
-// the height is pinned to the one-row list (paneRows+7 = 8), not the 85% default.
+// the height is pinned to the one-row list plus chrome (paneRows+8 = 9 with the
+// 2-row footer of issue #529), not the 85% default.
 func TestModelsDialogNotPercentageBalloon(t *testing.T) {
 	b := openModelsDialog(t, 6, 200, 50)
 	if b.W >= 160 {
@@ -106,8 +107,8 @@ func TestModelsDialogNotPercentageBalloon(t *testing.T) {
 	if b.H >= 42 {
 		t.Errorf("models dialog height = %d, want content-sized (< 42), not the 85%% balloon", b.H)
 	}
-	if b.H != 8 {
-		t.Errorf("models dialog height = %d, want 8 (one row + chrome)", b.H)
+	if b.H != 9 {
+		t.Errorf("models dialog height = %d, want 9 (one-row list + chrome + 2-row footer, issue #529)", b.H)
 	}
 }
 

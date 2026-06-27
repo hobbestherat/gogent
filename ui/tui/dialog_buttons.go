@@ -64,13 +64,32 @@ const buttonChrome = 4
 // display order, e.g. []string{"Export &CSV", "Export &JSON", "Close"}. The
 // caller is expected to size its dialog so the group fits (the statistics dialog
 // floors its width well above the group's needs); the clamping is a safety net.
+//
+// Buttons are one row tall. A dialog that wants a taller footer (issue #529) calls
+// footerButtonRectsH with an explicit height instead; this signature is the 1-row
+// default kept stable so every existing caller is untouched.
 func footerButtonRects(labels []string, leftX, rightX, y, gap int) []tv.Rect {
+	return footerButtonRectsH(labels, leftX, rightX, y, gap, 1)
+}
+
+// footerButtonRectsH is footerButtonRects with a configurable button height h: each
+// rect carries H==h so the buttons render h rows tall (turbotui's Button.draw fills
+// every row of its bounds as a solid "[ … ]" block, centring the caption — Phase-1
+// tall-button support for gogent#529). The horizontal layout (right-alignment, gap,
+// clampDialogRect) is identical to the 1-row path; only the height differs.
+//
+// h <= 0 collapses to 1, mirroring turbotui's ButtonHeight contract, so a zero
+// height degrades to the ordinary single-row footer rather than an invisible button.
+func footerButtonRectsH(labels []string, leftX, rightX, y, gap, h int) []tv.Rect {
+	if h < 1 {
+		h = 1
+	}
 	rects := make([]tv.Rect, len(labels))
 	rightEdge := rightX
 	for i := len(labels) - 1; i >= 0; i-- {
 		w := tv.ButtonLabelWidth(labels[i])
 		x := rightEdge - w + 1
-		rects[i] = clampDialogRect(tv.Rect{X: x, Y: y, W: w, H: 1}, leftX, rightX)
+		rects[i] = clampDialogRect(tv.Rect{X: x, Y: y, W: w, H: h}, leftX, rightX)
 		rightEdge = x - gap - 1
 	}
 	return rects
