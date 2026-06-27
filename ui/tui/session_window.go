@@ -1721,13 +1721,36 @@ func (sw *SessionWindow) apply(ev agent.SessionEvent) {
 		sw.statusStats = ev.Stats
 		sw.refreshStatus()
 	case agent.SessionEventAssistantStep:
-		sw.addThought(ev.Text)
+		// Skip a thought already restored from the snapshot with no new user turn
+		// since (issue #516): a turn whose reasoning finished during restore carries it
+		// in both the snapshot and the drained backlog.
+		want := strings.Join(childLines(ev.Text), "\n")
+		if !sw.transcript.restoredDuplicate(kindThinking, func(r *transcriptRecord) bool { return r.body() == want }) {
+			sw.addThought(ev.Text)
+		}
 	case agent.SessionEventToolCall:
-		sw.beginToolCall(ev.CallID, ev.Tool, ev.Args)
+		// Skip a tool block already restored from the snapshot with no new user turn
+		// since (issue #516): a tool-using turn that finished during restore is in both
+		// the snapshot and the drained backlog. restore() builds the call record as
+		// "tool: <name>"; a legitimate repeat call inside a live turn matches an earlier
+		// LIVE record (restored=false), so it is never suppressed.
+		if !sw.transcript.restoredDuplicate(kindTool, func(r *transcriptRecord) bool { return r.header == "tool: "+ev.Tool }) {
+			sw.beginToolCall(ev.CallID, ev.Tool, ev.Args)
+		}
 	case agent.SessionEventToolResult:
 		sw.finishToolCall(ev.CallID, ev.Tool, ev.Result)
 	case agent.SessionEventFinal:
-		sw.addAssistant(ev.Text)
+		// Skip an answer already restored from the snapshot with no new user turn since
+		// (issue #516): on first connect the SSE stream is opened before the initial
+		// Restore() completes and drained only afterwards, so a turn that finished during
+		// restore arrives both in the restored snapshot and in the buffered live stream —
+		// applying the drained backlog must not duplicate it. A genuinely new turn always
+		// has its user message in between (and its earlier answer is a live record), so
+		// this never swallows a legitimate reply, even an identical one.
+		want := strings.Join(childLines(ev.Text), "\n")
+		if !sw.transcript.restoredDuplicate(kindAssistant, func(r *transcriptRecord) bool { return r.body() == want }) {
+			sw.addAssistant(ev.Text)
+		}
 		sw.setBusy(false)
 	case agent.SessionEventPlan:
 		// The plan itself arrives as the assistant's final answer; this just marks
@@ -2492,6 +2515,19 @@ func (sw *SessionWindow) appendThinkingDelta(delta string) {
 		return
 	}
 	if sw.liveThought == nil {
+		// On first connect a turn whose reasoning is already restored from the snapshot
+		// (a kindThinking record still at the pristine tail) must not also stream a
+		// duplicate live "thinking…" block from the drained backlog (issue #516).
+		// Suppress the whole stream for this turn rather than matching text: deltas are
+		// token fragments, so a content match on the first one is unreliable, whereas the
+		// presence of a restored thought is a stable signal. liveThought stays nil, so
+		// every further delta short-circuits here and foldLiveThought is a no-op. Because
+		// this is a content-blind presence check, it uses restoredAtPristineTail (stops
+		// at the first live record), so an autonomous session resumes streaming as soon
+		// as it has any live activity rather than being suppressed indefinitely.
+		if sw.transcript.restoredAtPristineTail(kindThinking, func(*transcriptRecord) bool { return true }) {
+			return
+		}
 		sw.liveThought = sw.transcript.add(&transcriptRecord{
 			kind: kindThinking, header: "thinking…", color: colorNote, role: roleNote,
 		})
@@ -2581,6 +2617,18 @@ func (sw *SessionWindow) finishToolCall(id, name, result string) {
 		delete(sw.pendingTools, id)
 		sw.transcript.setHeader(rec, fmt.Sprintf("tool: %s (done)", name))
 	} else {
+		// No pending call for this result. On first connect this is the drained
+		// backlog result of a tool turn whose call was already deduped against the
+		// snapshot (issue #516): skip the fallback record only when the snapshot
+		// already shows this tool's RESULT, so the result is not orphaned into a
+		// duplicate. Matching the result record specifically (restore() builds it as
+		// "result: <name>") — not the call "tool: <name>" — means a result that a
+		// partial snapshot never persisted is still rendered rather than dropped.
+		if sw.transcript.restoredDuplicate(kindTool, func(r *transcriptRecord) bool {
+			return r.header == "result: "+name
+		}) {
+			return
+		}
 		rec = sw.transcript.add(&transcriptRecord{
 			kind: kindTool, header: fmt.Sprintf("tool: %s", name), color: colorTool, role: roleTool, collapsed: true,
 		})
@@ -2855,6 +2903,12 @@ func (sw *SessionWindow) restore(msgs []ChatMessage) {
 				})
 			}
 		}
+	}
+	// Mark every snapshot-built record so the connect-path dedup (issue #516) can
+	// tell them from live events: a drained backlog event is suppressed only when it
+	// would duplicate one of these, never when it merely matches another live event.
+	for _, r := range records {
+		r.restored = true
 	}
 	sw.transcript.addAll(records)
 	// Record the fingerprint of the source slice so a later reconnect refresh can

@@ -661,6 +661,13 @@ type Workbench struct {
 	// are read only on the UI thread.
 	reconnectHost  string
 	reconnectRetry func()
+	// afterRestore, when set, runs once at the end of Run's initial restore block.
+	// The attach path uses it to start the deferred SSE consumer only after the first
+	// Restore() has populated the workbench, so live events cannot flood the UI thread
+	// during restore (issue #516). nil (the embedded path) makes it a no-op. Written
+	// once by SetAfterRestore during attach setup before the UI loop exists, then read
+	// only on the UI thread inside Run — so it needs no synchronisation.
+	afterRestore func()
 	// reconnectCoalesce is the leading-edge debounce window for refreshAfterReconnect
 	// (issue #520): a burst of rapid early reconnects collapses to a single
 	// Restore()+resync. reconnectRefreshAt stamps the last refresh that actually ran.
@@ -2834,6 +2841,13 @@ func (w *Workbench) Run() error {
 	// Open an initial session so the user has somewhere to type.
 	if len(w.order) == 0 {
 		w.NewSession()
+	}
+	// Restore is complete and the workbench is populated: start the deferred SSE
+	// consumer now (issue #516) so live daemon events begin flowing only once their
+	// target windows exist, never flooding the UI thread mid-restore. nil on the
+	// embedded path, where the stream is consumed eagerly.
+	if w.afterRestore != nil {
+		w.afterRestore()
 	}
 	w.desktop.SetUnhandledKeyFn(func(event tui.TypeEvent) {
 		// '?' and ':' are handled one step earlier, at the Fallthrough dispatch stage

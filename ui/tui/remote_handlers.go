@@ -138,6 +138,15 @@ type RemoteClient struct {
 	tunnel TunnelRestarter
 
 	startOnce sync.Once
+
+	// initialEvents holds the SSE stream opened synchronously by StartGated so its
+	// consumption can be deferred until the first Restore() completes (issue #516):
+	// opening early preserves fail-fast, but draining it into the sink before restore
+	// would flood the UI thread. nil once consumeOnce has launched consume.
+	initialEvents <-chan GlobalEventDTO
+	// consumeOnce guards the deferred launch of consume()+monitorHealth() so the
+	// begin closure StartGated returns is idempotent and safe from any goroutine.
+	consumeOnce sync.Once
 }
 
 // TunnelRestarter re-establishes an out-of-process transport (the ssh:// tunnel)
@@ -209,7 +218,38 @@ func (rc *RemoteClient) Close() { rc.cancel() }
 // short backoff until the context is cancelled. When parent is cancelled, the
 // client's own context is cancelled too (stopping every background goroutine and
 // turn). Start is idempotent — only the first call has effect.
+//
+// Start launches consumption immediately. The attach path uses StartGated instead,
+// to defer consumption until the first Restore() completes (issue #516); Start
+// stays for the embedded/test callers that want the stream live right away.
 func (rc *RemoteClient) Start(parent context.Context) error {
+	begin, err := rc.StartGated(parent)
+	if err != nil {
+		return err
+	}
+	begin()
+	return nil
+}
+
+// StartGated performs the same fail-fast connect as Start — the SSE stream is
+// opened synchronously so an unreachable/denied daemon aborts before the TUI ever
+// launches — and starts the approvals poller, but it does NOT begin draining the
+// stream into the sink. Instead it returns a begin closure that launches the
+// consumer (and the health monitor) when called. The attach path calls begin only
+// after the workbench's initial Restore() has finished, so live daemon events
+// cannot flood the UI thread while Restore is still grinding through its slow
+// sequential round-trips (issue #516).
+//
+// The stream being open-but-undrained between StartGated and begin is safe: the
+// daemon hub delivers non-terminal events non-blocking with drop-on-full, so a
+// momentarily-unread subscriber never back-pressures the daemon or other clients,
+// and the bounded backlog drains once begin runs with the UI thread free.
+//
+// begin is idempotent (guarded by consumeOnce) and safe to call from any
+// goroutine; a nil sink makes it a no-op. StartGated itself is idempotent — only
+// the first call (or a prior Start) has effect, and a repeat returns a no-op begin.
+func (rc *RemoteClient) StartGated(parent context.Context) (begin func(), err error) {
+	begin = func() {}
 	var startErr error
 	rc.startOnce.Do(func() {
 		// Tie the externally-provided lifetime to the client's context.
@@ -222,21 +262,29 @@ func (rc *RemoteClient) Start(parent context.Context) error {
 		}()
 
 		if rc.sink != nil {
-			events, err := rc.openStream()
-			if err != nil {
-				startErr = fmt.Errorf("subscribe to daemon events: %w", err)
+			events, oerr := rc.openStream()
+			if oerr != nil {
+				startErr = fmt.Errorf("subscribe to daemon events: %w", oerr)
 				return
 			}
-			go rc.consume(events)
-			if rc.healthEvery > 0 {
-				go rc.monitorHealth()
+			rc.initialEvents = events
+			// Defer consume + monitorHealth: monitorHealth must not run before the
+			// stream is being drained, or it could dropStream() the stashed channel.
+			begin = func() {
+				rc.consumeOnce.Do(func() {
+					go rc.consume(rc.initialEvents)
+					rc.initialEvents = nil
+					if rc.healthEvery > 0 {
+						go rc.monitorHealth()
+					}
+				})
 			}
 		}
 		if rc.approver != nil {
 			go rc.pollApprovals()
 		}
 	})
-	return startErr
+	return begin, startErr
 }
 
 // consume forwards the first (already-open) event stream into the sink, then on
