@@ -714,3 +714,77 @@ func TestConnectOrder_DedupKeepsIdenticalAnswerAcrossSeparateTurns(t *testing.T)
 			"%d assistant records, want 2 (a user record must protect a genuine new reply)", n)
 	}
 }
+
+// --- driver fixes-round-2: restored-flag dedup --------------------------------
+//
+// Round 2 made the dedup match ONLY snapshot-built (restored) records, so live-vs-
+// live events are never suppressed. Final/ToolCall/AssistantStep are now guarded.
+// The two tests below (a) pin that live-vs-live robustness and (b) probe the one
+// content-bearing append path still unguarded: SessionEventThinkingDelta.
+
+// countRecordsOfKind tallies transcript records of a given kind. Used to detect a
+// restored thought being duplicated by a drained ThinkingDelta (both kindThinking).
+func countRecordsOfKind(sw *SessionWindow, k eventKind) int {
+	if sw == nil || sw.transcript == nil {
+		return 0
+	}
+	n := 0
+	for _, r := range sw.transcript.records {
+		if r != nil && r.kind == k {
+			n++
+		}
+	}
+	return n
+}
+
+// TestConnectOrder_DedupKeepsRepeatedLiveToolCallsInOneTurn pins the restored-flag
+// invariant the whole round-2 fix rests on: a drained live event is suppressed only
+// when it duplicates a RESTORED record, never another live one. Two legitimate calls
+// to the same tool inside one live turn must both render.
+func TestConnectOrder_DedupKeepsRepeatedLiveToolCallsInOneTurn(t *testing.T) {
+	w := newTestWorkbench(t)
+	silenceNotifications(w)
+	sw := w.AdoptSession(RestoredSession{ID: "s1", Messages: []ChatMessage{
+		{Role: "user", Content: "q"},
+	}})
+	drainPosted(t, w)
+
+	// A brand-new live turn calls the same tool twice (distinct call ids).
+	sw.addUser("do it")
+	w.deliverSessionEvent("s1", agent.SessionEvent{Type: agent.SessionEventToolCall, CallID: "c1", Tool: "ZZLIVETOOL516", Args: map[string]interface{}{"a": "1"}})
+	w.deliverSessionEvent("s1", agent.SessionEvent{Type: agent.SessionEventToolCall, CallID: "c2", Tool: "ZZLIVETOOL516", Args: map[string]interface{}{"a": "2"}})
+	drainPosted(t, w)
+
+	if n := countRecordsContaining(sw, "ZZLIVETOOL516"); n != 2 {
+		t.Fatalf("repeated live tool calls in one turn rendered %d tool records, want 2 "+
+			"(live-vs-live must never be deduped; the guard matches only restored records)", n)
+	}
+}
+
+// TestConnectOrder_DedupDoesNotCoverThinkingDelta exposes the remaining unguarded
+// append path. A restored assistant message carries its reasoning as a kindThinking
+// "thought" record (thoughtRecord); a buffered SessionEventThinkingDelta for the same
+// reasoning (drained post-begin) calls appendThinkingDelta, which is NOT guarded by
+// restoredDuplicate — so it builds a SECOND kindThinking record. apply() guards
+// Final/ToolCall/AssistantStep but not ThinkingDelta (nor Compaction/Error).
+func TestConnectOrder_DedupDoesNotCoverThinkingDelta(t *testing.T) {
+	w := newTestWorkbench(t)
+	silenceNotifications(w)
+	sw := w.AdoptSession(RestoredSession{ID: "s1", Messages: []ChatMessage{
+		{Role: "assistant", Reasoning: "REASON-7X", Content: "ans"},
+	}})
+	drainPosted(t, w)
+	if n := countRecordsOfKind(sw, kindThinking); n != 1 {
+		t.Fatalf("baseline: %d thinking records, want 1 (restored from Reasoning)", n)
+	}
+
+	// The deferred consumer drains a leftover ThinkingDelta for the same reasoning.
+	w.deliverSessionEvent("s1", agent.SessionEvent{Type: agent.SessionEventThinkingDelta, Text: "REASON-7X\n"})
+	drainPosted(t, w)
+
+	if n := countRecordsOfKind(sw, kindThinking); n != 1 {
+		t.Fatalf("issue #516 (remaining gap): a buffered ThinkingDelta overlapping the restored "+
+			"reasoning duplicated the thinking block: %d kindThinking records, want 1 "+
+			"(apply() dedup covers Final/ToolCall/AssistantStep but not SessionEventThinkingDelta)", n)
+	}
+}
