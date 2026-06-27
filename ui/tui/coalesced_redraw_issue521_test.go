@@ -175,23 +175,21 @@ func TestScheduleOverallRefreshDefersAndDoesNotCompose(t *testing.T) {
 	}
 }
 
-// TestOverallCountLagsUntilCoalescedRefresh is a characterization test for a
-// consequence of the incomplete fix (see TestConnectBurstCoalescesOverallRecompute
-// and TestSynchronousOverallFetchSourceIsActiveLayerHook).
-//
-// The only synchronous refreshOverall left on the open path is the
-// OnActiveLayerChange hook, which AddLayer fires BEFORE openWindowAny runs
-// sidebar.addSession. So the hook recomputes the Overall count with the just-opened
-// window NOT yet in the sidebar — the count is stale by exactly one session until
-// the 250ms coalesced refresh catches up. Before #521, openWindowAny's own
-// refreshOverall ran AFTER addSession and showed the correct count synchronously;
-// the C-fix removed that call, so the count now lags. The design accepted this
-// <=250ms lag (open question #2), so this test documents the lag and its
-// self-heal rather than treating the lag itself as a hard failure.
-func TestOverallCountLagsUntilCoalescedRefresh(t *testing.T) {
+// TestOverallCountDeferredUntilCoalescedRefresh covers the deferral end-to-end.
+// With the recompute fully deferred on the open path (no synchronous
+// refreshOverall during a burst), the Overall count must NOT be recomputed per
+// window: it stays at its pre-burst value synchronously, then ONE coalesced
+// refresh fetches statistics exactly once and reflects every restored window.
+// This is the "final frame after a burst must be correct" edge case from #521,
+// plus the "one recompute per burst, not per window" coalescing contract.
+func TestOverallCountDeferredUntilCoalescedRefresh(t *testing.T) {
 	w := newTestWorkbench(t)
 	stopStatsTimer(t, w)
-	w.handlers.GetStatistics = func() stats.Report { return stats.Report{} }
+	calls := 0
+	w.handlers.GetStatistics = func() stats.Report {
+		calls++
+		return stats.Report{}
+	}
 
 	const n = 4
 	for i := 0; i < n; i++ {
@@ -199,15 +197,21 @@ func TestOverallCountLagsUntilCoalescedRefresh(t *testing.T) {
 		w.AdoptSession(RestoredSession{ID: id, Title: id})
 	}
 
-	// Synchronously the count is stale by one: the hook recomputed before the
-	// last addSession, and openWindowAny no longer refreshes after addSession.
-	if got := w.sidebar.overall.Sessions; got != n-1 {
-		t.Errorf("Overall session count synchronously after burst = %d, want %d (documents the <=250ms lag: the just-opened window is missing until the coalesced refresh)", got, n-1)
+	// Nothing recomputed synchronously: zero stats fetches and the count stays 0
+	// (its pre-burst value) — the recompute is deferred, not run per window.
+	if calls != 0 {
+		t.Errorf("burst fetched GetStatistics %d time(s) synchronously; want 0 (recompute must be deferred)", calls)
+	}
+	if got := w.sidebar.overall.Sessions; got != 0 {
+		t.Errorf("Overall session count synchronously after burst = %d, want 0 (the recompute must not run per window)", got)
 	}
 	// The coalesced terminus (the 250ms AfterFunc Posts refreshOverall; no loop
-	// here, so invoke the same call) does correct it — the "final frame after a
-	// burst must be correct" edge case from #521.
+	// here, so invoke the same call) fetches exactly once and yields the correct
+	// final count.
 	w.refreshOverall()
+	if calls != 1 {
+		t.Errorf("coalesced refresh fetched GetStatistics %d time(s); want 1 (one recompute per burst)", calls)
+	}
 	if got := w.sidebar.overall.Sessions; got != n {
 		t.Errorf("Overall session count after coalesced refresh = %d, want %d (final frame must reflect every restored window)", got, n)
 	}
@@ -312,31 +316,21 @@ func TestOverallRefreshCoalesceWindow(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// DEFECT FOUND: the Overall recompute is NOT coalesced on the connect/restore
-// open path. The two tests below document it. The first (a passing diagnostic)
-// pinpoints the root cause; the second (currently failing) encodes the issue's
-// coalescing contract that the burst violates.
+// REGRESSION GUARDS for the OnActiveLayerChange hook (NewWorkbench). An earlier
+// revision of the #521 fix converted openWindowAny's DIRECT refreshOverall to the
+// coalescer but missed this hook, which AddLayer fires synchronously — so a
+// connect/restore burst still fetched GetStatistics once per window. The hook now
+// keeps only the cheap focusSession immediate and defers the recompute via
+// scheduleOverallRefresh (mirroring openWindowAny). The tests below pin that.
 // ---------------------------------------------------------------------------
 
-// TestSynchronousOverallFetchSourceIsActiveLayerHook is a PASSING diagnostic that
-// pinpoints the root cause of the per-window synchronous GetStatistics fetch.
-//
-// Change (C) removed the DIRECT refreshOverall from openWindowAny (it now defers
-// via scheduleOverallRefresh), and that part works: with the hook neutralised, a
-// window-open fetches ZERO statistics. The problem is a SECOND, pre-existing
-// synchronous refreshOverall trigger the fix did not touch: NewWorkbench
-// registers a Desktop.OnActiveLayerChange hook that calls refreshOverall whenever
-// the active session changes. AddLayer fires that hook synchronously (turbotui
-// desktop.go:289 notifyActiveLayerChange -> direct callback), and at AddLayer
-// time openWindowAny has not yet run focusSession, so the hook's guard
-// (ActiveID() != sidebar.focused) passes on EVERY newly opened window. Net:
-// GetStatistics is still fetched once per window during a connect burst.
-//
-// This test passes today and documents the mechanism so the fix can be targeted
-// at the hook (defer it via scheduleOverallRefresh too, or move the focusSession
-// call before/around the AddLayer so the hook's own guard suppresses the
-// redundant recompute). See the failing TestConnectBurstCoalescesOverallRecompute.
-func TestSynchronousOverallFetchSourceIsActiveLayerHook(t *testing.T) {
+// TestActiveLayerHookDefersOverallRecompute verifies the corrected hook: opening
+// a window fires the OnActiveLayerChange hook synchronously (AddLayer ->
+// notifyActiveLayerChange, turbotui desktop.go:289), and the hook must DEFER the
+// expensive Overall recompute (GetStatistics + fold) to the 250ms coalescer —
+// fetching ZERO statistics synchronously — while still landing the cheap sidebar
+// focus highlight on the new window immediately.
+func TestActiveLayerHookDefersOverallRecompute(t *testing.T) {
 	w := newTestWorkbench(t)
 	stopStatsTimer(t, w)
 	calls := 0
@@ -345,41 +339,59 @@ func TestSynchronousOverallFetchSourceIsActiveLayerHook(t *testing.T) {
 		return stats.Report{}
 	}
 
-	// Default hook present: opening the first window changes the active session,
-	// so the OnActiveLayerChange hook runs refreshOverall synchronously.
 	w.openWindow("a", "A")
-	if calls == 0 {
-		t.Errorf("expected the default OnActiveLayerChange hook to fetch statistics on first open; got 0 calls (test premise wrong)")
-	}
 
-	// Replace the hook with a no-op (OnActiveLayerChange is a setter). With the
-	// direct refreshOverall already removed from openWindowAny (change C), a
-	// window-open now fetches ZERO statistics — proving the hook is the sole
-	// source of the synchronous fetch and that change C's direct-call removal
-	// took effect.
-	w.desktop.OnActiveLayerChange(func(*tv.Layer) {})
-	before := calls
-	w.openWindow("b", "B")
-	if calls != before {
-		t.Errorf("with the OnActiveLayerChange hook neutralised, openWindow still fetched statistics %d time(s); want 0 (openWindowAny's direct refreshOverall is gone — change C holds)", calls-before)
+	if calls != 0 {
+		t.Errorf("openWindow fetched GetStatistics %d time(s) synchronously; want 0 (OnActiveLayerChange hook must defer the recompute to the coalescer, issue #521)", calls)
 	}
-	// openWindowAny did still arm the coalescer (change C routes through it).
+	if w.sidebar.focused != "a" {
+		t.Errorf("sidebar.focused = %q, want a (the hook's cheap focusSession must still run immediately so the highlight tracks the opened window)", w.sidebar.focused)
+	}
 	if w.statsRefresh == nil {
-		t.Error("openWindowAny did not arm the coalesced Overall refresh timer (change C routing is missing)")
+		t.Error("the coalesced Overall refresh timer was not armed (the hook must defer via scheduleOverallRefresh)")
 	}
 }
 
-// TestConnectBurstCoalescesOverallRecompute encodes the issue #521 contract that
-// the Overall recompute is COALESCED during a connect/restore burst: GetStatistics
-// (a backend round-trip) plus the lifetime fold must run at most once for a burst
-// of N window-opens, not once per window.
-//
-// CURRENTLY FAILING — this test exposes an incomplete fix. Change (C) deferred
-// the DIRECT refreshOverall in openWindowAny, but the Desktop.OnActiveLayerChange
-// hook registered in NewWorkbench still calls refreshOverall synchronously on
-// every AddLayer, so GetStatistics is fetched once per window during the burst —
-// exactly the amplification #521 set out to coalesce. See the passing diagnostic
-// TestSynchronousOverallFetchSourceIsActiveLayerHook for the root cause.
+// TestActiveLayerHookSkipsUnchangedActiveSession covers the hook's dedup guard,
+// which existed before #521 and must survive the fix. Opening a non-session layer
+// (a dialog/overlay) above the active window changes TopLayer but NOT ActiveID
+// (activeIDLocked falls back to the w.order tail, the session beneath), so
+// ActiveID == sidebar.focused and the hook must skip — firing no Overall
+// recompute and no GetStatistics fetch. This is what keeps a dialog open from
+// triggering a redundant stats fetch.
+func TestActiveLayerHookSkipsUnchangedActiveSession(t *testing.T) {
+	w := newTestWorkbench(t)
+	stopStatsTimer(t, w)
+	calls := 0
+	w.handlers.GetStatistics = func() stats.Report {
+		calls++
+		return stats.Report{}
+	}
+	w.openWindow("a", "A")
+	if w.ActiveID() != "a" || w.sidebar.focused != "a" {
+		t.Fatalf("setup: ActiveID=%q focused=%q, want a/a", w.ActiveID(), w.sidebar.focused)
+	}
+	calls = 0
+
+	// A non-session overlay on top: TopLayer becomes it, but ActiveID still
+	// resolves to the session beneath (the w.order tail).
+	comp := tv.NewComponent(tv.Rect{X: 10, Y: 5, W: 40, H: 10})
+	w.desktop.AddLayer(tv.NewLayer("overlay", comp, false, false))
+
+	if w.ActiveID() != "a" {
+		t.Fatalf("precondition: overlay on top changed ActiveID to %q, want a (test premise — activeIDLocked must skip non-session layers)", w.ActiveID())
+	}
+	if calls != 0 {
+		t.Errorf("a non-session overlay over the active session fetched GetStatistics %d time(s); want 0 (hook guard must dedupe an unchanged ActiveID)", calls)
+	}
+}
+
+// TestConnectBurstCoalescesOverallRecompute is the regression guard for the #521
+// coalescing contract: GetStatistics (a backend round-trip) plus the lifetime fold
+// must run at most once for a burst of N window-opens, never once per window. It
+// passed only after the OnActiveLayerChange hook was converted to defer via
+// scheduleOverallRefresh (mirroring openWindowAny); a regression that re-introduces
+// a synchronous refreshOverall on the open path would fetch N times and fail this.
 func TestConnectBurstCoalescesOverallRecompute(t *testing.T) {
 	w := newTestWorkbench(t)
 	stopStatsTimer(t, w)
