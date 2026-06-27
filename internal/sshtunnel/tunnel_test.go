@@ -1192,6 +1192,41 @@ func TestParseConnectURL_URLPortOverridesConfig(t *testing.T) {
 	}
 }
 
+// TestParseConnectURL_ConfigAppliedReflectsPrecedence is a defect guard
+// (criterion 2). cfg.ConfigApplied / the diagnostic claim "what ssh-config
+// APPLIED", so the summary must NOT list a User/Port the URL explicitly
+// overrode — otherwise the auth diagnostic contradicts itself ("attempted
+// user=bob" yet "~/.ssh/config: applied ...: User=pi"). HostName and
+// IdentityFile have no URL override, so they remain accurate when reported.
+func TestParseConnectURL_ConfigAppliedReflectsPrecedence(t *testing.T) {
+	writeUserSSHConfig(t, strings.Join([]string{
+		"Host rpi5",
+		"    HostName 192.168.1.5",
+		"    User pi",
+		"    Port 2222",
+	}, "\n"))
+
+	cfg, err := ParseConnectURL("ssh://bob@rpi5:3333", "tok", "", "", false)
+	if err != nil {
+		t.Fatalf("ParseConnectURL: %v", err)
+	}
+	// Sanity: the URL really did win for the dial values.
+	if cfg.User != "bob" || cfg.Port != 3333 {
+		t.Fatalf("precedence wrong: User=%q Port=%d, want bob/3333", cfg.User, cfg.Port)
+	}
+	// Desired: the "applied" summary must not claim the overridden User/Port.
+	if strings.Contains(cfg.ConfigApplied, "User=pi") {
+		t.Errorf("ConfigApplied should omit the URL-overridden User (pi); the user actually used is bob, not pi\nConfigApplied=%q", cfg.ConfigApplied)
+	}
+	if strings.Contains(cfg.ConfigApplied, "Port=2222") {
+		t.Errorf("ConfigApplied should omit the URL-overridden Port (2222); the port actually used is 3333, not 2222\nConfigApplied=%q", cfg.ConfigApplied)
+	}
+	// HostName has no URL override, so it IS applied and should be reported.
+	if !strings.Contains(cfg.ConfigApplied, "HostName=192.168.1.5") {
+		t.Errorf("ConfigApplied should include the applied HostName; got %q", cfg.ConfigApplied)
+	}
+}
+
 // TestParseConnectURL_FlagKeyPathPassesThrough: --ssh-key flows into KeyPath
 // untouched, and config IdentityFiles are still resolved alongside it (so the
 // explicit key is tried first, then the config key).
