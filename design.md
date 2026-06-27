@@ -68,6 +68,21 @@ directly) while giving gogent a fail-safe connection.
 - The returned error is the `*model.ModelError` verbatim, e.g.
   `model "foo" is misconfigured: api_type and endpoint are both empty (cannot determine where to send requests)`.
 
+> **Implementation note (supersedes the `errors.As` sketch below).** wrapcheck (enabled
+> repo-wide) requires errors crossing the gogent→caller boundary to be wrapped, and the
+> codebase already classifies model errors via `errors.Is` on gogent sentinels (the Delete
+> handler). So `AddModel`/`UpdateModel` wrap the validation detail with a new sentinel
+> `gogent.ErrModelInvalid` (`fmt.Errorf("%w: %w", ErrModelInvalid, verr)`), and the server
+> classifies with `errors.Is(err, gogent.ErrModelInvalid)` → 400. This keeps `internal/model`
+> out of `internal/server`'s imports (cleaner boundary) and is consistent with
+> `ErrModelNotFound`/`ErrModelInUse`/`ErrModelIsDefault`.
+>
+> **Also:** `modelsSvc.Update`'s signature was reordered to `(r, req, name)` — webapi only
+> binds the JSON body to the index-1 parameter, so the prior `(r, name, req)` silently
+> ignored the body (binding `req` from the query string). The reorder matches the existing
+> `watchersSvc.Update`/`commandsSvc.Update` convention and is required for PUT validation to
+> operate on the real submitted config (otherwise every PUT would be rejected as unroutable).
+
 ### GOAL 1 — HTTP seam (`internal/server/resources.go`)
 Today `modelsSvc.Create` (`:36`) maps any `AddModel` error to **409**, and `Update` (`:49`) maps
 to **404**. Add a distinct **400** path for validation errors. The only `*model.ModelError`

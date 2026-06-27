@@ -166,6 +166,9 @@ func embeddedHandlersFor(g *gogent.Gogent, wb *tuipkg.Workbench, noColor bool) t
 		GetModels: func() []config.ModelConfig {
 			return g.Models()
 		},
+		ConfigWarnings: func() []string {
+			return g.ConfigWarnings()
+		},
 		UpdateModel: func(m config.ModelConfig) error {
 			return g.UpdateModel(m)
 		},

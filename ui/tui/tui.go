@@ -116,6 +116,13 @@ type Handlers struct {
 	// persists changes to one model (matched by Name). May be nil.
 	GetModels   func() []config.ModelConfig
 	UpdateModel func(config.ModelConfig) error
+	// ConfigWarnings returns one notice per model config that was dropped as
+	// unroutable at load time (issue #532), so the workbench can tell the user at
+	// startup which entries were ignored and where to fix them. Empty/nil means
+	// nothing was dropped. Wired only in embedded mode (the config is daemon-owned
+	// when attached, so the client leaves this nil — same precedent as
+	// GetDefaultModel being nil while attached). May be nil.
+	ConfigWarnings func() []string
 	// ScanModels queries a backend (built from the given draft config's
 	// api_type/endpoint/api_key) for the model ids it serves, so the editor can
 	// swap the model-id text field for a dropdown. May be nil.
@@ -2878,6 +2885,19 @@ func (w *Workbench) Run() error {
 	// re-openable from the palette and Help menu regardless of this preference.
 	if w.handlers.GetShowWelcome != nil && w.handlers.GetShowWelcome() {
 		w.showWelcomeDialog()
+	}
+	// Notify the user about model configs that were dropped as unroutable at load
+	// (issue #532). Shown AFTER the welcome block so this modal stacks on top and is
+	// dismissed first — a config error outranks onboarding. It re-fires every launch
+	// until the user fixes ~/.gogent/config.json (the load sweep never rewrites the
+	// file). Wired only in embedded mode; nil handler => skipped.
+	if w.handlers.ConfigWarnings != nil {
+		if ws := w.handlers.ConfigWarnings(); len(ws) > 0 {
+			w.showConfirm("Model config",
+				"These configured models were ignored because they cannot be routed:\n\n• "+
+					strings.Join(ws, "\n• ")+
+					"\n\nEdit or remove them in ~/.gogent/config.json.", nil)
+		}
 	}
 	err := w.desktop.Run(w.shutdown)
 	w.app.Close()

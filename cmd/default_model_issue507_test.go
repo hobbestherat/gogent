@@ -53,7 +53,10 @@ func daemonWithModelsIssue507(t *testing.T, initialDefault string, models ...str
 	t.Helper()
 	g := gogent.NewGogent(t.TempDir())
 	for _, name := range models {
-		if err := g.AddModel(config.ModelConfig{Name: name}); err != nil {
+		// Routable config (api_type/endpoint set) so save-time validation
+		// (issue #532) is satisfied — these tests exercise default-model resolution,
+		// not config validation.
+		if err := g.AddModel(config.ModelConfig{Name: name, APIType: "openai", Endpoint: "https://api.example.com/v1"}); err != nil {
 			t.Fatalf("AddModel %s: %v", name, err)
 		}
 	}
