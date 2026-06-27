@@ -402,7 +402,6 @@ func TestSummary_RenderAlignedAcrossSessionStates(t *testing.T) {
 		{"bg", "BgTitle", "◐"},
 	} {
 		sessionRow := rowContaining(rows, tc.title)
-		summaryRow := rowContaining(rows, tc.session)
 		// The summary row for a zero-agent session is the all-zero bar; find it as
 		// the row directly beneath this session's title row.
 		idx := -1
@@ -415,7 +414,7 @@ func TestSummary_RenderAlignedAcrossSessionStates(t *testing.T) {
 		if idx < 0 || idx+1 >= len(rows) {
 			t.Fatalf("%s: session row missing or has no following row", tc.session)
 		}
-		summaryRow = rows[idx+1]
+		summaryRow := rows[idx+1]
 		if !strings.Contains(summaryRow, allZeroBar) {
 			t.Fatalf("%s: row beneath session should be the all-zero summary:\n%s", tc.session, summaryRow)
 		}
