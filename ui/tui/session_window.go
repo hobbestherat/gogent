@@ -2743,6 +2743,13 @@ func (sw *SessionWindow) copyLastCode() {
 // restore means addAll appends onto a fresh slice, so the single render() rebuilds
 // the whole view — exactly one compose, no intermediate clear-render (issue #519).
 func (sw *SessionWindow) reload(msgs []ChatMessage) {
+	// An empty transcript means "nothing to swap in" — most often a transient fetch
+	// failure (the remote GetTranscript handler yields nil on error). Treat it as a
+	// no-op rather than clearing the window, so a flaky lazy-load or reconnect re-sync
+	// never destroys already-shown content or a deferred shell's placeholder (#517).
+	if len(msgs) == 0 {
+		return
+	}
 	sw.transcript.records = nil
 	sw.restore(msgs)
 }

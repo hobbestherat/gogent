@@ -698,10 +698,15 @@ func (rc *RemoteClient) Handlers() Handlers {
 				// first restoreEagerTranscripts entries are the ones worth loading now;
 				// the remainder defer their transcript fetch to first focus.
 				if eager < restoreEagerTranscripts {
+					eager++
 					if msgs, err := c.GetTranscript(s.ID, "root"); err == nil {
 						rs.Messages = messageDTOsToChat(msgs)
+					} else {
+						// A failed eager fetch must not leave a silently-empty window:
+						// degrade it to a deferred shell so it shows the placeholder and
+						// retries the transcript on first focus, instead of opening blank.
+						rs.Deferred = true
 					}
-					eager++
 				} else {
 					rs.Deferred = true
 				}

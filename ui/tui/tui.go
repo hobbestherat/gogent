@@ -1826,6 +1826,15 @@ func (w *Workbench) ensureTranscript(id string) {
 	}
 	title := sw.title
 	go func() {
+		// The window may have been closed between Focus and now (deferred OnCreate is
+		// async): re-check before issuing OnCreate so we don't resurrect a just-closed
+		// session by re-creating it on the daemon.
+		w.mu.Lock()
+		alive := w.sessions[id] != nil
+		w.mu.Unlock()
+		if !alive {
+			return
+		}
 		// OnCreate was deferred along with the transcript (AdoptSession); make the
 		// daemon attach this session's observer now, before the first transcript read.
 		if w.handlers.OnCreate != nil {
@@ -1835,6 +1844,12 @@ func (w *Workbench) ensureTranscript(id string) {
 		w.desktop.Post(func() {
 			w.mu.Lock()
 			sw := w.sessions[id]
+			if sw != nil && len(msgs) == 0 {
+				// A transient fetch failure (the handler yields nil on error) leaves the
+				// placeholder in place (reload is a no-op on empty); re-arm the deferred
+				// flag so a refocus retries instead of stranding an empty window.
+				w.deferredTranscripts[id] = true
+			}
 			w.mu.Unlock()
 			if sw != nil && !sw.readOnly {
 				sw.reload(msgs)
