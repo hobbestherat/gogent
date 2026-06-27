@@ -17,12 +17,15 @@ import (
 // This file implements the "Add model from catalog" flow (issue #486): a small
 // wizard that fetches the models.dev catalog, lets the user pick a PROVIDER then a
 // MODEL (both searchable), and opens a pre-filled, fully-editable review form that
-// — on Save — creates a NEW model config via handlers.AddModel. It is purely
-// additive: showModelEditor (the manual editor) is left untouched, and every entry
-// point degrades gracefully to the manual editor when the catalog is unreachable.
+// — on Save — creates a NEW model config via handlers.AddModel. Since issue #509
+// the wizard is the "Add from Catalog…" path of the unified Models… dialog
+// (showModelsDialog): the only addition is an onClose continuation threaded
+// through the steps so finishing or cancelling the wizard returns the user to a
+// fresh Models… list. When the catalog is unreachable every entry point degrades
+// gracefully to that dialog's manual Add Empty… path.
 //
 // The catalog fetch can hit the network, so it always runs off the UI thread
-// behind a "Loading catalog…" layer (mirroring showModelEditor's scanModels
+// behind a "Loading catalog…" layer (mirroring the model form's scanModels
 // goroutine), posting the result back via desktop.Post.
 
 // catalogReady reports whether the catalog-assisted flow is wired (both the
@@ -33,18 +36,22 @@ func (w *Workbench) catalogReady() bool {
 
 // showAddModelDialog is the wizard entry point. It loads the catalog off-thread
 // and, on success, opens the provider picker; on failure it offers the manual
-// editor instead so the feature never blocks.
-func (w *Workbench) showAddModelDialog() {
+// editor instead so the feature never blocks. onClose is the continuation invoked
+// when the wizard finishes (added or cancelled) — the unified Models… dialog
+// passes a closure that reopens a fresh list so control returns there; nil is a
+// no-op. The empty-catalog path is handled by offerManualEditor (which itself
+// reopens the Models dialog), so it does not also call onClose.
+func (w *Workbench) showAddModelDialog(onClose func()) {
 	if !w.catalogReady() {
 		w.showConfirm("Add model", "Catalog-assisted model setup is unavailable.", nil)
 		return
 	}
-	w.loadCatalogThen(false, func(cat modelsdev.Catalog, err error) {
+	w.loadCatalogThen(false, onClose, func(cat modelsdev.Catalog, err error) {
 		if len(cat) == 0 {
 			w.offerManualEditor(err)
 			return
 		}
-		w.showCatalogProviderStep(cat)
+		w.showCatalogProviderStep(cat, onClose)
 	})
 }
 
@@ -55,11 +62,11 @@ func (w *Workbench) offerManualEditor(err error) {
 	if err != nil {
 		msg += ":\n" + err.Error()
 	}
-	if w.handlers.GetModels != nil && w.handlers.UpdateModel != nil {
-		msg += "\n\nOpen the manual model editor instead?"
+	if w.handlers.GetModels != nil && w.handlers.AddModel != nil {
+		msg += "\n\nOpen the Models dialog to add one manually instead?"
 		w.showConfirm("Add model", msg, func(ok bool) {
 			if ok {
-				w.showModelEditor()
+				w.showModelsDialog()
 			}
 		})
 		return
@@ -70,8 +77,10 @@ func (w *Workbench) offerManualEditor(err error) {
 // loadCatalogThen shows a cancellable "Loading catalog…" modal, fetches the
 // catalog on a goroutine (force triggers a revalidating refresh), and invokes
 // onReady on the UI thread with the result. Cancel/Escape cancels the fetch's
-// context (aborting an in-flight network GET) and drops the posted callback.
-func (w *Workbench) loadCatalogThen(force bool, onReady func(modelsdev.Catalog, error)) {
+// context (aborting an in-flight network GET) and drops the posted callback;
+// onClose (nil => no-op) then runs so a load cancelled before any wizard step
+// still returns the user to the Models… list (the caller removed it on entry).
+func (w *Workbench) loadCatalogThen(force bool, onClose func(), onReady func(modelsdev.Catalog, error)) {
 	spec := tv.DialogSpec{MinW: 40, MinH: 5, MaxH: 5, PreferredW: 40}
 	x, y, width, height := w.dialogRect(spec)
 	dialog := tv.NewDialog("Catalog", x, y, width, height)
@@ -94,6 +103,9 @@ func (w *Workbench) loadCatalogThen(force bool, onReady func(modelsdev.Catalog, 
 		done = true
 		cancelFetch() // abort the in-flight GET, not just drop its result
 		w.desktop.RemoveLayer(layer)
+		if onClose != nil {
+			onClose() // load abandoned: return to the Models… list
+		}
 	}
 	dialog.Window.AddContent(newButton("Cancel", tv.Rect{X: width - 13, Y: height - 3, W: 10, H: 1}, cancel))
 	dialog.Root().OnTypeFn = func(_ *tv.VisualComponent, event tui.TypeEvent) bool {
@@ -130,6 +142,7 @@ type pickerStep struct {
 	onPick    func(string) // called with the chosen key
 	onBack    func()       // nil => no Back button
 	onRefresh func()       // nil => no Refresh button
+	onClose   func()       // invoked when the step is cancelled/Escaped (nil => no-op)
 }
 
 // showPicker renders a filter TextBox above a Select. Typing in the filter
@@ -157,7 +170,12 @@ func (w *Workbench) showPicker(step pickerStep) {
 	currentKey := wireFilter(filter, sel, step.rows, step.keys)
 
 	var layer *tv.Layer
-	cancel := func() { w.desktop.RemoveLayer(layer) }
+	cancel := func() {
+		w.desktop.RemoveLayer(layer)
+		if step.onClose != nil {
+			step.onClose() // return to the Models… list when the wizard is abandoned
+		}
+	}
 	next := func() {
 		key := currentKey()
 		if key == "" {
@@ -240,7 +258,7 @@ func wireFilter(filter *tv.TextBox, sel *tv.Select, rows, keys []string) func() 
 // showCatalogProviderStep is wizard step 1: pick a provider. Each row shows the
 // provider name and the env var(s) it expects, so the user knows what credential
 // to have ready.
-func (w *Workbench) showCatalogProviderStep(cat modelsdev.Catalog) {
+func (w *Workbench) showCatalogProviderStep(cat modelsdev.Catalog, onClose func()) {
 	ids := make([]string, 0, len(cat))
 	for id := range cat {
 		ids = append(ids, id)
@@ -262,23 +280,24 @@ func (w *Workbench) showCatalogProviderStep(cat modelsdev.Catalog) {
 		label:  "Provider:",
 		rows:   rows,
 		keys:   ids,
-		onPick: func(id string) { w.showCatalogModelStep(cat, id) },
+		onPick: func(id string) { w.showCatalogModelStep(cat, id, onClose) },
 		onRefresh: func() {
-			w.loadCatalogThen(true, func(fresh modelsdev.Catalog, err error) {
+			w.loadCatalogThen(true, onClose, func(fresh modelsdev.Catalog, err error) {
 				if len(fresh) == 0 {
 					w.offerManualEditor(err)
 					return
 				}
-				w.showCatalogProviderStep(fresh)
+				w.showCatalogProviderStep(fresh, onClose)
 			})
 		},
+		onClose: onClose,
 	})
 }
 
 // showCatalogModelStep is wizard step 2: pick a model from the chosen provider.
 // Each row shows display name, context window, output cap, and reasoning/free
 // badges.
-func (w *Workbench) showCatalogModelStep(cat modelsdev.Catalog, providerID string) {
+func (w *Workbench) showCatalogModelStep(cat modelsdev.Catalog, providerID string, onClose func()) {
 	p := cat[providerID]
 	ids := make([]string, 0, len(p.Models))
 	for id := range p.Models {
@@ -296,8 +315,11 @@ func (w *Workbench) showCatalogModelStep(cat modelsdev.Catalog, providerID strin
 		label:  "Model:",
 		rows:   rows,
 		keys:   ids,
-		onPick: func(id string) { w.showCatalogReviewStep(cat, providerID, id) },
-		onBack: func() { w.showCatalogProviderStep(cat) },
+		onPick: func(id string) { w.showCatalogReviewStep(cat, providerID, id, onClose) },
+		onBack: func() { w.showCatalogProviderStep(cat, onClose) },
+		// onBack returns to the provider step (still in the wizard); only an outright
+		// cancel/Escape ends it, so onClose routes back to the Models… list there.
+		onClose: onClose,
 	})
 }
 
@@ -352,7 +374,7 @@ func tokensShort(n int) string {
 // form. Every field models.dev can supply is auto-filled; API type is read-only
 // ("from catalog"); the API key (or Vertex project/location) is blank and
 // required. Save creates a NEW entry via handlers.AddModel and refreshes the app.
-func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, modelID string) {
+func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, modelID string, onClose func()) {
 	p := cat[providerID]
 	cm := p.Models[modelID]
 
@@ -419,7 +441,12 @@ func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, mod
 	location.SetText(draft.Location)
 
 	var layer *tv.Layer
-	cancel := func() { w.desktop.RemoveLayer(layer) }
+	cancel := func() {
+		w.desktop.RemoveLayer(layer)
+		if onClose != nil {
+			onClose() // abandoned at the review step: return to the Models… list
+		}
+	}
 
 	save := func() {
 		draft.Name = strings.TrimSpace(name.GetText())
@@ -469,6 +496,11 @@ func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, mod
 		}
 		w.desktop.RemoveLayer(layer)
 		w.refreshModelsAfterSave()
+		// Return to a fresh Models… list (showing the new entry) before the
+		// follow-up "set as default?" confirm, which then stacks on top of it.
+		if onClose != nil {
+			onClose()
+		}
 
 		saved := draft.Name
 		if w.handlers.SetDefaultModel != nil {
@@ -486,7 +518,7 @@ func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, mod
 
 	dialog.Window.AddContent(newButton("Back", tv.Rect{X: 2, Y: height - 3, W: tv.ButtonLabelWidth("Back"), H: 1}, func() {
 		w.desktop.RemoveLayer(layer)
-		w.showCatalogModelStep(cat, providerID)
+		w.showCatalogModelStep(cat, providerID, onClose)
 	}))
 	dialog.Window.AddContent(newButton("Save", tv.Rect{X: width - 24, Y: height - 3, W: 9, H: 1}, save))
 	dialog.Window.AddContent(newButton("Cancel", tv.Rect{X: width - 13, Y: height - 3, W: 10, H: 1}, cancel))

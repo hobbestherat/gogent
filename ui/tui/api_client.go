@@ -620,6 +620,14 @@ func (c *APIClient) AddModel(m config.ModelConfig) error {
 	return c.do(http.MethodPost, "/models", m, nil)
 }
 
+// RemoveModel deletes a model on the daemon (DELETE /models/:name). The daemon
+// returns 404 for an unknown name and 409 when removal is blocked (the model is
+// the default while others remain, or it is in use by an active session); c.do
+// surfaces the response body as a Go error the Models… dialog shows verbatim.
+func (c *APIClient) RemoveModel(name string) error {
+	return c.do(http.MethodDelete, "/models/"+url.PathEscape(name), nil, nil)
+}
+
 // ScanModels probes a model backend on the daemon for the model ids it serves.
 func (c *APIClient) ScanModels(name string) ([]string, error) {
 	var out struct {

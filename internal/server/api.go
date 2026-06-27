@@ -207,6 +207,7 @@ func (s *Server) buildAPI() *webapi.API {
 			{Path: "/models", Method: http.MethodGet, Handler: mods.List, AuthLevel: req},
 			{Path: "/models", Method: http.MethodPost, Handler: mods.Create, AuthLevel: req},
 			{Path: "/models/:name", Method: http.MethodPut, Handler: mods.Update, AuthLevel: req},
+			{Path: "/models/:name", Method: http.MethodDelete, Handler: mods.Delete, AuthLevel: req},
 			{Path: "/models/:name/scan", Method: http.MethodPost, Handler: mods.Scan, AuthLevel: req},
 
 			// --- tools ---

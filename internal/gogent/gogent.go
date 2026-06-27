@@ -3328,6 +3328,95 @@ func (g *Gogent) AddModel(cfg config.ModelConfig) error {
 	return nil
 }
 
+// Sentinel errors returned by RemoveModel so callers (notably the HTTP server)
+// can map an outcome to a precise status (404 for not-found, 409 for the blocked
+// cases) via errors.Is without string-matching.
+var (
+	// ErrModelNotFound means no configured model has the requested name.
+	ErrModelNotFound = errors.New("model not found")
+	// ErrModelInUse means a live session is actively running on the model, so
+	// removing it would pull the backend out from under an in-flight turn.
+	ErrModelInUse = errors.New("model is in use by an active session")
+	// ErrModelIsDefault means the model is the configured default for new sessions
+	// and other models remain; the default must be reassigned before removal.
+	ErrModelIsDefault = errors.New("model is the default; set another default first")
+)
+
+// RemoveModel deletes the configured model with the given Name and persists the
+// change. It enforces the issue #509 removal policy so the embedded and remote
+// (HTTP DELETE) backends behave identically:
+//
+//   - unknown name              -> ErrModelNotFound
+//   - in use by a live turn     -> ErrModelInUse (a session whose PrimaryModel ==
+//     name, i.e. one that has actually routed a turn through it; never-sent
+//     sessions report "" and are not counted)
+//   - default while others exist -> ErrModelIsDefault (block, don't silently
+//     reassign)
+//   - the last/only model       -> ALLOWED even if it is the default: the entry
+//     is removed and DefaultModel is cleared, yielding the empty-list state.
+//
+// The in-use check runs before the last-model rule on purpose: a model with an
+// in-flight turn is never yanked, even when it is the only one (the caller must
+// let that session finish/close first). It is the first model mutator to read
+// live sessions, so it uses the snapshot-then-release lock pattern (cf.
+// AggregateStats): copy the session pointers under g.mu, release it, then probe
+// each session's own lock via PrimaryModel() — never holding g.mu across s.mu —
+// and finally re-acquire g.mu to delete.
+func (g *Gogent) RemoveModel(name string) error {
+	// An empty name matches no configured model — and would otherwise alias every
+	// idle session's PrimaryModel()=="" in the in-use scan below, yielding a
+	// spurious in-use block. Reject it up front as not-found.
+	if name == "" {
+		return fmt.Errorf("%w: %q", ErrModelNotFound, name)
+	}
+
+	// 1) In-use scan: snapshot session pointers under g.mu, release, then probe
+	// each session lock-free so g.mu is never held across the session's s.mu.
+	g.mu.RLock()
+	sessions := make([]*agent.UserSession, 0, len(g.userSessions))
+	for _, s := range g.userSessions {
+		sessions = append(sessions, s)
+	}
+	g.mu.RUnlock()
+	for _, s := range sessions {
+		if s.PrimaryModel() == name {
+			return fmt.Errorf("%w: session %s", ErrModelInUse, s.ID)
+		}
+	}
+
+	// 2) Mutate config under g.mu. Re-find the entry: it may have changed while
+	// the in-use scan ran lock-free.
+	g.mu.Lock()
+	idx := -1
+	for i, m := range g.config.ModelConfigs {
+		if m != nil && m.Name == name {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		g.mu.Unlock()
+		return fmt.Errorf("%w: %q", ErrModelNotFound, name)
+	}
+	isDefault := g.config.DefaultModel == name
+	isLast := len(g.config.ModelConfigs) == 1
+	if isDefault && !isLast {
+		g.mu.Unlock()
+		return fmt.Errorf("%w: %q", ErrModelIsDefault, name)
+	}
+	g.config.ModelConfigs = append(g.config.ModelConfigs[:idx], g.config.ModelConfigs[idx+1:]...)
+	if isDefault {
+		// Only reachable for the last/only model; nothing remains to default to.
+		g.config.DefaultModel = ""
+	}
+	g.mu.Unlock()
+
+	if err := g.SaveConfig(); err != nil {
+		g.warnf("Failed to persist config: %v", err)
+	}
+	return nil
+}
+
 // UpdateModel replaces the configuration of the model with the given Name and
 // persists the change. Sessions pick up the new endpoint/key on their next turn
 // (connections are rebuilt per send). Returns an error if no model matches.

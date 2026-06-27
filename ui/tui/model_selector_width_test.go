@@ -54,101 +54,84 @@ func TestHeaderSelectWidthFitsLongestName(t *testing.T) {
 	}
 }
 
-// openModelEditor drives the REAL showModelEditor on a screenW×screenH terminal
-// with a single model whose option label has the requested display-cell width, and
-// returns the opened dialog's outer rectangle. Testing the live code path (rather
-// than a mirror of its DialogSpec) is deliberate: round 1 used a static
-// modelEditorSpec mirror that silently drifted from the source after the clip fix
-// landed, turning a fixed bug into a false failure. Driving showModelEditor keeps
-// the test honest against whatever sizing logic the dialog actually uses.
+// openModelsDialog drives the REAL showModelsDialog on a screenW×screenH terminal
+// with one model whose row label has the requested display-cell width, and returns
+// the opened dialog's outer rectangle. It replaces the old openModelEditor helper:
+// since issue #509 the per-row unified dialog (a tv.Tree, no top model Select) is
+// what is sized, so testing the live sizing path keeps the test honest against the
+// dialog's actual width/height logic rather than a hand-mirrored spec.
 //
-// The option label is nameLabel's "DisplayName (Name)"; with Name="x" (1 cell) the
-// label width is len(DisplayName)+4, so labelCells controls the widest option.
-func openModelEditor(t *testing.T, labelCells, screenW, screenH int) tv.Rect {
+// The row label is "<marker><disp> — <model> — <apitype>"; with model="m" and
+// apitype "openai" the non-display tail is ~14 cells, so displayCells controls the
+// row width for the fit assertion.
+func openModelsDialog(t *testing.T, displayCells, screenW, screenH int) tv.Rect {
 	t.Helper()
-	if labelCells < 5 {
-		t.Fatalf("labelCells %d too small to build a label", labelCells)
+	if displayCells < 1 {
+		t.Fatalf("displayCells %d too small", displayCells)
 	}
-	dn := strings.Repeat("x", labelCells-4) // "<dn> (x)" == labelCells cells
+	disp := strings.Repeat("x", displayCells)
 	w := newTestWorkbench(t)
 	w.SetHandlers(Handlers{
-		GetModels:   func() []config.ModelConfig { return []config.ModelConfig{{Name: "x", DisplayName: dn, Model: "m"}} },
-		UpdateModel: func(config.ModelConfig) error { return nil },
+		GetModels: func() []config.ModelConfig {
+			return []config.ModelConfig{{Name: "x", DisplayName: disp, Model: "m", APIType: "openai"}}
+		},
+		GetDefaultModel: func() string { return "x" },
+		UpdateModel:     func(config.ModelConfig) error { return nil },
+		AddModel:        func(config.ModelConfig) error { return nil },
+		RemoveModel:     func(string) error { return nil },
+		SetDefaultModel: func(string) error { return nil },
 	})
 	w.app.Resize(screenW, screenH)
-	w.showModelEditor()
+	w.showModelsDialog()
 	if top := w.desktop.TopLayer(); top == nil || top.Root == nil {
-		t.Fatalf("model editor did not open")
+		t.Fatalf("models dialog did not open")
 	}
 	return dialogBounds(w)
 }
 
-// modelEditorLabelCells reports the display width of the option label
-// openModelEditor builds for labelCells (== labelCells by construction); it exists
-// so the fit assertion measures the real label rather than assuming.
-func modelEditorLabelCells(labelCells int) int {
-	return tui.StringWidth(strings.Repeat("x", labelCells-4) + " (x)")
-}
-
-// TestModelEditorWidthFloor checks the 64-column comfort floor holds on a terminal
-// whose 80% default would otherwise be narrower, for a short option.
-func TestModelEditorWidthFloor(t *testing.T) {
-	// screen 70 -> 80% = 56 < 64; a short option keeps the 64 floor.
-	if b := openModelEditor(t, 8, 70, 40); b.W != modelEditorMinWidth {
-		t.Errorf("model editor width on a 70-col terminal = %d, want %d (floor)", b.W, modelEditorMinWidth)
+// TestModelsDialogNotPercentageBalloon is the #309 regression guard carried over
+// from the old editor sizing tests: on a roomy terminal the unified Models… dialog
+// sizes to its CONTENT, NOT the 160×42 percentage balloon that motivated #309. The
+// width follows the footer button row (wider than the 64 comfort floor once
+// Add/Edit/Remove/Set Default/Done are all laid out) but stays under the 160 cap;
+// the height is pinned to the one-row list (paneRows+7 = 8), not the 85% default.
+func TestModelsDialogNotPercentageBalloon(t *testing.T) {
+	b := openModelsDialog(t, 6, 200, 50)
+	if b.W >= 160 {
+		t.Errorf("models dialog width = %d on 200 cols — the 160 percentage balloon is back", b.W)
+	}
+	if b.W < modelEditorMinWidth {
+		t.Errorf("models dialog width = %d, want at least the %d floor", b.W, modelEditorMinWidth)
+	}
+	if b.H >= 42 {
+		t.Errorf("models dialog height = %d, want content-sized (< 42), not the 85%% balloon", b.H)
+	}
+	if b.H != 8 {
+		t.Errorf("models dialog height = %d, want 8 (one row + chrome)", b.H)
 	}
 }
 
-// TestModelEditorSizedToContent checks the model editor sizes to content after the
-// #309 turbotui cap-not-floor change: with a short option it is the 64-wide comfort
-// floor (not the old 80% default), and — the round-1 BUG 3 fix — its height is the
-// fixed 18-row footprint, not the inflated 85% vertical default.
-func TestModelEditorSizedToContent(t *testing.T) {
-	b := openModelEditor(t, 8, 200, 50)
-	if b.W != modelEditorMinWidth {
-		t.Errorf("model editor width on a 200-col terminal = %d, want %d (content floor, not 160)", b.W, modelEditorMinWidth)
+// TestModelsDialogGrowsToFitWidestRow is the #108 regression guard: a model whose
+// row label is wider than the comfort floor must grow the dialog so the row never
+// clips, and the list area (width-4) must hold the full row label.
+func TestModelsDialogGrowsToFitWidestRow(t *testing.T) {
+	const dispCells = 60 // row ~ 2+60+3+1+3+6 = 75 cells > the 64 floor
+	b := openModelsDialog(t, dispCells, 200, 50)
+	if b.W <= modelEditorMinWidth {
+		t.Fatalf("dialog width %d did not grow past the %d floor for a wide row", b.W, modelEditorMinWidth)
 	}
-	if b.H != modelEditorHeight {
-		t.Errorf("model editor height on a 50-row terminal = %d, want %d (pinned, not the 85%% default of 42)", b.H, modelEditorHeight)
-	}
-}
-
-// TestModelEditorWidthFitsOption is the round-1 BUG 1 regression guard: the boxed
-// Select must show the widest option in full whenever the terminal has room for it.
-// model_editor.go now lifts MinW to the content width (bounded by the usable
-// screen) so a content-driven PreferredW above the 80% cap is no longer clamped
-// below what the option needs. The {70,100} case is the original repro: a 70-cell
-// option needs a 93-col dialog, which fits in the 96 usable cols.
-func TestModelEditorWidthFitsOption(t *testing.T) {
-	for _, tc := range []struct {
-		name               string
-		labelCells, screen int
-	}{
-		{"short option, roomy screen", 10, 200},
-		{"long option exceeds 80% cap but fits screen", 70, 100},
-		{"very long option, very roomy screen", 120, 250},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			labelW := modelEditorLabelCells(tc.labelCells)
-			needed := labelW + 2 + modelEditorBoxX + 3
-			usable := tc.screen - 2*tv.DefaultDialogMargin
-			if needed > usable {
-				t.Skipf("screen %d too small to ever hold a %d-cell option (needed %d > usable %d)",
-					tc.screen, labelW, needed, usable)
-			}
-			b := openModelEditor(t, tc.labelCells, tc.screen, 50)
-			boxW := b.W - modelEditorBoxX - 3 // mirrors showModelEditor's boxW
-			if boxW-2 < labelW {
-				t.Errorf("labelW=%d screen=%d: dialog width %d -> boxW %d cannot hold the option (text area %d); "+
-					"long model name would clip", labelW, tc.screen, b.W, boxW, boxW-2)
-			}
-		})
+	// The row label the dialog builds for this model.
+	row := "✓ " + strings.Repeat("x", dispCells) + " — m — openai"
+	rowW := tui.StringWidth(row)
+	if listArea := b.W - 4; listArea < rowW {
+		t.Errorf("dialog width %d -> list area %d cannot hold the %d-cell row; the row would clip", b.W, listArea, rowW)
 	}
 }
 
 // TestLongestRuneLen checks the widest-string helper now measures in DISPLAY
 // CELLS (tui.StringWidth) — the CJK case is the issue #299 fix: a three-glyph CJK
 // option occupies six cells, not three (the old rune count under-sized the box).
+// The helper is reused by showModelsDialog to size the list to its widest row.
 func TestLongestRuneLen(t *testing.T) {
 	for _, tc := range []struct {
 		name string
