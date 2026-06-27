@@ -55,8 +55,11 @@ func resolveConnectToken(flagValue string) string {
 // plan mode, settings, models, tools, skills, statistics, watchers and the live
 // event stream — is driven over HTTP/SSE via the APIClient + RemoteClient. A
 // local *gogent.Gogent is built only as a presentation-config source (theme,
-// keybindings, layout, notifications, default model, welcome): it starts no
-// server, sessions, watchers or MCP, so it never duplicates the daemon's work.
+// keybindings, layout, notifications, welcome): it starts no server, sessions,
+// watchers or MCP, so it never duplicates the daemon's work. The default model is
+// daemon-owned (issue #507) and comes over HTTP, not from this local core; the local
+// skills/, rules.json and workspace are loaded but unused in remote mode. See the
+// ownership block on installPresentationHandlers for the full client-vs-daemon split.
 //
 // The embedded (non-attached) path in main is left entirely unchanged; this is a
 // separate entry that returns when the TUI loop exits, after which the caller
@@ -262,11 +265,31 @@ func remoteModelConfigs(client *tuipkg.APIClient) []*config.ModelConfig {
 
 // installPresentationHandlers fills the TUI-machine presentation handlers on a
 // remote Handlers set from the local *gogent.Gogent. These concern the TUI's own
-// machine (its colour theme, keybindings, window layout, desktop notifications,
-// onboarding dialog and default-model dropdown selection), not the daemon's agent
-// state, so they stay local exactly as the issue's layout/notifications guidance
-// recommends. The remote (daemon-backed) fields set by RemoteClient.Handlers are
-// left untouched.
+// machine (its colour theme, keybindings, window layout, desktop notifications and
+// onboarding dialog), not the daemon's agent state, so they stay local exactly as the
+// issue's layout/notifications guidance recommends. The remote (daemon-backed) fields
+// set by RemoteClient.Handlers are left untouched.
+//
+// Ownership in attached mode (issue #507):
+//
+//   - CLIENT-owned (this machine's ~/.gogent/config.json, set here): theme + saved
+//     themes, keybindings, window layout, welcome/onboarding, and notifications. The
+//     notifications block governs THIS terminal's live notifier (its bell/sound/
+//     enabled) — the notifier hardware is local, so the client legitimately owns it.
+//     NewGogent also loads skills/, rules.json and the workspace/AGENTS.md/repo map,
+//     but those are IGNORED in remote mode (their handlers come from the daemon via
+//     RemoteClient); the local core is built purely as this presentation-config source.
+//   - DAEMON-owned (over HTTP via RemoteClient.Handlers): sessions/messages/models/
+//     tools/skills/stats/watchers, the DEFAULT MODEL, budget, timeouts, sub-agents and
+//     review-edits. The daemon's own /api/settings/notifications block governs ONLY
+//     daemon-side notification fallback (watcher/agent completions when no client is
+//     attached); the attached client deliberately neither reads nor writes it, so it
+//     never pretends to control daemon-side notifications.
+//
+// Default model is therefore NOT wired here anymore (it was the split-brain bug): it
+// is daemon-owned and comes from RemoteClient.Handlers, so "Set as default" while
+// attached updates the DAEMON and the selector resolves the daemon's default against
+// the daemon's model list.
 func installPresentationHandlers(h *tuipkg.Handlers, g *gogent.Gogent, wb *tuipkg.Workbench, noColorFlag bool) {
 	h.GetTheme = func() config.ThemeConfig { return g.Theme() }
 	h.SetTheme = func(t config.ThemeConfig) {
@@ -288,11 +311,14 @@ func installPresentationHandlers(h *tuipkg.Handlers, g *gogent.Gogent, wb *tuipk
 	}
 	h.GetShowWelcome = func() bool { return g.GetShowWelcome() }
 	h.SetShowWelcome = func(show bool) { _ = g.SetShowWelcome(show) }
+	// Notifications are CLIENT-owned (issue #507): the live notifier fires on THIS
+	// machine, so its config legitimately stays local. The daemon's
+	// /api/settings/notifications block (daemon-side fallback only) is intentionally
+	// not touched from here. GetDefaultModel/SetDefaultModel are deliberately NOT set
+	// here — the default model is daemon-owned and wired by RemoteClient.Handlers.
 	h.GetNotifyConfig = func() config.NotifyConfig { return g.Notifications() }
 	h.SetNotifyConfig = func(n config.NotifyConfig) {
 		g.SetNotifications(n)
 		wb.SetNotifyConfig(n)
 	}
-	h.GetDefaultModel = func() string { return g.DefaultModelName() }
-	h.SetDefaultModel = func(name string) error { return g.SetDefaultModel(name) }
 }

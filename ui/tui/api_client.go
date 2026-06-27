@@ -405,10 +405,13 @@ type SkillDTO struct {
 // reuses the config types verbatim, exactly as the server does, so a read-
 // modify-write round-trip is lossless.
 type SettingsDTO struct {
-	SubAgents   config.SubAgentConfig `json:"sub_agents"`
-	Timeouts    config.TimeoutConfig  `json:"timeouts"`
-	Budget      config.BudgetConfig   `json:"budget"`
-	ReviewEdits bool                  `json:"review_edits"`
+	SubAgents config.SubAgentConfig `json:"sub_agents"`
+	Timeouts  config.TimeoutConfig  `json:"timeouts"`
+	Budget    config.BudgetConfig   `json:"budget"`
+	// DefaultModel is the daemon's default-model name for new sessions (issue #507),
+	// daemon-owned exactly as Budget is. A read-modify-write round-trip preserves it.
+	DefaultModel string `json:"default_model"`
+	ReviewEdits  bool   `json:"review_edits"`
 }
 
 // --- health & sessions ------------------------------------------------------
