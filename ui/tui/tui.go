@@ -332,6 +332,15 @@ type Handlers struct {
 	// unlike DaemonStatusInfo. It returns "" for embedded/attached-local (the
 	// indicator derives those labels from DaemonMode alone). May be nil.
 	ConnectionLabel func() string
+	// ReconnectAddress returns the verbatim --connect argument for the current
+	// attached-remote daemon (e.g. "ssh://user@host", "host:port"), so the
+	// daemon-aware quit dialog can show a copy-pasteable "Re-attach later with:
+	// gogent --connect {addr}" line (issue #503). Unlike reconnectHost (a display
+	// label from hostLabel, which drops the scheme/user) this is a real connect
+	// string. It is cheap and synchronous (a closure over the attach address),
+	// mirroring ConnectionLabel. It returns "" for embedded/attached-local; may be
+	// nil (the re-attach line is then omitted).
+	ReconnectAddress func() string
 }
 
 // WatcherConfig is the UI-facing description of a watcher to create (issue #329
@@ -641,6 +650,16 @@ type Workbench struct {
 	// only) and Stop (attached-local only) are mode-exclusive and the modal blocks
 	// the menu, so one field suffices. Touched only on the UI thread.
 	daemonHandoffLayer *tv.Layer
+	// quitDialogLayer is the live daemon-aware quit confirmation, nil when none is
+	// open (issue #503). It is tracked so the background daemon-status fetch can
+	// enrich the body in place only while the same dialog is still up (and no-op if
+	// the user already dismissed or acted). Touched only on the UI thread (open +
+	// Post-ed enrichment callback).
+	quitDialogLayer *tv.Layer
+	// quitDialogBody is the quit dialog's body TextView while it is open, nil
+	// otherwise — retained so the background status fetch can rewrite it in place
+	// (issue #503), mirroring disconnectBody. Touched only on the UI thread.
+	quitDialogBody *tv.TextView
 	// menuBar is the live menu bar built by rebuildMenu, retained so the right-anchored
 	// connection-status slot can be updated in place (refreshConnectionStatus) without a
 	// full menu rebuild. Touched only on the UI thread.
@@ -1449,12 +1468,23 @@ func (w *Workbench) approveActivePlan() {
 	sw.startApprovedTurn()
 }
 
+// confirmQuit is the single choke point for every confirmable quit gesture
+// (Ctrl+C, File→Exit, the command-palette "Quit"). When daemon wiring is present
+// it opens the daemon-aware quit dialog (issue #503), which tells the user what
+// quitting will actually do and offers the relevant explicit handoff; without it
+// (DaemonMode nil) it falls back to today's generic Yes/No confirmation so a build
+// with no daemon wiring degrades gracefully. The disconnect modal's own "Quit"
+// button deliberately bypasses this (it already states the daemon survives).
 func (w *Workbench) confirmQuit() {
-	w.showConfirm("Quit Gogent", "Are you sure you want to quit?", func(yes bool) {
-		if yes && w.quit != nil {
-			w.quit()
-		}
-	})
+	if w.handlers.DaemonMode == nil {
+		w.showConfirm("Quit Gogent", "Are you sure you want to quit?", func(yes bool) {
+			if yes && w.quit != nil {
+				w.quit()
+			}
+		})
+		return
+	}
+	w.showQuitDialog()
 }
 
 // NewSession creates a new session window and notifies the backend.

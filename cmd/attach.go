@@ -182,6 +182,9 @@ func runAttached(homeDir, addr, token string, noColorFlag bool) error {
 	}
 	wb.SetReconnectControls(hostLabel(addr), rc.RetryNow)
 	handlers := rc.Handlers()
+	// Verbatim --connect argument for the daemon-aware quit dialog's re-attach line
+	// (issue #503): unlike hostLabel (a display label) this is a real connect string.
+	handlers.ReconnectAddress = func() string { return addr }
 	installPresentationHandlers(&handlers, g, wb, noColorFlag)
 	// Daemon menu (issue #358 §6): a controller tracks the attachment mode so the
 	// menu offers "Stop daemon" (local) or just "Daemon status" (remote --connect).

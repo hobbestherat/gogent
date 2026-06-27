@@ -93,27 +93,41 @@ func (w *Workbench) daemonItems() []*tv.MenuItem {
 	return items
 }
 
-// startDaemonFromMenu runs the embedded->daemon handoff off the UI thread (it
-// spawns a process and waits for it to come up), then reports the outcome and
-// rebuilds the menu so it reflects the new attached-local mode. The handler itself
-// swaps the Workbench Handlers (on the UI thread via Post) as part of the handoff.
-func (w *Workbench) startDaemonFromMenu() {
+// runStartDaemon runs the embedded->daemon handoff off the UI thread behind the
+// shared "Start daemon" progress modal, then on the UI thread dismisses the
+// progress and invokes onResult(err) (the progress is gone before the result, so
+// they never stack — issue #478). It is the single place the handoff is performed,
+// shared by the Daemon menu and the daemon-aware quit dialog's "Start daemon &
+// quit" (issue #503) so both get identical progress/single-dialog behaviour. It is
+// guarded against a double handoff (and a nil handler) and reports whether it
+// started one. The handler itself swaps the Workbench Handlers (on the UI thread
+// via Post) as part of the handoff.
+func (w *Workbench) runStartDaemon(onResult func(err error)) bool {
 	if w.handlers.StartDaemon == nil || w.daemonHandoffLayer != nil {
-		return // guard: no double handoff (mirrors the disconnect modal's guard)
+		return false // guard: no double handoff (mirrors the disconnect modal's guard)
 	}
 	w.daemonHandoffLayer = w.showProgress("Start daemon", "Migrating to the local daemon…\nIn-flight turns are cancelled; their partial output is preserved and reappears after reattach.")
 	go func() {
 		err := w.handlers.StartDaemon()
 		w.desktop.Post(func() {
 			w.dismissDaemonHandoffProgress() // replace: progress gone before the result
-			w.rebuildMenu()
-			if err != nil {
-				w.showConfirm("Start daemon", "Could not start the daemon:\n"+err.Error(), nil)
-				return
-			}
-			w.showConfirm("Start daemon", "The local daemon is running and this TUI is now attached to it. Closing the terminal no longer stops your sessions or watchers.", nil)
+			onResult(err)
 		})
 	}()
+	return true
+}
+
+// startDaemonFromMenu runs the embedded->daemon handoff and reports the outcome,
+// rebuilding the menu so it reflects the new attached-local mode.
+func (w *Workbench) startDaemonFromMenu() {
+	w.runStartDaemon(func(err error) {
+		w.rebuildMenu()
+		if err != nil {
+			w.showConfirm("Start daemon", "Could not start the daemon:\n"+err.Error(), nil)
+			return
+		}
+		w.showConfirm("Start daemon", "The local daemon is running and this TUI is now attached to it. Closing the terminal no longer stops your sessions or watchers.", nil)
+	})
 }
 
 // dismissDaemonHandoffProgress removes the interim handoff progress modal if one is
@@ -127,26 +141,38 @@ func (w *Workbench) dismissDaemonHandoffProgress() {
 	w.daemonHandoffLayer = nil
 }
 
-// stopDaemonFromMenu runs the daemon->embedded handoff off the UI thread (it asks
-// the daemon to persist + exit and rebuilds the embedded core), then reports the
-// outcome and rebuilds the menu so it reflects the new embedded mode.
-func (w *Workbench) stopDaemonFromMenu() {
+// runStopDaemon runs the daemon->embedded handoff off the UI thread behind the
+// shared "Stop daemon" progress modal (it asks the daemon to persist + exit and
+// rebuilds the embedded core), then on the UI thread dismisses the progress and
+// invokes onResult(err). Shared by the Daemon menu and the quit dialog's "Stop
+// daemon & quit" (issue #503), with the same guard/#478 single-dialog behaviour as
+// runStartDaemon. Reports whether it started a handoff.
+func (w *Workbench) runStopDaemon(onResult func(err error)) bool {
 	if w.handlers.StopDaemon == nil || w.daemonHandoffLayer != nil {
-		return // guard: no double handoff (mirrors the disconnect modal's guard)
+		return false // guard: no double handoff (mirrors the disconnect modal's guard)
 	}
 	w.daemonHandoffLayer = w.showProgress("Stop daemon", "Migrating back to in-process (embedded) mode…\nThe daemon persists its state and shuts down; sessions and watchers continue in this process.")
 	go func() {
 		err := w.handlers.StopDaemon()
 		w.desktop.Post(func() {
 			w.dismissDaemonHandoffProgress() // replace: progress gone before the result
-			w.rebuildMenu()
-			if err != nil {
-				w.showConfirm("Stop daemon", "Could not stop the daemon:\n"+err.Error(), nil)
-				return
-			}
-			w.showConfirm("Stop daemon", "The daemon has stopped and the core is running in this process again.", nil)
+			onResult(err)
 		})
 	}()
+	return true
+}
+
+// stopDaemonFromMenu runs the daemon->embedded handoff and reports the outcome,
+// rebuilding the menu so it reflects the new embedded mode.
+func (w *Workbench) stopDaemonFromMenu() {
+	w.runStopDaemon(func(err error) {
+		w.rebuildMenu()
+		if err != nil {
+			w.showConfirm("Stop daemon", "Could not stop the daemon:\n"+err.Error(), nil)
+			return
+		}
+		w.showConfirm("Stop daemon", "The daemon has stopped and the core is running in this process again.", nil)
+	})
 }
 
 // showDaemonStatusDialog fetches the daemon status off the UI thread (it may make

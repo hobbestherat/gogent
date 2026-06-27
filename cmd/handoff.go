@@ -275,6 +275,9 @@ func (dc *daemonController) switchToRemote(g *gogent.Gogent, client *tuipkg.APIC
 		return nil, fmt.Errorf("start remote event stream: %w", err)
 	}
 	handlers := rc.Handlers()
+	// Verbatim --connect argument for the daemon-aware quit dialog's re-attach line
+	// (issue #503); set on both initial switchToRemote and the reconnect path.
+	handlers.ReconnectAddress = func() string { return addr }
 	installPresentationHandlers(&handlers, g, dc.wb, dc.noColor)
 	dc.installMenuHandlers(&handlers)
 	dc.applyOnUI(func() {
