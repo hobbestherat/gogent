@@ -108,10 +108,22 @@ as-is.
 
 1. **Unknown name** → `ErrModelNotFound` (server 404).
 2. **In use by a live session** → `ErrModelInUse` ("model is in use by session
-   N"). Enforced by scanning `g.userSessions` for any `s.PrimaryModel() == name`
+   N"). Enforced by scanning live sessions for any `s.PrimaryModel() == name`
    (live sessions are in-process in BOTH modes — the daemon holds them in remote
    mode, the embedded process holds them in embedded mode — so the single core
    check covers both). Report the first matching session id.
+   - **Definition of "in use" (D2):** `PrimaryModel()`
+     (`user_session.go:3501`) returns `""` until the backend calls
+     `SetPrimaryModel` — i.e. until the session has routed at least one turn. So
+     "in use" here means **a live session that has actually run a turn on this
+     model**. A freshly-created, never-sent session whose *default* happens to be
+     this model has `PrimaryModel()==""` and is **deliberately not** counted. This
+     is safe: (a) if the model is the default and other models exist, removal is
+     already blocked by step 3; (b) if it is the last model, the user is
+     intentionally clearing all backends and a never-used session simply has no
+     model to send to afterward (the expected zero-models state) rather than being
+     yanked mid-turn. This boundary is stated in the `RemoveModel` doc comment so
+     it is a decision, not an accident.
 3. **Removing the default while other models remain** → `ErrModelIsDefault`
    ("\"X\" is the default model; set another default first"). BLOCK (we prefer an
    explicit block over silent reassignment so the user's default is never changed
@@ -122,9 +134,38 @@ as-is.
    left to "set another default" to — it resolves the apparent conflict between
    "block default" and "allow last".)
 
-On success: delete the entry, `SaveConfig()`, return nil. A failed `SaveConfig`
-is logged via `g.warnf` (same as the other mutators) but does not block the
-in-memory delete — consistent with `AddModel`.
+**Precedence note (D3 — acknowledged dead-end).** Step 2 (in-use) runs *before*
+step 4 (allow-last). So if the **only** model has had a turn routed through it by
+a still-live session, removal is blocked — and since there is no other model to
+switch that session to, the empty-list state is only reachable once that session
+ends/closes. We **keep** this precedence on purpose: yanking a model out from
+under an actively-running session would break its next turn, which is worse than
+asking the user to close the session first. The block message names the blocking
+session ("model is in use by session N") so the path forward is explicit rather
+than a silent dead-end. ("Remove the last model → empty list" is therefore
+reachable whenever the last model is not mid-use, which is the common case.)
+
+**Lock discipline (D5 — first mutator to touch `g.userSessions`).** `AddModel`/
+`UpdateModel`/`SetDefaultModel` never read sessions, so their plain
+`g.mu.Lock()`→mutate→`Unlock()`→`SaveConfig()` shape is **not** sufficient here:
+`PrimaryModel()` takes the session's own `s.mu` (`user_session.go:3503`), so
+calling it while holding `g.mu` would impose a `g.mu → s.mu` order that risks
+deadlock against any `s.mu → g.mu` path. `RemoveModel` therefore follows the
+established **snapshot-then-release** pattern used by `AggregateStats()`
+(`gogent.go:2324-2329`) and `refreshSessionRegistries()` (`mcp.go:107-113`):
+  1. `g.mu.RLock()`; copy the `*agent.UserSession` pointers into a local slice;
+     `g.mu.RUnlock()`.
+  2. With **no lock held**, scan the snapshot calling `s.PrimaryModel()`; if any
+     match `name`, return `ErrModelInUse` (best-effort, like `AggregateStats`; a
+     race where a session starts using the model between snapshot and delete is
+     acceptable and bounded).
+  3. `g.mu.Lock()`; re-find the entry (it may have changed under us), apply the
+     default/last-model rules, delete from `g.config.ModelConfigs`, fix
+     `g.config.DefaultModel`; `g.mu.Unlock()`.
+  4. `SaveConfig()`.
+
+On success: a failed `SaveConfig` is logged via `g.warnf` (same as the other
+mutators) but does not block the in-memory delete — consistent with `AddModel`.
 
 This policy is documented in a comment on `RemoveModel` and the server `Delete`
 handler refers to it.
@@ -133,15 +174,22 @@ handler refers to it.
 
 ## User-facing behavior — the unified dialog
 
-`showModelsDialog()` builds a modal `tv.Dialog` titled **"Models"**:
+`showModelsDialog()` builds a modal dialog titled **"Models"**. (Naming
+precision, D7a: `NewDialog`/`Fit`/`Root`/`Window.AddContent`/`NewModalLayer`/
+`DialogSpec` all live in `package tv` and are invoked on a `*tv.Dialog` value
+named `dialog` — there is no `dialog` package; the `dialog.Foo` calls below are
+method/field access on that local, exactly as in `sessions_dialog.go`.)
 
 - **List (left/top): `tv.Tree`**, one node per configured model. Row label:
   `<default-marker> <DisplayName> — <model id> — <api type>`, e.g.
   `✓ GPT-4o — gpt-4o — openai`. The default marker (`✓`) comes from
-  `GetDefaultModel()`. `tree.OnActivate` (Enter) = Edit the selected row;
-  `tree.OnSelect` keeps the selection in sync so the toolbar buttons act on the
-  highlighted row. List colours follow the `selectionColorsFor` pattern already
-  used by `sessions_dialog.go` (issue #327).
+  `GetDefaultModel()`. `OnActivate`/`OnSelect` are **callback struct fields** on
+  `*tv.Tree` (`widget_tree.go:59-60`), not methods: set
+  `tree.OnActivate = func(*tv.TreeNode){…}` (Enter ⇒ Edit the selected row) and
+  `tree.OnSelect = func(*tv.TreeNode){…}` (keeps the highlighted row in sync so
+  the toolbar buttons act on it), guarding `tree.Selected()==nil`. List colours
+  follow the `selectionColorsFor` pattern already used by `sessions_dialog.go`
+  (issue #327).
 - **Zero models**: NO early return (the current `showModelEditor` bug — it shows
   "No models are configured." and bails). Instead show an empty-list placeholder
   row ("No models configured — choose Add to create one."). Only **Add…** and
@@ -177,12 +225,28 @@ handler refers to it.
   at a glance, and let us hide the Catalog button cleanly when the catalog is
   unavailable. Documented here per the issue's request.
 
-After any add / edit / remove / set-default, we **persist + refresh live
-dropdowns** via the existing `refreshModelsAfterSave()` (`SetModels` +
-`rebuildMenu`) — the same path `showModelEditor.save` and the catalog wizard
-already use, so open session windows and the sidebar pick up changes immediately
-(issue #389). The list dialog itself re-reads `GetModels()` to rebuild its tree
-after each mutation.
+After any add / edit / set-default, we **persist + refresh live dropdowns** via
+the existing `refreshModelsAfterSave()` (`SetModels` + `rebuildMenu`) — the same
+path `showModelEditor.save` and the catalog wizard already use, so open session
+windows and the sidebar pick up changes immediately (issue #389). The list dialog
+itself re-reads `GetModels()` to rebuild its tree after each mutation.
+
+**Remove must NOT reuse `refreshModelsAfterSave()` as-is (D1 — breaks an
+acceptance criterion).** `refreshModelsAfterSave()`
+(`model_catalog_dialog.go:524-535`) gates the `SetModels` call on
+`len(refreshed) > 0`. That gate is fine for add/edit (which never empty the
+list), but on **removing the last model** `GetModels()` returns empty, `SetModels`
+is skipped, and `w.models`/`w.modelNames` keep the deleted entry — the sidebar
+(`sidebar.rebuildModelOptions()`) and every open window's dropdown still offer the
+removed model until restart, contradicting "removing the last model yields the
+empty-list state" and "changes refresh live dropdowns." `SetModels(nil)` *does*
+correctly produce the empty state (`tui.go:776-790`). Fix: after a successful
+remove, call a refresh that **always** pushes the (possibly empty) list —
+`w.SetModels(ptrs)` unconditionally (ptrs may be `nil`/empty) followed by
+`w.rebuildMenu()`. We add a small helper (e.g. `refreshModelsList()`) that does
+the unconditional `SetModels` + `rebuildMenu`, and use it for remove; add/edit can
+also adopt it (the `>0` gate buys nothing once remove exists). The list dialog
+then rebuilds its tree from the now-empty `GetModels()` into the empty-list state.
 
 ### `modelForm` (shared builder)
 Signature roughly: `modelForm(title string, initial config.ModelConfig,
@@ -194,9 +258,27 @@ conversions, and calls `onSave` with the assembled `config.ModelConfig`. Edit
 passes `UpdateModel`; Empty-add passes `AddModel`.
 
 **Scan in Add mode**: omitted (button hidden when the form has no saved name),
-matching the catalog review step's deliberate choice — a draft scan can't work in
-remote mode (`ScanModels` is keyed by a SAVED model name and would 404). Scan
-stays available in Edit mode (model is saved). Documented in a comment.
+matching the catalog review step's deliberate choice. Reasoning corrected (D7c):
+the **core** `ScanModels(cfg)` (`gogent.go:3419`) takes a *draft* config and works
+unsaved, so a draft scan *would* succeed in embedded mode — but the **server**
+route `POST /models/:name/scan` (`resources.go:69`) resolves `name`→a SAVED config
+and 404s for an unsaved draft, so the remote handler (`ScanModels: c.ScanModels(m.Name)`)
+cannot scan a draft. To keep embedded and remote behaving identically, we hide
+Scan in Add mode rather than offer a button that only works in one backend. Scan
+stays available in Edit mode (the model is saved in both backends). Documented in
+a comment.
+
+**Behavior delta — single-model edit (D6).** The current `showModelEditor`
+supports *batch* multi-model editing: a top `tv.Select` switches models, edits are
+buffered per-model (`store(cur)` on `OnChange`), and Save loops `UpdateModel` over
+all of them (`model_editor.go:254-261`). The unified dialog replaces this with
+**per-row Edit**: Edit opens one model's form and Save calls `UpdateModel` for
+that one model only. This is an intentional simplification (the list+per-row model
+is clearer and removes the buffered-edit/loop-save machinery); it is within scope
+but is a real behavior change, called out here rather than implied by "the same
+fields." The `model_selector_width_test.go` sizing premise (widest model label
+drives the dialog width via the top Select) no longer applies and must be revisited
+(see Tests).
 
 ---
 
@@ -220,14 +302,17 @@ Nothing happens silently — blocks and successes both surface a dialog.
 
 **(3) No regressions.** Edit / catalog-add / set-default / scan keep working
 because the underlying handlers and the catalog wizard are reused, not rewritten;
-`modelForm` is the same fields the old editor had. `RemoveModel` follows the
-established lock/SaveConfig pattern, so persistence and session invariants hold
-(sessions rebuild connections per send; an in-use model can't be pulled out from
-under a live session because of the in-use block). Existing model-route server
-tests stay green (we ADD a DELETE route, don't alter GET/POST/PUT). The
-deprecated `showModelEditor` symbol is removed and all call sites repointed, so
-no dangling references. gofmt/build/vet/golangci-lint clean; `go test ./...`
-green except the pre-existing environmental `TestUserSessionSendMessage` 404.
+`modelForm` is the same fields the old editor had. `RemoveModel` uses the
+snapshot-then-release lock pattern (D5) so persistence and session invariants
+hold (sessions rebuild connections per send; an in-use model can't be pulled out
+from under a live session because of the in-use block). Existing model-route
+server tests stay green (we ADD a DELETE route, don't alter GET/POST/PUT). The
+deprecated `showModelEditor` symbol is removed and **all three** call sites
+addressed: the runtime caller `offerManualEditor`
+(`model_catalog_dialog.go:62`) is repointed to `showModelsDialog`, and the two
+test files that drive it (D4) are **migrated, not just repointed** — see Tests.
+gofmt/build/vet/golangci-lint clean; `go test ./...` green except the pre-existing
+environmental `TestUserSessionSendMessage` 404.
 
 **(4) Holistic across both repos.** turbotui is untouched — the dialog is pure
 composition of existing primitives, honouring the library/app seam (the issue's
@@ -247,10 +332,23 @@ established post-mutation contract and is reused.
   model). Covered by a core test.
 - **In-use detection differs embedded vs remote** — avoided by enforcing in core
   (`g.userSessions`), which both modes share; the server only maps status.
-- **Removing `showModelEditor` breaks a caller** — `offerManualEditor` in
-  `model_catalog_dialog.go` calls `w.showModelEditor()` as its offline fallback;
-  it will be repointed to `showModelsDialog` (which itself offers Empty-slot add
-  offline), so the graceful-degradation path still lands somewhere useful.
+- **Removing `showModelEditor` breaks callers (D4)** — three call sites, not one:
+  - `offerManualEditor` (`model_catalog_dialog.go:62`) — runtime offline fallback;
+    repointed to `showModelsDialog` (which itself offers Empty-slot add offline),
+    so graceful degradation still lands somewhere useful.
+  - `issue389_test.go:120` & `:152` (`TestIssue389ModelEditor…`) — these open the
+    editor, click Save, and assert the open-session dropdown label +
+    `selectedModelName` refresh live. They must be **rewritten** to drive the new
+    flow (`showModelsDialog` → select row → Edit → Save) while keeping the same
+    issue-#389 assertions. The underlying `SetModels`/`refreshModelsAfterSave`
+    refresh contract is preserved, so the assertions remain valid.
+  - `model_selector_width_test.go:79` (`openModelEditor`) + callers (`:97/:107/:139`)
+    — these assert the editor's width/sizing driven by the widest model label in
+    the top `Select`. With per-row Edit there is no top model Select, so the
+    sizing premise changes; the width test must be **reworked** (either retargeted
+    at the list dialog's tree sizing, or retired if the form's fixed-width layout
+    no longer has a content-driven `MinW`). Decided in the implementation phase
+    once the form's final layout is fixed.
 - **`tv.Tree` empty-state focus** — guard handlers against `tree.Selected()==nil`
   so the empty list can't panic on a button press.
 - **Tests importing `internal/*` from `ui/tui`** — keep the UI test using the
@@ -266,7 +364,13 @@ established post-mutation contract and is reused.
   test).
 - UI flow: open with zero models (only Add/Done enabled); Empty-slot add offline;
   catalog add (stubbed catalog); edit; remove with confirm; remove-default
-  blocked with message.
+  blocked with message; **remove-last clears the live dropdowns** (assert
+  `w.modelNames` is empty after removing the only model — guards D1).
+- **Migrate existing UI tests (D4 — required for `go test ./...` green):**
+  - `issue389_test.go` `TestIssue389ModelEditor…` (×2) — rewrite to drive
+    `showModelsDialog` → Edit → Save; keep the live-dropdown-refresh assertions.
+  - `model_selector_width_test.go` — rework or retire the width assertions to
+    match the new layout (no top model `Select`).
 
 ---
 
@@ -275,10 +379,15 @@ established post-mutation contract and is reused.
    Acceptable, or should Edit support rename (would need a core
    rename/`UpdateModel`-by-old-name path)? Recommendation: keep read-only;
    out of scope for #509.
-2. **In-use scope** — block only on a model that is the *primary* model of a live
-   session (`PrimaryModel()`). Should we also block if a session merely *can*
-   switch to it? Recommendation: primary-only; switching picks a different model
-   at send time and a removed model just falls back to default.
+2. **In-use scope** (decided, see policy step 2 + D2/D3) — "in use" = a live
+   session that has *run a turn* on the model (`PrimaryModel()==name`, which is
+   `""` pre-turn). Never-sent sessions whose default is the model are not counted;
+   removing the default with other models present is independently blocked, and
+   the last-model removal intentionally yields the zero-models state. In-use
+   precedes allow-last, so the only model can't be removed mid-use (the block
+   names the session). Open sub-question if the maintainer disagrees: should a
+   never-sent session pinned to the model also block? Recommendation: no (keep the
+   `PrimaryModel` definition).
 3. **List layout** — single-column tree of formatted rows (chosen) vs a
    tree+detail split like `sessions_dialog.go`. Recommendation: single column —
    the row already carries default/id/type; Edit shows full detail. Easy to add a
