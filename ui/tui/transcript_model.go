@@ -213,6 +213,39 @@ func (m *transcriptModel) lastAssistantRecord() *transcriptRecord {
 	return nil
 }
 
+// duplicatesLastAnswer reports whether text is identical to the transcript's most
+// recent assistant answer with no newer user turn since — i.e. re-applying it as a
+// final answer would render the same reply twice. It guards the connect path (issue
+// #516): the global SSE stream is opened (fail-fast) before the initial Restore()
+// completes and is only drained afterwards, so a turn that finished in the window
+// between the stream opening and the transcript snapshot is present in BOTH the
+// restored snapshot AND the buffered live stream; draining that backlog onto the
+// now-open window would otherwise append the answer a second time.
+//
+// Scanning back from the tail, the FIRST user or assistant record decides: an
+// assistant whose body equals text is a duplicate; a user record (a new turn begun
+// since the last answer) means text is a genuine new reply, never a duplicate — so
+// two legitimately-identical answers in separate turns are both kept. Intervening
+// tool/thought/note records are transparent. The comparison rebuilds text the way
+// assistantRecord would store it (childLines split, joined on newlines) so it
+// matches body() exactly.
+func (m *transcriptModel) duplicatesLastAnswer(text string) bool {
+	want := strings.Join(childLines(text), "\n")
+	for i := len(m.records) - 1; i >= 0; i-- {
+		r := m.records[i]
+		if r == nil {
+			continue
+		}
+		switch r.kind {
+		case kindAssistant:
+			return r.body() == want
+		case kindUser:
+			return false
+		}
+	}
+	return false
+}
+
 // defaultTranscriptLimit bounds the number of records a session keeps live in its
 // TextView. The view otherwise grows without bound — every event, folded tool
 // result and compaction digest is appended forever — so capping it bounds both

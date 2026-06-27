@@ -664,8 +664,9 @@ type Workbench struct {
 	// afterRestore, when set, runs once at the end of Run's initial restore block.
 	// The attach path uses it to start the deferred SSE consumer only after the first
 	// Restore() has populated the workbench, so live events cannot flood the UI thread
-	// during restore (issue #516). nil (the embedded path) makes it a no-op. Read only
-	// on the UI thread, inside Run.
+	// during restore (issue #516). nil (the embedded path) makes it a no-op. Written
+	// once by SetAfterRestore during attach setup before the UI loop exists, then read
+	// only on the UI thread inside Run — so it needs no synchronisation.
 	afterRestore func()
 	// reconnectCoalesce is the leading-edge debounce window for refreshAfterReconnect
 	// (issue #520): a burst of rapid early reconnects collapses to a single

@@ -1727,7 +1727,16 @@ func (sw *SessionWindow) apply(ev agent.SessionEvent) {
 	case agent.SessionEventToolResult:
 		sw.finishToolCall(ev.CallID, ev.Tool, ev.Result)
 	case agent.SessionEventFinal:
-		sw.addAssistant(ev.Text)
+		// Drop an answer identical to the one already at the tail of the transcript
+		// with no new user turn since (issue #516): on first connect the SSE stream is
+		// opened before the initial Restore() completes and drained only afterwards, so
+		// a turn that finished during restore arrives both in the restored snapshot and
+		// in the buffered live stream — applying the drained backlog must not duplicate
+		// it. A genuinely new turn always has its user message in between, so this never
+		// swallows a legitimate reply (even an identical one).
+		if !sw.transcript.duplicatesLastAnswer(ev.Text) {
+			sw.addAssistant(ev.Text)
+		}
 		sw.setBusy(false)
 	case agent.SessionEventPlan:
 		// The plan itself arrives as the assistant's final answer; this just marks
