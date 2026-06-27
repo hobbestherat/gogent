@@ -656,6 +656,10 @@ type Workbench struct {
 	// the user already dismissed or acted). Touched only on the UI thread (open +
 	// Post-ed enrichment callback).
 	quitDialogLayer *tv.Layer
+	// quitDialogBody is the quit dialog's body TextView while it is open, nil
+	// otherwise — retained so the background status fetch can rewrite it in place
+	// (issue #503), mirroring disconnectBody. Touched only on the UI thread.
+	quitDialogBody *tv.TextView
 	// menuBar is the live menu bar built by rebuildMenu, retained so the right-anchored
 	// connection-status slot can be updated in place (refreshConnectionStatus) without a
 	// full menu rebuild. Touched only on the UI thread.

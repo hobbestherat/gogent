@@ -242,11 +242,11 @@ func quitButtonRow(width, btnY int, labels ...string) []tv.Rect {
 	return rects
 }
 
-// quitButtonRowFits reports whether N buttons with the given labels fit side by side
-// within the dialog's content interior (width-4, i.e. inside the two content
-// margins) at the constant gap quitButtonRow uses. The quit dialog consults it to
-// decide whether to drop the middle handoff button on a narrow terminal.
-func quitButtonRowFits(width int, labels ...string) bool {
+// quitButtonRowWidth is the total rendered width of a row of buttons with the given
+// labels at the constant gap quitButtonRow uses (each button sized via
+// tv.ButtonLabelWidth). The quit dialog uses it both to size the dialog wide enough
+// for the full row and to decide the narrow-terminal drop.
+func quitButtonRowWidth(labels ...string) int {
 	const gap = 4
 	total := 0
 	for i, label := range labels {
@@ -255,7 +255,15 @@ func quitButtonRowFits(width int, labels ...string) bool {
 			total += gap
 		}
 	}
-	return total <= width-4
+	return total
+}
+
+// quitButtonRowFits reports whether N buttons with the given labels fit side by side
+// within the dialog's content interior (width-4, i.e. inside the two content
+// margins). The quit dialog consults it to decide whether to drop the middle
+// handoff button on a genuinely narrow terminal.
+func quitButtonRowFits(width int, labels ...string) bool {
+	return quitButtonRowWidth(labels...) <= width-4
 }
 
 // centeredButton centres a single button labelled by label on row btnY.

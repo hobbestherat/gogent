@@ -258,15 +258,26 @@ func (w *Workbench) showQuitDialog() {
 	if willEnrich {
 		sizing = quitSizingBody(mode, host, addr)
 	}
+	// messageDialogSpec sizes the dialog width to the body's longest line only, but
+	// the button row can be wider than a short body (e.g. the enriched-local or
+	// embedded body). Without this the dialog would be too narrow for its own row and
+	// the narrow-terminal drop below would discard the middle handoff button even on a
+	// wide terminal (issue #503). Widen the sizing text to the full row width so the
+	// dialog is sized to max(body, buttonRow); the drop then only fires when the
+	// terminal genuinely cannot fit the row (dialogRect clamps width to the terminal).
+	fullRowW := quitButtonRowWidth(quitLabels(model.Buttons)...)
+	sizing = widenForButtonRow(sizing, fullRowW)
 
 	dialog, layer, body, width, bodyH := w.newMessageLayer(model.Title, sizing, "quit-dialog")
 	rewriteBody(body, model.Body) // render the fallback into the (possibly enriched-sized) box
 	w.quitDialogLayer = layer
+	w.quitDialogBody = body
 
 	dismiss := func() {
 		if w.quitDialogLayer != nil {
 			w.desktop.RemoveLayer(w.quitDialogLayer)
 			w.quitDialogLayer = nil
+			w.quitDialogBody = nil
 		}
 	}
 	quitNow := func() {
@@ -278,25 +289,30 @@ func (w *Workbench) showQuitDialog() {
 		switch kind {
 		case quitStopAndQuit:
 			return func() {
-				dismiss()
-				w.runStopDaemon(func(err error) {
+				// Dismiss only once the handoff has actually started (and its progress
+				// modal is up): if runStopDaemon declines (handler nil / a handoff already
+				// in flight) the quit dialog stays so the user is never stranded.
+				if w.runStopDaemon(func(err error) {
 					if err != nil {
 						w.showConfirm("Stop daemon", "Could not stop the daemon:\n"+err.Error(), nil)
 						return // stay alive on failure
 					}
 					quitNow()
-				})
+				}) {
+					dismiss()
+				}
 			}
 		case quitStartAndQuit:
 			return func() {
-				dismiss()
-				w.runStartDaemon(func(err error) {
+				if w.runStartDaemon(func(err error) {
 					if err != nil {
 						w.showConfirm("Start daemon", "Could not start the daemon:\n"+err.Error(), nil)
 						return // stay alive on failure
 					}
 					quitNow()
-				})
+				}) {
+					dismiss()
+				}
 			}
 		case quitCancel:
 			return dismiss
@@ -356,6 +372,24 @@ func (w *Workbench) showQuitDialog() {
 			w.desktop.RequestRedraw()
 		})
 	}()
+}
+
+// widenForButtonRow returns sizing widened — invisibly, via trailing spaces on its
+// first line — so that messageDialogSpec (which sizes the dialog width to the body's
+// longest line) makes the dialog at least as wide as the button row of width rowW.
+// Trailing spaces never show (the body is rewritten to the real text after sizing),
+// add no rows, and are naturally capped by messageMaxWidth. A no-op when the body is
+// already at least rowW wide.
+func widenForButtonRow(sizing string, rowW int) string {
+	if tv.LongestLineWidth(sizing) >= rowW {
+		return sizing
+	}
+	first, rest, found := strings.Cut(sizing, "\n")
+	first += strings.Repeat(" ", rowW-tui.StringWidth(first))
+	if found {
+		return first + "\n" + rest
+	}
+	return first
 }
 
 // quitLabels extracts the ordered labels from a button slice.
