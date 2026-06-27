@@ -760,7 +760,14 @@ func NewWorkbench(models []*config.ModelConfig) *Workbench {
 		if w.sidebar == nil || w.ActiveID() == w.sidebar.focused {
 			return
 		}
-		w.refreshOverall()
+		// AddLayer fires this hook synchronously, so a connect/restore burst that opens
+		// N windows would otherwise run N synchronous GetStatistics fetches here — the
+		// per-window Overall recompute issue #521 targets. Keep the cheap focus/TODO
+		// tracking immediate (it also updates sidebar.focused so the guard above dedupes
+		// the next fire) but defer the expensive recompute to the 250ms coalescer, so the
+		// burst folds into one fetch ~250ms after it settles. Mirrors openWindowAny.
+		w.sidebar.focusSession(w.ActiveID())
+		w.scheduleOverallRefresh()
 		w.desktop.RequestRedraw()
 	})
 	// Keep the sidebar pinned to the right edge across terminal resizes.
@@ -1053,7 +1060,16 @@ func (w *Workbench) rebuildMenu() {
 	bar.SetStatus(text)
 	bar.SetStatusColors(fg, bg)
 	w.desktop.SetMenuBar(bar)
-	w.desktop.Redraw()
+	// Coalesced redraw (issue #521): rebuildMenu only rebuilds the menu-bar model and
+	// never precedes a blocking read, so it has no must-paint-now requirement. It runs
+	// once per restored window on the connect/restore hot path (AdoptSession /
+	// OpenAnalysisSession), so a synchronous Redraw here repainted the whole frame N
+	// times during a burst. RequestRedraw defers to the run loop's single per-iteration
+	// flush, and is serviced in every context this runs: the pre-loop restore folds into
+	// Desktop.Run's initial compose+Apply (it composes the final state when the loop
+	// starts, independent of the dirty flag), a reconnect (Post) into the post-drain
+	// flush, and in-loop user actions (rename/pin/close/reorder) into the dispatch flush.
+	w.desktop.RequestRedraw()
 }
 
 // connectionIndicator derives the menu-bar status string and its colours for the
@@ -1757,9 +1773,21 @@ func (w *Workbench) openWindowAny(id, title string, readOnly bool) *SessionWindo
 	if w.sidebar != nil {
 		w.sidebar.addSession(id, title, pinned)
 	}
-	// The Overall panel's session count changed; refresh it so the count is right
-	// on the immediate repaint rather than the next coalesced event refresh.
-	w.refreshOverall()
+	// Keep the sidebar's focus/TODO tracking current immediately (cheap: it only sets
+	// the focused row and moves the tree highlight, with no statistics work), but defer
+	// the expensive Overall recompute (GetStatistics + lifetime fold) via the 250ms
+	// coalescer. A connect/restore burst opens many windows back-to-back, so folding N
+	// per-window recomputes into one ~250ms after the burst settles avoids N full
+	// aggregate rebuilds, matching how live session events refresh the panel
+	// (deliverSessionEvent / issue #53). The window, its transcript and its sidebar row
+	// are already on screen via AddLayer + addSession; only the Overall aggregate count
+	// lags ≤250ms (issue #521). focusSession stays inline so the focus/TODO highlight is
+	// not lost when no statistics handler is wired (scheduleOverallRefresh no-ops then,
+	// whereas refreshOverall updates focus before its statistics guard).
+	if w.sidebar != nil {
+		w.sidebar.focusSession(w.ActiveID())
+	}
+	w.scheduleOverallRefresh()
 	return sw
 }
 
@@ -2858,7 +2886,11 @@ func (w *Workbench) scheduleOverallRefresh() {
 		w.statsRefresh = time.AfterFunc(overallRefreshCoalesce, func() {
 			w.desktop.Post(func() {
 				w.refreshOverall()
-				w.desktop.Redraw()
+				// Desktop.Post already requests a coalesced redraw once the callback
+				// returns, so a synchronous Redraw here is redundant; RequestRedraw lets
+				// this refresh coalesce with any other posts drained in the same loop
+				// iteration (issue #521).
+				w.desktop.RequestRedraw()
 			})
 		})
 		return
@@ -3030,7 +3062,12 @@ func (w *Workbench) tickBusyStatuses() {
 		redraw = true
 	}
 	if redraw {
-		w.desktop.Redraw()
+		// tickBusyStatuses runs inside desktop.Post (runStatusTicker), which already
+		// requests a coalesced redraw when the callback returns, so a synchronous Redraw
+		// here is redundant and forces an extra mid-drain flush while deliverSessionEvent
+		// posts drain alongside this tick. RequestRedraw lets the marker update coalesce
+		// into the loop's single per-iteration flush (issue #521).
+		w.desktop.RequestRedraw()
 	}
 	if len(active) == 0 {
 		return
@@ -3039,9 +3076,11 @@ func (w *Workbench) tickBusyStatuses() {
 		sw.refreshStatus()
 	}
 	// While work is in flight the aggregate keeps moving (tokens stream in), so
-	// refresh the Overall panel on the same 1s tick as the status lines.
+	// refresh the Overall panel on the same 1s tick as the status lines. As above, the
+	// enclosing desktop.Post already requests the coalesced redraw, so RequestRedraw is
+	// the right call here (issue #521).
 	w.refreshOverall()
-	w.desktop.Redraw()
+	w.desktop.RequestRedraw()
 }
 
 // refreshWatcherNodes re-pulls the watcher list and reconciles the sidebar's
