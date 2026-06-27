@@ -28,39 +28,51 @@ func threeTodos() []agent.TodoItem {
 func TestApplyTodoStoresNotTreeChildren(t *testing.T) {
 	s := newTestSidebar()
 	s.addSession("s1", "Session 1", false)
+	// Issue #510: every session now gets the always-on summary child eagerly in
+	// addSession, so the baseline is 1 synthetic child, not 0.
+	before := len(s.sessions["s1"].Children)
+	if before != 1 {
+		t.Fatalf("baseline children = %d, want 1 (the always-on summary)", before)
+	}
+	if _, ok := s.sessions["s1"].Children[0].Data.(syntheticRef); !ok {
+		t.Fatalf("baseline child[0] should be the synthetic summary, got %T", s.sessions["s1"].Children[0].Data)
+	}
 
 	s.applyTodo("s1", threeTodos())
 
 	if got := len(s.todos["s1"]); got != 3 {
 		t.Fatalf("s.todos[s1] = %d items, want 3", got)
 	}
-	// No todo nodes were attached to the session: the tree half is agents only.
-	// Since issue #484 a session only gains a synthetic status-bar child once it
-	// has a sub-agent, and applyTodo never creates one, so the count is still 0.
-	if n := len(s.sessions["s1"].Children); n != 0 {
-		t.Fatalf("session node has %d children after applyTodo, want 0 (todos must not be tree children)", n)
+	// No todo nodes were attached to the session: applyTodo leaves the tree half
+	// (the always-on summary + real agents) untouched, so the child count is
+	// unchanged from the baseline and there is still no real agent row.
+	if n := len(s.sessions["s1"].Children); n != before {
+		t.Fatalf("session node has %d children after applyTodo, want %d (todos must not be tree children)", n, before)
+	}
+	if n := countNodeRefChildren(s.sessions["s1"]); n != 0 {
+		t.Fatalf("session has %d real agent children after applyTodo, want 0", n)
 	}
 	if len(s.agents) != 0 {
 		t.Fatalf("s.agents = %d, want 0 (todos must not register as agents)", len(s.agents))
 	}
 	// Sanity check the other direction: a sub-agent is still a tree child, so
 	// the test is actually exercising the todo path's distinctness. Count REAL
-	// (nodeRef) children rather than raw len: issue #484 also prepends a synthetic
-	// status-bar node (child[0]) to every session that has a sub-agent, so the raw
-	// child count is now statusNode + agent (= 2), but only one is a real agent row.
+	// (nodeRef) children rather than raw len: the always-on summary node
+	// (child[0], issue #510) is synthetic, so only the agent is a real row.
 	s.applySubAgent("s1", agent.SessionEvent{AgentID: "a1", Name: "worker", Status: agent.StatusRunning})
 	if n := countNodeRefChildren(s.sessions["s1"]); n != 1 {
 		t.Fatalf("sub-agent should add 1 real (nodeRef) tree child, got %d", n)
 	}
 	if _, ok := s.sessions["s1"].Children[0].Data.(syntheticRef); !ok {
-		t.Fatalf("child[0] should be the synthetic status-bar node after a sub-agent (issue #484), got %T", s.sessions["s1"].Children[0].Data)
+		t.Fatalf("child[0] should be the synthetic summary node after a sub-agent (issue #510), got %T", s.sessions["s1"].Children[0].Data)
 	}
 }
 
-// TestApplyTodoTreeChildrenStayZeroAcrossUpdates ensures repeated todo updates
+// TestApplyTodoTreeChildrenStableAcrossUpdates ensures repeated todo updates
 // (the live checklist changing as the agent works) never accumulate tree
-// children, since each update now only overwrites s.todos.
-func TestApplyTodoTreeChildrenStayZeroAcrossUpdates(t *testing.T) {
+// children, since each update now only overwrites s.todos. The child count stays
+// pinned at the always-on summary (issue #510) with no real agent rows added.
+func TestApplyTodoTreeChildrenStableAcrossUpdates(t *testing.T) {
 	s := newTestSidebar()
 	s.addSession("s1", "Session 1", false)
 
@@ -71,8 +83,11 @@ func TestApplyTodoTreeChildrenStayZeroAcrossUpdates(t *testing.T) {
 	if got := len(s.todos["s1"]); got != 3 {
 		t.Fatalf("s.todos[s1] = %d, want 3 (last update wins)", got)
 	}
-	if n := len(s.sessions["s1"].Children); n != 0 {
-		t.Fatalf("tree children = %d after repeated updates, want 0", n)
+	if n := len(s.sessions["s1"].Children); n != 1 {
+		t.Fatalf("tree children = %d after repeated updates, want 1 (just the always-on summary)", n)
+	}
+	if n := countNodeRefChildren(s.sessions["s1"]); n != 0 {
+		t.Fatalf("real agent tree children = %d after repeated updates, want 0", n)
 	}
 }
 
