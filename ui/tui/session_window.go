@@ -2743,8 +2743,32 @@ func (sw *SessionWindow) copyLastCode() {
 // restore means addAll appends onto a fresh slice, so the single render() rebuilds
 // the whole view — exactly one compose, no intermediate clear-render (issue #519).
 func (sw *SessionWindow) reload(msgs []ChatMessage) {
+	// A nil transcript signals a failed fetch (the remote GetTranscript handler
+	// returns nil only on error; a successful load is always non-nil, empty or not).
+	// Treat nil as a no-op rather than clearing the window, so a flaky lazy-load or
+	// reconnect re-sync never destroys already-shown content or a deferred shell's
+	// placeholder (#517). A non-nil but empty slice is a genuine empty transcript and
+	// does clear the window — the session really has no messages.
+	if msgs == nil {
+		return
+	}
 	sw.transcript.records = nil
 	sw.restore(msgs)
+}
+
+// markDeferred seeds a faint placeholder into a window whose transcript was not
+// fetched up front (issue #517), so a restored-but-not-yet-loaded session reads as
+// "loads on focus" rather than as a confusingly empty conversation. The placeholder
+// is one of the records reload() clears when the real transcript arrives.
+func (sw *SessionWindow) markDeferred() {
+	sw.transcript.add(&transcriptRecord{
+		kind:      kindSystem,
+		header:    "[System] Transcript loads when this window is focused.",
+		color:     colorInfo,
+		role:      roleInfo,
+		collapsed: true,
+	})
+	sw.transcript.render()
 }
 
 // restore replays a saved transcript into the model so a re-opened session is

@@ -141,7 +141,12 @@ type Handlers struct {
 	GetDefaultModel func() string
 	SetDefaultModel func(string) error
 	// GetTranscript returns a (sub-)agent's message transcript for the monologue
-	// popup. May be nil.
+	// popup and for the deferred lazy-load on focus (issue #517). The return value
+	// encodes success vs failure: a successful load is always non-nil (an empty
+	// transcript is a non-nil empty slice), while nil signals the fetch FAILED.
+	// Consumers rely on this distinction — nil leaves shown content/placeholders
+	// intact and retries; a non-nil empty result clears them. May be nil (the field
+	// itself, meaning the capability is unavailable).
 	GetTranscript func(sessionID, agentID string) []ChatMessage
 	// GetSkills returns the loaded skills with active state and usage stats.
 	// SetSkillActive toggles whether a skill is active (offered to the model and
@@ -417,6 +422,12 @@ type RestoredSession struct {
 	// re-opened window preselects it in the model dropdown (issue #266). Empty
 	// leaves the default selection.
 	Model string
+	// Deferred marks a session whose transcript was intentionally not fetched up
+	// front to bound first-connect round-trips (issue #517). AdoptSession opens it
+	// as a labelled shell (no transcript, no OnCreate) and the Workbench fetches its
+	// transcript once, lazily, the first time the window is focused. Messages is
+	// empty when Deferred is true.
+	Deferred bool
 }
 
 // SessionMeta is the UI-facing, index-only view of one persisted session for the
@@ -517,6 +528,11 @@ type Workbench struct {
 	mu         sync.Mutex
 	sessions   map[string]*SessionWindow
 	order      []string
+	// deferredTranscripts is the set of restored windows whose transcript was not
+	// fetched up front (issue #517): they opened as labelled shells and load their
+	// transcript once, lazily, on first focus. An id is removed the moment its load
+	// starts (in ensureTranscript), so focus can never trigger a second fetch.
+	deferredTranscripts map[string]bool
 	// pinned records favorite sessions (shown with a ★ marker and floated to the
 	// top of the sidebar on pin). Kept as a set so the flag survives reorders.
 	pinned  map[string]bool
@@ -683,13 +699,14 @@ type Workbench struct {
 func NewWorkbench(models []*config.ModelConfig) *Workbench {
 	app := tui.New()
 	w := &Workbench{
-		app:           app,
-		desktop:       tv.NewDesktop(app),
-		sessions:      make(map[string]*SessionWindow),
-		keybindings:   make(map[tv.ActionID]tv.Chord),
-		pinned:        make(map[string]bool),
-		sidebarPinned: true,
-		sidebarW:      defaultSidebarWidth,
+		app:                 app,
+		desktop:             tv.NewDesktop(app),
+		sessions:            make(map[string]*SessionWindow),
+		deferredTranscripts: make(map[string]bool),
+		keybindings:         make(map[tv.ActionID]tv.Chord),
+		pinned:              make(map[string]bool),
+		sidebarPinned:       true,
+		sidebarW:            defaultSidebarWidth,
 		// Use default window config (resizable, minimizable and maximizable by default)
 		windowConfig: config.WindowConfig{
 			Resizable:   true,
@@ -1623,7 +1640,19 @@ func (w *Workbench) AdoptSession(rs RestoredSession) *SessionWindow {
 		title = rs.ID
 	}
 	sw := w.openWindow(rs.ID, title)
-	sw.restore(rs.Messages)
+	// A deferred session (issue #517) opens as a labelled shell: its transcript is
+	// fetched once on first focus (ensureTranscript), and OnCreate is deferred to
+	// that same moment so first connect pays no up-front round-trip for it. Remote
+	// live events still route to this window by id over the global SSE stream, so the
+	// missing OnCreate does not lose streamed activity.
+	if rs.Deferred {
+		w.mu.Lock()
+		w.deferredTranscripts[rs.ID] = true
+		w.mu.Unlock()
+		sw.markDeferred()
+	} else {
+		sw.restore(rs.Messages)
+	}
 	// Preselect the model the session was last using (issue #266) so the next
 	// send goes to it and the dropdown shows it, rather than defaulting to index 0.
 	// SetSelected does not fire OnChange, so this has no side effects.
@@ -1631,7 +1660,7 @@ func (w *Workbench) AdoptSession(rs RestoredSession) *SessionWindow {
 		sw.modelSelect.SetSelected(idx)
 		sw.rebuildEffortOptions()
 	}
-	if w.handlers.OnCreate != nil {
+	if !rs.Deferred && w.handlers.OnCreate != nil {
 		w.handlers.OnCreate(rs.ID, title)
 	}
 	w.rebuildMenu()
@@ -1763,11 +1792,76 @@ func (w *Workbench) Focus(id string) {
 	w.desktop.RemoveLayer(sw.layer)
 	w.desktop.AddLayer(sw.layer)
 	w.desktop.SetFocus(sw.input)
+	// Lazily load a deferred session's transcript the first time it is focused
+	// (issue #517). This is the single user-driven focus chokepoint — cycle, the
+	// session menu, the sidebar and watcher-open all route through it — while
+	// construction-time focus uses desktop.SetFocus directly, so restoring the shells
+	// never triggers a fetch.
+	w.ensureTranscript(id)
 	// The middle TODO region (issue #190) and the Overall panel's "model"/"api"
 	// rows (issue #107) both follow the active session; refreshOverall resolves
 	// both from the raised top window, so refresh before the redraw below.
 	w.refreshOverall()
 	w.desktop.Redraw()
+}
+
+// ensureTranscript fetches and renders a deferred window's transcript the first
+// time it is needed (issue #517), then clears its deferred mark so it never fetches
+// twice. It is a no-op for a window that was eagerly restored or already loaded.
+//
+// The work runs off the UI thread: a deferred window's transcript is one daemon
+// round-trip (a fresh SSH channel over ssh://), and doing it synchronously inside
+// Focus would freeze the whole UI on every first-focus — exactly the stall this
+// change exists to remove. The fetched transcript is applied with reload (clear +
+// restore) on the UI thread via desktop.Post, replacing the placeholder and any
+// live deltas that streamed into the shell with the daemon's authoritative copy.
+func (w *Workbench) ensureTranscript(id string) {
+	w.mu.Lock()
+	if !w.deferredTranscripts[id] {
+		w.mu.Unlock()
+		return
+	}
+	// Clear the mark before fetching so a concurrent or repeat focus cannot start a
+	// second fetch (exactly-once).
+	delete(w.deferredTranscripts, id)
+	sw := w.sessions[id]
+	w.mu.Unlock()
+	if sw == nil || w.handlers.GetTranscript == nil {
+		return
+	}
+	title := sw.title
+	go func() {
+		// The window may have been closed between Focus and now (deferred OnCreate is
+		// async): re-check before issuing OnCreate so we don't resurrect a just-closed
+		// session by re-creating it on the daemon.
+		w.mu.Lock()
+		alive := w.sessions[id] != nil
+		w.mu.Unlock()
+		if !alive {
+			return
+		}
+		// OnCreate was deferred along with the transcript (AdoptSession); make the
+		// daemon attach this session's observer now, before the first transcript read.
+		if w.handlers.OnCreate != nil {
+			w.handlers.OnCreate(id, title)
+		}
+		msgs := w.handlers.GetTranscript(id, "root")
+		w.desktop.Post(func() {
+			w.mu.Lock()
+			sw := w.sessions[id]
+			if sw != nil && msgs == nil {
+				// A failed fetch (the handler returns nil only on error) leaves the
+				// placeholder in place (reload is a no-op on nil); re-arm the deferred
+				// flag so a refocus retries. A successful but empty transcript (non-nil)
+				// is NOT re-armed: reload clears the placeholder to a genuine empty window.
+				w.deferredTranscripts[id] = true
+			}
+			w.mu.Unlock()
+			if sw != nil && !sw.readOnly {
+				sw.reload(msgs)
+			}
+		})
+	}()
 }
 
 // cycle moves focus to the next/previous session window.
@@ -2694,6 +2788,12 @@ func (w *Workbench) Run() error {
 			w.AdoptSession(rs)
 		}
 		w.applyLayout(layout)
+		// applyLayout fixes the z-order but does not focus, so resolve the landing
+		// window afterwards and load its transcript if it happens to be a deferred
+		// shell (issue #517) — the user must not land on a placeholder.
+		if active := w.ActiveID(); active != "" {
+			w.ensureTranscript(active)
+		}
 	}
 	// Open an initial session so the user has somewhere to type.
 	if len(w.order) == 0 {

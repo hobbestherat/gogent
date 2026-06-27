@@ -17,7 +17,15 @@ import (
 type sessionsSvc struct{ s *Server }
 
 // List handles GET /sessions: every saved + live session (index metadata only).
-func (svc sessionsSvc) List(r *http.Request) (interface{}, error) {
+//
+// With no query params it returns the full, ID-sorted listing exactly as before
+// (back-compat for any other caller). The optional ?live=&limit=&offset= params
+// (issue #517) put it in "bounded mode": ?live=true restricts to live sessions
+// (excluding archived/closed ones, which are persisted-but-not-live), the result is
+// then ordered most-recent-first, and ?offset=/?limit= page it. Out-of-range
+// offset/limit are clamped, never errored. Bounded mode backs the attached TUI's
+// Restore, which must not pay N round-trips against an unbounded on-disk list.
+func (svc sessionsSvc) List(r *http.Request, q listSessionsQuery) (interface{}, error) {
 	// Peer scope may not enumerate other sessions.
 	if err := requireHuman(r, svc.s.provider); err != nil {
 		return nil, err
@@ -54,8 +62,53 @@ func (svc sessionsSvc) List(r *http.Request) (interface{}, error) {
 			views = append(views, v)
 		}
 	}
-	sort.Slice(views, func(i, j int) bool { return views[i].ID < views[j].ID })
-	return views, nil
+
+	bounded := q.Live != "" || q.Limit > 0 || q.Offset > 0
+	if !bounded {
+		// Legacy mode: unchanged full, ID-ascending listing.
+		sort.Slice(views, func(i, j int) bool { return views[i].ID < views[j].ID })
+		return views, nil
+	}
+
+	// Bounded mode: optional live filter, most-recent-first order, then paginate.
+	if liveTruthy(q.Live) {
+		filtered := views[:0]
+		for _, v := range views {
+			if v.Live {
+				filtered = append(filtered, v)
+			}
+		}
+		views = filtered
+	}
+	// Most-recent first: CreatedAt (RFC3339, lexically sortable) descending, with ID
+	// descending as a stable tiebreak. An empty CreatedAt sorts last.
+	sort.Slice(views, func(i, j int) bool {
+		if views[i].CreatedAt != views[j].CreatedAt {
+			return views[i].CreatedAt > views[j].CreatedAt
+		}
+		return views[i].ID > views[j].ID
+	})
+	return paginate(views, q.Offset, q.Limit), nil
+}
+
+// liveTruthy reports whether the ?live= param requests a live-only listing.
+func liveTruthy(s string) bool { return s == "true" || s == "1" }
+
+// paginate returns views[offset:offset+limit] with both bounds clamped into range,
+// so an out-of-range offset/limit yields a valid (possibly empty) slice rather than
+// an error. limit<=0 means "no cap" (everything from offset on).
+func paginate(views []sessionView, offset, limit int) []sessionView {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(views) {
+		offset = len(views)
+	}
+	end := len(views)
+	if limit > 0 && offset+limit < end {
+		end = offset + limit
+	}
+	return views[offset:end]
 }
 
 // Create handles POST /sessions.

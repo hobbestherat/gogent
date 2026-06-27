@@ -60,6 +60,21 @@ const approvalPollInterval = 750 * time.Millisecond
 // session list.
 const watcherSessionPrefix = "watcher:"
 
+// restoreEagerTranscripts bounds how many of the most-recent live sessions have
+// their transcript (and OnCreate POST) fetched up front on (re)connect (issue #517).
+// Every other restored window opens deferred — a labelled shell with no up-front
+// round-trip — and lazily fetches its transcript the first time it is focused. 20 is
+// roughly what a user keeps visible at once, so first connect stays a small constant
+// number of round-trips regardless of how many sessions the daemon holds.
+const restoreEagerTranscripts = 20
+
+// restoreMaxWindows hard-caps how many live-session windows Restore opens, so a
+// daemon holding thousands of live sessions cannot make first connect build that
+// many windows or ship a thousands-row /sessions body. Older live sessions beyond
+// the cap stay reachable from the Saved Sessions browser; hitting the cap is logged,
+// never silently swallowed.
+const restoreMaxWindows = 200
+
 // RemoteClient backs the TUI's Handlers seam with an APIClient when the TUI is
 // attached to a daemon (issue #358, Phase 2). It owns three things: the
 // request-mapping handlers (each Handlers field → one /api call), the global SSE
@@ -650,13 +665,26 @@ func (rc *RemoteClient) Handlers() Handlers {
 		// Restore reopens a window for each session the daemon currently holds live
 		// (it restored them on its own startup). The shared "default" HTTP session
 		// and the free-running watcher sessions are backend-only and get no window.
+		//
+		// Restore is bounded (issue #517): it asks the daemon for only the most-recent
+		// live sessions (live=true excludes archived, limit caps the window count and
+		// shrinks the wire body), then eagerly fetches the transcript for just the
+		// first restoreEagerTranscripts of them. The rest are returned Deferred — the
+		// TUI opens them as labelled shells and fetches each transcript once, lazily,
+		// on first focus — so first connect costs one list call plus a small, constant
+		// number of transcript round-trips rather than one per session.
 		Restore: func() []RestoredSession {
-			sessions, err := c.ListSessions()
+			sessions, err := c.ListSessionsBounded(true, restoreMaxWindows, 0)
 			if err != nil {
 				log.Printf("remote restore: list sessions: %v", err)
 				return nil
 			}
-			var out []RestoredSession
+			if len(sessions) == restoreMaxWindows {
+				log.Printf("remote restore: restored the %d most-recent live sessions; "+
+					"older ones are available from Saved Sessions", restoreMaxWindows)
+			}
+			out := make([]RestoredSession, 0, len(sessions))
+			eager := 0
 			for _, s := range sessions {
 				if !s.Live || s.ID == "default" || strings.HasPrefix(s.ID, watcherSessionPrefix) {
 					continue
@@ -666,8 +694,21 @@ func (rc *RemoteClient) Handlers() Handlers {
 					title = s.ID
 				}
 				rs := RestoredSession{ID: s.ID, Title: title, Model: s.PrimaryModel}
-				if msgs, err := c.GetTranscript(s.ID, "root"); err == nil {
-					rs.Messages = messageDTOsToChat(msgs)
+				// The server already ordered the live set most-recent-first, so the
+				// first restoreEagerTranscripts entries are the ones worth loading now;
+				// the remainder defer their transcript fetch to first focus.
+				if eager < restoreEagerTranscripts {
+					eager++
+					if msgs, err := c.GetTranscript(s.ID, "root"); err == nil {
+						rs.Messages = messageDTOsToChat(msgs)
+					} else {
+						// A failed eager fetch must not leave a silently-empty window:
+						// degrade it to a deferred shell so it shows the placeholder and
+						// retries the transcript on first focus, instead of opening blank.
+						rs.Deferred = true
+					}
+				} else {
+					rs.Deferred = true
 				}
 				out = append(out, rs)
 			}
