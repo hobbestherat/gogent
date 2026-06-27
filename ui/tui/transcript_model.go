@@ -275,6 +275,35 @@ func (m *transcriptModel) add(r *transcriptRecord) *transcriptRecord {
 	return r
 }
 
+// addAll appends every record in one batch and rebuilds the view a single time,
+// instead of the per-record incremental append add() does. Restoring a saved
+// transcript is M appends of already-built records with no streaming in between,
+// so one render() yields the same final view at an O(1) compose rather than the
+// O(M) renderOne() calls add() would make (issue #519). It honours the same
+// limit/trim contract as add(): over the cap, the oldest batch is dropped via
+// trim() and the single render() shows the retained tail.
+//
+// nil entries are skipped: the restore builders return nil for blank text, and
+// render()/visible() dereference every record, so a nil must never reach
+// m.records. The append sites already guard, but skipping here as well makes the
+// "no nil in records" invariant fail-safe rather than convention.
+func (m *transcriptModel) addAll(records []*transcriptRecord) {
+	for _, r := range records {
+		if r != nil {
+			m.records = append(m.records, r)
+		}
+	}
+	if m.limit > 0 && len(m.records) > m.limit {
+		// Over the cap: trim() drops the oldest batch and renders once.
+		m.trim()
+		return
+	}
+	// Single compose for the whole batch; render() honours the active filter and
+	// search via visible(), so a restore under an active filter still produces the
+	// correct filtered view and match count in one pass.
+	m.render()
+}
+
 // trim drops the oldest records to bring the transcript back under its limit,
 // then rebuilds the view. Roughly a tenth of the limit is dropped at once so the
 // full rebuild is amortised across many adds rather than firing on every add
