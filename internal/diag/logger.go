@@ -57,6 +57,16 @@ func NewFile(path string) (*Logger, error) {
 	return New(f), nil
 }
 
+// OpenLogFile opens (or creates) the diagnostics log file at path for appending
+// and returns the underlying *os.File. The parent directory is created if needed
+// (owner-only, like NewFile). It exists so a single sink can be shared between a
+// diag.Logger (via New) and another writer — notably the standard library's log
+// package (log.SetOutput) — so the attached TUI redirects BOTH off os.Stderr to
+// the same file and neither bleeds onto the alternate screen (issue #560).
+func OpenLogFile(path string) (*os.File, error) {
+	return openAppend(path)
+}
+
 // With returns a child logger that adds args (alternating key/value pairs, or
 // slog.Attr values) to every record it writes. Use it to thread session and
 // agent ids so a model event can be correlated to the tool outcome it caused.

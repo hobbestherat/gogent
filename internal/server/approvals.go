@@ -61,6 +61,28 @@ type approvalBridge struct {
 	mu      sync.Mutex
 	pending map[string]*pendingApproval
 	nextSeq int64
+
+	// recent remembers approvals that were already removed (resolved or timed out)
+	// so a decision POST that lands AFTER removal can be reconciled idempotently
+	// instead of hard-404ing and losing the user's answer (issue #560). It is
+	// bounded by recentCap with FIFO eviction (recentOrder); entries are tiny.
+	recent      map[string]concludedApproval
+	recentOrder []string
+}
+
+// recentCap bounds the recall ring (issue #560). It is far above any realistic
+// number of approvals in flight at once, so a late decision is essentially always
+// reconcilable; an evicted id falls back to a 404 the client retries then surfaces.
+const recentCap = 64
+
+// concludedApproval is the compact record kept for a removed approval so a late
+// decision POST can still be applied (a sticky permission grant) or acknowledged
+// idempotently (issue #560).
+type concludedApproval struct {
+	kind       string
+	sessionID  string
+	agentID    string
+	permission *permissionDetail
 }
 
 func newApprovalBridge(h *hub, connectedTimeout, unattendedTimeout time.Duration, now func() time.Time) *approvalBridge {
@@ -83,6 +105,7 @@ func newApprovalBridge(h *hub, connectedTimeout, unattendedTimeout time.Duration
 		unattendedTimeout: unattendedTimeout,
 		now:               now,
 		pending:           make(map[string]*pendingApproval),
+		recent:            make(map[string]concludedApproval),
 	}
 }
 
@@ -237,8 +260,40 @@ func (b *approvalBridge) get(id string) *pendingApproval {
 
 func (b *approvalBridge) remove(id string) {
 	b.mu.Lock()
-	delete(b.pending, id)
+	if ap, ok := b.pending[id]; ok {
+		b.rememberLocked(id, concludedApproval{
+			kind:       ap.kind,
+			sessionID:  ap.sessionID,
+			agentID:    ap.agentID,
+			permission: ap.permission,
+		})
+		delete(b.pending, id)
+	}
 	b.mu.Unlock()
+}
+
+// rememberLocked records a concluded approval in the bounded recall ring, evicting
+// the oldest entry when full. Caller holds b.mu.
+func (b *approvalBridge) rememberLocked(id string, c concludedApproval) {
+	if _, exists := b.recent[id]; !exists {
+		b.recentOrder = append(b.recentOrder, id)
+		for len(b.recentOrder) > recentCap {
+			oldest := b.recentOrder[0]
+			b.recentOrder = b.recentOrder[1:]
+			delete(b.recent, oldest)
+		}
+	}
+	b.recent[id] = c
+}
+
+// recall returns the record of a removed approval, if it is still in the ring. A
+// decision POST that arrives after the pending approval was removed uses it to
+// reconcile idempotently rather than hard-404ing (issue #560).
+func (b *approvalBridge) recall(id string) (concludedApproval, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	c, ok := b.recent[id]
+	return c, ok
 }
 
 // resolve delivers a decision to the waiting tool goroutine for the given id.

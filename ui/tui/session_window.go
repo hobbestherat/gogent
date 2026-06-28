@@ -1832,6 +1832,13 @@ func (sw *SessionWindow) apply(ev agent.SessionEvent) {
 			sw.addError(ev.Err.Error())
 		}
 		sw.setBusy(false)
+	case agent.SessionEventNotice:
+		// An informational system note (e.g. a remote approval could not be
+		// delivered, issue #560). Rendered like other "[System]" lines; never an
+		// error, so it does not clear the busy state.
+		if strings.TrimSpace(ev.Text) != "" {
+			sw.addNote(ev.Text)
+		}
 	}
 }
 

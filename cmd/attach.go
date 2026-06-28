@@ -6,12 +6,14 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"gogent/internal/config"
+	"gogent/internal/diag"
 	"gogent/internal/gogent"
 	"gogent/internal/sshtunnel"
 	tuipkg "gogent/ui/tui"
@@ -231,10 +233,27 @@ func runAttached(homeDir, addr, token string, noColorFlag bool) error {
 	}
 	wb.SetAfterRestore(begin)
 
+	// Redirect BOTH diagnostic sinks off os.Stderr to the gogent.log file before the
+	// TUI takes the alternate screen (issue #560). Attach mode never reaches main's
+	// diag-file setup (main returns before it), so the local core's diag logger AND
+	// the standard library's log package would otherwise write to fd 2 — which the
+	// TUI never redirects — and bleed onto the rendered frame as a flash. One shared
+	// append handle backs both; a failed open leaves the stderr defaults (degrade
+	// gracefully, matching main). stderr is restored after Run() returns (below), by
+	// which point the alternate screen is gone, so an exit-time error stays visible.
+	if f, ferr := diag.OpenLogFile(filepath.Join(homeDir, ".gogent", "gogent.log")); ferr == nil {
+		g.SetLogger(diag.New(f))
+		log.SetOutput(f)
+	}
+
 	// Run the TUI loop.
 	go func() {
-		if err := wb.Run(); err != nil {
-			log.Printf("TUI error: %v", err)
+		runErr := wb.Run()
+		// The alternate screen is torn down once Run returns, so restore log output
+		// to stderr — a TUI exit error must be visible, not buried in the log file.
+		log.SetOutput(os.Stderr)
+		if runErr != nil {
+			log.Printf("TUI error: %v", runErr)
 		}
 		// When the UI loop exits (user quit), trigger the shutdown path below.
 		select {

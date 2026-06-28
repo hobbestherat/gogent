@@ -590,7 +590,9 @@ func (rc *RemoteClient) handleApproval(ap ApprovalDTO) {
 		decision := rc.approver.AskPermission(req)
 		// permission.Decision values ("allow"/"deny"/"always"/"always_deny") are
 		// exactly the wire tokens the server's decision endpoint expects.
-		rc.decide(ap.ID, string(decision))
+		wire := string(decision)
+		status, err := rc.decide(ap.ID, wire)
+		rc.reportDecision(ap.SessionID, "permission", req.Resource, wire, status, err)
 	case "edit_review":
 		if ap.EditReview == nil {
 			return
@@ -602,15 +604,67 @@ func (rc *RemoteClient) handleApproval(ap ApprovalDTO) {
 			Op:        ap.EditReview.Op,
 			Diff:      ap.EditReview.Diff,
 		}
-		rc.decide(ap.ID, editDecisionToWire(rc.approver.ReviewEdit(req)))
+		wire := editDecisionToWire(rc.approver.ReviewEdit(req))
+		status, err := rc.decide(ap.ID, wire)
+		rc.reportDecision(ap.SessionID, "edit_review", req.Path, wire, status, err)
 	}
 }
 
-// decide POSTs a resolved decision, logging (not surfacing) a failure: a 404/409
-// means the gate was already resolved or timed out on the daemon, which is benign.
-func (rc *RemoteClient) decide(aid, decision string) {
-	if err := rc.client.DecideApproval(aid, decision); err != nil {
-		log.Printf("remote approval %s: %v", aid, err)
+// decideRetryBackoff is the wait before each retry of a failed decision POST. The
+// endpoint is idempotent (issue #560), so a blind retry can never double-apply a
+// decision; it just rides out a transient network blip or 5xx. The length of the
+// slice is the number of retries after the first attempt.
+var decideRetryBackoff = []time.Duration{200 * time.Millisecond, 500 * time.Millisecond}
+
+// decide POSTs a resolved decision to the daemon, retrying a transient failure a
+// couple of times before giving up. It returns the daemon's status ("resolved"
+// for an in-time decision, "late" for a reconciled one) and the final error after
+// retries. A failure is still logged for the post-incident record — now to the
+// diagnostics file, never the alternate screen (issue #560) — but the caller
+// (reportDecision) is responsible for surfacing a definitive failure (or a late
+// grant) to the user, so the decision is never silently lost.
+func (rc *RemoteClient) decide(aid, decision string) (status string, err error) {
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-rc.ctx.Done():
+				return "", fmt.Errorf("remote approval %s: %w", aid, rc.ctx.Err())
+			case <-time.After(decideRetryBackoff[attempt-1]):
+			}
+		}
+		status, err = rc.client.DecideApproval(aid, decision)
+		if err == nil {
+			return status, nil
+		}
+		if attempt >= len(decideRetryBackoff) {
+			break
+		}
+	}
+	log.Printf("remote approval %s: %v", aid, err)
+	return "", err
+}
+
+// reportDecision surfaces a remote approval outcome to the user in-band so it is
+// never silent (issue #560): a definitive delivery failure becomes a kind-aware
+// "[System]" note, and a sticky permission grant that the daemon reconciled after
+// the prompt had already expired ("late") tells the user it will apply going
+// forward. The common in-time success is silent.
+func (rc *RemoteClient) reportDecision(sessionID, kind, resource, wire, status string, err error) {
+	if err != nil {
+		switch kind {
+		case "edit_review":
+			rc.emitNotice(sessionID, "Couldn't deliver your edit-review decision to the daemon; the edit was not applied — please try again.")
+		default:
+			rc.emitNotice(sessionID, "Couldn't deliver your approval to the daemon; the tool used the safe default. 'Always allow' did not take effect — please try again.")
+		}
+		return
+	}
+	if status == "late" && kind == "permission" && (wire == "always" || wire == "always_deny") {
+		verb := "allow"
+		if wire == "always_deny" {
+			verb = "deny"
+		}
+		rc.emitNotice(sessionID, fmt.Sprintf("The request that prompted this already used the safe default; your 'always %s' for %s has been saved and will apply to future requests.", verb, resource))
 	}
 }
 
@@ -1101,6 +1155,17 @@ func (rc *RemoteClient) emitErr(sessionID string, err error) {
 		return
 	}
 	rc.sink(sessionID, agent.SessionEvent{Type: agent.SessionEventError, Err: err})
+}
+
+// emitNotice surfaces an informational system note in the session's window
+// (rendered as a "[System]" line), used to tell the user about a remote approval
+// outcome that would otherwise be silent — a delivery failure or a late "always"
+// grant (issue #560). A nil sink (narrow tests) is a no-op, mirroring emitErr.
+func (rc *RemoteClient) emitNotice(sessionID, text string) {
+	if rc.sink == nil {
+		return
+	}
+	rc.sink(sessionID, agent.SessionEvent{Type: agent.SessionEventNotice, Text: text})
 }
 
 // mutateSettings applies a one-field change with a read-modify-write against
