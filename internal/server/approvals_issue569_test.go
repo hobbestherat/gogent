@@ -160,6 +160,40 @@ func TestApprovalIssue569UnobservedChargedToUnattendedSafetyBound(t *testing.T) 
 	}
 }
 
+// TestApprovalIssue569ObservedConnectedTimeoutZeroNeverDenies locks in the
+// documented split (approvals.go): connectedTimeout == 0 means "never" for an
+// OBSERVED connected prompt (a human fetched it and could answer) — the connected
+// clock must not deny it, and because it is observed the unattended clock is held
+// at zero while connected. The un-observed connected case is the one governed by
+// the unattended bound (TestApprovalIssue569UnobservedChargedToUnattendedSafetyBound).
+func TestApprovalIssue569ObservedConnectedTimeoutZeroNeverDenies(t *testing.T) {
+	h := newHub()
+	_, unsub := h.subscribeGlobal() // connected
+	defer unsub()
+	// connectedTimeout=0 (never) with a short unattended bound, so a spurious deny
+	// would show up quickly.
+	bridge := newApprovalBridge(h, 0, 60*time.Millisecond, time.Now)
+
+	id := bridge.alloc("permission", "s1", "root", &permissionDetail{Action: "shell", Resource: "r"}, nil)
+	done := make(chan decision, 1)
+	go func() { done <- bridge.wait(id, "s1", decision{perm: permission.DecisionDeny}) }()
+
+	bridge.list() // observe → connectedTimeout=0 must now mean "never deny"
+
+	// Well past the 60ms unattended bound: an OBSERVED connected prompt must NOT be
+	// denied by either clock.
+	time.Sleep(160 * time.Millisecond)
+	select {
+	case d := <-done:
+		t.Fatalf("observed connected prompt with connectedTimeout=0 was denied with %v; want to block until a decision", d.perm)
+	default:
+	}
+	if bridge.get(id) == nil {
+		t.Fatal("observed connected approval was removed despite connectedTimeout=0 (never)")
+	}
+	bridge.resolve(id, decision{perm: permission.DecisionAllow})
+}
+
 // TestApprovalIssue569IsObservedHelper exercises the helper wait() reads each tick.
 func TestApprovalIssue569IsObservedHelper(t *testing.T) {
 	h := newHub()

@@ -230,19 +230,19 @@ func issue569PendingApproval() []ApprovalDTO {
 // fire during the test, so the ONLY way the prompt surfaces is the daemon's
 // "approval" SSE nudge → StartGated's handler → kickApprovals → scanApprovals. If
 // that wiring is missing, the badge never appears.
+//
+// The nudge is sent the INSTANT the stream opens (flush headers, then immediately
+// push the frame). This deliberately exercises the fixes-round-1 ordering: the
+// approval-signal handler is registered BEFORE openStream starts the SSE reader, so
+// an immediate nudge is not dropped on a nil handler. Before that fix this test
+// would race/fail (the nudge landed while the handler was still nil, and with
+// pollEvery=1h there is no poll backstop within the window).
 func TestRemoteClientSSEApprovalSignalSurfacesPromptWithoutPollTick(t *testing.T) {
 	withFastRetries(t)
-	// Gate the nudge: StartGated sets the approval-signal handler only AFTER
-	// openStream has started the reader, so a frame sent the instant the stream
-	// opens could race the handler registration. The test pushes the frame only once
-	// Start() has returned (handler set, poller running) — which is also the
-	// realistic timing (a prompt is raised by a running turn, long after attach).
-	nudge := make(chan struct{})
 	srv, listCalls, _ := issue569ApprovalsServer(t, issue569PendingApproval(), func(w http.ResponseWriter, f http.Flusher) {
-		// Send 200 + headers now so the client's openStream (http.Do) unblocks and
-		// Start() can return; the frame itself is gated until the test signals ready.
+		// Send 200 + headers, then immediately push the approval nudge — no gating,
+		// to stress the handler-registered-before-reader ordering.
 		f.Flush()
-		<-nudge
 		fmt.Fprint(w, "event: approval\n")
 		fmt.Fprint(w, `data: {"id":"apr-1"}`+"\n\n")
 		f.Flush()
@@ -264,9 +264,6 @@ func TestRemoteClientSSEApprovalSignalSurfacesPromptWithoutPollTick(t *testing.T
 	if err := rc.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	// Let the reader settle on the open stream, then push the nudge.
-	time.Sleep(30 * time.Millisecond)
-	close(nudge)
 
 	deadline := time.After(2 * time.Second)
 	for approver.count() == 0 {
