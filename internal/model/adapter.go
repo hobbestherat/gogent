@@ -125,10 +125,14 @@ const anthropicVersion = "2023-06-01"
 // serves both the direct Anthropic API and Claude on Google Vertex AI; the
 // vertex flag selects the Vertex body shape — the model name is omitted (it
 // rides in the URL path), the API version is sent as the anthropic_version body
-// field instead of a header, sampling params are dropped (modern Claude rejects
-// temperature/top_p), and extended thinking is emitted as adaptive thinking.
-// Prompt-cache breakpoints (cache_control on the system block + the end of the
-// cacheable prefix) are emitted on BOTH paths (issue #404). See buildBody.
+// field instead of a header, and extended thinking is emitted as adaptive
+// thinking. Sampling params (temperature/top_p) are forwarded identically on both
+// paths; whether a given model accepts them is decided upstream in buildRequest
+// via the (provider,model) capability layer (resolveModelCaps), not here — so
+// current-gen Claude, which rejects them, simply arrives with nil pointers that
+// omitempty drops (issue #543). Prompt-cache breakpoints (cache_control on the
+// system block + the end of the cacheable prefix) are emitted on BOTH paths
+// (issue #404). See buildBody.
 type anthropicAdapter struct{ vertex bool }
 
 // anthropicThinking is the Messages-API thinking control. For Claude on Vertex,
@@ -242,22 +246,27 @@ type anthropicTool struct {
 func (a anthropicAdapter) buildBody(req CompletionRequest, buf *bytes.Buffer) error {
 	out := anthropicRequest{
 		Stream: req.Stream,
+		// Sampling params are forwarded verbatim on BOTH the direct and Vertex
+		// paths. Whether a model accepts them is decided UPSTREAM in buildRequest
+		// via the (provider,model) capability layer (resolveModelCaps): current-gen
+		// Claude rejects temperature/top_p, so those pointers arrive nil here and
+		// omitempty drops them from the wire body. The adapter no longer makes that
+		// decision — it is data (model_overrides.go), not a per-instance branch
+		// (issue #543).
+		Temperature: req.Temperature,
+		TopP:        req.TopP,
 	}
 
 	if a.vertex {
 		// Vertex shape: the model name rides in the URL path (so it is omitted from
-		// the body), the API version travels in the body, and modern Claude rejects
-		// temperature/top_p — so sampling params are dropped entirely (Anthropic
-		// recommends steering with prompting rather than sampling on these models).
-		// Extended thinking, when enabled, is emitted as adaptive thinking.
+		// the body) and the API version travels in the body. Extended thinking, when
+		// enabled, is emitted as adaptive thinking.
 		out.AnthropicVersion = vertexAnthropicVersion
 		if req.Thinking != nil && req.Thinking.Type == "enabled" {
 			out.Thinking = &anthropicThinking{Type: "adaptive", Display: "summarized"}
 		}
 	} else {
 		out.Model = req.Model
-		out.Temperature = req.Temperature
-		out.TopP = req.TopP
 	}
 
 	// max_tokens is mandatory for Anthropic. buildRequest always sets one of the

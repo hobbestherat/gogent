@@ -156,11 +156,18 @@ func TestVertexAnthropicBodyShape(t *testing.T) {
 	if body["stream"] != true {
 		t.Errorf("stream = %v, want true (streamRawPredict still reads stream from the body)", body["stream"])
 	}
-	if _, ok := body["temperature"]; ok {
-		t.Error("body has temperature; modern Claude rejects sampling params on Vertex")
+	// buildBody is now a PURE FORWARDER on both paths (issue #543): whether a model
+	// accepts sampling params is decided UPSTREAM in buildRequest via the
+	// (provider,model) capability layer (resolveModelCaps), not here. This call
+	// hands the adapter non-nil pointers, so they are forwarded verbatim — pinning
+	// the new contract. The "current-gen Claude drops sampling" assertion now lives
+	// at the buildRequest level (see caps_test.go) where the decision actually
+	// resides.
+	if body["temperature"] == nil {
+		t.Error("body missing temperature; the adapter must forward whatever buildRequest hands it")
 	}
-	if _, ok := body["top_p"]; ok {
-		t.Error("body has top_p; modern Claude rejects sampling params on Vertex")
+	if body["top_p"] == nil {
+		t.Error("body missing top_p; the adapter must forward whatever buildRequest hands it")
 	}
 	if got, ok := body["max_tokens"].(float64); !ok || got != 200 {
 		t.Errorf("max_tokens = %v, want 200", body["max_tokens"])
