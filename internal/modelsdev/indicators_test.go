@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"gogent/internal/model"
 )
 
 // TestReasoningCapable pins the review form's reasoning-capable indicator (issue
@@ -98,5 +100,24 @@ func TestCostSummary(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestDerivesBaseAgreesWithDeriveBaseAPITypes locks the cross-package invariant the
+// fixes-round addressed: modelsdev.deriveBaseAPITypes (the set ToModelConfig blanks
+// Endpoint for) and model.DerivesBase (the set the review form branches on) must be
+// the SAME set. A drift would make the form show a "derived:" indicator for a
+// provider whose persisted Endpoint is p.API, or an editable p.API box for one whose
+// Endpoint is blank — i.e. the indicator would lie about the persisted config.
+func TestDerivesBaseAgreesWithDeriveBaseAPITypes(t *testing.T) {
+	for apiType := range deriveBaseAPITypes {
+		if !model.DerivesBase(model.APIType(apiType)) {
+			t.Errorf("deriveBaseAPITypes has %q (ToModelConfig blanks its Endpoint) but model.DerivesBase is false — the review form would prefill p.API for a provider whose persisted endpoint is empty", apiType)
+		}
+	}
+	// The generic gateway type is the canonical NON-derive-base: ToModelConfig copies
+	// p.API, so the form must show the editable prefilled box, not a derived indicator.
+	if model.DerivesBase(model.APITypeOpenAI) {
+		t.Error("model.DerivesBase(openai) = true, want false — gateways must keep the p.API editable-box path")
 	}
 }

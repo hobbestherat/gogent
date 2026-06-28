@@ -94,6 +94,45 @@ func TestResolvedBaseURLMatchesRouting(t *testing.T) {
 	}
 }
 
+// TestDerivesBase tests the PUBLIC DerivesBase helper the review form branches on
+// (distinct from the registry-field guard in routable_config_validation_test.go,
+// which catches provider-registration drift). It also locks the contract DerivesBase
+// forms with ResolvedBaseURL — the two helpers the dialog composes — so the dialog's
+// hint switch always has a real case for a derive-base provider.
+func TestDerivesBase(t *testing.T) {
+	for _, tc := range []struct {
+		apiType APIType
+		want    bool
+	}{
+		{APITypeOpenAI, false}, // the only placeholder-default provider
+		{APITypeZAI, true},
+		{APITypeOpenRouter, true},
+		{APITypeAnthropic, true},
+		{APITypeVertex, true},
+		{APITypeVertexNative, true},
+		{APITypeVertexAnthropic, true},
+		// Unknown resolves to the OpenAI provider (providerFor fallback) => not derive-base.
+		{APIType("totally-unknown"), false},
+	} {
+		t.Run(string(tc.apiType), func(t *testing.T) {
+			if got := DerivesBase(tc.apiType); got != tc.want {
+				t.Errorf("DerivesBase(%q) = %v, want %v", tc.apiType, got, tc.want)
+			}
+			// Contract with ResolvedBaseURL: a derive-base provider must yield a hint
+			// the review form can render (a named base OR project/location), never the
+			// ("", false) pair that means "use p.API". When NOT derive-base, it must
+			// return ("", false) so the form treats it as a gateway.
+			base, fromProjLoc := ResolvedBaseURL(tc.apiType)
+			switch {
+			case tc.want && base == "" && !fromProjLoc:
+				t.Errorf("DerivesBase(%q)=true but ResolvedBaseURL=(%q,false): the review form's hint switch has no real case (the unreachable '(derived by the adapter)' default would fire)", tc.apiType, base)
+			case !tc.want && (base != "" || fromProjLoc):
+				t.Errorf("DerivesBase(%q)=false but ResolvedBaseURL=(%q,%v): a non-derive-base provider must look like a gateway to the form", tc.apiType, base, fromProjLoc)
+			}
+		})
+	}
+}
+
 // TestSupportsThinking pins which api_types actually emit the `thinking` request
 // parameter, so the review form's Thinking annotation is truthful. The direct
 // Anthropic Messages API has SupportsThinking unset (caps:{}), so a Claude model
