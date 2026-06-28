@@ -11,6 +11,7 @@ import (
 	"gogent/internal/fileops"
 	"gogent/internal/gogent"
 	"gogent/internal/modelsdev"
+	"gogent/internal/shell"
 	"gogent/internal/stats"
 	"gogent/internal/tool"
 	tuipkg "gogent/ui/tui"
@@ -65,6 +66,25 @@ func embeddedHandlersFor(g *gogent.Gogent, wb *tuipkg.Workbench, noColor bool) t
 					Err:  err,
 				})
 			}
+		},
+		// OnShell runs a !-prefixed shell command out-of-band at the workspace
+		// root (issue #571), the same Dir=WorkspaceRoot contract the agent shell
+		// tool uses. It is synchronous (the TUI calls it on a background goroutine
+		// and renders the result inline); it never starts an agent turn, so no
+		// tokens are spent and the conversation is untouched. shell.Execute returns
+		// a nil error for a non-zero exit or a timeout (both carried in the result),
+		// so err here means the command could not be launched.
+		OnShell: func(command string) (tuipkg.ShellResult, error) {
+			res, err := shell.Execute(command, shell.ShellConfig{Dir: g.GetWorkspaceRoot()})
+			if err != nil {
+				return tuipkg.ShellResult{}, fmt.Errorf("shell execute: %w", err)
+			}
+			return tuipkg.ShellResult{
+				Stdout:   res.Stdout,
+				Stderr:   res.Stderr,
+				ExitCode: res.ExitCode,
+				Timeout:  res.Timeout,
+			}, nil
 		},
 		// OnFork forks parentSessionID into a new peer session seeded with a
 		// deep copy of its full conversation history (issue #349), then bridges

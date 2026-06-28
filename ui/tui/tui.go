@@ -238,6 +238,18 @@ type Handlers struct {
 	// the window's drain-on-idle path instead. May be nil, in which case the
 	// Interject button reports the feature as unavailable.
 	OnInject func(sessionID, message string)
+	// OnShell runs a !-prefixed shell command out-of-band (issue #571) — on the
+	// host (embedded) or the daemon (remote/SSH-attached) at the session's
+	// WorkspaceRoot — and returns its output WITHOUT involving the model: no turn,
+	// no tokens, and the result never enters the model conversation/context. The
+	// returned err is non-nil only for an execution/transport failure (the command
+	// could not be launched, or the daemon request failed); a non-zero command exit
+	// and a timeout are normal results carried in ShellResult (ExitCode / Timeout),
+	// not errors. It is called on a background goroutine (a command may run up to
+	// the shell timeout), so the caller must marshal the result back onto the UI
+	// thread before rendering. May be nil (e.g. the read-only analysis window),
+	// in which case a !cmd reports the feature as unavailable.
+	OnShell func(command string) (ShellResult, error)
 	// SupervisorEnabled reports whether the harness-level supervisor (issue #172)
 	// is enabled (experimental.supervisor). When false the idle watchdog never
 	// runs, so a session's /goal is purely informational. May be nil, treated as
@@ -368,6 +380,19 @@ type Handlers struct {
 	// mirroring ConnectionLabel. It returns "" for embedded/attached-local; may be
 	// nil (the re-attach line is then omitted).
 	ReconnectAddress func() string
+}
+
+// ShellResult is the UI-side view of a !cmd execution (issue #571), mirroring
+// internal/shell.ExecuteResult without importing it so ui/tui stays exec-free
+// (no os/exec, no internal/shell dependency). The embedded and remote OnShell
+// implementations each map their respective result (a shell.ExecuteResult or a
+// daemon ShellResultDTO) into this shape, which the transcript renders inline.
+// ExitCode is 0 on success; Timeout marks a command killed at the shell timeout.
+type ShellResult struct {
+	Stdout   string
+	Stderr   string
+	ExitCode int
+	Timeout  bool
 }
 
 // WatcherConfig is the UI-facing description of a watcher to create (issue #329

@@ -531,6 +531,55 @@ func (c *APIClient) Workspace() (WorkspaceDTO, error) {
 	return out, nil
 }
 
+// shellRequestDTO is the body of POST /api/shell (issue #571).
+type shellRequestDTO struct {
+	Command string `json:"command"`
+}
+
+// ShellResultDTO mirrors the server's shellView (POST /api/shell): the result of
+// a !-prefixed shell command the daemon ran out-of-band at its workspace root.
+// Error is set only when the command could not be launched; a non-zero exit is
+// carried in ExitCode (and Timeout marks a command killed at the shell timeout).
+type ShellResultDTO struct {
+	Stdout   string `json:"stdout"`
+	Stderr   string `json:"stderr"`
+	ExitCode int    `json:"exit_code,omitempty"`
+	Timeout  bool   `json:"timeout,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+// Shell runs a !-prefixed shell command on the daemon at its workspace root via
+// POST /api/shell (issue #571) and returns the result. It backs the attached
+// TUI's OnShell handler: an SSH-attached user's !cmd executes daemon-side, never
+// through an agent turn.
+//
+// It deliberately does NOT use c.do(): that helper caps every request at
+// quickTimeout (30s), which would kill a longer-running command and diverge from
+// the embedded path, where shell.Execute honours the full shell timeout (5 min by
+// default). Instead — exactly like SendMessage — it issues the request with the
+// caller's context and a direct http.Do, so the only bound is the daemon-side
+// shell timeout. Callers pass context.Background() for that 5-minute ceiling.
+func (c *APIClient) Shell(ctx context.Context, command string) (ShellResultDTO, error) {
+	req, err := c.newRequest(ctx, http.MethodPost, "/shell", shellRequestDTO{Command: command})
+	if err != nil {
+		return ShellResultDTO{}, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return ShellResultDTO{}, fmt.Errorf("shell: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return ShellResultDTO{}, fmt.Errorf("shell: %s: %s", resp.Status, strings.TrimSpace(string(msg)))
+	}
+	var out ShellResultDTO
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil && err != io.EOF {
+		return ShellResultDTO{}, fmt.Errorf("decode shell response: %w", err)
+	}
+	return out, nil
+}
+
 // ListSessions returns every saved + live session known to the daemon (index
 // metadata; no transcript replay), backing both Restore and the Saved Sessions
 // browser.

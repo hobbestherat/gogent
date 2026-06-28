@@ -922,6 +922,23 @@ func (rc *RemoteClient) Handlers() Handlers {
 				log.Printf("remote inject session %s: %v", sessionID, err)
 			}
 		},
+		// OnShell runs a !-prefixed command on the daemon at its workspace root
+		// (issue #571), out-of-band from any agent turn. A background context is
+		// used deliberately: the request's only bound is the daemon-side shell
+		// timeout (not the client's 30s quickTimeout), so an attached !cmd honours
+		// the same 5-minute ceiling as the embedded path.
+		OnShell: func(command string) (ShellResult, error) {
+			dto, err := c.Shell(context.Background(), command)
+			if err != nil {
+				return ShellResult{}, err
+			}
+			return ShellResult{
+				Stdout:   dto.Stdout,
+				Stderr:   dto.Stderr,
+				ExitCode: dto.ExitCode,
+				Timeout:  dto.Timeout,
+			}, nil
+		},
 		OnUndo:   func(sessionID string) (string, error) { return c.Undo(sessionID) },
 		OnRewind: func(sessionID string, turns int) (string, error) { return c.Rewind(sessionID, turns) },
 		OnSetPlanMode: func(sessionID string, on bool) {
