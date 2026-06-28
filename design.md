@@ -12,6 +12,24 @@ at the gate (heavy `internal/model` overlap with #542/#543, which merge before u
 
 ---
 
+## 0. Round-2 revision log (resolves every round-1 concern — verify against the file, not the diff)
+
+> Round-1 review keyed off an empty `git diff HEAD`; the round-2 content was committed, so the diff
+> looks empty while the file *is* revised. Each concern below names the exact section/line that
+> resolves it so re-review can confirm against the current file.
+
+| # | Round-1 concern (gate) | Resolution in this file |
+|---|---|---|
+| 1 | DeepSeek=0.1 vs OpenAI=0.5 unimplementable from one shared `Capabilities` (gate 1) | §2.3 table row **deepseek** + §1 "Provider topology": DeepSeek discount moved to **per-(provider,model) `ModelCaps` exact rows** (`{APITypeOpenAI,"deepseek-chat",0.10}`), beating OpenAI's 0.50 provider default. The two are no longer claimed distinct on `Capabilities`. |
+| 2 | `discount` is not a number for Gemini/Z.AI (gate 1) | §2.3 table: Gemini **0.25**, Z.AI **0.20 (PROVISIONAL, Open Q3)**, OpenRouter **1.0 documented-inaccurate**. No `discount` placeholders remain. |
+| 3 | Writes silent in CSV; `writeConnectorCSV` never extended (gate 2) | §2.2 adds `set("cache_write_tokens_in", int64(c.CacheWriteTokensIn))` after `stats.go:347`; §3 lists the renderer; §5 report assertion now satisfiable. |
+| 4 | Legacy `cached_tokens` unmarshal broken by field→method (alias loses the field) (gate 3) | §2.1 `raw` struct adds explicit `LegacyCachedTokens int json:"cached_tokens"` + `CacheWriteTokens` fields and a specified **three-way read precedence** (nested > `prompt_cache_hit_tokens` > legacy). |
+| 5 | MarshalJSON byte-order unspecified (gate 3) | §2.1 pins exact reflection key order (`…,cached_tokens,cache_write_tokens(omitempty),reasoning_tokens`) with a golden-string test in §5. |
+| 6 | Rename enumeration incomplete (gate 3) | §3 + §5 now list **both** `issue487_failure_persist_test.go` files (`internal/model` `:165/:182`, `internal/gogent` `:61/:228/:381`). |
+| 7 | Budget-fallback rationale mechanistically wrong (gate 3) | §2.3 "the real mechanism": `*ModelConnection` **does** satisfy `CacheCostReporter` (assertion succeeds); raw fallback is empty `caps()`→1.0 + nil `ModelCaps` overrides + no cache tokens, not interface non-implementation. |
+
+---
+
 ## 1. Problem (confirmed against current code)
 
 gogent already parses a prompt-cache *read* count from every provider but collapses it into a
