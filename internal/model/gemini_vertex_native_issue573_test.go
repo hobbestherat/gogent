@@ -282,15 +282,18 @@ func TestIssue573GeminiSchemaMultiNonNullNullableCollapsesAndFlagsNullable(t *te
 }
 
 // TestIssue573GeminiSchemaDegenerateNullOnlyLeftAsIs pins the degenerate case:
-// a ["null"]-only type is left unchanged (dropNullFromType reports no change
-// when nothing non-null survives), so no nullable is added.
+// a ["null"]-only type has no representable scalar, so the sanitizer drops the
+// unrepresentable array type and re-infers a scalar (STRING fallback) — the key
+// guarantee is that NO array type ever reaches the wire. No nullable is added
+// (no non-null member was dropped).
 func TestIssue573GeminiSchemaDegenerateNullOnlyLeftAsIs(t *testing.T) {
 	out := geminiSchema(map[string]interface{}{
 		"type": []interface{}{"null"},
 	}).(map[string]interface{})
-	if _, ok := out["type"].([]interface{}); !ok {
-		t.Fatalf("degenerate [null] type = %#v, want left as-is", out["type"])
+	if _, ok := out["type"].([]interface{}); ok {
+		t.Fatalf("degenerate [null] type still an array %#v, want collapsed (would 400)", out["type"])
 	}
+	requireStringType(t, out, "STRING")
 	if _, hasNullable := out["nullable"]; hasNullable {
 		t.Fatalf("degenerate [null] gained nullable: %#v", out)
 	}
