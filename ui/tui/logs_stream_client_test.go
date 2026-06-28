@@ -2,9 +2,12 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -203,4 +206,83 @@ func TestStreamLogsTo_DeliversRecords(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+// TestStreamLogsTo_ReconnectMustNotDuplicate exposes a real defect in the remote
+// interlace (issue #562's headline capability). The daemon's LogStream primes its
+// full Snapshot() on EVERY connection (internal/server/logs.go), and StreamLogsTo
+// reconnects silently when a stream ends. There is no client-side dedup and no
+// server resumption cursor, so after a reconnect the same history is re-delivered
+// and re-appended — [daemon] lines appear twice (and then crowd out real lines at
+// the display cap). The server below re-primes a fixed snapshot then closes
+// (mimicking a blip after priming); a correct client must not re-append records
+// it already received. This test FAILS against the current implementation.
+func TestStreamLogsTo_ReconnectMustNotDuplicate(t *testing.T) {
+	var reqCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&reqCount, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		for i, txt := range []string{"hist-one", "hist-two", "hist-three"} {
+			frame := fmt.Sprintf("event: log\ndata: {\"time\":\"1970-01-01T00:00:0%dZ\",\"level\":\"INFO\",\"text\":%q}\n\n", i+1, txt)
+			_, _ = io.WriteString(w, frame)
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		// Returning closes the stream; the client treats it as a blip and reconnects.
+	}))
+	defer srv.Close()
+
+	client, err := NewAPIClient(srv.URL, "")
+	if err != nil {
+		t.Fatalf("NewAPIClient: %v", err)
+	}
+	rc := NewRemoteClient(client, func(string, agent.SessionEvent) {}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var mu sync.Mutex
+	var delivered []string
+	done := make(chan struct{})
+	go func() {
+		rc.StreamLogsTo(ctx, func(rec LogRecordDTO) {
+			mu.Lock()
+			delivered = append(delivered, rec.Text)
+			mu.Unlock()
+		})
+		close(done)
+	}()
+
+	// Wait for at least one reconnect (2+ connections), then let the re-primed
+	// batch arrive. backoff(1)=500ms gates the first reconnect.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && atomic.LoadInt32(&reqCount) < 2 {
+		time.Sleep(25 * time.Millisecond)
+	}
+	time.Sleep(400 * time.Millisecond) // allow the re-primed batch to be delivered
+	cancel()
+	<-done
+
+	if conns := atomic.LoadInt32(&reqCount); conns < 2 {
+		t.Fatalf("reconnect did not occur (connections=%d); test inconclusive", conns)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	seen := make(map[string]int)
+	for _, txt := range delivered {
+		seen[txt]++
+	}
+	duped := false
+	for txt, n := range seen {
+		if n > 1 {
+			duped = true
+			t.Errorf("daemon line %q delivered %d× across reconnects — duplicated in the window (no dedup / no resumption cursor)", txt, n)
+		}
+	}
+	if duped {
+		t.Fatalf("StreamLogsTo re-delivered history on reconnect: deliveries=%v", delivered)
+	}
 }

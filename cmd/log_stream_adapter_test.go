@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"gogent/internal/diag"
+	"gogent/internal/server"
 )
 
 // These tests cover the daemon-side adapter that bridges *diag.Ring to
@@ -122,5 +123,32 @@ func TestRingLogStreamer_SnapshotSeesHistoryLiveSeesNew(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("did not receive the post-subscribe live record")
+	}
+}
+
+// Each SSE connection is its own LogStreamer subscriber; the adapter must fan a
+// logged record out to every concurrent subscriber (not just one), so two remote
+// clients — or a reopen — each see the line.
+func TestRingLogStreamer_MultipleSubscribersEachReceive(t *testing.T) {
+	t.Parallel()
+	ring := diag.NewRing(8)
+	a := ringLogStreamer{ring: ring}
+	out1, un1 := a.Subscribe()
+	out2, un2 := a.Subscribe()
+	defer un1()
+	defer un2()
+
+	lg := diag.NewWithRing(io.Discard, ring)
+	lg.Warn("broadcast-to-all")
+
+	for name, ch := range map[string]<-chan server.LogRecord{"first": out1, "second": out2} {
+		select {
+		case rec := <-ch:
+			if rec.Level != "WARN" || !strings.Contains(rec.Text, "broadcast-to-all") {
+				t.Errorf("%s subscriber got %+v", name, rec)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s subscriber missed the fanned-out record", name)
+		}
 	}
 }

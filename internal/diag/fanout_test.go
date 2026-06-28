@@ -205,3 +205,36 @@ func TestRing_EmptySecretRenderedEmpty(t *testing.T) {
 		t.Fatalf("empty secret should render empty, not redacted: %q", recs[0].Text)
 	}
 }
+
+// A Secret nested inside a group-valued attr must also be redacted, with the
+// group key folded into the attr name (appendRingAttr recurses into KindGroup).
+func TestRing_SecretRedactedInNestedGroupAttr(t *testing.T) {
+	t.Parallel()
+	ring := NewRing(8)
+	fanout := &fanoutHandler{handlers: []slog.Handler{
+		slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}),
+		newRingHandler(ring),
+	}}
+	grp := slog.Attr{Key: "req", Value: slog.GroupValue(
+		slog.Attr{Key: "auth", Value: slog.AnyValue(Secret("nested-secret"))},
+		slog.Attr{Key: "path", Value: slog.StringValue("/x")},
+	)}
+	slog.New(fanout).Info("call", grp)
+
+	recs := ring.Snapshot()
+	if len(recs) != 1 {
+		t.Fatalf("captured %d, want 1", len(recs))
+	}
+	if strings.Contains(recs[0].Text, "nested-secret") {
+		t.Fatalf("SECRET LEAKED inside a nested group attr: %q", recs[0].Text)
+	}
+	if !strings.Contains(recs[0].Text, "[REDACTED]") {
+		t.Fatalf("nested group secret not redacted: %q", recs[0].Text)
+	}
+	if !strings.Contains(recs[0].Text, "req.auth") {
+		t.Fatalf("nested group prefix lost: %q", recs[0].Text)
+	}
+	if !strings.Contains(recs[0].Text, "req.path=/x") {
+		t.Fatalf("sibling attr inside the group lost: %q", recs[0].Text)
+	}
+}
