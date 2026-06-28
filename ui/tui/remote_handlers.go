@@ -159,6 +159,27 @@ type RemoteClient struct {
 	// wsFetching is true while a background fetch is in flight, so concurrent
 	// status refreshes coalesce onto one request.
 	wsFetching bool
+
+	// watchMu guards the watcher cache backing the ListWatchers handler (issue
+	// #572). refreshWatcherNodes reads ListWatchers on the UI thread every 1s (once
+	// per open session + once for the free set), so — exactly like wsRoot — the
+	// per-tick read must be cheap and must NOT block the UI thread on the SSH
+	// tunnel (a synchronous GET is bounded by quickTimeout = 30s). The handler
+	// returns a cached snapshot and refreshes it off-thread.
+	watchMu sync.Mutex
+	// watchCache holds the last-known watcher list per query key (the session id,
+	// or "" for the free set). Returned by cachedWatchers and replaced by
+	// fetchWatchers / the mutation refresh.
+	watchCache map[string][]WatcherInfo
+	// watchFetching tracks which keys have a background fetch in flight, so
+	// concurrent ticks coalesce onto one request per key.
+	watchFetching map[string]bool
+	// watchGen is an epoch counter bumped (under watchMu) by every successful
+	// watcher mutation. A background fetch snapshots it at launch and commits its
+	// result only if the epoch still matches, so a stale in-flight fetch that
+	// started before a mutation cannot clobber the fresh post-mutation state the
+	// mutation handler wrote synchronously.
+	watchGen uint64
 }
 
 // TunnelRestarter re-establishes an out-of-process transport (the ssh:// tunnel)
@@ -178,15 +199,17 @@ type TunnelRestarter interface {
 func NewRemoteClient(client *APIClient, sink EventSink, approver Approver) *RemoteClient {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &RemoteClient{
-		client:       client,
-		sink:         sink,
-		approver:     approver,
-		ctx:          ctx,
-		cancel:       cancel,
-		pollEvery:    approvalPollInterval,
-		retryNow:     make(chan struct{}, 1),
-		approvalKick: make(chan struct{}, 1),
-		backoff:      backoffFor,
+		client:        client,
+		sink:          sink,
+		approver:      approver,
+		ctx:           ctx,
+		cancel:        cancel,
+		pollEvery:     approvalPollInterval,
+		retryNow:      make(chan struct{}, 1),
+		approvalKick:  make(chan struct{}, 1),
+		backoff:       backoffFor,
+		watchCache:    make(map[string][]WatcherInfo),
+		watchFetching: make(map[string]bool),
 	}
 }
 
@@ -860,6 +883,133 @@ func (rc *RemoteClient) fetchWorkspaceRoot() {
 	}
 }
 
+// --- watcher cache (issue #572) ---------------------------------------------
+
+// cachedWatchers backs the ListWatchers handler. It returns the last-known
+// watcher list for the query key (sessionID, or "" for the free set) WITHOUT
+// blocking the UI thread: refreshWatcherNodes calls this on the 1s status tick,
+// and a synchronous GET would freeze the UI for up to quickTimeout on a stalled
+// SSH tunnel. It mirrors cachedWorkspaceRoot — the first call returns nil and
+// kicks an off-thread fetch, so the node appears on the next tick (watcher nodes
+// already only move on the 1s tick). A snapshot copy is returned so the caller
+// never aliases the cached slice.
+func (rc *RemoteClient) cachedWatchers(sessionID string) []WatcherInfo {
+	rc.watchMu.Lock()
+	defer rc.watchMu.Unlock()
+	if !rc.watchFetching[sessionID] {
+		rc.watchFetching[sessionID] = true
+		gen := rc.watchGen
+		go rc.fetchWatchers(sessionID, gen)
+	}
+	cached := rc.watchCache[sessionID]
+	if cached == nil {
+		return nil
+	}
+	return append([]WatcherInfo(nil), cached...)
+}
+
+// fetchWatchers performs one background GET /api/watchers[?session_id=] and
+// updates the cache. Like fetchWorkspaceRoot it acquires watchMu only AFTER the
+// HTTP call returns, so the UI thread never blocks on the network while holding
+// the lock, and it clears the in-flight flag via defer so a fetch can never
+// freeze a key's cache. It commits its result only if the epoch still matches
+// (gen == watchGen): a fetch that started before a mutation bumped the epoch read
+// pre-mutation state, so it is discarded rather than clobbering the fresh state
+// the mutation handler wrote synchronously. On error the last-good slice is kept
+// (no flicker on a transient blip); the next tick retries.
+func (rc *RemoteClient) fetchWatchers(sessionID string, gen uint64) {
+	dtos, err := rc.client.ListWatchers(sessionID)
+	rc.watchMu.Lock()
+	defer rc.watchMu.Unlock()
+	defer func() { rc.watchFetching[sessionID] = false }()
+	if err != nil || gen != rc.watchGen {
+		return
+	}
+	infos := make([]WatcherInfo, 0, len(dtos))
+	for _, d := range dtos {
+		infos = append(infos, watcherDTOToInfo(d))
+	}
+	rc.watchCache[sessionID] = infos
+}
+
+// invalidateWatchers is called by every watcher mutation handler on success. It
+// bumps the epoch (dropping any in-flight background fetch that would otherwise
+// land with pre-mutation data) and synchronously re-fetches every key currently
+// in the cache, so the dialog's post-action loadWatcherItems re-render reads the
+// fresh state. The synchronous network here is acceptable: the user just clicked
+// and the mutation itself already blocked. Keys are bounded by "" + the open
+// sessions, so the refresh is small.
+func (rc *RemoteClient) invalidateWatchers() {
+	rc.watchMu.Lock()
+	rc.watchGen++
+	keys := make([]string, 0, len(rc.watchCache))
+	for k := range rc.watchCache {
+		keys = append(keys, k)
+	}
+	rc.watchMu.Unlock()
+	for _, k := range keys {
+		dtos, err := rc.client.ListWatchers(k)
+		if err != nil {
+			continue
+		}
+		infos := make([]WatcherInfo, 0, len(dtos))
+		for _, d := range dtos {
+			infos = append(infos, watcherDTOToInfo(d))
+		}
+		rc.watchMu.Lock()
+		rc.watchCache[k] = infos
+		rc.watchMu.Unlock()
+	}
+}
+
+// watcherDTOToInfo maps a wire WatcherDTO to the ui/tui WatcherInfo, reproducing
+// the embedded mapper (cmd/main.go toWatcherInfo) from the wire shape: a
+// free-running watcher reports its own watcher:<name> session as SessionID, an
+// attached one reports its target; Running tracks the "running" status; the
+// RFC3339 timestamps are reformatted to the embedded "2006-01-02 15:04" display
+// form (kept raw if unparseable). All other fields pass through verbatim.
+func watcherDTOToInfo(d WatcherDTO) WatcherInfo {
+	free := d.Kind == "free"
+	targetSession := ""
+	sessionID := watcherSessionPrefix + d.Name
+	if !free {
+		targetSession = d.Target
+		sessionID = d.Target
+	}
+	out := WatcherInfo{
+		ID:            d.ID,
+		Name:          d.Name,
+		Free:          free,
+		TargetSession: targetSession,
+		SessionID:     sessionID,
+		Enabled:       d.Enabled,
+		Status:        d.Status,
+		Running:       d.Status == "running",
+		Task:          d.Task,
+		Schedule:      d.Schedule,
+		NextFire:      reformatWatcherTime(d.NextFire),
+		LastRun:       reformatWatcherTime(d.LastRun),
+		LastResult:    d.LastResult,
+		LastError:     d.LastError,
+	}
+	return out
+}
+
+// reformatWatcherTime converts a wire RFC3339 timestamp to the embedded display
+// form ("2006-01-02 15:04"). An empty string stays empty; an unparseable value is
+// returned verbatim so a server format change degrades to showing the raw string
+// rather than dropping the field.
+func reformatWatcherTime(s string) string {
+	if s == "" {
+		return ""
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return s
+	}
+	return t.Format("2006-01-02 15:04")
+}
+
 // --- Handlers ---------------------------------------------------------------
 
 // Handlers builds the Handlers struct that drives the daemon over HTTP/SSE. It
@@ -869,10 +1019,10 @@ func (rc *RemoteClient) fetchWorkspaceRoot() {
 // wired HERE (over /api/settings), not by the attach wiring. Handlers explicitly
 // deferred from this
 // bounded slice — OnFork, OnRename (the window title still persists via the local
-// layout), StreamThinking, the supervisor check, the @-file workspace bridge, and
-// the watcher-management API — are intentionally left nil and degrade gracefully
-// (the feature is simply unavailable while attached), as those are a later
-// Phase-2/3 slice.
+// layout), StreamThinking, the supervisor check, and the @-file workspace bridge
+// — are intentionally left nil and degrade gracefully (the feature is simply
+// unavailable while attached), as those are a later Phase-2/3 slice. The
+// watcher-management API IS wired (issue #572): see the watcher handlers below.
 func (rc *RemoteClient) Handlers() Handlers {
 	c := rc.client
 	// The models.dev catalog is public data fetched directly by the attached
@@ -1281,11 +1431,70 @@ func (rc *RemoteClient) Handlers() Handlers {
 		},
 		RestoreCommandVer: func(name string, v int) error { return c.RestoreCommandVersion(name, v) },
 
-		// NOTE: the watcher handlers (ListWatchers/CreateWatcher/…) are deliberately
-		// left nil. Watcher management over the wire is an explicitly deferred
-		// Phase-3 API-gap item, out of scope for this bounded remote-client slice; an
-		// attached TUI simply hides the watcher dialog/sidebar nodes until that slice
-		// lands.
+		// Watchers (issue #329 daemon API, remote wiring issue #572): the dialog,
+		// the ◷ sidebar nodes and /watcher drive the daemon's /api/watchers surface,
+		// mirroring the embedded handler set (cmd/embedded_handlers.go). ListWatchers
+		// reads the non-blocking cache (refreshWatcherNodes calls it on the 1s UI
+		// tick); every mutation invalidates that cache so the dialog re-renders fresh.
+		// Enable/Disable are the two directions of SetWatcherEnabled. CreateWatcher
+		// forwards cfg.ReportToSession (nil ⇒ free-running, a live session id ⇒
+		// attached) — the daemon decides the kind — so the calling sessionID is unused
+		// over the wire, matching the daemon's tool create path.
+		ListWatchers: func(sessionID string) []WatcherInfo {
+			return rc.cachedWatchers(sessionID)
+		},
+		CreateWatcher: func(cfg WatcherConfig, _ string) (WatcherInfo, error) {
+			enabled := true
+			req := WatcherCreateDTO{
+				Name:            cfg.Name,
+				Task:            cfg.Task,
+				Model:           cfg.Model,
+				Schedule:        config.ScheduleConfig{Every: cfg.Every, DailyAt: cfg.DailyAt, Timezone: cfg.Timezone},
+				Enabled:         &enabled,
+				ReportToSession: cfg.ReportToSession,
+			}
+			dto, err := c.CreateWatcher(req)
+			if err != nil {
+				return WatcherInfo{}, fmt.Errorf("create watcher: %w", err)
+			}
+			rc.invalidateWatchers()
+			return watcherDTOToInfo(dto), nil
+		},
+		EnableWatcher: func(idOrName string) error {
+			if err := c.SetWatcherEnabled(idOrName, true); err != nil {
+				return err
+			}
+			rc.invalidateWatchers()
+			return nil
+		},
+		DisableWatcher: func(idOrName string) error {
+			if err := c.SetWatcherEnabled(idOrName, false); err != nil {
+				return err
+			}
+			rc.invalidateWatchers()
+			return nil
+		},
+		RunWatcher: func(idOrName string) error {
+			if err := c.RunWatcher(idOrName); err != nil {
+				return err
+			}
+			rc.invalidateWatchers()
+			return nil
+		},
+		StopWatcher: func(idOrName string) error {
+			if err := c.StopWatcher(idOrName); err != nil {
+				return err
+			}
+			rc.invalidateWatchers()
+			return nil
+		},
+		DeleteWatcher: func(idOrName string) error {
+			if err := c.DeleteWatcher(idOrName); err != nil {
+				return err
+			}
+			rc.invalidateWatchers()
+			return nil
+		},
 	}
 }
 
