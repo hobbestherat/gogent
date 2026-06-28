@@ -861,6 +861,13 @@ type geminiRequest struct {
 	Tools             []geminiTool      `json:"tools,omitempty"`
 	ToolConfig        *geminiToolConfig `json:"toolConfig,omitempty"`
 	GenerationConfig  *geminiGenConfig  `json:"generationConfig,omitempty"`
+	// CachedContent references an explicit Gemini CachedContent resource
+	// ("projects/…/locations/…/cachedContents/{id}") whose systemInstruction +
+	// tools + leading contents this request reuses instead of re-sending. When
+	// set (issue #547), buildBody OMITS the shadowed systemInstruction/tools and
+	// the cached prefix contents, emitting only the post-snapshot tail. omitempty
+	// keeps it — and the whole request — byte-identical to today when inactive.
+	CachedContent string `json:"cachedContent,omitempty"`
 }
 
 // geminiContent is one turn: a role (user|model|function) and a polymorphic parts
@@ -952,9 +959,15 @@ type geminiThinkingConfig struct {
 	ThinkingBudget  *int `json:"thinkingBudget,omitempty"`
 }
 
-func (geminiAdapter) buildBody(req CompletionRequest, buf *bytes.Buffer) error {
-	out := geminiRequest{}
-
+// geminiBuildContents maps a request's messages and tools to the native Gemini
+// pieces — the top-level systemInstruction, the merged contents[] turns, the
+// tools[].functionDeclarations, and the toolConfig — without touching the wire
+// (no marshaling, no network). It is the SINGLE source of truth for that mapping
+// so buildBody and the explicit-cache lifecycle manager (ensureGeminiCache, issue
+// #547) agree byte-for-byte on what a CachedContent resource shadows. Returns
+// (nil, …) for any piece the request does not produce, exactly as the prior
+// inline code left those fields unset.
+func geminiBuildContents(req CompletionRequest) (sys *geminiContent, contents []geminiContent, tools []geminiTool, toolCfg *geminiToolConfig) {
 	// Hoist system messages to the top-level systemInstruction; map the rest to
 	// contents, merging consecutive same-role turns (Gemini wants one turn per
 	// role, and tool results must ride in a user turn).
@@ -970,14 +983,14 @@ func (geminiAdapter) buildBody(req CompletionRequest, buf *bytes.Buffer) error {
 		if len(parts) == 0 {
 			continue
 		}
-		if n := len(out.Contents); n > 0 && out.Contents[n-1].Role == role {
-			out.Contents[n-1].Parts = append(out.Contents[n-1].Parts, parts...)
+		if n := len(contents); n > 0 && contents[n-1].Role == role {
+			contents[n-1].Parts = append(contents[n-1].Parts, parts...)
 		} else {
-			out.Contents = append(out.Contents, geminiContent{Role: role, Parts: parts})
+			contents = append(contents, geminiContent{Role: role, Parts: parts})
 		}
 	}
 	if len(systemParts) > 0 {
-		out.SystemInstruction = &geminiContent{Parts: []geminiPart{{Text: strings.Join(systemParts, "\n\n")}}}
+		sys = &geminiContent{Parts: []geminiPart{{Text: strings.Join(systemParts, "\n\n")}}}
 	}
 
 	// Tools → functionDeclarations (JSON-Schema type names upper-cased).
@@ -995,10 +1008,39 @@ func (geminiAdapter) buildBody(req CompletionRequest, buf *bytes.Buffer) error {
 				Parameters:  params,
 			})
 		}
-		out.Tools = []geminiTool{{FunctionDeclarations: decls}}
+		tools = []geminiTool{{FunctionDeclarations: decls}}
 		if req.ToolChoice != nil {
-			out.ToolConfig = geminiToolConfigFor(*req.ToolChoice)
+			toolCfg = geminiToolConfigFor(*req.ToolChoice)
 		}
+	}
+	return sys, contents, tools, toolCfg
+}
+
+func (geminiAdapter) buildBody(req CompletionRequest, buf *bytes.Buffer) error {
+	out := geminiRequest{}
+
+	sys, contents, tools, toolCfg := geminiBuildContents(req)
+	if req.GeminiCachedContent != "" {
+		// An explicit CachedContent resource holds the systemInstruction, tools,
+		// and the leading GeminiCachedPrefixContents turns — Vertex prepends them
+		// server-side, so re-sending them (and re-declaring tools) is redundant and
+		// rejected. Reference the resource and emit only the post-snapshot tail.
+		out.CachedContent = req.GeminiCachedContent
+		n := req.GeminiCachedPrefixContents
+		if n < 0 {
+			n = 0
+		}
+		if n > len(contents) {
+			n = len(contents) // defensive: never slice past the available contents
+		}
+		out.Contents = contents[n:]
+	} else {
+		// Inactive path — identical to the prior inline mapping, so a non-cached
+		// request marshals byte-for-byte as before.
+		out.SystemInstruction = sys
+		out.Contents = contents
+		out.Tools = tools
+		out.ToolConfig = toolCfg
 	}
 
 	// generationConfig: sampling, output cap, structured output, thinking.

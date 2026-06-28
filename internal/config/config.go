@@ -95,6 +95,31 @@ func (m *ModelConfig) AnthropicCacheTTL() string {
 	}
 }
 
+// GeminiCacheTTL returns the explicit-cache lifetime for native Gemini (Vertex
+// vertex-native), as a Gemini "ttl" duration string (e.g. "3600s"), resolved
+// from the SAME CacheTTL knob the Anthropic path uses (issue #545). Unlike
+// Anthropic — where caching is on by default — Gemini explicit context caching
+// is OPT-IN: an explicit CachedContent resource is billable storage, so it must
+// never be created unless the user asked. So an EMPTY CacheTTL means OFF here
+// (returns ""), and only a positive duration ("1h", "5m", "30m", "<N>s", …)
+// enables it. "off"/"none"/unrecognized also return "" (disabled). Issue #547.
+func (m *ModelConfig) GeminiCacheTTL() string {
+	if m == nil {
+		return ""
+	}
+	raw := strings.ToLower(strings.TrimSpace(m.CacheTTL))
+	if raw == "" || raw == "off" || raw == "none" || raw == "disabled" {
+		return ""
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return "" // unparseable/non-positive → disabled (never create a resource)
+	}
+	// Gemini wants a duration string with a seconds suffix (fractional allowed,
+	// but whole seconds suffice for cache lifetimes).
+	return strconv.FormatInt(int64(d.Seconds()), 10) + "s"
+}
+
 // IsReasoningModel reports whether the config opts into any reasoning control
 // (reasoning effort or an explicit thinking toggle). It is the signal that the
 // model expects the reasoning-model request encoding (max_completion_tokens,

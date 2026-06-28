@@ -346,6 +346,18 @@ type CompletionRequest struct {
 	// Anthropic adapter; json:"-" keeps it off the OpenAI-compatible wire, which
 	// marshals the whole request (see openAIAdapter.buildBody).
 	CacheTTL string `json:"-"`
+	// GeminiCachedContent, when non-empty, is the full resource name of a native
+	// Gemini explicit CachedContent ("projects/…/locations/…/cachedContents/{id}")
+	// that this request references in place of the shadowed prefix. It is resolved
+	// by ensureGeminiCache (issue #547) just before marshaling and consumed ONLY by
+	// the Gemini adapter; json:"-" keeps it off the OpenAI-compatible wire, and it
+	// stays empty on every non-vertex-native path.
+	GeminiCachedContent string `json:"-"`
+	// GeminiCachedPrefixContents is the number of leading merged Gemini contents
+	// the referenced CachedContent already holds; the adapter emits contents[N:]
+	// (omitting the cached prefix, systemInstruction, and tools). Meaningful only
+	// when GeminiCachedContent is set.
+	GeminiCachedPrefixContents int `json:"-"`
 }
 
 // ToolChoiceMode is the provider-independent tool-selection policy. It abstracts
@@ -720,6 +732,12 @@ type ModelConnection struct {
 	// the constructors from the provider registry; methods delegate to it.
 	provider *provider
 	client   *http.Client
+
+	// geminiCache holds the native-Gemini explicit context-cache lifecycle state
+	// (issue #547): the live CachedContent resource name, the hash of the prefix it
+	// covers, and its expiry. Zero-value safe and touched ONLY on the vertex-native
+	// path (see ensureGeminiCache); inert for every other provider.
+	geminiCache geminiCacheState
 
 	// configErr, when non-nil, is a construction-time configuration error that
 	// could not be returned (NewModelConnectionFromConfig has no error result).
@@ -1520,6 +1538,12 @@ func (c *ModelConnection) complete(ctx context.Context, messages []Message, stre
 	ov, _ := MaxTokensOverrideFrom(ctx)
 	reqBody := c.buildRequest(messages, stream, tools, format, ov)
 
+	// Resolve the native-Gemini explicit context cache (issue #547): a no-op on
+	// every non-vertex-native provider and when the cache is disabled/below the
+	// size gate. When it engages, it annotates reqBody with the CachedContent
+	// reference the adapter then emits in place of the shadowed prefix.
+	c.ensureGeminiCache(ctx, &reqBody)
+
 	// Marshal the request body ONCE, before the retry loop. Only the socket send
 	// needs retrying, so re-marshaling the (potentially large) transcript on every
 	// attempt would needlessly multiply the marshal cost (issue #20). The body is
@@ -1655,6 +1679,11 @@ func (c *ModelConnection) completeStream(ctx context.Context, messages []Message
 	}
 	ov, _ := MaxTokensOverrideFrom(ctx)
 	reqBody := c.buildRequest(messages, true, tools, nil, ov)
+
+	// Resolve the native-Gemini explicit context cache (issue #547) — same no-op /
+	// annotate contract as the blocking path, so streaming references the resource
+	// identically.
+	c.ensureGeminiCache(ctx, &reqBody)
 
 	// Marshal into a pooled buffer (issue #20): the bytes stay live through the
 	// single request send and the buffer is returned to the pool on return.
