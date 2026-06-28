@@ -368,33 +368,107 @@ func TestGeminiCacheReactiveDropGuard(t *testing.T) {
 	}
 }
 
-// DEFECT (documented): the reactive-drop guard is `status >= 400 && status < 500`,
-// which also matches the RETRYABLE 4xx codes 408/409/429. After those exhaust
-// retries (immediately, with no retry, on the streaming path), a transient
-// rate-limit/conflict drops the cache reference and forces an unnecessary
-// recreate next turn — adding load during rate-limiting, the opposite of ideal,
-// and contradicting the method's own docstring ("transient 5xx/429 ... need no
-// invalidation"). The guard should also exclude 408/409/429 (e.g. gate on
-// `!isRetryableStatus(status)`). This test pins the CURRENT behavior so the suite
-// stays green; flip the expectation when the guard is narrowed.
-func TestGeminiCacheReactiveDropGuardOverbroadOnRetryable4xx(t *testing.T) {
+// The reactive-drop guard must track the retry policy EXACTLY: a transient 5xx
+// or a RETRYABLE 4xx (408/409/429) is retried by the caller and must NOT
+// invalidate the reference (else a rate-limit/conflict churns an unnecessary
+// recreate next turn — extra load during rate-limiting). Only a PERMANENT 4xx
+// (400/404/… of a referenced cache) clears it. (Round-2 fix: the guard now
+// excludes isRetryableStatus; this test was the defect-pinning test that flipped
+// when the guard was narrowed.)
+func TestGeminiCacheReactiveDropGuardExcludesRetryable4xx(t *testing.T) {
 	conn := NewModelConnection()
-	conn.geminiCache.mu.Lock()
-	conn.geminiCache.name = "projects/p/locations/l/cachedContents/live"
-	conn.geminiCache.mu.Unlock()
+	const ref = "projects/p/locations/l/cachedContents/live"
 
-	for _, code := range []int{http.StatusTooManyRequests, http.StatusRequestTimeout, http.StatusConflict} {
+	reset := func() {
 		conn.geminiCache.mu.Lock()
-		conn.geminiCache.name = "projects/p/locations/l/cachedContents/live"
+		conn.geminiCache.name = ref
+		conn.geminiCache.prefixHash = "h"
+		conn.geminiCache.prefixLen = 2
 		conn.geminiCache.mu.Unlock()
+	}
+	gone := func() bool {
+		conn.geminiCache.mu.Lock()
+		defer conn.geminiCache.mu.Unlock()
+		return conn.geminiCache.name == ""
+	}
+
+	// Retryable codes keep the reference.
+	for _, code := range []int{http.StatusTooManyRequests, http.StatusRequestTimeout, http.StatusConflict, http.StatusBadGateway, http.StatusServiceUnavailable} {
+		reset()
 		conn.dropGeminiCacheRefAfterError(true, code)
-		conn.geminiCache.mu.Lock()
-		gone := conn.geminiCache.name == ""
-		conn.geminiCache.mu.Unlock()
-		t.Logf("retryable %d: cache reference dropped = %v (docstring says it should NOT invalidate)", code, gone)
-		if !gone {
-			t.Errorf("status %d: expected CURRENT (buggy) behavior to drop the reference; if this now passes, the guard was fixed — update this test", code)
+		if gone() {
+			t.Errorf("status %d: dropped the reference; want KEPT (transient/retryable)", code)
 		}
+	}
+	// Permanent 4xx on a referenced cache still clears.
+	for _, code := range []int{http.StatusBadRequest, http.StatusNotFound, http.StatusForbidden, http.StatusUnprocessableEntity} {
+		reset()
+		conn.dropGeminiCacheRefAfterError(true, code)
+		if !gone() {
+			t.Errorf("status %d: kept the reference; want CLEARED (permanent 4xx)", code)
+		}
+	}
+	// A non-referenced request never clears, even on a permanent 4xx.
+	reset()
+	conn.dropGeminiCacheRefAfterError(false, http.StatusBadRequest)
+	if gone() {
+		t.Errorf("unreferenced 400 cleared the reference; want no-op")
+	}
+}
+
+// End-to-end: a transient 429 on a referenced cache must NOT clear it, and the
+// session recovers by REUSING the resource once the rate limit clears — not by
+// paying a recreate. This is the real-path behavior the guard fix protects.
+func TestGeminiCache429KeepsReferenceAndRecoversByReuse(t *testing.T) {
+	srv := newCacheSrv(t)
+	conn := setupCacheConn(t, srv, "1h")
+	conn.maxAttempts = 3 // exercise the retry loop, then fail on exhaustion
+	ctx := context.Background()
+
+	// Turn 1: create + succeed.
+	if _, err := conn.CompleteWithToolsCtx(ctx, largeCacheMessages(), oneTool("t")); err != nil {
+		t.Fatalf("turn1: %v", err)
+	}
+	conn.geminiCache.mu.Lock()
+	name1 := conn.geminiCache.name
+	conn.geminiCache.mu.Unlock()
+	if name1 == "" {
+		t.Fatalf("turn1 did not create a cache")
+	}
+
+	// Turn 2: rate-limited (429). Retries exhaust, the turn fails — but the
+	// reference must survive so the next turn reuses instead of recreating.
+	srv.mu.Lock()
+	srv.genStatus = http.StatusTooManyRequests
+	srv.mu.Unlock()
+	if _, err := conn.CompleteWithToolsCtx(ctx, largeCacheMessages(), oneTool("t")); err == nil {
+		t.Fatalf("turn2: expected 429 error after retries")
+	}
+	conn.geminiCache.mu.Lock()
+	nameAfter429 := conn.geminiCache.name
+	conn.geminiCache.mu.Unlock()
+	if nameAfter429 != name1 {
+		t.Errorf("after 429 storm, name = %q, want KEPT %q (transient — must not invalidate)", nameAfter429, name1)
+	}
+	if creates, _, _ := srv.snapshot(); creates != 1 {
+		t.Errorf("creates = %d after 429, want 1 (no churn recreate during rate-limit)", creates)
+	}
+
+	// Turn 3: rate limit clears — reuse the SAME resource and succeed.
+	srv.mu.Lock()
+	srv.genStatus = http.StatusOK
+	srv.mu.Unlock()
+	if _, err := conn.CompleteWithToolsCtx(ctx, largeCacheMessages(), oneTool("t")); err != nil {
+		t.Fatalf("turn3 recovery: %v", err)
+	}
+	if creates, _, _ := srv.snapshot(); creates != 1 {
+		t.Errorf("creates = %d after recovery, want 1 (reused, not recreated)", creates)
+	}
+	conn.geminiCache.mu.Lock()
+	name3 := conn.geminiCache.name
+	conn.geminiCache.mu.Unlock()
+	if name3 != name1 {
+		t.Errorf("turn3 name = %q, want reused %q", name3, name1)
 	}
 }
 
