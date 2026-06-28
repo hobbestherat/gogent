@@ -1436,9 +1436,7 @@ func normalizeGeminiType(node map[string]interface{}) {
 func pruneGeminiRequired(node map[string]interface{}) {
 	req, ok := node["required"].([]interface{})
 	if !ok {
-		if _, present := node["required"]; present {
-			delete(node, "required")
-		}
+		delete(node, "required")
 		return
 	}
 	props, _ := node["properties"].(map[string]interface{})
