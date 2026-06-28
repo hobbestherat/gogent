@@ -264,6 +264,7 @@ func (s *Server) buildAPI() *webapi.API {
 			// --- system ---
 			{Path: "/health", Method: http.MethodGet, Handler: sys.Health, AuthLevel: pub},
 			{Path: "/workspace", Method: http.MethodGet, Handler: sys.Workspace, AuthLevel: req},
+			{Path: "/shell", Method: http.MethodPost, Handler: sys.Shell, AuthLevel: req},
 			{Path: "/stats", Method: http.MethodGet, Handler: sys.Stats, AuthLevel: req},
 			{Path: "/daemon/status", Method: http.MethodGet, Handler: sys.DaemonStatus, AuthLevel: req},
 		},

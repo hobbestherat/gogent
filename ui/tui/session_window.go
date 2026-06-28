@@ -484,6 +484,14 @@ func newSessionWindowKind(wb *Workbench, id, title string, bounds tv.Rect, kind 
 		if !sw.nudgingSend && !sw.draining {
 			sw.recordHistory(text)
 		}
+		// A leading "!" is a shell command run out-of-band on the host/daemon
+		// (issue #571), never sent to the model. It is handled before the busy
+		// check so it works whether idle or busy and never touches turn state or
+		// the queue: it consumes no turn and no tokens.
+		if sw.handleBangCommand(text) {
+			input.Clear()
+			return
+		}
 		// Busy: don't drop the input (issue #170). Queue it as the next turn instead
 		// — the drain-on-idle path re-submits it when the agent finishes, and (with
 		// the experimental flag on) it is injected mid-turn. A leading-slash command
@@ -2021,6 +2029,96 @@ func (sw *SessionWindow) handleSlashCommand(text string) bool {
 		return true
 	}
 	return false
+}
+
+// handleBangCommand interprets a leading "!..." input as an out-of-band shell
+// command (issue #571): the remainder is run on the host (embedded) or the daemon
+// (remote) at the session's WorkspaceRoot via the OnShell handler, and its output
+// is rendered inline in the transcript WITHOUT involving the model — no turn, no
+// tokens, nothing added to the conversation/context. It returns true when the
+// input was a "!" command (handled here; the caller clears the input and does not
+// send anything to the model) and false when the input is not "!"-prefixed and
+// should follow the normal slash/model path.
+//
+// A bare "!" (no command) is a safe no-op that prints a one-line usage note. When
+// no OnShell handler is wired (e.g. the read-only analysis window) the feature is
+// reported as unavailable. Execution runs on a background goroutine because a
+// command may block up to the shell timeout; the result is marshalled back onto
+// the UI thread via Workbench.Post before the transcript is touched, so it never
+// races concurrent renders (a "!" command is allowed while a turn is busy, so
+// several can be in flight at once).
+func (sw *SessionWindow) handleBangCommand(text string) bool {
+	if !strings.HasPrefix(text, "!") {
+		return false
+	}
+	command := strings.TrimSpace(text[1:])
+	if command == "" {
+		sw.addNote("usage: !<shell command> (runs on the host/daemon, not sent to the model)")
+		return true
+	}
+	if sw.wb == nil || sw.wb.handlers.OnShell == nil {
+		sw.addNote("shell commands are unavailable")
+		return true
+	}
+	onShell := sw.wb.handlers.OnShell
+	wb := sw.wb
+	go func() {
+		res, err := onShell(command)
+		wb.Post(func() { sw.addShellResult(command, res, err) })
+	}()
+	return true
+}
+
+// addShellResult renders a !cmd invocation and its output inline in the transcript
+// (issue #571). It is a display-only system record: it is appended to the window's
+// transcript for the user to read but is never sent to the model and never enters
+// the conversation/context (and so is dropped on session restore, which rebuilds
+// only from agent messages). The invocation echoes as "! <cmd>"; stdout then
+// stderr follow as child lines; a non-zero exit, a timeout, or an empty result are
+// annotated so the user always gets feedback. An err (a launch/transport failure,
+// distinct from a non-zero command exit) is reported as a failure note.
+func (sw *SessionWindow) addShellResult(command string, res ShellResult, err error) {
+	if err != nil {
+		sw.addNote(fmt.Sprintf("! %s failed: %v", command, err))
+		return
+	}
+	var b strings.Builder
+	b.WriteString(res.Stdout)
+	if res.Stderr != "" {
+		if b.Len() > 0 && !strings.HasSuffix(b.String(), "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString("stderr:\n")
+		b.WriteString(res.Stderr)
+	}
+	body := strings.TrimRight(b.String(), "\n")
+	var status []string
+	if res.Timeout {
+		status = append(status, "timed out")
+	}
+	if res.ExitCode != 0 {
+		status = append(status, fmt.Sprintf("exit %d", res.ExitCode))
+	}
+	if body == "" {
+		if len(status) == 0 {
+			status = append(status, "no output")
+		}
+	}
+	header := "! " + command
+	if len(status) > 0 {
+		header += "  [" + strings.Join(status, ", ") + "]"
+	}
+	lines := []styledLine{{text: header, color: colorInfo, role: roleInfo}}
+	if body != "" {
+		lines = append(lines, styledChildLines(body, roleInfo)...)
+	}
+	sw.transcript.add(&transcriptRecord{
+		kind:   kindSystem,
+		header: "[Shell]",
+		color:  colorInfo,
+		role:   roleInfo,
+		lines:  lines,
+	})
 }
 
 // dispatchCustomCommand resolves "/name" against the custom-command registry and,

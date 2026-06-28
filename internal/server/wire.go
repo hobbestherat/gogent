@@ -447,6 +447,25 @@ type gitInfo struct {
 	Dirty  bool   `json:"dirty"`
 }
 
+// shellRequest is the body of POST /api/shell (issue #571): a single !-prefixed
+// shell command to run out-of-band at the daemon workspace root, outside any
+// agent turn.
+type shellRequest struct {
+	Command string `json:"command"`
+}
+
+// shellView is the wire result of POST /api/shell, mirroring
+// internal/shell.ExecuteResult: stdout/stderr, the command exit code, whether it
+// timed out, and an Error set only when the command could not be launched (a
+// non-zero exit is NOT an error — it is carried in ExitCode).
+type shellView struct {
+	Stdout   string `json:"stdout"`
+	Stderr   string `json:"stderr"`
+	ExitCode int    `json:"exit_code,omitempty"`
+	Timeout  bool   `json:"timeout,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
 // --- Conversion helpers -----------------------------------------------------
 
 func modelToView(m *config.ModelConfig) modelView {

@@ -10,6 +10,7 @@ import (
 	"github.com/hobbestherat/webapi"
 	"gogent/internal/config"
 	"gogent/internal/gogent"
+	"gogent/internal/shell"
 	"gogent/internal/tool"
 	"gogent/internal/vcs"
 )
@@ -324,6 +325,39 @@ func (svc systemSvc) Workspace(r *http.Request) (interface{}, error) {
 		v.Git = info
 	}
 	return v, nil
+}
+
+// Shell handles POST /shell — run a !-prefixed shell command out-of-band at the
+// daemon workspace root (issue #571), the same Dir=WorkspaceRoot contract the
+// agent shell tool uses. It is the daemon half of the TUI's "!cmd" affordance:
+// an SSH-attached client sends the command here and renders the result inline,
+// exactly as the embedded TUI runs it locally. It never starts an agent turn, so
+// it spends no tokens and does not touch any session's conversation.
+//
+// It is gated to the human scope (like Stats/DaemonStatus) so an agent token can
+// not drive the out-of-band shell. shell.Execute already bounds the command with
+// a timeout and a max-output cap and returns a structured result (a non-zero exit
+// or a timeout is carried in the result, not as a Go error), so the handler maps
+// that result straight onto shellView.
+func (svc systemSvc) Shell(r *http.Request, req shellRequest) (interface{}, error) {
+	if err := requireHuman(r, svc.s.provider); err != nil {
+		return nil, err
+	}
+	command := strings.TrimSpace(req.Command)
+	if command == "" {
+		return nil, webapi.NewHTTPError(http.StatusBadRequest, "command is required")
+	}
+	res, err := shell.Execute(command, shell.ShellConfig{Dir: svc.s.g.GetWorkspaceRoot()})
+	if err != nil {
+		return nil, webapi.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return shellView{
+		Stdout:   res.Stdout,
+		Stderr:   res.Stderr,
+		ExitCode: res.ExitCode,
+		Timeout:  res.Timeout,
+		Error:    res.Error,
+	}, nil
 }
 
 // Stats handles GET /stats — aggregate Statistics() across all sessions.
