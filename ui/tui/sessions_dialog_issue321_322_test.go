@@ -388,7 +388,10 @@ func TestSessionsDialogUnavailableWithoutHandlers(t *testing.T) {
 // TestSessionsDialogSpecIsContentDrivenNotBrowserShare contrasts the dedicated
 // sessions spec with the shared browserDialogSpec on the SAME roomy terminal: the
 // sessions dialog is materially smaller in both axes (it sizes to content) while
-// the browser fills the percentage box. This is the #322 before/after in one test.
+// the browser is the wider footprint. Issue #552 caps the browser at
+// comfortableMaxWidth (120), so on 200x50 it resolves to 120x42 (not the old
+// 160x42 balloon) — still materially larger than the sessions content footprint.
+// This is the #322 before/after in one test.
 func TestSessionsDialogSpecIsContentDrivenNotBrowserShare(t *testing.T) {
 	const termW, termH = 200, 50
 	w := newTestWorkbench(t)
@@ -401,7 +404,8 @@ func TestSessionsDialogSpecIsContentDrivenNotBrowserShare(t *testing.T) {
 		t.Errorf("sessions %dx%d is not smaller than the shared browser %dx%d — the dedicated content spec is not in effect (#322)",
 			sw, sh, bw, bh)
 	}
-	if bw != 160 || bh != 42 {
-		t.Errorf("browser spec on 200x50 = %dx%d, want the 160x42 balloon (premise of the contrast)", bw, bh)
+	if bw != comfortableMaxWidth || bh != 42 {
+		t.Errorf("browser spec on 200x50 = %dx%d, want %dx42 (comfortable-capped footprint, issue #552)",
+			bw, bh, comfortableMaxWidth)
 	}
 }
