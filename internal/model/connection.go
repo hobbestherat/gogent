@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"math/rand/v2"
 	"net/http"
 	"strconv"
@@ -438,20 +439,33 @@ type Choice struct {
 	Index        int     `json:"index"`
 }
 
+// CacheStats is the provider-agnostic prompt-cache split for one turn. ReadTokens
+// and WriteTokens are both subsets of TokenUsage.PromptTokens. ReadTokens is the
+// portion of the prompt served from the provider's cache at a steep discount;
+// WriteTokens is the portion the provider charged a premium to WRITE into its
+// cache. Only Anthropic reports (and bills) a write count — WriteTokens is 0 for
+// every other provider, so the model reduces to a single read counter there.
+//
+// The inner json tags describe a standalone CacheStats; inside TokenUsage the
+// custom (Un)MarshalJSON maps ReadTokens to the legacy "cached_tokens" key (for
+// byte-identical persistence and back-compat) and WriteTokens to
+// "cache_write_tokens".
+type CacheStats struct {
+	ReadTokens  int `json:"cache_read_tokens,omitempty"`
+	WriteTokens int `json:"cache_write_tokens,omitempty"`
+}
+
 type TokenUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
-	// CachedTokens is the count of prompt (input) tokens that the provider served
-	// from its prompt cache rather than reprocessing. It is a subset of
-	// PromptTokens, billed at a steep discount, so it measures how much of the
-	// stable prefix (tools + system prompt + history) was reused this turn.
-	//
-	// OpenAI-compatible backends (incl. Z.AI) report it nested under
-	// usage.prompt_tokens_details.cached_tokens; DeepSeek-style backends report it
-	// top-level as prompt_cache_hit_tokens. UnmarshalJSON reads either form. The
-	// own tag keeps it round-tripping through gogent's persistence.
-	CachedTokens int `json:"cached_tokens,omitempty"`
+	// Cache is the normalized prompt-cache read/write split (see CacheStats). It is
+	// populated provider-agnostically: OpenAI-compatible backends (incl. Z.AI) via
+	// the nested usage.prompt_tokens_details.cached_tokens, DeepSeek via the
+	// top-level prompt_cache_hit_tokens, Gemini via cachedContentTokenCount, and
+	// Anthropic via cache_read_input_tokens / cache_creation_input_tokens. It is
+	// (un)marshaled flat — see MarshalJSON / UnmarshalJSON — not as a nested object.
+	Cache CacheStats `json:"-"`
 	// ReasoningTokens is the count of output tokens a reasoning model spent on
 	// internal chain-of-thought. It is a subset of CompletionTokens (already
 	// billed within it), reported under
@@ -460,10 +474,43 @@ type TokenUsage struct {
 	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 }
 
-// UnmarshalJSON parses provider token usage, normalizing the cached-prompt-token
-// count from the two shapes OpenAI-compatible backends use (a nested
-// prompt_tokens_details.cached_tokens, or a top-level prompt_cache_hit_tokens)
-// into CachedTokens.
+// CachedTokens reports the prompt-cache READ token count (a subset of
+// PromptTokens). It is the back-compat alias for the former CachedTokens field,
+// now computed from Cache.ReadTokens.
+func (u TokenUsage) CachedTokens() int { return u.Cache.ReadTokens }
+
+// MarshalJSON serializes TokenUsage flat. The five pre-cache-write keys keep their
+// historical reflection order and positions — prompt_tokens, completion_tokens,
+// total_tokens, cached_tokens (=Cache.ReadTokens), reasoning_tokens — so a turn
+// with no cache writes is byte-identical to gogent's prior persistence. The new
+// cache_write_tokens (=Cache.WriteTokens) is omitempty and appended LAST, so it
+// appears only on Anthropic write turns and never shifts an existing key.
+func (u TokenUsage) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+		CachedTokens     int `json:"cached_tokens,omitempty"`
+		ReasoningTokens  int `json:"reasoning_tokens,omitempty"`
+		CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
+	}{
+		PromptTokens:     u.PromptTokens,
+		CompletionTokens: u.CompletionTokens,
+		TotalTokens:      u.TotalTokens,
+		CachedTokens:     u.Cache.ReadTokens,
+		ReasoningTokens:  u.ReasoningTokens,
+		CacheWriteTokens: u.Cache.WriteTokens,
+	})
+}
+
+// UnmarshalJSON parses provider token usage, normalizing the prompt-cache split
+// from every shape under one roof. Cache READS resolve most-authoritative first:
+// the nested OpenAI/Z.AI/OpenRouter usage.prompt_tokens_details.cached_tokens, then
+// the top-level DeepSeek prompt_cache_hit_tokens, then the legacy top-level
+// cached_tokens key gogent itself persists (kept so stored turns still load after
+// the field became Cache.ReadTokens). Cache WRITES come only from gogent's own
+// cache_write_tokens tag; providers that report a write count do so through their
+// adapters (anthropicUsage.toTokenUsage), not this path.
 func (u *TokenUsage) UnmarshalJSON(data []byte) error {
 	type alias TokenUsage // strips methods to avoid infinite recursion
 	var raw struct {
@@ -471,7 +518,9 @@ func (u *TokenUsage) UnmarshalJSON(data []byte) error {
 		PromptTokensDetails *struct {
 			CachedTokens int `json:"cached_tokens"`
 		} `json:"prompt_tokens_details"`
-		PromptCacheHitTokens    int `json:"prompt_cache_hit_tokens"`
+		PromptCacheHitTokens    int `json:"prompt_cache_hit_tokens"` // DeepSeek wire
+		LegacyCachedTokens      int `json:"cached_tokens"`           // gogent-persisted reads
+		CacheWriteTokens        int `json:"cache_write_tokens"`      // gogent-persisted writes
 		CompletionTokensDetails *struct {
 			ReasoningTokens int `json:"reasoning_tokens"`
 		} `json:"completion_tokens_details"`
@@ -482,14 +531,40 @@ func (u *TokenUsage) UnmarshalJSON(data []byte) error {
 	*u = TokenUsage(raw.alias)
 	switch {
 	case raw.PromptTokensDetails != nil && raw.PromptTokensDetails.CachedTokens > 0:
-		u.CachedTokens = raw.PromptTokensDetails.CachedTokens
+		u.Cache.ReadTokens = raw.PromptTokensDetails.CachedTokens
 	case raw.PromptCacheHitTokens > 0:
-		u.CachedTokens = raw.PromptCacheHitTokens
+		u.Cache.ReadTokens = raw.PromptCacheHitTokens
+	case raw.LegacyCachedTokens > 0:
+		u.Cache.ReadTokens = raw.LegacyCachedTokens
+	}
+	if raw.CacheWriteTokens > 0 {
+		u.Cache.WriteTokens = raw.CacheWriteTokens
 	}
 	if raw.CompletionTokensDetails != nil && raw.CompletionTokensDetails.ReasoningTokens > 0 {
 		u.ReasoningTokens = raw.CompletionTokensDetails.ReasoningTokens
 	}
 	return nil
+}
+
+// orOne returns m, or 1.0 when m is 0 — the "no special pricing" default so an
+// unset cache multiplier prices tokens at face value.
+func orOne(m float64) float64 {
+	if m == 0 {
+		return 1
+	}
+	return m
+}
+
+// costWeightedInput prices a turn's prompt tokens by cache tier: the full-price
+// remainder (prompt minus reads and writes) plus reads at readMult plus writes at
+// writeMult, rounded to the nearest whole token. ReadTokens and WriteTokens are
+// subsets of prompt, so the remainder is non-negative. A 0 multiplier means 1.0
+// (face value), so an unpriced provider reduces to raw prompt tokens.
+func (c CacheStats) costWeightedInput(prompt int, readMult, writeMult float64) int {
+	base := prompt - c.ReadTokens - c.WriteTokens
+	return int(math.Round(float64(base) +
+		float64(c.ReadTokens)*orOne(readMult) +
+		float64(c.WriteTokens)*orOne(writeMult)))
 }
 
 // StreamResponse is one event delivered on the streaming channel. Content/Role
@@ -568,6 +643,7 @@ type ModelStats struct {
 	ErrorCount                 int
 	TotalTokensIn              int
 	TotalCachedTokensIn        int
+	TotalCacheWriteTokensIn    int
 	TotalTokensOut             int
 	TotalTimeMs                int64
 	TimeoutCount               int
@@ -1130,7 +1206,8 @@ func (c *ModelConnection) CompleteWithStats(messages []Message) (*CompletionResp
 		usage = resp.Usage
 		c.Stats.Mutex.Lock()
 		c.Stats.TotalTokensIn += usage.PromptTokens
-		c.Stats.TotalCachedTokensIn += usage.CachedTokens
+		c.Stats.TotalCachedTokensIn += usage.CachedTokens()
+		c.Stats.TotalCacheWriteTokensIn += usage.Cache.WriteTokens
 		c.Stats.TotalTokensOut += usage.CompletionTokens
 		c.Stats.Mutex.Unlock()
 	}
@@ -1193,6 +1270,38 @@ func (c *ModelConnection) MaxTokensConfig() (configured, limit int) {
 		configured = c.Config.MaxTokens
 	}
 	return configured, c.caps().MaxTokensLimit
+}
+
+// CacheCostReporter is an optional connector capability: it reports a turn's
+// cost-weighted input token count, pricing prompt-cache reads (discounted) and
+// writes (Anthropic premium) at the provider's multipliers instead of counting
+// every prompt token at face value. The agent budget consults it so recorded
+// spend reflects the real cost of cached tokens (issue #544). A connector that
+// does not implement it leaves the budget to use raw PromptTokens.
+type CacheCostReporter interface {
+	CostWeightedInput(u TokenUsage) int
+}
+
+// CostWeightedInput prices u's prompt tokens by cache tier using this connection's
+// per-provider cache multipliers (Capabilities), overridden by any per-(provider,
+// model) ModelCaps entry — the same two-axis resolution buildRequest uses for wire
+// quirks. The override path is what lets DeepSeek (which rides api_type "openai"
+// and so shares OpenAI's Capabilities) carry its own deeper cache discount. With
+// no provider and no override every multiplier defaults to 1.0, so the result
+// equals u.PromptTokens — identical budget accounting to before cache
+// cost-weighting existed. It satisfies CacheCostReporter.
+func (c *ModelConnection) CostWeightedInput(u TokenUsage) int {
+	caps := c.caps()
+	readMult, writeMult := caps.CacheReadMultiplier, caps.CacheWriteMultiplier
+	if mc := resolveModelCaps(c.APIType, c.ModelName); mc.CacheReadMultiplier != nil || mc.CacheWriteMultiplier != nil {
+		if mc.CacheReadMultiplier != nil {
+			readMult = *mc.CacheReadMultiplier
+		}
+		if mc.CacheWriteMultiplier != nil {
+			writeMult = *mc.CacheWriteMultiplier
+		}
+	}
+	return u.Cache.costWeightedInput(u.PromptTokens, readMult, writeMult)
 }
 
 // stripReasoning returns messages with the retained chain-of-thought (Reasoning)
@@ -1500,7 +1609,8 @@ func (c *ModelConnection) complete(ctx context.Context, messages []Message, stre
 	c.Stats.SuccessCount++
 	if fullResp.Usage != nil {
 		c.Stats.TotalTokensIn += fullResp.Usage.PromptTokens
-		c.Stats.TotalCachedTokensIn += fullResp.Usage.CachedTokens
+		c.Stats.TotalCachedTokensIn += fullResp.Usage.CachedTokens()
+		c.Stats.TotalCacheWriteTokensIn += fullResp.Usage.Cache.WriteTokens
 		c.Stats.TotalTokensOut += fullResp.Usage.CompletionTokens
 	}
 	c.Stats.Mutex.Unlock()
@@ -1579,7 +1689,8 @@ func (c *ModelConnection) completeStream(ctx context.Context, messages []Message
 		c.Stats.SuccessCount++
 		if usage != nil {
 			c.Stats.TotalTokensIn += usage.PromptTokens
-			c.Stats.TotalCachedTokensIn += usage.CachedTokens
+			c.Stats.TotalCachedTokensIn += usage.CachedTokens()
+			c.Stats.TotalCacheWriteTokensIn += usage.Cache.WriteTokens
 			c.Stats.TotalTokensOut += usage.CompletionTokens
 		}
 	}

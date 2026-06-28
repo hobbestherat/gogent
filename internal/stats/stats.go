@@ -107,33 +107,38 @@ type SessionModelStat struct {
 // model.StatsSnapshot) in this neutral package, so the UI and export code need
 // not depend on the model package's internals.
 type ConnectorStat struct {
-	Requests         int   `json:"requests"`
-	Success          int   `json:"success"`
-	Errors           int   `json:"errors"`
-	TokensIn         int   `json:"tokens_in"`
-	CachedTokensIn   int   `json:"cached_tokens_in"`
-	TokensOut        int   `json:"tokens_out"`
-	TotalTimeMs      int64 `json:"total_time_ms"`
-	Timeouts         int   `json:"timeouts"`
-	ContextOverflows int   `json:"context_overflows"`
-	Refusals         int   `json:"refusals"`
-	GenericErrors    int   `json:"generic_errors"`
+	Requests       int `json:"requests"`
+	Success        int `json:"success"`
+	Errors         int `json:"errors"`
+	TokensIn       int `json:"tokens_in"`
+	CachedTokensIn int `json:"cached_tokens_in"`
+	// CacheWriteTokensIn is the count of prompt tokens WRITTEN to the provider's
+	// cache (Anthropic cache_creation_input_tokens), billed at a premium. 0 for
+	// every other provider, so it is omitempty (issue #544).
+	CacheWriteTokensIn int   `json:"cache_write_tokens_in,omitempty"`
+	TokensOut          int   `json:"tokens_out"`
+	TotalTimeMs        int64 `json:"total_time_ms"`
+	Timeouts           int   `json:"timeouts"`
+	ContextOverflows   int   `json:"context_overflows"`
+	Refusals           int   `json:"refusals"`
+	GenericErrors      int   `json:"generic_errors"`
 }
 
 // FromSnapshot converts a model connector snapshot into the neutral ConnectorStat.
 func FromSnapshot(s model.StatsSnapshot) ConnectorStat {
 	return ConnectorStat{
-		Requests:         s.RequestCount,
-		Success:          s.SuccessCount,
-		Errors:           s.ErrorCount,
-		TokensIn:         s.TotalTokensIn,
-		CachedTokensIn:   s.TotalCachedTokensIn,
-		TokensOut:        s.TotalTokensOut,
-		TotalTimeMs:      s.TotalTimeMs,
-		Timeouts:         s.TimeoutCount,
-		ContextOverflows: s.ContextWindowOverflowCount,
-		Refusals:         s.RefusalCount,
-		GenericErrors:    s.GenericErrorCount,
+		Requests:           s.RequestCount,
+		Success:            s.SuccessCount,
+		Errors:             s.ErrorCount,
+		TokensIn:           s.TotalTokensIn,
+		CachedTokensIn:     s.TotalCachedTokensIn,
+		CacheWriteTokensIn: s.TotalCacheWriteTokensIn,
+		TokensOut:          s.TotalTokensOut,
+		TotalTimeMs:        s.TotalTimeMs,
+		Timeouts:           s.TimeoutCount,
+		ContextOverflows:   s.ContextWindowOverflowCount,
+		Refusals:           s.RefusalCount,
+		GenericErrors:      s.GenericErrorCount,
 	}
 }
 
@@ -141,17 +146,18 @@ func FromSnapshot(s model.StatsSnapshot) ConnectorStat {
 // across sessions into a total.
 func (c ConnectorStat) Add(other ConnectorStat) ConnectorStat {
 	return ConnectorStat{
-		Requests:         c.Requests + other.Requests,
-		Success:          c.Success + other.Success,
-		Errors:           c.Errors + other.Errors,
-		TokensIn:         c.TokensIn + other.TokensIn,
-		CachedTokensIn:   c.CachedTokensIn + other.CachedTokensIn,
-		TokensOut:        c.TokensOut + other.TokensOut,
-		TotalTimeMs:      c.TotalTimeMs + other.TotalTimeMs,
-		Timeouts:         c.Timeouts + other.Timeouts,
-		ContextOverflows: c.ContextOverflows + other.ContextOverflows,
-		Refusals:         c.Refusals + other.Refusals,
-		GenericErrors:    c.GenericErrors + other.GenericErrors,
+		Requests:           c.Requests + other.Requests,
+		Success:            c.Success + other.Success,
+		Errors:             c.Errors + other.Errors,
+		TokensIn:           c.TokensIn + other.TokensIn,
+		CachedTokensIn:     c.CachedTokensIn + other.CachedTokensIn,
+		CacheWriteTokensIn: c.CacheWriteTokensIn + other.CacheWriteTokensIn,
+		TokensOut:          c.TokensOut + other.TokensOut,
+		TotalTimeMs:        c.TotalTimeMs + other.TotalTimeMs,
+		Timeouts:           c.Timeouts + other.Timeouts,
+		ContextOverflows:   c.ContextOverflows + other.ContextOverflows,
+		Refusals:           c.Refusals + other.Refusals,
+		GenericErrors:      c.GenericErrors + other.GenericErrors,
 	}
 }
 
@@ -161,17 +167,18 @@ func (c ConnectorStat) Add(other ConnectorStat) ConnectorStat {
 // the TUI's Statistics totals (issue #278).
 func (c ConnectorStat) Sub(other ConnectorStat) ConnectorStat {
 	return ConnectorStat{
-		Requests:         c.Requests - other.Requests,
-		Success:          c.Success - other.Success,
-		Errors:           c.Errors - other.Errors,
-		TokensIn:         c.TokensIn - other.TokensIn,
-		CachedTokensIn:   c.CachedTokensIn - other.CachedTokensIn,
-		TokensOut:        c.TokensOut - other.TokensOut,
-		TotalTimeMs:      c.TotalTimeMs - other.TotalTimeMs,
-		Timeouts:         c.Timeouts - other.Timeouts,
-		ContextOverflows: c.ContextOverflows - other.ContextOverflows,
-		Refusals:         c.Refusals - other.Refusals,
-		GenericErrors:    c.GenericErrors - other.GenericErrors,
+		Requests:           c.Requests - other.Requests,
+		Success:            c.Success - other.Success,
+		Errors:             c.Errors - other.Errors,
+		TokensIn:           c.TokensIn - other.TokensIn,
+		CachedTokensIn:     c.CachedTokensIn - other.CachedTokensIn,
+		CacheWriteTokensIn: c.CacheWriteTokensIn - other.CacheWriteTokensIn,
+		TokensOut:          c.TokensOut - other.TokensOut,
+		TotalTimeMs:        c.TotalTimeMs - other.TotalTimeMs,
+		Timeouts:           c.Timeouts - other.Timeouts,
+		ContextOverflows:   c.ContextOverflows - other.ContextOverflows,
+		Refusals:           c.Refusals - other.Refusals,
+		GenericErrors:      c.GenericErrors - other.GenericErrors,
 	}
 }
 
@@ -345,6 +352,7 @@ func writeConnectorCSV(w *csv.Writer, section, name string, c ConnectorStat) {
 	set("errors", int64(c.Errors))
 	set("tokens_in", int64(c.TokensIn))
 	set("cached_tokens_in", int64(c.CachedTokensIn))
+	set("cache_write_tokens_in", int64(c.CacheWriteTokensIn))
 	set("cache_hit_percent", int64(c.CacheHitPercent()))
 	set("tokens_out", int64(c.TokensOut))
 	set("total_time_ms", c.TotalTimeMs)

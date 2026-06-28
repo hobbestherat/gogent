@@ -141,6 +141,25 @@ type Endpoints struct {
 	StreamURL string
 }
 
+// CacheControlKind declares whether a provider accepts CLIENT-SIDE prompt-cache
+// directives, and in what form. It is a capability declaration only: it advertises
+// the request-side lever for the follow-up issues that wire emission (#545
+// Anthropic breakpoints, #547 Gemini explicit cached content). Providers that
+// cache automatically with no client lever are CacheControlNone. The actual
+// directive stays wire-specific in each adapter; nothing reads this for emission
+// yet.
+type CacheControlKind uint8
+
+const (
+	// CacheControlNone: caching is automatic, no client directive accepted
+	// (OpenAI, Z.AI, OpenRouter, and the Vertex OpenAI-compat surface).
+	CacheControlNone CacheControlKind = iota
+	// CacheControlBreakpoints: Anthropic cache_control breakpoints on content blocks.
+	CacheControlBreakpoints
+	// CacheControlCachedContent: Gemini explicit cachedContent resources.
+	CacheControlCachedContent
+)
+
 // Capabilities reports how a provider wants the internal CompletionRequest shaped
 // on the wire. buildRequest reads these flags to gate reasoning/thinking/format
 // parameters and the output-token field, so a provider never emits a parameter
@@ -160,6 +179,18 @@ type Capabilities struct {
 	// SupportsResponseFormat gates response_format (OpenAI structured outputs) and
 	// the strict-tool parallel_tool_calls invariant.
 	SupportsResponseFormat bool
+	// CacheControl declares the provider's client-side cache-directive support, for
+	// the request-side follow-ups (#545/#547). Declaration only — see CacheControlKind.
+	CacheControl CacheControlKind
+	// CacheReadMultiplier / CacheWriteMultiplier price prompt-cache READ and WRITE
+	// tokens relative to a full-price input token, for the cost-weighted agent budget
+	// (issue #544). 0 means 1.0 (face value), so a provider that declares neither
+	// prices all input at 1x — identical to before cache cost-weighting. Reads are
+	// discounted (<1); writes are an Anthropic-only premium (>1). A discount that
+	// varies by model WITHIN a provider (e.g. DeepSeek riding api_type "openai")
+	// is expressed per-model via ModelCaps, which overrides these.
+	CacheReadMultiplier  float64
+	CacheWriteMultiplier float64
 }
 
 // ---------------------------------------------------------------------------

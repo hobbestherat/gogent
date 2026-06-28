@@ -137,6 +137,7 @@ type StatsSnapshot struct {
 	ErrorCount                 int
 	TotalTokensIn              int
 	TotalCachedTokensIn        int
+	TotalCacheWriteTokensIn    int
 	TotalTokensOut             int
 	TotalTimeMs                int64
 	TimeoutCount               int
@@ -154,6 +155,7 @@ func (s StatsSnapshot) Add(other StatsSnapshot) StatsSnapshot {
 		ErrorCount:                 s.ErrorCount + other.ErrorCount,
 		TotalTokensIn:              s.TotalTokensIn + other.TotalTokensIn,
 		TotalCachedTokensIn:        s.TotalCachedTokensIn + other.TotalCachedTokensIn,
+		TotalCacheWriteTokensIn:    s.TotalCacheWriteTokensIn + other.TotalCacheWriteTokensIn,
 		TotalTokensOut:             s.TotalTokensOut + other.TotalTokensOut,
 		TotalTimeMs:                s.TotalTimeMs + other.TotalTimeMs,
 		TimeoutCount:               s.TimeoutCount + other.TimeoutCount,
@@ -176,6 +178,7 @@ func (s StatsSnapshot) Sub(other StatsSnapshot) StatsSnapshot {
 		ErrorCount:                 s.ErrorCount - other.ErrorCount,
 		TotalTokensIn:              s.TotalTokensIn - other.TotalTokensIn,
 		TotalCachedTokensIn:        s.TotalCachedTokensIn - other.TotalCachedTokensIn,
+		TotalCacheWriteTokensIn:    s.TotalCacheWriteTokensIn - other.TotalCacheWriteTokensIn,
 		TotalTokensOut:             s.TotalTokensOut - other.TotalTokensOut,
 		TotalTimeMs:                s.TotalTimeMs - other.TotalTimeMs,
 		TimeoutCount:               s.TimeoutCount - other.TimeoutCount,
@@ -194,7 +197,8 @@ func (s StatsSnapshot) Sub(other StatsSnapshot) StatsSnapshot {
 // happens to recover to its prior level while token counters drop.
 func (s StatsSnapshot) IsReset() bool {
 	return s.RequestCount < 0 || s.SuccessCount < 0 || s.ErrorCount < 0 ||
-		s.TotalTokensIn < 0 || s.TotalCachedTokensIn < 0 || s.TotalTokensOut < 0 ||
+		s.TotalTokensIn < 0 || s.TotalCachedTokensIn < 0 || s.TotalCacheWriteTokensIn < 0 ||
+		s.TotalTokensOut < 0 ||
 		s.TotalTimeMs < 0 || s.TimeoutCount < 0 || s.ContextWindowOverflowCount < 0 ||
 		s.RefusalCount < 0 || s.GenericErrorCount < 0
 }
@@ -209,6 +213,7 @@ func (s *ModelStats) Snapshot() StatsSnapshot {
 		ErrorCount:                 s.ErrorCount,
 		TotalTokensIn:              s.TotalTokensIn,
 		TotalCachedTokensIn:        s.TotalCachedTokensIn,
+		TotalCacheWriteTokensIn:    s.TotalCacheWriteTokensIn,
 		TotalTokensOut:             s.TotalTokensOut,
 		TotalTimeMs:                s.TotalTimeMs,
 		TimeoutCount:               s.TimeoutCount,
@@ -231,6 +236,7 @@ func (s *ModelStats) Carry(prev StatsSnapshot) {
 	s.ErrorCount += prev.ErrorCount
 	s.TotalTokensIn += prev.TotalTokensIn
 	s.TotalCachedTokensIn += prev.TotalCachedTokensIn
+	s.TotalCacheWriteTokensIn += prev.TotalCacheWriteTokensIn
 	s.TotalTokensOut += prev.TotalTokensOut
 	s.TotalTimeMs += prev.TotalTimeMs
 	s.TimeoutCount += prev.TimeoutCount

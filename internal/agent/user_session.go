@@ -1034,7 +1034,17 @@ func (s *UserSession) modelRoundTrip(ctx context.Context, sess *model.ModelSessi
 		return nil, fmt.Errorf("model round-trip: %w", err)
 	}
 	if resp != nil && resp.Usage != nil {
-		agent.AddTokensUsed(resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+		// Charge the budget the cost-WEIGHTED input: prompt-cache reads are billed at
+		// a discount and Anthropic cache writes at a premium, so counting every prompt
+		// token at 1x under-counts write turns and over-counts cache-hit turns (issue
+		// #544). A connector that prices caching (CacheCostReporter) returns the
+		// weighted figure; one that does not — or a turn with no cached tokens —
+		// yields raw PromptTokens, so this reduces to the prior accounting.
+		promptCost := resp.Usage.PromptTokens
+		if r, ok := sess.Model.(model.CacheCostReporter); ok {
+			promptCost = r.CostWeightedInput(*resp.Usage)
+		}
+		agent.AddTokensUsed(promptCost, resp.Usage.CompletionTokens)
 	}
 	return resp, nil
 }
