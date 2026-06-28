@@ -856,6 +856,94 @@ func (c *APIClient) SetSkillActive(name string, active bool) error {
 		map[string]bool{"enabled": active}, nil)
 }
 
+// --- Watchers (issue #329 Phase 5 daemon API; remote wiring issue #572) ------
+
+// WatcherDTO mirrors the server's watcherView for the /watchers endpoints
+// (internal/server/wire.go). Target is the owning session id for an attached
+// watcher or "free" for a free-running one; the daemon omits zero timestamps and
+// sends NextFire/LastRun as RFC3339 strings.
+type WatcherDTO struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Kind       string `json:"kind"`   // "free" | "attached"
+	Target     string `json:"target"` // session id, or "free" for free-running
+	Task       string `json:"task,omitempty"`
+	Schedule   string `json:"schedule,omitempty"`
+	Enabled    bool   `json:"enabled"`
+	Status     string `json:"status"`
+	NextFire   string `json:"next_fire,omitempty"`
+	LastRun    string `json:"last_run,omitempty"`
+	LastResult string `json:"last_result,omitempty"`
+	LastError  string `json:"last_error,omitempty"`
+}
+
+// WatcherCreateDTO is the body of POST /watchers, mirroring the server's
+// createWatcherRequest. Schedule reuses config.ScheduleConfig (exactly one of
+// every / daily_at). ReportToSession decides the kind: nil/omitted ⇒ free-running,
+// a non-nil live session id ⇒ attached. Enabled is sent explicitly to mirror the
+// embedded create's Enabled:true.
+type WatcherCreateDTO struct {
+	Name            string                `json:"name"`
+	Task            string                `json:"task"`
+	Schedule        config.ScheduleConfig `json:"schedule"`
+	Model           string                `json:"model,omitempty"`
+	Enabled         *bool                 `json:"enabled,omitempty"`
+	ReportToSession *string               `json:"report_to_session,omitempty"`
+}
+
+// ListWatchers fetches the watchers visible to sessionID: GET /watchers lists
+// free-running watchers, and ?session_id=<id> additionally includes that
+// session's attached watchers (the scoping the daemon's ListWatchers enforces).
+func (c *APIClient) ListWatchers(sessionID string) ([]WatcherDTO, error) {
+	path := "/watchers"
+	if sessionID != "" {
+		q := url.Values{}
+		q.Set("session_id", sessionID)
+		path += "?" + q.Encode()
+	}
+	var out []WatcherDTO
+	if err := c.do(http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// CreateWatcher registers a new watcher (POST /watchers) and returns the created
+// watcher. The daemon decides the kind from req.ReportToSession.
+func (c *APIClient) CreateWatcher(req WatcherCreateDTO) (WatcherDTO, error) {
+	var out WatcherDTO
+	if err := c.do(http.MethodPost, "/watchers", req, &out); err != nil {
+		return WatcherDTO{}, err
+	}
+	return out, nil
+}
+
+// SetWatcherEnabled drives a watcher (by id or name) to an explicit schedule
+// state via PUT /watchers/:id/enabled. The :id segment accepts an id or a name;
+// the daemon resolves it (unknown → 404, ambiguous name → 409).
+func (c *APIClient) SetWatcherEnabled(idOrName string, enabled bool) error {
+	return c.do(http.MethodPut, "/watchers/"+url.PathEscape(idOrName)+"/enabled",
+		map[string]bool{"enabled": enabled}, nil)
+}
+
+// RunWatcher fires a watcher (by id or name) immediately, ignoring its schedule
+// and enabled state, via POST /watchers/:id/run.
+func (c *APIClient) RunWatcher(idOrName string) error {
+	return c.do(http.MethodPost, "/watchers/"+url.PathEscape(idOrName)+"/run", nil, nil)
+}
+
+// StopWatcher cancels a watcher's in-flight fire (by id or name) without stopping
+// its schedule, via POST /watchers/:id/stop.
+func (c *APIClient) StopWatcher(idOrName string) error {
+	return c.do(http.MethodPost, "/watchers/"+url.PathEscape(idOrName)+"/stop", nil, nil)
+}
+
+// DeleteWatcher unregisters a watcher (by id or name) entirely via
+// DELETE /watchers/:id.
+func (c *APIClient) DeleteWatcher(idOrName string) error {
+	return c.do(http.MethodDelete, "/watchers/"+url.PathEscape(idOrName), nil, nil)
+}
+
 // --- Custom commands (issue #403) -------------------------------------------
 
 // CommandParamDTO mirrors the server's commandParamView.

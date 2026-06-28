@@ -575,20 +575,38 @@ func TestRemoteHandlersSavedSessionBrowserMapsToSessionsAPI(t *testing.T) {
 	}
 }
 
-func TestRemoteHandlersDoNotExposeDeferredWatcherAPI(t *testing.T) {
+// TestRemoteHandlersWireWatcherAPI flips the old deferred-nil contract: as of
+// issue #572 the remote client wires the full watcher handler set over the
+// existing daemon /api/watchers surface, so the Watchers dialog, the ◷ sidebar
+// nodes and /watcher all light up while attached. Every handler must be non-nil
+// (the UI seam gates each affordance on a nil handler, so a missing wiring would
+// silently re-hide the surface).
+func TestRemoteHandlersWireWatcherAPI(t *testing.T) {
 	client, err := NewAPIClient("http://127.0.0.1:1", "")
 	if err != nil {
 		t.Fatalf("NewAPIClient: %v", err)
 	}
 	h := NewRemoteClient(client, nil, nil).Handlers()
-	if h.ListWatchers != nil ||
-		h.CreateWatcher != nil ||
-		h.EnableWatcher != nil ||
-		h.DisableWatcher != nil ||
-		h.RunWatcher != nil ||
-		h.StopWatcher != nil ||
-		h.DeleteWatcher != nil {
-		t.Fatal("remote handlers expose watcher API, but watcher-over-wire is explicitly deferred from this bounded slice")
+	if h.ListWatchers == nil {
+		t.Error("ListWatchers handler is nil; the Watchers dialog/sidebar//watcher would stay hidden")
+	}
+	if h.CreateWatcher == nil {
+		t.Error("CreateWatcher handler is nil")
+	}
+	if h.EnableWatcher == nil {
+		t.Error("EnableWatcher handler is nil; the dialog Enable button would be dead")
+	}
+	if h.DisableWatcher == nil {
+		t.Error("DisableWatcher handler is nil; the dialog Disable button would be dead")
+	}
+	if h.RunWatcher == nil {
+		t.Error("RunWatcher handler is nil; /watcher run would refuse")
+	}
+	if h.StopWatcher == nil {
+		t.Error("StopWatcher handler is nil; the dialog Stop button would be dead")
+	}
+	if h.DeleteWatcher == nil {
+		t.Error("DeleteWatcher handler is nil; the dialog Delete button would be dead")
 	}
 }
 
