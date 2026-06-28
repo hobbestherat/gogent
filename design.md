@@ -187,41 +187,50 @@ Two minor notes (neither a blocker):
   construction.
 - Explicit larger dialog caps (Sessions 160, Commands 140, Watchers 130)
   unaffected — they set their own `MaxW`; we add `MaxW` only where it was absent.
-- **Window-sizing tests stay green.** `maximize_test.go`, `sidebar_resize_test.go`,
-  `dialog_issue317_test.go`, model-selector/session dialog width tests are
-  unaffected — they exercise boundary-only paths or run at the default 80×25
-  where the 90% window math (=72) is already below 120, so the cap is a no-op.
-- **Three `dialog_sizing_test.go` assertions DO change and MUST be updated** — they
-  run at 200 cols where the old 80% default (160) exceeds 120, so the new `MaxW`
-  intentionally bites. These tests codify the *old uncapped* behavior; updating
-  them to the new ≤120 expectation is part of this change, not a regression:
-  1. `TestDialogsSizedToContent` / "list-driven dialogs stay wide…"
-     (`dialog_sizing_test.go:165`): asserts palette+help width `== defW` (160) at
-     200×50. New result is **120**. Update: assert `b.W == comfortableMaxWidth`
-     (120) at 200 cols, and keep the height-cap/centering assertions as-is. The
-     "stays wide" intent is preserved in spirit — wide but capped — so the
-     subtest name/comment should be reworded to "…stay wide but cap width to the
-     comfortable max."
-  2. `TestDialogReResolvesOnResize` / "percentage-driven palette grows…"
-     (`dialog_sizing_test.go:269`): palette uses `dialog.Fit(spec)`
-     (`command_palette.go:650`), so the capped spec re-resolves on resize. The
-     `after.W > before.W` "grows" check still holds (before is at a narrow
-     terminal < 120), but `after.W == 160` becomes **120**. Update that assertion
-     to `comfortableMaxWidth` and reword to "…grows on resize but stops at the
-     comfortable cap."
-  3. `TestBrowserPreferredWidthClamped` (`dialog_sizing_test.go:397`): for
-     `screenW ∈ {120,160,200}` asserts `gotW == screenW*80/100`. With `MaxW:120`
-     the browser resolves to **120** at 160/200 (96 at 120 cols is unchanged).
-     Update the `want` to `min(screenW*80/100, comfortableMaxWidth)`, and drop the
-     now-false `gotW >= spec.PreferredW` sub-assertion (or recompute it against
-     the cap). The doc-comment explaining the dead 85% is updated to note 120 is
-     now the binding cap.
-- **New tests** assert the additive behavior: window cap at open on a wide
-  terminal (e.g. 766×50 → window W == 120), window ceiling on restore via
-  `applyLayout` (persisted W=300 → restored ≤120; persisted W=80 → unchanged), and
-  each of the 3 dialogs ≤120 on a 766-col terminal; plus a no-op assertion on a
-  narrow terminal (e.g. 100 cols → window/dialog widths follow the old %, cap does
-  not bite).
+**Audit method.** I grepped repo-wide (not just `dialog_sizing_test.go`) for
+everything that resolves the changed specs or asserts the old wide footprint:
+`browserDialogSpec()`, `showResourcesDialog()`, `showCommandPalette()`,
+`showHelpOverlay()`, `resourcesSpec`, and the `160x42` / `!= 160` balloon
+literals. Result: **6 assertion sites across 3 test files change**, all from the
+old-uncapped to the new ≤120 behavior — updating them is part of this change.
+
+**Tests that change and MUST be updated (the cap intentionally bites at ≥160 cols):**
+
+| # | File:line / test | Now | Becomes | Update |
+|---|---|---|---|---|
+| 1 | `dialog_sizing_test.go:165` `TestDialogsSizedToContent` "list-driven dialogs stay wide" | palette+help `W==160` @200×50 | **120** | assert `W==comfortableMaxWidth`; reword subtest → "…stay wide but cap width to the comfortable max"; keep height-cap + centering checks |
+| 2 | `dialog_sizing_test.go:269` `TestDialogReResolvesOnResize` "palette grows on resize" | `after.W==160` | **120** | palette uses `dialog.Fit(spec)` (`command_palette.go:650`) so the capped spec re-resolves; `after.W>before.W` still holds (before<120); change `==160` to `comfortableMaxWidth`; reword to "…grows but stops at the comfortable cap" |
+| 3 | `dialog_sizing_test.go:397` `TestBrowserPreferredWidthClamped` | `gotW==screenW*80/100` for {120,160,200} | 96 / **120** / **120** | change `want` to `min(screenW*80/100, comfortableMaxWidth)`; drop the now-false `gotW >= spec.PreferredW` sub-assertion; update the doc-comment to note 120 is the binding cap (96 at 120 cols is unchanged — cap doesn't bite there) |
+| 4 | `resources_dialog_test.go:320` `TestResourcesDialogOpensWithBrowserFootprint` | `b.W==160 && b.H==42` @200×50 | **120**×42 | the Resources dialog itself; assert `120×42`; reword "unchanged browser footprint" → "capped browser footprint" |
+| 5 | `resources_dialog_test.go:282/296` `resourcesSpec` mirror + `TestResourcesDialogSize` | mirror has no `MaxW`; row `{200,100 → 160,85}` | mirror gains `MaxW:120`; row → `{200,100 → 120,85}` | `resourcesSpec` is a hand-maintained mirror of `browserDialogSpec` ("rebuilds the DialogSpec showResourcesDialog uses"); add `MaxW: comfortableMaxWidth` to keep it faithful, then flip the large-screen row to 120; the `{120,40→96,34}` and smaller rows are unchanged (cap doesn't bite below 150) |
+| 6 | `sessions_dialog_issue321_322_test.go:404` `TestSessionsDialogSpecIsContentDrivenNotBrowserShare` | `bw==160 && bh==42` | **120**×42 | a *session-dialog* test that asserts the browser footprint as its contrast premise; assert `bw==120`; the `sw>=bw` smaller-than check still holds (sessions resolves 104 < 120); reword the "160x42 balloon, premise of the contrast" comment |
+
+**Tests verified genuinely green (no edit needed):**
+- `dialog_sizing_test.go:31/74/85` and the rest of `TestResolveDialogRectPolicy` —
+  construct **raw** `tv.DialogSpec{...}` literals (not our changed specs), so they
+  lock turbotui's policy independently of our `MaxW` additions.
+- `TestDialogShrinksOnResize` (`:347`) — opens the palette at 200×50 (its `big`
+  silently becomes 120 instead of 160) then shrinks to 80×24 (`small=64×20`, cap
+  doesn't bite); both assertions (`small<big`, `small==64×20`) still hold.
+- `TestDialogsClampToTinyTerminal` (`:229`), `TestConfirmDialogResizePathIndependent`
+  (`:322`) — tiny terminals / `showConfirm`; cap never bites.
+- Palette/help **behavior** tests (`command_palette_test.go:235/258`,
+  `keybinding_customizer_phase4b_test.go:169`, `theme_issue327_test.go:604/620`) —
+  assert layer presence / list background painting, not width.
+- Window-sizing tests: `maximize_test.go`, `sidebar_resize_test.go`,
+  `dialog_issue317_test.go` (settings/notifications/review/monologue use their own
+  specs; review/monologue already assert `==120`), model-selector dialog width
+  tests, `commands_dialog_issue448_test.go`, `statistics_render_test.go`,
+  `sessions_dialog_test.go:218` — boundary-only paths or default 80×25 where the
+  90% window math (=72) is already < 120, so the cap is a no-op.
+
+**New tests** (additive behavior):
+- Window cap at open on a wide terminal (766×50 → new window `W==120`).
+- Window ceiling on restore via `applyLayout` (persisted `W=300` → restored ≤120;
+  persisted `W=80` → unchanged).
+- Each of the 3 dialogs ≤120 on a 766-col terminal.
+- No-op assertion on a narrow terminal (e.g. 100 cols → window/dialog widths
+  follow the old percentages; cap does not bite).
 - Gates: `gofmt`/`go build`/`go vet` clean; `golangci-lint` 0 NEW; `go test ./...`
   green (pre-existing `TestUserSessionSendMessage` 404 is the only acceptable
   failure).
@@ -242,7 +251,11 @@ correctly placed in gogent. No new deps, no `go.mod` bump, no turbotui edit.
 - `ui/tui/tui.go` — `openWindowAny` (cap), `applyLayout` (ceiling).
 - `ui/tui/dialog_sizing.go` — `browserDialogSpec` (+MaxW).
 - `ui/tui/command_palette.go` — `showCommandPalette`, `showHelpOverlay` (+MaxW).
-- New test file(s) for the window cap + dialog caps.
+- Existing tests updated to the capped behavior (6 sites, 3 files):
+  `ui/tui/dialog_sizing_test.go` (3), `ui/tui/resources_dialog_test.go` (2,
+  incl. the `resourcesSpec` mirror gaining `MaxW`),
+  `ui/tui/sessions_dialog_issue321_322_test.go` (1).
+- New test file(s) for the window cap (open + restore) + the 3 dialog caps.
 - **turbotui: no change.**
 
 ## Rebase note
