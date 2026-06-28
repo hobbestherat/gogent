@@ -472,7 +472,7 @@ func TestGeminiAdapterParseResponseTextFunctionCallThoughtAndUsage(t *testing.T)
 	if resp.Usage == nil {
 		t.Fatal("Usage = nil, want usageMetadata mapped")
 	}
-	if *resp.Usage != (TokenUsage{PromptTokens: 5, CompletionTokens: 7, TotalTokens: 15, ReasoningTokens: 3, CachedTokens: 2}) {
+	if *resp.Usage != (TokenUsage{PromptTokens: 5, CompletionTokens: 7, TotalTokens: 15, ReasoningTokens: 3, Cache: CacheStats{ReadTokens: 2}}) {
 		t.Errorf("Usage = %+v, want Gemini usage mapping", resp.Usage)
 	}
 }

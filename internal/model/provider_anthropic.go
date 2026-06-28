@@ -11,8 +11,14 @@ func init() {
 		adapter: anthropicAdapter{},
 		// Extended thinking and reasoning_effort are not wired through the direct
 		// Anthropic adapter, so their capability flags stay unset; structured output
-		// is achieved via strict tools rather than response_format.
-		caps:      Capabilities{},
+		// is achieved via strict tools rather than response_format. Cache: reads at
+		// 0.1x, writes (cache_creation_input_tokens) at the 1.25x 5-minute-breakpoint
+		// premium; client-side cache_control breakpoints are declared for #545.
+		caps: Capabilities{
+			CacheControl:         CacheControlBreakpoints,
+			CacheReadMultiplier:  0.10,
+			CacheWriteMultiplier: 1.25,
+		},
 		endpoints: staticBaseEndpoints{defaultBaseURL: "https://api.anthropic.com", chatPath: "/v1/messages"},
 		// x-api-key + the required anthropic-version header on every request.
 		auth: keyAuth{mode: authXAPIKey, extraHeaders: map[string]string{"anthropic-version": anthropicVersion}},
@@ -26,8 +32,14 @@ func init() {
 		adapter: anthropicAdapter{vertex: true},
 		// Claude on Vertex exposes extended thinking (emitted as adaptive thinking).
 		// reasoning_effort is not an Anthropic body param and there is no
-		// response_format field, so both stay off.
-		caps: Capabilities{SupportsThinking: true},
+		// response_format field, so both stay off. Cache pricing/control mirror the
+		// direct Anthropic API (same Messages wire format).
+		caps: Capabilities{
+			SupportsThinking:     true,
+			CacheControl:         CacheControlBreakpoints,
+			CacheReadMultiplier:  0.10,
+			CacheWriteMultiplier: 1.25,
+		},
 		endpoints: modelURLEndpoints{
 			baseURLFunc:   vertexNativeBaseURL,
 			chatURLFunc:   vertexAnthropicChatURL,

@@ -503,7 +503,14 @@ func (u anthropicUsage) toTokenUsage(outputTokens int) *TokenUsage {
 		PromptTokens:     prompt,
 		CompletionTokens: out,
 		TotalTokens:      prompt + out,
-		CachedTokens:     u.CacheReadInputTokens,
+		// Anthropic reports BOTH cache tiers: cache_read_input_tokens (served from
+		// cache, discounted) and cache_creation_input_tokens (written to cache, billed
+		// at a premium). Both are retained — the write count was previously discarded
+		// (issue #544). Anthropic is the only provider with a write count; 0 elsewhere.
+		Cache: CacheStats{
+			ReadTokens:  u.CacheReadInputTokens,
+			WriteTokens: u.CacheCreationInputTokens,
+		},
 	}
 }
 
@@ -1161,7 +1168,7 @@ type geminiUsageMetadata struct {
 
 // toTokenUsage maps Gemini usage onto gogent's TokenUsage. candidatesTokenCount
 // excludes thinking, which is reported separately as thoughtsTokenCount and
-// surfaced as ReasoningTokens; cachedContentTokenCount becomes CachedTokens.
+// surfaced as ReasoningTokens; cachedContentTokenCount becomes Cache.ReadTokens.
 func (u *geminiUsageMetadata) toTokenUsage() *TokenUsage {
 	if u == nil {
 		return nil
@@ -1171,7 +1178,8 @@ func (u *geminiUsageMetadata) toTokenUsage() *TokenUsage {
 		CompletionTokens: u.CandidatesTokenCount,
 		TotalTokens:      u.TotalTokenCount,
 		ReasoningTokens:  u.ThoughtsTokenCount,
-		CachedTokens:     u.CachedContentTokenCount,
+		// Gemini reports cache reads only (cachedContentTokenCount); no write count.
+		Cache: CacheStats{ReadTokens: u.CachedContentTokenCount},
 	}
 }
 

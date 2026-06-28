@@ -46,7 +46,21 @@ var modelOverrides = []modelOverride{
 	// regardless of generation — the decision now lives here as data rather than
 	// in the adapter.
 	{provider: APITypeVertexAnthropic, caps: ModelCaps{RejectsSampling: true}},
+
+	// --- DeepSeek cache discount (issue #544) ---
+	// DeepSeek is not a distinct api_type: it is reached as a base-URL config on
+	// api_type "openai" and so shares OpenAI's Capabilities (cache read 0.5x). But
+	// DeepSeek's cache-hit price is far deeper (~0.1x of input). These exact
+	// (provider,model) rows override just the read multiplier for the two DeepSeek
+	// chat models, leaving everything else (incl. sampling) at the OpenAI default.
+	// DeepSeek reports no cache-write count, so WriteMultiplier stays inherited.
+	{provider: APITypeOpenAI, model: "deepseek-chat", caps: ModelCaps{CacheReadMultiplier: ptr(0.10)}},
+	{provider: APITypeOpenAI, model: "deepseek-reasoner", caps: ModelCaps{CacheReadMultiplier: ptr(0.10)}},
 }
+
+// ptr returns a pointer to v, for the optional (nil = inherit) multiplier fields
+// on ModelCaps.
+func ptr[T any](v T) *T { return &v }
 
 // findOverride returns the caps of the first override row satisfying match, and
 // whether one was found. resolveModelCaps calls it once per tier with a

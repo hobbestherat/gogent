@@ -28,6 +28,15 @@ type ModelCaps struct {
 	// independent of whether reasoning is enabled. buildRequest reads this to omit
 	// the sampling pointers entirely.
 	RejectsSampling bool
+	// CacheReadMultiplier / CacheWriteMultiplier override the per-provider cache
+	// price (Capabilities.Cache*Multiplier) for a model whose discount differs from
+	// its provider default — chiefly DeepSeek, which rides api_type "openai" and so
+	// shares OpenAI's Capabilities yet caches at a deeper discount. nil means
+	// "inherit the provider default" (the zero value, so a model with no entry
+	// changes nothing). A non-nil pointer to 0 would mean a literal 0x and is not a
+	// value any real model needs; use a small positive multiplier instead.
+	CacheReadMultiplier  *float64
+	CacheWriteMultiplier *float64
 }
 
 // resolveModelCaps returns the capability overrides for a (provider, model) pair.

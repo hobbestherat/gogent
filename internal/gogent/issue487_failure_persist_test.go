@@ -58,7 +58,7 @@ func usageResp(prompt, completion, cached, reasoning int) *model.CompletionRespo
 			PromptTokens:     prompt,
 			CompletionTokens: completion,
 			TotalTokens:      prompt + completion,
-			CachedTokens:     cached,
+			Cache:            model.CacheStats{ReadTokens: cached},
 			ReasoningTokens:  reasoning,
 		},
 	}
@@ -225,7 +225,7 @@ func TestLoadShardReconstructsMetaAndSkipsUnknownKinds_Issue487(t *testing.T) {
 	if records[0].kind != "message" || records[0].msg.Content != "hi" {
 		t.Errorf("record0 = %+v, want the user message", records[0])
 	}
-	if records[1].kind != "usage" || records[1].turn.Usage == nil || records[1].turn.Usage.PromptTokens != 5 || records[1].turn.Usage.CachedTokens != 1 {
+	if records[1].kind != "usage" || records[1].turn.Usage == nil || records[1].turn.Usage.PromptTokens != 5 || records[1].turn.Usage.CachedTokens() != 1 {
 		t.Errorf("record1 = %+v, want a usage turn with prompt=5 cached=1", records[1])
 	}
 	// The "at":"2026-06-26T12:00:00Z" field must round-trip into the Turn's Timestamp.
@@ -378,7 +378,7 @@ func TestSuccessfulTurnIntegrationPersistsUsageRecord_Issue487(t *testing.T) {
 		t.Fatalf("RootHistory = %+v, want one usage turn", ls.RootHistory)
 	}
 	u := ls.RootHistory[0].Usage
-	if u.PromptTokens != 1234 || u.CompletionTokens != 56 || u.CachedTokens != 100 || u.ReasoningTokens != 7 {
+	if u.PromptTokens != 1234 || u.CompletionTokens != 56 || u.CachedTokens() != 100 || u.ReasoningTokens != 7 {
 		t.Errorf("restored usage = %+v, want prompt/completion/cached/reasoning preserved", u)
 	}
 	if ls.RootHistory[0].Error != nil {

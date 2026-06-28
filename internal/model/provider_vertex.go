@@ -49,8 +49,15 @@ func init() {
 		apiType: APITypeVertexNative,
 		adapter: geminiAdapter{},
 		// Native Gemini: structured output via responseSchema and thinking via
-		// thinkingConfig; Gemini accepts temperature normally.
-		caps:        Capabilities{SupportsResponseFormat: true, SupportsThinking: true},
+		// thinkingConfig; Gemini accepts temperature normally. Cache: context-cache
+		// reads (cachedContentTokenCount) at ~0.25x, no write count; explicit
+		// cachedContent is a client-side directive declared for #547.
+		caps: Capabilities{
+			SupportsResponseFormat: true,
+			SupportsThinking:       true,
+			CacheControl:           CacheControlCachedContent,
+			CacheReadMultiplier:    0.25,
+		},
 		endpoints:   modelURLEndpoints{baseURLFunc: vertexNativeBaseURL, chatURLFunc: vertexNativeChatURL, streamURLFunc: vertexNativeStreamURL},
 		auth:        adcAuth{},
 		lister:      vertexPublisherLister{publisher: "google", format: bareModelID, keep: hasPrefixAny("gemini", "gemma")},
