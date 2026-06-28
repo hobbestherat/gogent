@@ -147,6 +147,18 @@ type RemoteClient struct {
 	// consumeOnce guards the deferred launch of consume()+monitorHealth() so the
 	// begin closure StartGated returns is idempotent and safe from any goroutine.
 	consumeOnce sync.Once
+
+	// wsMu guards wsRoot/wsFetching, the cache backing GetWorkspaceRoot (issue
+	// #570). The status line reads GetWorkspaceRoot live on every refresh, so the
+	// daemon's (immutable) workspace root is fetched once in the background and
+	// cached here rather than round-tripped per refresh.
+	wsMu sync.Mutex
+	// wsRoot is the cached daemon workspace root, empty until the first successful
+	// GET /api/workspace lands.
+	wsRoot string
+	// wsFetching is true while a background fetch is in flight, so concurrent
+	// status refreshes coalesce onto one request.
+	wsFetching bool
 }
 
 // TunnelRestarter re-establishes an out-of-process transport (the ssh:// tunnel)
@@ -809,6 +821,45 @@ func editDecisionToWire(d gogent.EditReviewDecision) string {
 	}
 }
 
+// --- workspace root ---------------------------------------------------------
+
+// cachedWorkspaceRoot returns the daemon's workspace root for the status-line
+// path affordance (issue #570), fetching it once in the background and caching
+// it. It backs the GetWorkspaceRoot handler, which the status line reads live on
+// every refresh, so it must be cheap and must NOT block the UI thread: the first
+// call kicks an async GET /api/workspace and returns "" (the status line simply
+// omits the path, the documented nil-safe behaviour), and once the fetch lands
+// every later call returns the cached root. A failed fetch is not cached, so a
+// later refresh retries — covering a transient blip at attach time. The daemon
+// root is immutable for the daemon's lifetime, so a single successful fetch is
+// authoritative.
+func (rc *RemoteClient) cachedWorkspaceRoot() string {
+	rc.wsMu.Lock()
+	defer rc.wsMu.Unlock()
+	if rc.wsRoot != "" {
+		return rc.wsRoot
+	}
+	if !rc.wsFetching {
+		rc.wsFetching = true
+		go rc.fetchWorkspaceRoot()
+	}
+	return ""
+}
+
+// fetchWorkspaceRoot performs the one background GET /api/workspace and caches a
+// non-empty root. It deliberately acquires wsMu only AFTER the HTTP call returns,
+// so the UI thread never blocks on the network while holding the lock; a failed
+// or empty fetch clears the in-flight flag so a later refresh retries.
+func (rc *RemoteClient) fetchWorkspaceRoot() {
+	ws, err := rc.client.Workspace()
+	rc.wsMu.Lock()
+	defer rc.wsMu.Unlock()
+	rc.wsFetching = false
+	if err == nil && ws.Root != "" {
+		rc.wsRoot = ws.Root
+	}
+}
+
 // --- Handlers ---------------------------------------------------------------
 
 // Handlers builds the Handlers struct that drives the daemon over HTTP/SSE. It
@@ -1007,6 +1058,16 @@ func (rc *RemoteClient) Handlers() Handlers {
 			}
 			return RestoredSession{ID: id, Title: title, Messages: messageDTOsToChat(msgs), Model: meta.PrimaryModel}, true
 		},
+
+		// GetWorkspaceRoot reports the DAEMON's workspace root — where ! shell
+		// commands and the agent's shell tool calls actually run — so the attached
+		// status line shows the same working-directory path the local TUI does
+		// (issue #570). It is daemon-owned (like the default model, #507), so it is
+		// wired HERE over GET /api/workspace rather than by the attach layer's
+		// installPresentationHandlers, whose local g would report the CLIENT cwd.
+		// Cached + non-blocking: the value is fetched once in the background, so the
+		// per-refresh read stays cheap and never stalls the UI on the SSH tunnel.
+		GetWorkspaceRoot: rc.cachedWorkspaceRoot,
 
 		// --- settings (one settingsView; setters read-modify-write) ---
 		GetSettings: func() config.SubAgentConfig {
