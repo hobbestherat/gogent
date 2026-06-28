@@ -96,14 +96,17 @@ fallbacks are unchanged.
 
 ### 3. `applyLayout` (`ui/tui/tui.go`) — **ceiling only (option b)**
 
-Clamp each restored `e.W` down to the comfortable max *before* `clampWindowRect`:
+Clamp each restored `e.W` down to the comfortable max *before* `clampWindowRect`.
+Note `applyLayout` is `func (w *Workbench) applyLayout`, so the local **must not**
+be named `w` (it would shadow the receiver — a footgun and a likely shadow-lint
+hit under the repo's `golangci-lint` gate). Use `restoredW`:
 
 ```go
-w := e.W
-if w > comfortableMaxWidth {
-    w = comfortableMaxWidth
+restoredW := e.W
+if restoredW > comfortableMaxWidth {
+    restoredW = comfortableMaxWidth
 }
-bounds := clampWindowRect(tv.Rect{X: e.X, Y: e.Y, W: w, H: e.H},
+bounds := clampWindowRect(tv.Rect{X: e.X, Y: e.Y, W: restoredW, H: e.H},
     area.W, area.H, sw.window.MinWidth, sw.window.MinHeight)
 ```
 
@@ -115,9 +118,14 @@ Ceiling semantics: a saved width ≤120 restores verbatim; a width >120 clamps t
 
 - `browserDialogSpec` (`ui/tui/dialog_sizing.go:31`):
   `tv.DialogSpec{MinW: 60, MinH: 14, MaxW: comfortableMaxWidth, PreferredW: w.app.Width() * 85 / 100}`.
-  Keeping the percentage `PreferredW` is harmless — `MaxW` wins above 120, and on
-  narrower terminals the percentage keeps it responsive. (Leaving PreferredW in
-  preserves small/medium-terminal behavior exactly.)
+  The percentage `PreferredW` is already functionally **inert**: `resolveDimension`
+  (turbotui `dialog_spec.go:86-88`) clamps the 85% request down to the 80%
+  percentDefault, so it never reaches the output today. With `MaxW: 120` added it
+  stays inert (MaxW is the binding constraint above 120). It is kept solely
+  because `TestBrowserPreferredWidthClamped` reads `spec.PreferredW` directly — so
+  removing it would be a second, unrelated test churn. Keeping it is the
+  lower-churn choice; its doc-comment is updated to say the 85% is dead and 120 is
+  the real cap (no "keeps it responsive" claim).
 - `showCommandPalette` (`ui/tui/command_palette.go:566`): add `MaxW: comfortableMaxWidth`.
 - `showHelpOverlay` (`ui/tui/command_palette.go:665`): add `MaxW: comfortableMaxWidth`.
 
@@ -155,6 +163,20 @@ fills the screen — the cap only governs the automatic first paint and
 layout-restore. Nothing is silently hidden; windows/dialogs are simply centered
 at a sane width. No interaction is removed.
 
+Two minor notes (neither a blocker):
+- **Resources browser is the one prose reader among the three dialogs.** Unlike
+  the list-driven palette/help, it renders arbitrarily-long `SKILL.md` / input-
+  schema text, so 120 trades a little reading width versus the old ~80%. It is
+  still a comfortable prose column and the issue explicitly names Resources as a
+  ballooning offender, so 120 is the right default; a maintainer who wants the
+  Resources reader slightly wider could give it its own `MaxW` (e.g. 130–140)
+  without touching the constant. Default stays 120 for consistency — flagged in
+  Open questions.
+- **New windows still cascade from the top-left** (`x := 2 + offset*3`,
+  `tui.go:1787`). A 120-wide window on a 766-col terminal leaves dead space to the
+  right. That is pre-existing positioning, out of scope for a width fix, and not
+  changed here.
+
 ## Criterion 3 — No regressions
 
 - Boundary-only functions stay boundary-only: `maximizedWindowRect`,
@@ -165,13 +187,41 @@ at a sane width. No interaction is removed.
   construction.
 - Explicit larger dialog caps (Sessions 160, Commands 140, Watchers 130)
   unaffected — they set their own `MaxW`; we add `MaxW` only where it was absent.
-- Existing tests expected to stay green: `dialog_sizing_test.go`,
-  `dialog_issue317_test.go`, model-selector/session dialog width tests,
-  `maximize_test.go`, `sidebar_resize_test.go`. The 90%-window math is unchanged
-  below 120, so existing small/medium-terminal assertions hold.
-- New tests will assert: window cap at open (wide terminal), window ceiling on
-  restore via `applyLayout`, and ≤120 for the 3 dialogs on a 766-col terminal;
-  plus a no-op assertion on a narrow terminal.
+- **Window-sizing tests stay green.** `maximize_test.go`, `sidebar_resize_test.go`,
+  `dialog_issue317_test.go`, model-selector/session dialog width tests are
+  unaffected — they exercise boundary-only paths or run at the default 80×25
+  where the 90% window math (=72) is already below 120, so the cap is a no-op.
+- **Three `dialog_sizing_test.go` assertions DO change and MUST be updated** — they
+  run at 200 cols where the old 80% default (160) exceeds 120, so the new `MaxW`
+  intentionally bites. These tests codify the *old uncapped* behavior; updating
+  them to the new ≤120 expectation is part of this change, not a regression:
+  1. `TestDialogsSizedToContent` / "list-driven dialogs stay wide…"
+     (`dialog_sizing_test.go:165`): asserts palette+help width `== defW` (160) at
+     200×50. New result is **120**. Update: assert `b.W == comfortableMaxWidth`
+     (120) at 200 cols, and keep the height-cap/centering assertions as-is. The
+     "stays wide" intent is preserved in spirit — wide but capped — so the
+     subtest name/comment should be reworded to "…stay wide but cap width to the
+     comfortable max."
+  2. `TestDialogReResolvesOnResize` / "percentage-driven palette grows…"
+     (`dialog_sizing_test.go:269`): palette uses `dialog.Fit(spec)`
+     (`command_palette.go:650`), so the capped spec re-resolves on resize. The
+     `after.W > before.W` "grows" check still holds (before is at a narrow
+     terminal < 120), but `after.W == 160` becomes **120**. Update that assertion
+     to `comfortableMaxWidth` and reword to "…grows on resize but stops at the
+     comfortable cap."
+  3. `TestBrowserPreferredWidthClamped` (`dialog_sizing_test.go:397`): for
+     `screenW ∈ {120,160,200}` asserts `gotW == screenW*80/100`. With `MaxW:120`
+     the browser resolves to **120** at 160/200 (96 at 120 cols is unchanged).
+     Update the `want` to `min(screenW*80/100, comfortableMaxWidth)`, and drop the
+     now-false `gotW >= spec.PreferredW` sub-assertion (or recompute it against
+     the cap). The doc-comment explaining the dead 85% is updated to note 120 is
+     now the binding cap.
+- **New tests** assert the additive behavior: window cap at open on a wide
+  terminal (e.g. 766×50 → window W == 120), window ceiling on restore via
+  `applyLayout` (persisted W=300 → restored ≤120; persisted W=80 → unchanged), and
+  each of the 3 dialogs ≤120 on a 766-col terminal; plus a no-op assertion on a
+  narrow terminal (e.g. 100 cols → window/dialog widths follow the old %, cap does
+  not bite).
 - Gates: `gofmt`/`go build`/`go vet` clean; `golangci-lint` 0 NEW; `go test ./...`
   green (pre-existing `TestUserSessionSendMessage` 404 is the only acceptable
   failure).
@@ -207,7 +257,12 @@ resolve incidental `tui.go` overlap. PR body: "Closes #552".
    clamp restored width down to 120, accept that re-saving may drop a wider
    value. Confirmed by the task brief; no alternative pursued.
 2. **`browserDialogSpec` PreferredW** — kept the existing `Width()*85/100`
-   alongside the new `MaxW` (MaxW wins above 120, percentage preserves
-   narrow-terminal behavior). Dropping it would also satisfy the cap but would
-   change medium-terminal sizing slightly; keeping it is the lower-risk choice.
-   Flagging in case the maintainer prefers a clean content-driven `PreferredW`.
+   alongside the new `MaxW`. It is already functionally inert (clamped to the 80%
+   default by turbotui today) and stays inert under the cap; it is retained only
+   to avoid a second unrelated test churn in `TestBrowserPreferredWidthClamped`,
+   which reads it directly. The maintainer could instead drop the dead
+   `PreferredW` and simplify that test — flagged as a non-blocking cleanup.
+3. **Resources reader width** — design uses the shared 120. If the maintainer
+   judges the prose reader deserves more room than code panes, it could carry its
+   own larger `MaxW` (130–140). Default kept at 120 for consistency with the
+   established precedent; raising it is a one-line follow-up if desired.
