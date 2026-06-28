@@ -166,8 +166,8 @@ func TestShortenPathFitsInBudget(t *testing.T) {
 	for _, c := range cases {
 		for maxW := 0; maxW <= 60; maxW++ {
 			got := shortenPath(c.path, c.home, maxW)
-			switch {
-			case got == "":
+			switch got {
+			case "":
 				if c.path != "" && maxW >= pathFloor {
 					t.Errorf("shortenPath(%q,%q,%d) = \"\" but should fit (path non-empty, maxW>=floor)",
 						c.path, c.home, maxW)
