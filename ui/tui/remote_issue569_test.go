@@ -419,3 +419,201 @@ func TestReportDecisionIssue569LateStickyStillNotices(t *testing.T) {
 		}
 	}
 }
+
+// --- fixes-round-2: the "approval_expired" timeout signal (Layer C, client) ---
+//
+// A presented prompt that times out on the daemon is pushed to attached clients as
+// an "approval_expired" SSE frame; the client surfaces a cause-accurate notice so a
+// late click on the still-open dialog is not silently ignored (issue #569).
+
+// TestAPIClientStreamEventsRoutesApprovalExpiredToHandler confirms an
+// "approval_expired" SSE frame is decoded and handed to the expired handler (not the
+// session-event sink), and a following session event still flows.
+func TestAPIClientStreamEventsRoutesApprovalExpiredToHandler(t *testing.T) {
+	started := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/events" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		close(started)
+		fmt.Fprint(w, "event: approval_expired\n")
+		fmt.Fprint(w, `data: {"id":"apr_1","session_id":"sess-1"}`+"\n\n")
+		fmt.Fprint(w, "event: final\n")
+		fmt.Fprint(w, `data: {"session_id":"sess-1","event":{"type":"final","text":"done"}}`+"\n\n")
+		flusher.Flush()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	client, err := NewAPIClient(srv.URL, "")
+	if err != nil {
+		t.Fatalf("NewAPIClient: %v", err)
+	}
+	got := make(chan ApprovalExpiredDTO, 2)
+	client.SetApprovalExpiredHandler(func(d ApprovalExpiredDTO) { got <- d })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events, err := client.StreamEvents(ctx)
+	if err != nil {
+		t.Fatalf("StreamEvents: %v", err)
+	}
+	<-started
+
+	select {
+	case d := <-got:
+		if d.ID != "apr_1" || d.SessionID != "sess-1" {
+			t.Fatalf("expired DTO = %+v, want {apr_1 sess-1}", d)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("approval_expired frame was not routed to the handler")
+	}
+
+	select {
+	case ev := <-events:
+		if ev.SessionID != "sess-1" || ev.Event.Type != string(agent.SessionEventFinal) {
+			t.Fatalf("session event = %+v, want final after the expired frame", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("session event after the expired frame did not flow")
+	}
+
+	// Must not be delivered twice nor misrouted onto the event channel.
+	select {
+	case d := <-got:
+		t.Fatalf("expired handler invoked more than once: %+v", d)
+	case <-time.After(25 * time.Millisecond):
+	}
+}
+
+// TestAPIClientStreamEventsApprovalExpiredNilHandlerDropsFrame confirms a frame with
+// no handler installed is dropped (not panicked on) and does not break the stream.
+func TestAPIClientStreamEventsApprovalExpiredNilHandlerDropsFrame(t *testing.T) {
+	started := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/events" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		close(started)
+		fmt.Fprint(w, "event: approval_expired\n")
+		fmt.Fprint(w, `data: {"id":"apr_1","session_id":"sess-1"}`+"\n\n")
+		fmt.Fprint(w, "event: final\n")
+		fmt.Fprint(w, `data: {"session_id":"sess-1","event":{"type":"final","text":"ok"}}`+"\n\n")
+		flusher.Flush()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	client, err := NewAPIClient(srv.URL, "")
+	if err != nil {
+		t.Fatalf("NewAPIClient: %v", err)
+	}
+	// No SetApprovalExpiredHandler: the frame must be dropped, not panic.
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events, err := client.StreamEvents(ctx)
+	if err != nil {
+		t.Fatalf("StreamEvents: %v", err)
+	}
+	<-started
+	select {
+	case ev := <-events:
+		if ev.Event.Type != string(agent.SessionEventFinal) {
+			t.Fatalf("event = %+v, want final after a dropped expired frame", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a nil expired handler dropped the frame but blocked the session event")
+	}
+}
+
+// TestRemoteClientApprovalExpiredSurfacesNoticeFromSSEPush is the integration test
+// for the wiring: a daemon pushing approval_expired the instant the stream opens
+// surfaces a [System] notice in the named session window. The handler is registered
+// before openStream (fixes round 1), so the immediate push is not dropped; the
+// notice proves noteApprovalExpired ran end-to-end.
+func TestRemoteClientApprovalExpiredSurfacesNoticeFromSSEPush(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/events" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		f := w.(http.Flusher)
+		f.Flush() // send 200 + headers so openStream unblocks
+		fmt.Fprint(w, "event: approval_expired\n")
+		fmt.Fprint(w, `data: {"id":"apr_1","session_id":"sess-1"}`+"\n\n")
+		f.Flush()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	client, err := NewAPIClient(srv.URL, "")
+	if err != nil {
+		t.Fatalf("NewAPIClient: %v", err)
+	}
+	sink := &capturingSink{}
+	// approver != nil so StartGated wires the expired handler; sink != nil so the
+	// stream opens and the notice is received.
+	rc := NewRemoteClient(client, sink.fn, &issue569Approver{})
+	rc.pollEvery = time.Hour // irrelevant: this is a push, not a poll
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer rc.Close()
+
+	if err := rc.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	deadline := time.After(2 * time.Second)
+	for len(sink.notices()) == 0 {
+		select {
+		case <-time.After(5 * time.Millisecond):
+		case <-deadline:
+			t.Fatal("approval_expired push did not surface a [System] notice")
+		}
+	}
+	ns := sink.notices()
+	if len(ns) != 1 {
+		t.Fatalf("notices = %d, want exactly 1", len(ns))
+	}
+	if sink.lastSid != "sess-1" {
+		t.Errorf("expired notice routed to %q, want sess-1", sink.lastSid)
+	}
+}
+
+// TestRemoteClientNoteApprovalExpiredEmitsCauseAccurateNotice checks the unit path:
+// the notice is routed to the approval's session and states the cause-accurate facts
+// (timed out; safe default applied) — the daemon emits the signal only on a genuine
+// timeout, so the wording may assert that.
+func TestRemoteClientNoteApprovalExpiredEmitsCauseAccurateNotice(t *testing.T) {
+	rc, sink := newReportingRC(t)
+	rc.noteApprovalExpired(ApprovalExpiredDTO{ID: "apr_1", SessionID: "sess-9"})
+
+	ns := sink.notices()
+	if len(ns) != 1 {
+		t.Fatalf("notices = %d, want 1", len(ns))
+	}
+	if sink.lastSid != "sess-9" {
+		t.Errorf("expired notice routed to %q, want sess-9", sink.lastSid)
+	}
+	text := strings.ToLower(ns[0].Text)
+	for _, want := range []string{"timed out", "safe default"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("expired notice missing %q: %q", want, ns[0].Text)
+		}
+	}
+}
+
+// TestRemoteClientNoteApprovalExpiredNilSinkIsNoOp confirms a nil sink (narrow test
+// config) does not panic.
+func TestRemoteClientNoteApprovalExpiredNilSinkIsNoOp(t *testing.T) {
+	rc := NewRemoteClient(nil, nil, nil)
+	rc.noteApprovalExpired(ApprovalExpiredDTO{ID: "x", SessionID: "s"}) // must not panic
+}

@@ -410,3 +410,211 @@ func h_broadcastingBridgeAlloc(t *testing.T, h *hub, _ string) string {
 	bridge := newApprovalBridge(h, time.Minute, time.Minute, time.Now)
 	return bridge.alloc("permission", "s1", "root", &permissionDetail{Action: "shell", Resource: "r"}, nil)
 }
+
+// --- fixes-round-2: the "approval_expired" timeout signal (Layer C, server) ---
+//
+// When a PRESENTED (observed) prompt reaches its auto-deny timeout, wait() calls
+// expireDeny, which broadcasts an "approval_expired" signal so a connected client
+// can tell the user the prompt timed out and the safe default was applied —
+// closing the silent-late-click gap (issue #569). It fires ONLY for an observed
+// prompt (an un-presented one showed no dialog) and ONLY on a genuine timeout, so
+// the surfaced notice is cause-accurate (unlike the reportDecision "late" path,
+// which cannot tell a timeout from another client answering).
+
+// recvApprovalExpiredIssue569 drains frames from a subscriber until it sees an
+// approval-expired one (skipping any approval-signal frames), failing on timeout.
+func recvApprovalExpiredIssue569(t *testing.T, sub <-chan taggedEvent) taggedEvent {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case te := <-sub:
+			if te.approvalExpired {
+				return te
+			}
+			// skip approval-signal / session-event frames
+		case <-deadline:
+			t.Fatal("timed out waiting for an approval_expired frame")
+			return taggedEvent{}
+		}
+	}
+}
+
+// TestApprovalIssue569ObservedConnectedTimeoutBroadcastsExpiredAndDenies is the
+// headline: a prompt a client has fetched (observed) that reaches the connected
+// auto-deny must (a) return the safe deny default AND (b) push an approval_expired
+// signal carrying its id+session so the client can tell the user.
+func TestApprovalIssue569ObservedConnectedTimeoutBroadcastsExpiredAndDenies(t *testing.T) {
+	h := newHub()
+	sub, unsub := h.subscribeGlobal()
+	defer unsub()
+	bridge := newApprovalBridge(h, 50*time.Millisecond, 5*time.Second, time.Now)
+
+	id := bridge.alloc("permission", "sess-1", "root",
+		&permissionDetail{Action: "shell", Resource: "r"}, nil)
+	done := make(chan decision, 1)
+	go func() { done <- bridge.wait(id, "sess-1", decision{perm: permission.DecisionDeny}) }()
+
+	bridge.list() // observe → the connected clock now governs
+
+	select {
+	case d := <-done:
+		if d.perm != permission.DecisionDeny {
+			t.Fatalf("observed connected timeout decision = %v, want deny (safe default)", d.perm)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("observed connected approval did not auto-deny within the connected window")
+	}
+
+	te := recvApprovalExpiredIssue569(t, sub)
+	if te.approvalID != id {
+		t.Fatalf("expired signal approvalID = %q, want %q", te.approvalID, id)
+	}
+	if te.sessionID != "sess-1" {
+		t.Fatalf("expired signal sessionID = %q, want sess-1", te.sessionID)
+	}
+}
+
+// TestApprovalIssue569UnobservedTimeoutDoesNotBroadcastExpired confirms an
+// UN-presented prompt that times out does NOT emit an approval_expired signal — no
+// human ever saw a dialog, so there is nothing to retract and nobody to tell.
+func TestApprovalIssue569UnobservedTimeoutDoesNotBroadcastExpired(t *testing.T) {
+	h := newHub()
+	sub, unsub := h.subscribeGlobal()
+	defer unsub()
+	// connectedTimeout=0 (never) + short unattended bound; a subscriber is connected
+	// but never fetches, so the prompt is un-observed and the unattended clock denies.
+	bridge := newApprovalBridge(h, 0, 50*time.Millisecond, time.Now)
+
+	id := bridge.alloc("permission", "sess-1", "root", &permissionDetail{Action: "shell"}, nil)
+	done := make(chan decision, 1)
+	go func() { done <- bridge.wait(id, "sess-1", decision{perm: permission.DecisionDeny}) }()
+
+	select {
+	case <-done: // denied at the unattended bound
+	case <-time.After(time.Second):
+		t.Fatal("un-observed approval did not deny at the unattended bound")
+	}
+
+	// Drain any buffered frames: only the alloc approval-signal should be present,
+	// never an approval_expired frame.
+	time.Sleep(30 * time.Millisecond) // let a straggler arrive, if any
+	for {
+		select {
+		case te := <-sub:
+			if te.approvalExpired {
+				t.Fatalf("un-presented timeout emitted an approval_expired signal: %+v", te)
+			}
+		default:
+			return // drained, no expired frame — correct
+		}
+	}
+}
+
+// TestApprovalIssue569BroadcastApprovalExpiredGlobalOnlyNotSession confirms the
+// expired signal rides the global stream only, never per-session subscribers.
+func TestApprovalIssue569BroadcastApprovalExpiredGlobalOnlyNotSession(t *testing.T) {
+	h := newHub()
+	sessSub, sessUnsub := h.subscribeSession("s1")
+	defer sessUnsub()
+
+	h.broadcastApprovalExpired("apr_1", "s1")
+
+	select {
+	case te := <-sessSub:
+		t.Fatalf("per-session subscriber received an approval_expired signal: %+v", te)
+	case <-time.After(40 * time.Millisecond):
+	}
+}
+
+// TestApprovalIssue569BroadcastApprovalExpiredNonBlockingDropOnFull confirms the
+// expired fan-out never blocks the wait()/expireDeny path: with a subscriber buffer
+// completely full it returns promptly (drop-on-full).
+func TestApprovalIssue569BroadcastApprovalExpiredNonBlockingDropOnFull(t *testing.T) {
+	h := newHub()
+	sub, unsub := h.subscribeGlobal()
+	defer unsub()
+	for i := 0; i < cap(sub); i++ {
+		h.broadcastApprovalExpired("fill", "s")
+	}
+	done := make(chan struct{})
+	go func() {
+		h.broadcastApprovalExpired("dropped", "s") // buffer full: must drop, not block
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("broadcastApprovalExpired blocked on a full subscriber buffer (must be drop-on-full)")
+	}
+}
+
+// TestApprovalIssue569BroadcastApprovalExpiredNotReplayedToLateSubscriber confirms
+// the expired signal is NOT ring-buffered: a client subscribing AFTER the timeout
+// does not receive a stale replay (it re-syncs the live /approvals list instead).
+func TestApprovalIssue569BroadcastApprovalExpiredNotReplayedToLateSubscriber(t *testing.T) {
+	h := newHub()
+	h.broadcastApprovalExpired("apr_before", "s1") // fires before any subscriber
+	sub, unsub := h.subscribeGlobal()              // subscribe after
+	defer unsub()
+	select {
+	case te := <-sub:
+		if te.approvalExpired {
+			t.Fatalf("late subscriber received an un-buffered approval_expired signal: %+v", te)
+		}
+	case <-time.After(40 * time.Millisecond):
+	}
+}
+
+// TestApprovalIssue569BroadcastApprovalExpiredNilHubNoPanic confirms expireDeny's
+// nil-hub guard: a bridge with no hub does not panic on timeout.
+func TestApprovalIssue569BroadcastApprovalExpiredNilHubNoPanic(t *testing.T) {
+	bridge := newApprovalBridge(nil, 0, 30*time.Millisecond, time.Now)
+	id := bridge.alloc("permission", "s1", "root", &permissionDetail{Action: "shell"}, nil)
+	// list() observes it (so expireDeny would broadcast on a non-nil hub); with a nil
+	// hub it must simply deny without panicking.
+	bridge.list()
+	done := make(chan decision, 1)
+	go func() { done <- bridge.wait(id, "s1", decision{perm: permission.DecisionDeny}) }()
+	select {
+	case d := <-done:
+		if d.perm != permission.DecisionDeny {
+			t.Fatalf("nil-hub timeout decision = %v, want deny", d.perm)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("nil-hub observed approval did not deny at the unattended bound")
+	}
+}
+
+// TestApprovalIssue569GlobalSSESerializesApprovalExpiredFrame confirms globalSSE
+// emits the expired frame under the dedicated "approval_expired" name with the
+// id+session payload.
+func TestApprovalIssue569GlobalSSESerializesApprovalExpiredFrame(t *testing.T) {
+	ev := globalSSE(taggedEvent{approvalExpired: true, approvalID: "apr_7", sessionID: "sess-7"})
+	if ev.Name != approvalExpiredEventName {
+		t.Fatalf("SSE event name = %q, want %q", ev.Name, approvalExpiredEventName)
+	}
+	var v approvalExpiredView
+	if err := json.Unmarshal([]byte(ev.Data), &v); err != nil {
+		t.Fatalf("expired frame data is not valid JSON (%q): %v", ev.Data, err)
+	}
+	if v.ID != "apr_7" || v.SessionID != "sess-7" {
+		t.Fatalf("expired frame = %+v, want {apr_7 sess-7}", v)
+	}
+}
+
+// TestApprovalIssue569ApprovalExpiredEventNameDistinct guards that "approval_expired"
+// collides with no agent SessionEventType nor the other global frame names.
+func TestApprovalIssue569ApprovalExpiredEventNameDistinct(t *testing.T) {
+	others := []string{
+		string(agent.SessionEventFinal), string(agent.SessionEventError),
+		string(agent.SessionEventNotice), string(agent.SessionEventSubAgent),
+		string(agent.SessionEventPlan), string(agent.SessionEventUsage),
+		approvalEventName, notificationEventName,
+	}
+	for _, n := range others {
+		if n == approvalExpiredEventName {
+			t.Fatalf("approval_expired name collides with %q — a client could not route it by name", n)
+		}
+	}
+}
