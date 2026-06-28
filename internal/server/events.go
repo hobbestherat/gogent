@@ -69,13 +69,48 @@ func sessionSSE(ev agent.SessionEvent, sessionID string) webapi.SSEvent {
 // globalEventView).
 const notificationEventName = "notification"
 
+// approvalEventName is the SSE event: name carried by an "approval pending" nudge
+// on the global stream (issue #569). Like notificationEventName it is distinct
+// from every agent SessionEvent type, so a client routes it by name alone; its
+// data is an approvalSignalView (the approval id), not a globalEventView.
+const approvalEventName = "approval"
+
+// approvalSignalView is the tiny payload of an approval-pending nudge: only the
+// approval id, for diagnostics/logging. The client ignores it and simply
+// re-fetches GET /approvals on receipt (issue #569).
+type approvalSignalView struct {
+	ID string `json:"id"`
+}
+
+// approvalExpiredEventName is the SSE event: name carried by a "presented approval
+// timed out" signal on the global stream (issue #569). Distinct from every agent
+// SessionEventType and from the other global frame names, so a client routes it by
+// name alone; its data is an approvalExpiredView.
+const approvalExpiredEventName = "approval_expired"
+
+// approvalExpiredView is the payload of an approval-expired signal: the approval id
+// and the session it belonged to, so the client surfaces the timeout notice in the
+// right window (issue #569).
+type approvalExpiredView struct {
+	ID        string `json:"id"`
+	SessionID string `json:"session_id"`
+}
+
 // globalSSE builds an SSE event for the global subscriber. A notification frame
 // (te.notif set) is emitted under notificationEventName with the NotificationEvent
-// as its payload; every other frame is a session event tagged with its
-// originating session id.
+// as its payload; an approval-pending nudge (te.approvalSignal) under
+// approvalEventName with the approval id; an approval-expired signal
+// (te.approvalExpired) under approvalExpiredEventName with id+session; every other
+// frame is a session event tagged with its originating session id.
 func globalSSE(te taggedEvent) webapi.SSEvent {
 	if te.notif != nil {
 		return webapi.SSEvent{Name: notificationEventName, Data: marshalJSON(*te.notif)}
+	}
+	if te.approvalSignal {
+		return webapi.SSEvent{Name: approvalEventName, Data: marshalJSON(approvalSignalView{ID: te.approvalID})}
+	}
+	if te.approvalExpired {
+		return webapi.SSEvent{Name: approvalExpiredEventName, Data: marshalJSON(approvalExpiredView{ID: te.approvalID, SessionID: te.sessionID})}
 	}
 	return webapi.SSEvent{
 		Name: string(te.ev.Type),

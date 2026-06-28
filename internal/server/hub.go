@@ -19,6 +19,25 @@ type taggedEvent struct {
 	// channels (no separate channel) and is emitted as an SSE event named
 	// "notification"; per-session subscribers never receive it.
 	notif *NotificationEvent
+	// approvalSignal marks this frame as a best-effort "approval pending" nudge
+	// (issue #569): it carries no event payload, only approvalID for diagnostics,
+	// and tells a connected client to re-fetch GET /approvals now rather than wait
+	// for its next poll tick. Like notif it rides the global channels and is
+	// emitted under the SSE event name "approval"; per-session subscribers never
+	// receive it.
+	//
+	// approvalExpired marks this frame as a "presented approval timed out" signal
+	// (issue #569): a prompt the user had been shown reached its auto-deny bound
+	// before being answered, so the safe default was applied. It carries approvalID
+	// and sessionID (reusing the sessionID field) so a connected client can tell the
+	// user, in the right window, that a late answer no longer applies. Emitted under
+	// the SSE event name "approval_expired"; global subscribers only.
+	//
+	// A frame is exactly one of: session event, notif, approvalSignal, or
+	// approvalExpired.
+	approvalSignal  bool
+	approvalExpired bool
+	approvalID      string
 }
 
 // notificationRingSize bounds the missed-notification ring (issue #358 Open
@@ -182,6 +201,47 @@ func (h *hub) deliverNotification(nev NotificationEvent) bool {
 		h.ring = h.ring[len(h.ring)-notificationRingSize:]
 	}
 	return false
+}
+
+// broadcastApprovalSignal wakes every connected global subscriber to re-fetch GET
+// /approvals immediately rather than waiting for its 750ms poll tick (issue #569).
+// It is a best-effort nudge: non-blocking, drop-on-full, and NOT ring-buffered — a
+// reconnecting client re-scans approvals on its own, and /approvals is the
+// authoritative source, so a dropped signal only forfeits the latency it was
+// shaving, never the prompt. The frame carries the approval id for diagnostics;
+// the client ignores the body and just re-scans. Per-session subscribers are not
+// signalled (the approval list is a global resource).
+func (h *hub) broadcastApprovalSignal(id string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	te := taggedEvent{approvalSignal: true, approvalID: id}
+	for ch := range h.global {
+		select {
+		case ch <- te:
+		default:
+		}
+	}
+}
+
+// broadcastApprovalExpired tells every connected global subscriber that a
+// previously-presented approval reached its auto-deny timeout before it was
+// answered (issue #569), so each can surface a "this prompt timed out; the safe
+// default was applied" notice in the prompt's session window — closing the silent
+// gap where a user's late click on a still-open dialog had no effect and they were
+// never told. Best-effort like broadcastApprovalSignal: non-blocking, drop-on-full,
+// NOT ring-buffered (it is only meaningful to a client that saw the live prompt;
+// a reconnecting client re-syncs the live /approvals list instead). id+sessionID
+// ride the frame so the client routes the notice to the right window.
+func (h *hub) broadcastApprovalExpired(id, sessionID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	te := taggedEvent{approvalExpired: true, approvalID: id, sessionID: sessionID}
+	for ch := range h.global {
+		select {
+		case ch <- te:
+		default:
+		}
+	}
 }
 
 // cloneSubs returns a snapshot of a subscriber map's channels under the lock so
