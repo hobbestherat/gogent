@@ -60,6 +60,46 @@ func TestCostWeightedInputFormula(t *testing.T) {
 	}
 }
 
+// TestCostWeightedInputFlooredAtZero pins the defensive floor (math.Max(0, …)) that
+// stops a malformed/gateway response over-reporting cached tokens (Read+Write >
+// Prompt) from producing a NEGATIVE cost and rewinding the agent budget. With
+// face-value (1.0) multipliers the sum always equals prompt, so the floor only
+// bites when a <1 discount is applied to over-reported reads — exactly the cases
+// below. Removing the floor would let these return negatives.
+func TestCostWeightedInputFlooredAtZero(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		cs        CacheStats
+		prompt    int
+		readMult  float64
+		writeMult float64
+	}{
+		{"over-reported reads, openai 0.5 (would be -50)", CacheStats{ReadTokens: 300}, 100, 0.5, 0},
+		{"over-reported read+write, anthropic 0.1/1.25 (would be -300)", CacheStats{ReadTokens: 500, WriteTokens: 200}, 100, 0.1, 1.25},
+		{"boundary: 2x reads at 0.5 lands exactly 0", CacheStats{ReadTokens: 200}, 100, 0.5, 0},
+		{"deepseek 0.1 with read>prompt (would be -80)", CacheStats{ReadTokens: 200}, 100, 0.1, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.cs.costWeightedInput(tc.prompt, tc.readMult, tc.writeMult)
+			if got < 0 {
+				t.Errorf("costWeightedInput = %d, want >= 0 (floored; over-report must not rewind budget)", got)
+			}
+			if tc.name == "boundary: 2x reads at 0.5 lands exactly 0" && got != 0 {
+				t.Errorf("costWeightedInput = %d, want exactly 0 (genuine zero must be preserved, not just negatives clamped)", got)
+			}
+		})
+	}
+	// Sweep: the floor must hold across a range of over-reports and discounts.
+	for _, readMult := range []float64{0.1, 0.2, 0.25, 0.5} {
+		cs := CacheStats{ReadTokens: 10_000} // far exceeds any prompt below
+		for _, prompt := range []int{0, 1, 100, 1000} {
+			if got := cs.costWeightedInput(prompt, readMult, 0); got < 0 {
+				t.Errorf("costWeightedInput(prompt=%d, read=%d, mult=%v) = %d, want >= 0", prompt, cs.ReadTokens, readMult, got)
+			}
+		}
+	}
+}
+
 // TestCostWeightedInputPerProvider drives the FULL two-axis resolution through a
 // real *ModelConnection built from config: Capabilities (per api_type) overridden
 // by ModelCaps (per provider×model). This is where a mis-set multiplier, a missing

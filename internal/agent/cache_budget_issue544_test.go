@@ -83,4 +83,44 @@ func TestBudgetUsesCostWeightedInput_Issue544(t *testing.T) {
 			t.Errorf("GetTokensUsed = %d, want cost-weighted 570 (deepseek 0.1 override)", got)
 		}
 	})
+
+	t.Run("malformed over-reported cache does not rewind budget", func(t *testing.T) {
+		// A buggy gateway reports cached_tokens (300) LARGER than prompt_tokens
+		// (100). Without the cost-weighted floor the prompt cost would be negative
+		// (-50) and AddTokensUsed would DECREASE the agent's budget; the floor
+		// clamps it to 0, so the budget only grows by the completion tokens.
+		malformed := map[string]interface{}{
+			"choices": []map[string]interface{}{{
+				"index":         0,
+				"message":       map[string]interface{}{"role": "assistant", "content": "done"},
+				"finish_reason": "stop",
+			}},
+			"usage": map[string]interface{}{
+				"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
+				"prompt_tokens_details": map[string]interface{}{"cached_tokens": 300},
+			},
+		}
+		fs := &fakeServer{responses: []map[string]interface{}{malformed}}
+		server := httptest.NewServer(http.HandlerFunc(fs.handler))
+		defer server.Close()
+
+		conn := model.NewModelConnectionFromConfig(&config.ModelConfig{
+			APIType: "openai", Model: "gpt-4o", Endpoint: server.URL,
+		})
+		sess := model.NewModelSession("test", conn)
+		reg := tool.NewToolRegistry()
+		reg.RegisterCalcTool()
+		ag := NewAgent("root", sess)
+		ag.SetToolRegistry(reg)
+		us := NewUserSession("s1", ag)
+
+		if _, err := us.ExecuteTaskLoop(context.Background(), "root", "go"); err != nil {
+			t.Fatalf("ExecuteTaskLoop: %v", err)
+		}
+		// floor((100-300) + 300*0.5) = floor(-50) = 0 prompt + 20 completion = 20.
+		// Without the floor this would be -30 (a budget rewind). Must be exactly 20.
+		if got := ag.GetTokensUsed(); got != 20 {
+			t.Errorf("GetTokensUsed = %d, want 20 (over-reported prompt cost floored to 0; budget must never rewind)", got)
+		}
+	})
 }
