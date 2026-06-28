@@ -53,8 +53,10 @@ type decision struct {
 // resetting on the opposite transition. So a daemon whose TUI blips offline keeps
 // its long watcher turns alive, on reconnect a client picks the prompt up via GET
 // /approvals with a fresh grace window, and the unattended bound never alters the
-// connected case (connectedTimeout == 0 still means "never"). A delivered decision
-// always wins.
+// OBSERVED connected case (where connectedTimeout == 0 still means "never"). An
+// un-observed connected prompt is governed by the unattended bound instead (see
+// below), so connectedTimeout == 0 leaves it to that bound rather than blocking
+// forever. A delivered decision always wins.
 //
 // Crucially the connected clock is charged only against time AFTER a client has
 // fetched the prompt (issue #569): an approval raised while the TUI is briefly

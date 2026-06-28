@@ -261,6 +261,18 @@ func (rc *RemoteClient) StartGated(parent context.Context) (begin func(), err er
 			}
 		}()
 
+		if rc.approver != nil {
+			// Surface a freshly-raised remote prompt without waiting for the next poll
+			// tick: the daemon pushes an "approval" SSE nudge on alloc, which we turn
+			// into an immediate /approvals re-scan via the same coalesced kick reconnect
+			// uses (issue #569). The poller stays the authoritative backstop; the seen
+			// dedup keeps a push + a racing poll from double-presenting.
+			//
+			// Register the handler BEFORE openStream starts the SSE reader: a nudge that
+			// arrives the instant the stream opens would otherwise hit a nil handler and
+			// be dropped (the poll would still backstop it, but this closes the window).
+			rc.client.SetApprovalSignalHandler(rc.kickApprovals)
+		}
 		if rc.sink != nil {
 			events, oerr := rc.openStream()
 			if oerr != nil {
@@ -281,12 +293,6 @@ func (rc *RemoteClient) StartGated(parent context.Context) (begin func(), err er
 			}
 		}
 		if rc.approver != nil {
-			// Surface a freshly-raised remote prompt without waiting for the next poll
-			// tick: the daemon pushes an "approval" SSE nudge on alloc, which we turn
-			// into an immediate /approvals re-scan via the same coalesced kick reconnect
-			// uses (issue #569). The poller stays the authoritative backstop; the seen
-			// dedup keeps a push + a racing poll from double-presenting.
-			rc.client.SetApprovalSignalHandler(rc.kickApprovals)
 			go rc.pollApprovals()
 		}
 	})

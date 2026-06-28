@@ -60,20 +60,29 @@ non-blocking) — correctness still rests on Layer A + the authoritative
 `/approvals` fetch; the push only removes the up-to-750 ms latency and the
 "poll endpoint flaky while stream is up" edge.
 
-> **Implementation note (Layer C revised):** during implementation a deliberate,
-> tested #560 invariant was found — `TestReportDecisionLateNonStickyIsSilent`
-> asserts a *late one-shot* decision must stay **silent** ("carries no future
-> effect → must not surface"). Surfacing it (original Layer C) would break that
-> test → a regression (criterion 3). Since **Layer A already satisfies acceptance
-> criterion 2** (timeout not charged against un-presented time; the prompt is
-> surfaced, never auto-denied before presentation), Layer C's behavioural change
-> was **dropped**: `reportDecision` is left exactly as #560 wrote it (late
-> *sticky* grants still notice; late one-shots stay silent). The residual
-> post-presentation-timeout late case is the rare, intended connected-unresponsive
-> path #560 deliberately kept quiet. Flagged for the maintainer: if you *do* want
-> a late one-shot to notify, that is a #560 policy reversal and needs its test
-> updated — out of scope for this no-regression fix. The text below documents the
-> originally-designed Layer C for record.
+> **Implementation note (Layer C — RESOLVED: dropped, final).** During
+> implementation a deliberate, tested #560 invariant was found —
+> `TestReportDecisionLateNonStickyIsSilent` asserts a *late one-shot* decision must
+> stay **silent** ("carries no future effect → must not surface"). Surfacing it
+> (original Layer C) breaks that test → a regression (criterion 3), and would also
+> break the partner's own #569 test `TestReportDecisionIssue569LateOneShotStaysSilent`
+> which independently locks in the silent behaviour. Both are *correct* tests of
+> intended behaviour, not "wrong" tests.
+>
+> The decision is to **drop Layer C's behavioural change** (final, accepted after
+> review), on these grounds: (1) **Layer A already satisfies acceptance criterion 2**
+> — a prompt is never auto-denied before it is observed/presented, so the badge is
+> never silently lost (the actual #569 ask). (2) The only residual late-one-shot
+> case is *post-presentation*: the badge + dialog WERE shown, the user simply did
+> not answer within the 5-min connected-but-unresponsive window — exactly the
+> #358/#560-designed auto-deny, which #560 deliberately keeps silent. #569 neither
+> introduces nor worsens it. (3) The transcript already shows the tool was denied,
+> so the late click is not a *silent* loss of information.
+>
+> `reportDecision` is therefore left byte-for-byte as #560 wrote it (late *sticky*
+> grants still notice cause-agnostically; late one-shots stay silent). The text
+> below documents the originally-designed Layer C for the historical record only;
+> it is **not** implemented.
 
 **Layer C — client: never silently deny (usability).** Build on #560's
 `decide()`/`reportDecision` surface path: extend `reportDecision` so a `late`
