@@ -37,6 +37,22 @@ func extractProviderMessage(body string) string {
 		return ""
 	}
 
+	// 0: array form. Vertex returns some errors as a JSON ARRAY of error objects —
+	// [{"error":{"code":400,"message":"…","status":"INVALID_ARGUMENT"}}] — e.g. the
+	// "Malformed publisher model" 400 from the OpenAI-compat shim (issue #574). Recurse
+	// into the first element that yields a message so the clean reason surfaces instead of
+	// the whole array JSON; a degenerate array falls through to the raw-body fallback.
+	if trimmed[0] == '[' {
+		var arr []json.RawMessage
+		if json.Unmarshal([]byte(trimmed), &arr) == nil {
+			for _, el := range arr {
+				if msg := extractProviderMessage(string(el)); msg != "" {
+					return msg
+				}
+			}
+		}
+	}
+
 	// 1 + 3: error.message (object form) or error rendered as a bare string.
 	// json.RawMessage defers decoding error so both shapes can be tried.
 	var objErr struct {
