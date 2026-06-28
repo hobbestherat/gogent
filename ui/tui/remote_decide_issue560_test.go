@@ -318,6 +318,29 @@ func TestReportDecisionLateAlwaysDenyEmitsDenyNotice(t *testing.T) {
 	}
 }
 
+// TestReportDecisionLateNoticeDoesNotClaimSafeDefault locks in the fixes-round-1
+// wording change: "late" also fires when another attached client answered the
+// prompt in-time (not just on a timeout). Claiming "the request used the safe
+// default" would be wrong in that case, so the late notice must avoid that phrase
+// and only state what is certain — the grant was saved and applies going forward.
+func TestReportDecisionLateNoticeDoesNotClaimSafeDefault(t *testing.T) {
+	rc, c := newReportingRC(t)
+	rc.reportDecision("s1", "permission", "example.com", "always", "late", nil)
+
+	ns := c.notices()
+	if len(ns) != 1 {
+		t.Fatalf("notices = %d, want 1", len(ns))
+	}
+	if strings.Contains(strings.ToLower(ns[0].Text), "safe default") {
+		t.Errorf("late notice must not claim the request used the safe default (only true for the timeout case): %q", ns[0].Text)
+	}
+	for _, want := range []string{"example.com", "future requests"} {
+		if !strings.Contains(ns[0].Text, want) {
+			t.Errorf("late notice missing %q: %q", want, ns[0].Text)
+		}
+	}
+}
+
 func TestReportDecisionLateNonStickyIsSilent(t *testing.T) {
 	rc, c := newReportingRC(t)
 	// A late one-shot allow carries no future effect → must not surface.

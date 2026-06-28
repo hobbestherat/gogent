@@ -355,3 +355,99 @@ func TestDecideLateAlwaysDenyFiredAuditAsDenied(t *testing.T) {
 		t.Fatalf("always_deny audit allowed = %v, want [false]", allowed)
 	}
 }
+
+// --- resolve==false (double-consumer in-time race), fixes-round-1 -----------
+//
+// When a second POST arrives while the approval is still pending but a faster
+// client already delivered a decision (resolve returns false), the loser's sticky
+// grant must still be persisted — otherwise a one-shot "allow" winner would
+// silently discard a losing "always" (the #560 symptom, in a narrow window). The
+// fix persists a sticky permission decision on this branch too (idempotent),
+// mirroring the late-arrival path.
+
+// raceTwoDecides POSTs first then second for the same approval and returns the
+// first/second snapshots. The first resolves (channel buffered cap 1); the second
+// hits resolve==false without a wait() draining, exercising the raced branch.
+func raceTwoDecides(t *testing.T, srv *Server, id, first, second string) (*responseSnapshot, *responseSnapshot) {
+	t.Helper()
+	return decideOverHTTP(t, srv, id, first), decideOverHTTP(t, srv, id, second)
+}
+
+func TestDecideRacedLoserAlwaysSticksDespiteOneShotWinner(t *testing.T) {
+	srv, _ := newIssue560Server(t)
+	id := mintPermissionApproval(srv, "s1", "example.com")
+	ps := srv.g.GetPermissionService()
+
+	// Winner: a one-shot allow resolves first (resolve-succeed does NOT persist).
+	first, second := raceTwoDecides(t, srv, id, "allow", "always")
+	for i, r := range []*responseSnapshot{first, second} {
+		if r.Code != http.StatusOK || r.statusField(t) != "resolved" {
+			t.Fatalf("decide[%d] = %d %q, want 200 \"resolved\"", i, r.Code, r.Body)
+		}
+	}
+	// The winner's one-shot allow must not have broadened into a sticky grant on
+	// its own; the loser's "always" is what makes the host stick.
+	if err := ps.CheckWithContext(permission.RequestContext{}, permission.ActionNetwork, "example.com", "https://example.com/"); err != nil {
+		t.Fatalf("losing 'always' was not persisted in the resolve==false branch: %v", err)
+	}
+}
+
+func TestDecideRacedLoserAlwaysDenySticks(t *testing.T) {
+	srv, _ := newIssue560Server(t)
+	id := mintPermissionApproval(srv, "s1", "example.com")
+	ps := srv.g.GetPermissionService()
+
+	first, second := raceTwoDecides(t, srv, id, "allow", "always_deny")
+	if first.Code != http.StatusOK || second.Code != http.StatusOK {
+		t.Fatalf("raced decides = %d/%d, want 200/200", first.Code, second.Code)
+	}
+	if err := ps.CheckWithContext(permission.RequestContext{}, permission.ActionNetwork, "example.com", "https://example.com/"); err == nil {
+		t.Fatal("losing 'always_deny' should persist a deny in the resolve==false branch")
+	}
+}
+
+func TestDecideRacedNonStickyLoserDoesNotPersist(t *testing.T) {
+	srv, _ := newIssue560Server(t)
+	id := mintPermissionApproval(srv, "s1", "example.com")
+	ps := srv.g.GetPermissionService()
+
+	// Winner allow, loser deny — both non-sticky; nothing should persist.
+	if first, second := raceTwoDecides(t, srv, id, "allow", "deny"); first.Code != http.StatusOK || second.Code != http.StatusOK {
+		t.Fatalf("raced decides = %d/%d, want 200/200", first.Code, second.Code)
+	}
+	if err := ps.CheckWithContext(permission.RequestContext{}, permission.ActionNetwork, "example.com", "https://example.com/"); err == nil {
+		t.Fatal("non-sticky loser must not broaden into a sticky grant")
+	}
+}
+
+// TestDecideRacedStickyLoserAuditsOnce confirms the resolve==false persist fires
+// the audit sink exactly once (no double-audit, and never off-record).
+func TestDecideRacedStickyLoserAuditsOnce(t *testing.T) {
+	srv, _ := newIssue560Server(t)
+	id := mintPermissionApproval(srv, "s_race", "example.com")
+
+	var (
+		mu     sync.Mutex
+		calls  int
+		gotSid string
+	)
+	srv.g.GetPermissionService().SetAuditSink(func(rc permission.RequestContext, action permission.Action, resource string, allowed bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		gotSid = rc.SessionID
+	})
+
+	if first, second := raceTwoDecides(t, srv, id, "allow", "always"); first.Code != http.StatusOK || second.Code != http.StatusOK {
+		t.Fatalf("raced decides = %d/%d, want 200/200", first.Code, second.Code)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Errorf("audit calls = %d, want exactly 1 (only the loser's sticky persist audits; the resolve-succeed winner audits via CheckWithContext, not here)", calls)
+	}
+	if gotSid != "s_race" {
+		t.Errorf("audit session = %q, want s_race", gotSid)
+	}
+}
