@@ -889,6 +889,12 @@ type geminiPart struct {
 	FileData         *geminiFileData         `json:"fileData,omitempty"`
 	FunctionCall     *geminiFunctionCall     `json:"functionCall,omitempty"`
 	FunctionResponse *geminiFunctionResponse `json:"functionResponse,omitempty"`
+	// ThoughtSignature re-emits the opaque signature Vertex returned on a Gemini
+	// 3.x functionCall part. It MUST accompany the functionCall when that call is
+	// replayed in conversation history, else Vertex rejects the turn with HTTP 400
+	// ("Function call is missing a thought_signature"). omitempty keeps it off
+	// every part that has no signature (issue #573).
+	ThoughtSignature string `json:"thoughtSignature,omitempty"`
 }
 
 // geminiInlineData is an inline (base64) image/media part.
@@ -1126,11 +1132,16 @@ func geminiParts(m Message) (string, []geminiPart) {
 					args = json.RawMessage(a)
 				}
 			}
-			parts = append(parts, geminiPart{FunctionCall: &geminiFunctionCall{
-				Name: tc.Function.Name,
-				Args: args,
-				ID:   tc.ID,
-			}})
+			parts = append(parts, geminiPart{
+				FunctionCall: &geminiFunctionCall{
+					Name: tc.Function.Name,
+					Args: args,
+					ID:   tc.ID,
+				},
+				// Re-emit the Gemini 3.x thoughtSignature so the replayed call is
+				// accepted; empty (and thus omitted) for non-Gemini-origin calls (#573).
+				ThoughtSignature: tc.ThoughtSignature,
+			})
 		}
 		return "model", parts
 	case RoleTool, RoleFunction:
@@ -1232,10 +1243,25 @@ func geminiSchema(v interface{}) interface{} {
 	return uppercaseSchemaTypes(generic)
 }
 
-// uppercaseSchemaTypes walks a decoded JSON-Schema value and upper-cases the
-// value of every "type" field that is a string, recursing through objects and
-// arrays. A "type" whose value is not a plain string (e.g. a ["string","null"]
-// union) is left as-is — Gemini expresses nullability via the nullable field.
+// uppercaseSchemaTypes walks a decoded JSON-Schema value and normalizes every
+// "type" field into Gemini's canonical Schema form, recursing through objects and
+// arrays so the rule applies at any depth (nested properties, items, …):
+//
+//   - A plain string "type" is upper-cased (string→STRING, object→OBJECT, …).
+//   - A nullable-union "type" array (e.g. {"type":["string","null"]}) is COLLAPSED
+//     to the single surviving scalar (upper-cased) and the node's nullability is
+//     expressed the Gemini way by setting "nullable": true. Gemini's Schema.type
+//     proto field is a SCALAR enum, so a repeated/array value is rejected with an
+//     HTTP 400 ("Proto field is not repeating, cannot start list"); this is the
+//     fix for issue #573. An "enum" sibling is left untouched (a STRING enum is
+//     valid). A degenerate ["null"]-only or a genuine multi-non-null union (not
+//     produced by any gogent tool) is left as the trimmed array — Gemini would
+//     still reject the latter, but representing it needs anyOf, which is out of
+//     scope here.
+//
+// Mirrors #567's Anthropic normalizer (dropNullFromType, reused as-is) but emits
+// the Gemini proto form (scalar type + nullable flag) rather than just dropping
+// the null member.
 func uppercaseSchemaTypes(v interface{}) interface{} {
 	switch t := v.(type) {
 	case map[string]interface{}:
@@ -1244,6 +1270,22 @@ func uppercaseSchemaTypes(v interface{}) interface{} {
 				if s, ok := val.(string); ok {
 					t[k] = strings.ToUpper(s)
 					continue
+				}
+				if union, ok := val.([]interface{}); ok {
+					// dropNullFromType's changed==true means a "null" was dropped
+					// and at least one non-null member survives — i.e. the node is
+					// nullable. Collapse to that scalar and flag nullable the Gemini
+					// way. dropNullFromType is shared with the Anthropic caller and
+					// must not change signature.
+					if rewritten, changed := dropNullFromType(union); changed {
+						if s, ok := rewritten.(string); ok {
+							t[k] = strings.ToUpper(s)
+						} else {
+							t[k] = rewritten
+						}
+						t["nullable"] = true
+						continue
+					}
 				}
 			}
 			t[k] = uppercaseSchemaTypes(val)
@@ -1365,6 +1407,10 @@ type geminiRespPart struct {
 	Text         string                  `json:"text"`
 	Thought      bool                    `json:"thought"`
 	FunctionCall *geminiRespFunctionCall `json:"functionCall"`
+	// ThoughtSignature is the opaque, base64 signature Vertex attaches to a Gemini
+	// 3.x part (sibling to functionCall). It is captured for functionCall parts so
+	// the agent loop can echo it back on later turns (issue #573).
+	ThoughtSignature string `json:"thoughtSignature"`
 }
 
 type geminiRespFunctionCall struct {
@@ -1416,7 +1462,7 @@ func (geminiAdapter) parseResponse(body []byte) (*CompletionResponse, error) {
 	for _, p := range cand.Content.Parts {
 		switch {
 		case p.FunctionCall != nil:
-			tc, err := geminiToolCall(p.FunctionCall)
+			tc, err := geminiToolCall(p.FunctionCall, p.ThoughtSignature)
 			if err != nil {
 				return nil, err
 			}
@@ -1441,8 +1487,10 @@ func (geminiAdapter) parseResponse(body []byte) (*CompletionResponse, error) {
 // carrying the JSON-object args through as the OpenAI arguments-as-string form.
 // Empty args default to "{}" (a no-argument call); a non-empty args that is not a
 // JSON object is malformed provider output and is rejected as an error rather
-// than propagated into a gogent tool call (eval-safety).
-func geminiToolCall(fc *geminiRespFunctionCall) (ToolCall, error) {
+// than propagated into a gogent tool call (eval-safety). thoughtSig is the
+// part-level thoughtSignature (sibling to the functionCall in the wire); it is
+// carried on the ToolCall so the agent loop re-emits it on later turns (#573).
+func geminiToolCall(fc *geminiRespFunctionCall, thoughtSig string) (ToolCall, error) {
 	args := strings.TrimSpace(string(fc.Args))
 	if args == "" {
 		args = "{}"
@@ -1453,9 +1501,10 @@ func geminiToolCall(fc *geminiRespFunctionCall) (ToolCall, error) {
 		}
 	}
 	return ToolCall{
-		ID:       fc.ID,
-		Type:     "function",
-		Function: FunctionCall{Name: fc.Name, Arguments: args},
+		ID:               fc.ID,
+		Type:             "function",
+		Function:         FunctionCall{Name: fc.Name, Arguments: args},
+		ThoughtSignature: thoughtSig,
 	}, nil
 }
 
@@ -1518,7 +1567,7 @@ func (geminiAdapter) parseStream(body io.Reader, streamCh chan<- StreamResponse)
 							// functionCall arrives complete in one chunk; accumulate
 							// and emit only in the terminal Done event (as the
 							// OpenAI/Anthropic adapters do).
-							tc, err := geminiToolCall(p.FunctionCall)
+							tc, err := geminiToolCall(p.FunctionCall, p.ThoughtSignature)
 							if err != nil {
 								return content.String(), usage, &ModelError{
 									Type:    ErrorGeneric,
