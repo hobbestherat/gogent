@@ -310,6 +310,95 @@ func (rc *RemoteClient) consume(events <-chan GlobalEventDTO) {
 	}
 }
 
+// StreamLogsTo drives the daemon's diagnostic-log stream into sink until ctx is
+// cancelled (issue #562). Unlike the session-event consumer it reconnects
+// SILENTLY — no blocking "connection lost" modal, no tunnel restart, no "retry
+// now": a gap in a best-effort log tail is acceptable, and the session stream's
+// own disconnect modal already covers a real outage. It reuses only the shared
+// backoff schedule. The Logs window starts this in a goroutine on open and
+// cancels ctx on close, so a closed window holds no daemon stream.
+//
+// Duplicate suppression has two layers: the resume cursor (?since=) tells a
+// cooperating daemon to skip catch-up history the client already has, and a
+// bounded client-side dedup guarantees no record reaches the window twice even if
+// a server re-primes (defense-in-depth, independent of server behaviour). A fresh
+// invocation (each window open) starts an empty dedup, so reopening re-shows
+// history as expected.
+func (rc *RemoteClient) StreamLogsTo(ctx context.Context, sink func(LogRecordDTO)) {
+	attempt := 0
+	since := "" // resume cursor: the last record's wire timestamp (issue #562)
+	dedup := newLogDedup(logsDedupCap)
+	for {
+		ch, err := rc.client.StreamLogsSince(ctx, since)
+		if err == nil {
+			attempt = 0
+			for rec := range ch {
+				since = rec.Time // advance the cursor so a reconnect skips this record
+				if dedup.seenAdd(rec) {
+					continue // already delivered (e.g. a server that re-primed history)
+				}
+				sink(rec)
+			}
+		} else {
+			attempt++
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		wait := rc.backoff(attempt)
+		if attempt == 0 {
+			// The stream opened then ended (not an open failure): retry promptly.
+			wait = rc.backoff(1)
+		}
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// logsDedupCap bounds the client-side dedup window for the [daemon] log stream
+// (issue #562). It must exceed the daemon's log ring size (cmd.logRingSize, 2000)
+// so any record the daemon could re-prime on reconnect is still remembered here;
+// the margin tolerates a larger daemon ring. Beyond the cap the oldest keys evict,
+// but those records have also rotated out of the daemon's ring, so they cannot be
+// re-primed — the invariant (remember everything still re-primable) holds.
+const logsDedupCap = 4096
+
+// logDedup is a bounded set of recently-delivered daemon-log record identities. It
+// is the client-side guard that keeps a reconnect from re-delivering a record into
+// the Logs window even if the server re-primes it. It is NOT safe for concurrent
+// use — driven only by the single StreamLogsTo loop.
+type logDedup struct {
+	seen map[string]struct{}
+	keys []string // ring of keys in insertion order, for O(1) bounded eviction
+	idx  int
+}
+
+func newLogDedup(n int) *logDedup {
+	return &logDedup{seen: make(map[string]struct{}, n), keys: make([]string, n)}
+}
+
+// seenAdd reports whether rec was already delivered. If not, it records rec
+// (evicting the oldest key when the ring is full) and returns false. The identity
+// is (time, level, text): two genuinely-distinct records collide only if logged in
+// the same nanosecond with identical level and text, which the diag path does not
+// produce.
+func (d *logDedup) seenAdd(rec LogRecordDTO) bool {
+	key := rec.Time + "\x00" + rec.Level + "\x00" + rec.Text
+	if _, ok := d.seen[key]; ok {
+		return true
+	}
+	if old := d.keys[d.idx]; old != "" {
+		delete(d.seen, old)
+	}
+	d.keys[d.idx] = key
+	d.seen[key] = struct{}{}
+	d.idx = (d.idx + 1) % len(d.keys)
+	return false
+}
+
 // openStream opens a fresh SSE stream under a child context whose cancel is stored
 // so the health monitor can drop a wedged stream. The caller (consume) releases
 // the context via dropStream when the stream ends.

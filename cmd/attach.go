@@ -165,6 +165,11 @@ func runAttached(homeDir, addr, token string, noColorFlag bool) error {
 	}
 
 	wb := tuipkg.NewWorkbench(models)
+	// The Logs window's [local] stream (issue #562): the local core's diagnostic
+	// logger tees into this ring (wired below alongside the #560 file redirect), and
+	// the [daemon] stream is interlaced from the daemon's /api/logs/stream.
+	logRing := diag.NewRing(logRingSize)
+	wb.SetLogRing(logRing)
 	fmt.Printf("Attached to daemon at %s. Press Ctrl+C to detach.\n", addr)
 
 	// The RemoteClient feeds the daemon's global SSE stream into the workbench and
@@ -193,6 +198,9 @@ func runAttached(homeDir, addr, token string, noColorFlag bool) error {
 		rc.SetTunnel(tunnel)
 	}
 	wb.SetReconnectControls(hostLabel(addr), rc.RetryNow)
+	// Interlace the daemon's diagnostics into the Logs window's [daemon] stream
+	// (issue #562). The window starts this on open and cancels it on close.
+	wb.SetDaemonLogStream(rc.StreamLogsTo)
 	handlers := rc.Handlers()
 	// Verbatim --connect argument for the daemon-aware quit dialog's re-attach line
 	// (issue #503): unlike hostLabel (a display label) this is a real connect string.
@@ -205,7 +213,7 @@ func runAttached(homeDir, addr, token string, noColorFlag bool) error {
 	// in-process API server up for the rebuilt embedded core (issue #358 §6). No
 	// server runs yet in attach mode, so the handle is nil.
 	httpInfo := embeddedHTTP{host: *httpHost, port: *httpPort, password: resolveHTTPPassword(*httpPassword)}
-	dc := newAttachedController(wb, homeDir, noColorFlag, g, client, rc, addr, local, httpInfo)
+	dc := newAttachedController(wb, homeDir, noColorFlag, g, client, rc, addr, local, httpInfo, logRing)
 	dc.installMenuHandlers(&handlers)
 	wb.SetHandlers(handlers)
 
@@ -242,7 +250,9 @@ func runAttached(homeDir, addr, token string, noColorFlag bool) error {
 	// gracefully, matching main). stderr is restored after Run() returns (below), by
 	// which point the alternate screen is gone, so an exit-time error stays visible.
 	if f, ferr := diag.OpenLogFile(filepath.Join(homeDir, ".gogent", "gogent.log")); ferr == nil {
-		g.SetLogger(diag.New(f))
+		// Tee into the local log ring too (issue #562) so the Logs window surfaces
+		// the client's own diagnostics as the [local] stream.
+		g.SetLogger(diag.NewWithRing(f, logRing))
 		log.SetOutput(f)
 	}
 

@@ -67,8 +67,14 @@ type SessionWindow struct {
 	// fold/yank toolkit but has no input, model selector or live backend session,
 	// so several can sit open side-by-side for comparison without cost. Its id is
 	// an "analysis-N" synthetic (never a backend session id), it is excluded from
-	// the persisted layout, and closing it tears down no backend session.
+	// the persisted layout, and closing it tears down no backend session. It is
+	// derived from kind (true for every non-live window) so every existing
+	// readOnly check keeps holding for the Logs window too (issue #562).
 	readOnly bool
+	// kind distinguishes the live session window from the chrome-less read-only
+	// variants (analysis, issue #58; logs, issue #562). It gates the title suffix,
+	// the "ready" banner and log population; readOnly is derived as kind != winLive.
+	kind windowKind
 	// pendingTools tracks the transcript record of each in-flight tool call,
 	// keyed by the call's stable event id (SessionEvent.CallID), so its result
 	// can be appended to the same foldable entry when it returns. It is a map
@@ -204,14 +210,37 @@ type SessionWindow struct {
 	runSupervisorCheck func(goal string)
 }
 
-// newSessionWindow builds the window, its widgets and their layout/handlers. A
-// readOnly window (opened from the Sessions browser, issue #58) omits the input,
-// model selector and status line and gives the transcript the full height; a
-// live window wires the full send/model/status chrome.
+// windowKind distinguishes the kinds of window the SessionWindow shell backs.
+// The two read-only kinds reuse the shell's transcript/search/fold/scroll toolkit
+// but omit the input/model/status chrome.
+type windowKind int
+
+const (
+	winLive     windowKind = iota // a live backend session (full chrome)
+	winAnalysis                   // a saved transcript, read-only (issue #58)
+	winLogs                       // the persistent diagnostic Logs window (issue #562)
+)
+
+// newSessionWindow builds a live (readOnly false) or analysis (readOnly true,
+// issue #58) window. It is the back-compatible entry point; the Logs window
+// (issue #562) uses newSessionWindowKind directly with winLogs.
 func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly bool) *SessionWindow {
-	sw := &SessionWindow{wb: wb, id: id, title: title, readOnly: readOnly, pendingTools: map[string]*transcriptRecord{}}
-	displayTitle := title
+	kind := winLive
 	if readOnly {
+		kind = winAnalysis
+	}
+	return newSessionWindowKind(wb, id, title, bounds, kind)
+}
+
+// newSessionWindowKind builds the window, its widgets and their layout/handlers.
+// A read-only window (an analysis transcript, issue #58, or the Logs window, issue
+// #562) omits the input, model selector and status line and gives the transcript
+// the full height; a live window wires the full send/model/status chrome.
+func newSessionWindowKind(wb *Workbench, id, title string, bounds tv.Rect, kind windowKind) *SessionWindow {
+	readOnly := kind != winLive
+	sw := &SessionWindow{wb: wb, id: id, title: title, kind: kind, readOnly: readOnly, pendingTools: map[string]*transcriptRecord{}}
+	displayTitle := title
+	if kind == winAnalysis {
 		displayTitle = title + " (analysis)"
 	}
 	window := tv.NewWindow(displayTitle, bounds, tui.LineSingle)
@@ -240,12 +269,17 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 	// it runs after the maximize button and the base drag/resize handler.
 	sw.installSidebarClamp()
 	sw.transcript = newTranscriptModel(history)
-	sw.transcript.add(&transcriptRecord{
-		kind:   kindSystem,
-		header: "[System] " + title + " ready. Type a message and press Enter (Shift+Enter for newline).",
-		color:  colorInfo,
-		role:   roleInfo,
-	})
+	// The Logs window (issue #562) shows diagnostic lines, not a conversation, so it
+	// skips the live window's "ready, type a message" banner. Every other kind keeps
+	// it (the live prompt hint, and the analysis window's header line).
+	if kind != winLogs {
+		sw.transcript.add(&transcriptRecord{
+			kind:   kindSystem,
+			header: "[System] " + title + " ready. Type a message and press Enter (Shift+Enter for newline).",
+			color:  colorInfo,
+			role:   roleInfo,
+		})
+	}
 	// Register the transcript-context keys (search/filter/fold/yank) as Focus-scope
 	// bindings on the desktop's BindingRegistry, scoped to this window's transcript
 	// (issue #269, phase 4a). The toolkit consults them at the focused-widget stage —

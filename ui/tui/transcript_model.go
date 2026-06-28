@@ -24,6 +24,7 @@ const (
 	kindTool // a tool call together with its result (and restored tool messages)
 	kindError
 	kindCompaction
+	kindLog // a diagnostic log line shown in the Logs window (issue #562)
 )
 
 // kindSet is a bitmask of eventKinds, used to track which event types are
@@ -49,6 +50,8 @@ func (k eventKind) label() string {
 		return "errors"
 	case kindCompaction:
 		return "compaction"
+	case kindLog:
+		return "logs"
 	}
 	return "?"
 }
@@ -70,6 +73,7 @@ const (
 	roleTool
 	roleResult
 	roleInfo
+	roleWarn
 	roleError
 )
 
@@ -91,6 +95,10 @@ func roleColor(role colorRole) tui.Color {
 		return colorResult
 	case roleInfo:
 		return colorInfo
+	case roleWarn:
+		// Warnings reuse the tool-call yellow; there is no dedicated warn colour in
+		// the palette and yellow reads as a caution level (issue #562).
+		return colorTool
 	case roleError:
 		return colorError
 	}
@@ -605,7 +613,7 @@ func (m *transcriptModel) matchCount() int {
 // hiddenNames lists the labels of the hidden kinds in a stable order.
 func (m *transcriptModel) hiddenNames() string {
 	var names []string
-	for k := kindSystem; k <= kindCompaction; k++ {
+	for k := kindSystem; k <= kindLog; k++ {
 		if m.hidden&k.bit() != 0 {
 			names = append(names, k.label())
 		}
