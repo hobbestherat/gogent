@@ -67,6 +67,32 @@ type ModelConfig struct {
 	// it on/off and, like ReasoningEffort, marks the model as a reasoning model.
 	Thinking *bool `json:"thinking,omitempty"`
 	Free     bool  `json:"free"`
+	// CacheTTL selects the Anthropic prompt-cache breakpoint lifetime. "" or "5m"
+	// (the default) use the 5-minute ephemeral cache; "1h" uses the 1-hour cache
+	// (a 2× write premium, worthwhile only across idle/resume gaps >5min — see
+	// issue #545); "off"/"none" disables client-side cache_control entirely. It is
+	// honored only by Anthropic and Claude-on-Vertex (api_type anthropic /
+	// vertex-anthropic); providers that cache automatically ignore it.
+	CacheTTL string `json:"cache_ttl,omitempty"`
+}
+
+// AnthropicCacheTTL returns the normalized prompt-cache directive resolved from
+// CacheTTL: "" (the default 5-minute ephemeral cache), "1h" (the 1-hour cache),
+// or "off" (disable client-side cache_control). Unknown/typo values fall back to
+// "" so a misconfiguration never silently disables caching or 400s the request —
+// the same conservative-default posture as ContextWindowOrDefault.
+func (m *ModelConfig) AnthropicCacheTTL() string {
+	if m == nil {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(m.CacheTTL)) {
+	case "1h":
+		return "1h"
+	case "off", "none", "disabled":
+		return "off"
+	default: // "", "5m", or anything unrecognized → default 5-minute ephemeral
+		return ""
+	}
 }
 
 // IsReasoningModel reports whether the config opts into any reasoning control

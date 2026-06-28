@@ -153,6 +153,43 @@ type anthropicThinking struct {
 // largely served from cache across turns (issue #404).
 type anthropicCacheControl struct {
 	Type string `json:"type"`
+	// Ttl selects the cache lifetime: omitted = the default 5-minute ephemeral
+	// cache; "1h" = the 1-hour cache (a 2× write premium). Anthropic accepts ttl
+	// only as "5m" or "1h"; gogent emits it solely for "1h" so the default request
+	// stays byte-identical to before the TTL knob existed (issue #545).
+	Ttl string `json:"ttl,omitempty"`
+}
+
+// Anthropic prompt-cache breakpoint policy (issue #545).
+const (
+	// anthropicCacheLookback is Anthropic's cache-read lookback window in content
+	// blocks: a breakpoint finds a prior cache write only when that write lies
+	// within this many blocks BEFORE the breakpoint. It is the constraint
+	// cacheBreakpointSpacing is sized against.
+	anthropicCacheLookback = 20
+	// cacheBreakpointSpacing is the minimum block-distance between successive
+	// transcript breakpoints. Held a margin under anthropicCacheLookback so the
+	// chain of breakpoints always keeps a recent cache write inside the next
+	// request's lookback window even on a turn that appended many content blocks (a
+	// turn with M parallel tool calls adds ~2M+1 blocks). Small turns whose whole
+	// stable prefix is shorter than this emit no extra breakpoint, preserving the
+	// prior single-transcript-breakpoint behavior byte-for-byte.
+	cacheBreakpointSpacing = anthropicCacheLookback - 4 // 16
+	// maxAnthropicBreakpoints is the hard API ceiling on cache_control breakpoints
+	// per request (system + transcript). Anthropic 400s on more than four.
+	maxAnthropicBreakpoints = 4
+)
+
+// anthropicCacheCtl builds a cache_control breakpoint for the given resolved TTL
+// directive ("" / "5m" → default 5-minute ephemeral; "1h" → 1-hour ephemeral).
+// The "off" case is handled by the caller (which omits the breakpoint entirely),
+// so it is treated as the default here defensively.
+func anthropicCacheCtl(ttl string) *anthropicCacheControl {
+	cc := &anthropicCacheControl{Type: "ephemeral"}
+	if ttl == "1h" {
+		cc.Ttl = "1h"
+	}
+	return cc
 }
 
 // anthropicSystemBlock is one system-prompt text block. Both the direct Anthropic
@@ -286,14 +323,18 @@ func (a anthropicAdapter) buildBody(req CompletionRequest, buf *bytes.Buffer) er
 	// consecutive same-role messages (Anthropic wants one turn per role, and
 	// requires tool results to ride in a user turn).
 	//
-	// cacheBreakMsg/cacheBreakBlock track the end of the cacheable prefix: the last
-	// content block of the last NON-volatile message. The trailing volatile message
-	// (live git status + todos, issue #404) carries fast-changing content that must
-	// sit AFTER the prompt-cache breakpoint, or it would invalidate the cached
-	// transcript every turn. When there is no volatile tail this is simply the last
-	// block of the last message (the prior behavior).
+	// boundaries records the end of each NON-volatile message — every candidate
+	// prompt-cache breakpoint position — together with the running count of
+	// stable-prefix content blocks up to and including it. The trailing volatile
+	// message (live git status + todos, issue #404) carries fast-changing content
+	// that must sit AFTER every breakpoint, or it would invalidate the cached
+	// transcript each turn, so it never contributes a boundary. The transcript
+	// breakpoints are then chosen from these positions so the cache-read lookback
+	// always finds a recent write (issue #545; see the placement loop below).
 	var systemParts []string
-	cacheBreakMsg, cacheBreakBlock := -1, -1
+	type cacheBoundary struct{ msg, block, prefixBlocks int }
+	var boundaries []cacheBoundary
+	prefixBlocks := 0
 	for _, m := range req.Messages {
 		if m.Role == RoleSystem {
 			if m.Content != "" {
@@ -324,38 +365,73 @@ func (a anthropicAdapter) buildBody(req CompletionRequest, buf *bytes.Buffer) er
 		} else {
 			out.Messages = append(out.Messages, anthropicMessage{Role: role, Content: blocks})
 		}
-		// Advance the cache breakpoint to the end of this message only when it is
-		// NOT the volatile tail. A volatile RoleUser message merges into the prior
-		// user turn (e.g. after a tool result), but the breakpoint stays pinned to
-		// the last block contributed by a non-volatile message — the genuine end of
-		// the cacheable prefix.
+		// Record the end of this message as a breakpoint candidate, with the running
+		// stable-prefix block count, but only when it is NOT the volatile tail. A
+		// volatile RoleUser message merges into the prior user turn (e.g. after a
+		// tool result), yet the cacheable prefix ends at the last block contributed
+		// by a non-volatile message — never on the volatile tail.
 		if !m.Volatile {
-			cacheBreakMsg = len(out.Messages) - 1
-			cacheBreakBlock = len(out.Messages[cacheBreakMsg].Content) - 1
+			prefixBlocks += len(blocks)
+			msg := len(out.Messages) - 1
+			boundaries = append(boundaries, cacheBoundary{
+				msg:          msg,
+				block:        len(out.Messages[msg].Content) - 1,
+				prefixBlocks: prefixBlocks,
+			})
 		}
 	}
 
-	// System prompt. It is sent as a text-block array carrying a cache_control
-	// breakpoint (prompt caching) on both the direct Anthropic API and Vertex —
+	// cacheOn gates all prompt-cache breakpoint emission. It is on by default so a
+	// directly-constructed request (and the prior callers) keep caching; only an
+	// explicit "off" directive — set by buildRequest when the model disables
+	// caching or the provider lacks the CacheControlBreakpoints capability — turns
+	// it off (issue #545).
+	cacheOn := req.CacheTTL != "off"
+
+	// System prompt. It is sent as a text-block array (carrying a cache_control
+	// breakpoint when caching is on) on both the direct Anthropic API and Vertex —
 	// Anthropic accepts cache_control only on a system content block, not on the
 	// scalar string form, and the direct Messages API accepts the block-array
 	// system shape the same as Vertex (issue #404). Assigning the field only when
 	// non-empty keeps an empty system omitted rather than marshaling "system":[].
+	systemHasBreakpoint := false
 	if system := strings.Join(systemParts, "\n\n"); system != "" {
-		out.System = []anthropicSystemBlock{{
-			Type:         "text",
-			Text:         system,
-			CacheControl: &anthropicCacheControl{Type: "ephemeral"},
-		}}
+		block := anthropicSystemBlock{Type: "text", Text: system}
+		if cacheOn {
+			block.CacheControl = anthropicCacheCtl(req.CacheTTL)
+			systemHasBreakpoint = true
+		}
+		out.System = []anthropicSystemBlock{block}
 	}
 
-	// Prompt-cache breakpoint at the end of the cacheable prefix: on a multi-turn
-	// agent loop this lets the whole prior transcript be served from cache on the
-	// next request. Placed on the last content block of the last NON-volatile
-	// message so it lands at the end of the stable prefix, never on the volatile
-	// tail (issue #404). Emitted for both the direct Anthropic API and Vertex.
-	if cacheBreakMsg >= 0 {
-		out.Messages[cacheBreakMsg].Content[cacheBreakBlock].CacheControl = &anthropicCacheControl{Type: "ephemeral"}
+	// Prompt-cache breakpoints across the stable prefix. On a multi-turn agent loop
+	// these let the prior transcript be served from cache on the next request.
+	// Walk the non-volatile message boundaries backward from the END of the
+	// cacheable prefix: always break there (preserving the prior single-breakpoint
+	// placement) and add an earlier breakpoint each time the block-distance since
+	// the last one reaches cacheBreakpointSpacing. Because the spacing is under
+	// Anthropic's ~20-block read lookback, a recent cache write stays inside the
+	// next request's lookback window even when one turn appended many content
+	// blocks (a turn with M parallel tool calls adds ~2M+1 blocks) — the gap that
+	// silently forced a full-prefix rewrite before (issue #545). The total never
+	// exceeds maxAnthropicBreakpoints including the system breakpoint, and the
+	// per-block CacheControl is shared (a single immutable value). Emitted for both
+	// the direct Anthropic API and Vertex; skipped entirely when caching is off.
+	if cacheOn && len(boundaries) > 0 {
+		budget := maxAnthropicBreakpoints
+		if systemHasBreakpoint {
+			budget-- // the system block already holds one of the four breakpoints
+		}
+		cc := anthropicCacheCtl(req.CacheTTL)
+		placed, lastCum := 0, 0
+		for i := len(boundaries) - 1; i >= 0 && placed < budget; i-- {
+			b := boundaries[i]
+			if placed == 0 || lastCum-b.prefixBlocks >= cacheBreakpointSpacing {
+				out.Messages[b.msg].Content[b.block].CacheControl = cc
+				lastCum = b.prefixBlocks
+				placed++
+			}
+		}
 	}
 
 	for _, t := range req.Tools {
