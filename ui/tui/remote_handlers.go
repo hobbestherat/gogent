@@ -272,6 +272,10 @@ func (rc *RemoteClient) StartGated(parent context.Context) (begin func(), err er
 			// arrives the instant the stream opens would otherwise hit a nil handler and
 			// be dropped (the poll would still backstop it, but this closes the window).
 			rc.client.SetApprovalSignalHandler(rc.kickApprovals)
+			// A presented prompt that timed out before the user answered surfaces a
+			// notice so a late click on the still-open dialog is not silently ignored
+			// (issue #569). Registered before openStream for the same reason.
+			rc.client.SetApprovalExpiredHandler(rc.noteApprovalExpired)
 		}
 		if rc.sink != nil {
 			events, oerr := rc.openStream()
@@ -659,6 +663,18 @@ func (rc *RemoteClient) scanApprovals(seen map[string]bool) {
 			delete(seen, id)
 		}
 	}
+}
+
+// noteApprovalExpired surfaces an in-window notice when a presented approval timed
+// out on the daemon before the user answered (issue #569). The agent already
+// received the safe default and the turn moved on, but the dialog may still be open
+// on the user's screen; without this the user could click "Allow" and have it
+// silently do nothing. The notice is cause-accurate — the daemon emits the expired
+// signal ONLY on a genuine timeout (not when another client answered) — so it can
+// state plainly that the prompt timed out and the safe default was applied. A nil
+// sink (narrow tests) is a no-op, mirroring emitNotice.
+func (rc *RemoteClient) noteApprovalExpired(d ApprovalExpiredDTO) {
+	rc.emitNotice(d.SessionID, "This approval prompt timed out before it was answered, so the tool used the safe default. If the dialog is still open, answering it now will have no effect.")
 }
 
 // kickApprovals forces an immediate /approvals re-fetch by the poller. Reconnect

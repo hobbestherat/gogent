@@ -249,7 +249,7 @@ func (b *approvalBridge) wait(id, sessionID string, def decision) decision {
 				connectedFor += delta
 				unattendedFor = 0
 				if b.connectedTimeout > 0 && connectedFor >= b.connectedTimeout {
-					return def
+					return b.expireDeny(id, sessionID, def)
 				}
 			} else {
 				// Either no client is connected, or a client is connected but has not
@@ -260,11 +260,28 @@ func (b *approvalBridge) wait(id, sessionID string, def decision) decision {
 				unattendedFor += delta
 				connectedFor = 0
 				if b.unattendedTimeout > 0 && unattendedFor >= b.unattendedTimeout {
-					return def
+					return b.expireDeny(id, sessionID, def)
 				}
 			}
 		}
 	}
+}
+
+// expireDeny is the timeout return path of wait: it applies the safe default but
+// first, for a PRESENTED (observed) prompt, broadcasts a best-effort "approval
+// expired" signal so connected clients can tell the user the prompt timed out
+// before it was answered — so a late click on a still-open dialog is not silently
+// ignored (issue #569). It fires only for an observed prompt: an un-presented one
+// showed no dialog, so there is nothing to retract. Unlike the late-decision
+// reconcile path (which cannot tell a timeout from another client answering), this
+// fires ONLY on a genuine timeout, so the surfaced notice is cause-accurate. The
+// broadcast reaches connected global subscribers only; with none connected it is a
+// no-op (and there is no human to inform anyway).
+func (b *approvalBridge) expireDeny(id, sessionID string, def decision) decision {
+	if b.hub != nil && b.isObserved(id) {
+		b.hub.broadcastApprovalExpired(id, sessionID)
+	}
+	return def
 }
 
 // pollInterval is how often wait() re-checks the connected-client count and the

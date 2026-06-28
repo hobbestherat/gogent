@@ -60,47 +60,42 @@ non-blocking) — correctness still rests on Layer A + the authoritative
 `/approvals` fetch; the push only removes the up-to-750 ms latency and the
 "poll endpoint flaky while stream is up" edge.
 
-> **Implementation note (Layer C — RESOLVED: dropped, final).** During
-> implementation a deliberate, tested #560 invariant was found —
-> `TestReportDecisionLateNonStickyIsSilent` asserts a *late one-shot* decision must
-> stay **silent** ("carries no future effect → must not surface"). Surfacing it
-> (original Layer C) breaks that test → a regression (criterion 3), and would also
-> break the partner's own #569 test `TestReportDecisionIssue569LateOneShotStaysSilent`
-> which independently locks in the silent behaviour. Both are *correct* tests of
-> intended behaviour, not "wrong" tests.
->
-> The decision is to **drop Layer C's behavioural change** (final, accepted after
-> review), on these grounds: (1) **Layer A already satisfies acceptance criterion 2**
-> — a prompt is never auto-denied before it is observed/presented, so the badge is
-> never silently lost (the actual #569 ask). (2) The only residual late-one-shot
-> case is *post-presentation*: the badge + dialog WERE shown, the user simply did
-> not answer within the 5-min connected-but-unresponsive window — exactly the
-> #358/#560-designed auto-deny, which #560 deliberately keeps silent. #569 neither
-> introduces nor worsens it. (3) The transcript already shows the tool was denied,
-> so the late click is not a *silent* loss of information.
->
-> `reportDecision` is therefore left byte-for-byte as #560 wrote it (late *sticky*
-> grants still notice cause-agnostically; late one-shots stay silent). The text
-> below documents the originally-designed Layer C for the historical record only;
-> it is **not** implemented.
+**Layer C — daemon→client: tell the user when a *presented* prompt timed out
+(never silently denied).** This honours the Goal's "when the decision genuinely
+cannot be delivered, the user must be told" for the residual post-presentation
+case, via a daemon push rather than a `reportDecision` change.
 
-**Layer C — client: never silently deny (usability).** Build on #560's
-`decide()`/`reportDecision` surface path: extend `reportDecision` so a `late`
-status on a **one-shot decision of either kind** (`allow`/`deny` *and*
-`approve`/`reject`) also emits a `[System]` notice, so if the user answers after
-the prompt has already closed they are told their decision had no effect rather
-than seeing nothing. **The copy must be agnostic about *why* the prompt closed.**
-`"late"` (`approvals_handlers.go:43`) is returned both when the connected-timeout
-fired *and* when another attached client already answered — and the daemon's
-`concludedApproval` recall record (`approvals.go:81-86`) stores neither the cause
-nor the winning decision, so the client genuinely cannot distinguish. Claiming
-"the tool used the safe default (deny)" would be the **opposite** of the truth in
-the two-client race (client X answers allow → tool runs allow; client Y clicks
-allow later → `"late"`). The notice therefore mirrors the existing `always*`
-phrasing already in this function (`remote_handlers.go` `reportDecision`, the
-comment that explicitly forbids the safe-default claim): state only what is
-certain — *the prompt had already closed (it was answered elsewhere or timed
-out), so this decision had no effect.*
+> **Design evolution (Layer C).** The *originally* designed Layer C added the
+> notice inside `reportDecision` on a `late` one-shot. That was found to break a
+> deliberate, tested #560 invariant — `TestReportDecisionLateNonStickyIsSilent`
+> (plus the partner's `TestReportDecisionIssue569LateOneShotStaysSilent`) assert a
+> late one-shot stays **silent**, because `"late"` cannot tell a timeout from
+> "another client answered first" (the recall record stores neither cause nor
+> winner), so a notice there would mis-state the two-client race. Rather than
+> reverse a correct #560 test, Layer C was **re-seated on the daemon side**, where
+> the cause *is* known.
+
+**Mechanism (implemented):** when `approvalBridge.wait()` returns the safe default
+because an auto-deny bound fired (`expireDeny`), and the prompt had been
+**observed** (a client fetched it via `GET /approvals`, i.e. it was surfaced), the
+daemon broadcasts a best-effort `approval_expired` SSE signal carrying the
+approval id + session id (`hub.broadcastApprovalExpired`, global subscribers only,
+drop-on-full, not ring-buffered). The attached client routes it
+(`APIClient.SetApprovalExpiredHandler` → `RemoteClient.noteApprovalExpired`) to an
+in-window `[System]` notice: *"This approval prompt timed out before it was
+answered, so the tool used the safe default. If the dialog is still open, answering
+it now will have no effect."* Because the signal fires **only on a genuine
+timeout** (the decision-delivered path returns via `<-ap.decided` and never
+broadcasts), the notice is **cause-accurate** — the very ambiguity that blocked the
+`reportDecision` approach is absent here. It is gated on `observed` so an
+un-presented prompt (no dialog shown) raises no spurious notice.
+
+This keeps `reportDecision` **byte-for-byte as #560 wrote it** (the silent-late
+tests stay green), touches neither embedded mode nor the `Approver` interface, and
+adds no forced dialog-dismissal (the dialog lingers exactly as before — the notice
+is purely additive). It is the lighter, lower-risk half of the design's own
+Open-Questions item ("show the notice the instant the daemon auto-denies"); the
+heavier half (actively tearing down the open modal) remains deferred.
 
 Layer A satisfies acceptance criteria 1–3 on its own; B and C complete criteria
 2 (explicit notice alternative), 3 (no poll dependence) and 5 (SSE path test).

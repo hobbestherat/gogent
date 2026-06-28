@@ -45,12 +45,14 @@ type APIClient struct {
 	base  string // request base, e.g. "http://unix" or "http://host:port"
 	token string // optional bearer token (TCP auth); empty for the local socket
 
-	// notifyMu guards onNotification and onApprovalSignal, the callbacks for
-	// "notification" (issue #358 §9) and "approval" (issue #569) SSE frames on the
-	// global stream. They are the client's only mutable state.
-	notifyMu         sync.Mutex
-	onNotification   func(NotificationDTO)
-	onApprovalSignal func()
+	// notifyMu guards onNotification, onApprovalSignal and onApprovalExpired — the
+	// callbacks for "notification" (issue #358 §9), "approval" and "approval_expired"
+	// (issue #569) SSE frames on the global stream. They are the client's only
+	// mutable state.
+	notifyMu          sync.Mutex
+	onNotification    func(NotificationDTO)
+	onApprovalSignal  func()
+	onApprovalExpired func(ApprovalExpiredDTO)
 }
 
 // SetNotificationHandler installs the callback invoked for each "notification"
@@ -91,6 +93,26 @@ func (c *APIClient) approvalSignalHandler() func() {
 	c.notifyMu.Lock()
 	defer c.notifyMu.Unlock()
 	return c.onApprovalSignal
+}
+
+// SetApprovalExpiredHandler installs the callback invoked for each
+// "approval_expired" SSE frame on the global stream (issue #569). The attached TUI
+// points it at the RemoteClient so a presented prompt that timed out before the
+// user answered surfaces an in-window notice (the user is told their late answer no
+// longer applies) instead of being silently denied. A nil handler drops the frame.
+// Safe to call from any goroutine and at any time.
+func (c *APIClient) SetApprovalExpiredHandler(h func(ApprovalExpiredDTO)) {
+	c.notifyMu.Lock()
+	c.onApprovalExpired = h
+	c.notifyMu.Unlock()
+}
+
+// approvalExpiredHandler returns the currently-installed approval-expired callback
+// (nil if none), read under the lock so it never races SetApprovalExpiredHandler.
+func (c *APIClient) approvalExpiredHandler() func(ApprovalExpiredDTO) {
+	c.notifyMu.Lock()
+	defer c.notifyMu.Unlock()
+	return c.onApprovalExpired
 }
 
 // quickTimeout bounds the short request/response calls (create, stop, settings,
@@ -339,6 +361,19 @@ const notificationEventName = "notification"
 // pending" nudge on the global stream (issue #569). Its body is an approval id the
 // client ignores — the frame just triggers an immediate /approvals re-scan.
 const approvalEventName = "approval"
+
+// approvalExpiredEventName is the SSE event: name the server uses for a "presented
+// approval timed out" signal on the global stream (issue #569). Its body is an
+// ApprovalExpiredDTO; the client surfaces a timeout notice in the named session.
+const approvalExpiredEventName = "approval_expired"
+
+// ApprovalExpiredDTO mirrors the server's approvalExpiredView: a presented approval
+// that reached its auto-deny timeout before being answered (issue #569). The
+// attached TUI uses SessionID to surface the timeout notice in the right window.
+type ApprovalExpiredDTO struct {
+	ID        string `json:"id"`
+	SessionID string `json:"session_id"`
+}
 
 // LogRecordDTO mirrors the server's streamed diagnostic-log record (issue #562):
 // the daemon's gogent.log lines surfaced over GET /api/logs/stream so the Logs
@@ -947,6 +982,18 @@ func (c *APIClient) StreamEvents(ctx context.Context) (<-chan GlobalEventDTO, er
 				// — GET /approvals is authoritative and the poller dedups by id.
 				if h := c.approvalSignalHandler(); h != nil {
 					h()
+				}
+				continue
+			}
+			if ev.name == approvalExpiredEventName {
+				// A presented approval timed out before it was answered (issue #569):
+				// hand it to the expired handler so the TUI tells the user their late
+				// answer no longer applies, rather than the deny going unmentioned.
+				if h := c.approvalExpiredHandler(); h != nil {
+					var d ApprovalExpiredDTO
+					if err := json.Unmarshal([]byte(ev.data), &d); err == nil {
+						h(d)
+					}
 				}
 				continue
 			}
