@@ -20,22 +20,31 @@ import (
 // for the endpoint it talks to. They are blank in the aggregate "All models" view,
 // where a cluster-wide total has no single backend to name (issue #534).
 type overallStats struct {
-	Sessions    int    // open sessions (sidebar nodes)
-	SubAgents   int    // sub-agents tracked across all sessions (sidebar nodes)
-	TokensIn    int    // primary-model input tokens, summed across sessions
-	TokensOut   int    // primary-model output tokens, summed across sessions
-	Requests    int    // primary-model backend requests
-	Errors      int    // primary-model backend errors
-	CacheHitPct int    // prompt-cache hit share of input tokens, whole-number %
-	Model       string // selected model's display name; "" in the aggregate "All models" view (issue #534)
-	APIEndpoint string // selected model's endpoint host or provider label; "" in the aggregate view (issue #534)
+	Sessions    int // open sessions (sidebar nodes)
+	SubAgents   int // sub-agents tracked across all sessions (sidebar nodes)
+	TokensIn    int // primary-model input tokens, summed across sessions
+	TokensOut   int // primary-model output tokens, summed across sessions
+	Requests    int // primary-model backend requests
+	Errors      int // primary-model backend errors
+	CacheHitPct int // prompt-cache READ (hit) share of input tokens, whole-number % (issue #53)
+	// Cache write breakdown (issue #546): the cache-write share and the raw read /
+	// write token magnitudes, so the panel shows cache effectiveness AND the write
+	// premium, not just a single hit percentage. CacheWritePct is 0 for providers
+	// that never report writes (OpenAI/DeepSeek/Gemini/Z.AI/OpenRouter), so the
+	// "cache wr" row degrades cleanly to "0% 0".
+	CacheWritePct    int    // prompt-cache WRITE share of input tokens, whole-number %
+	CacheReadTokens  int    // input tokens served from cache (the "(12.4k)" read magnitude)
+	CacheWriteTokens int    // input tokens written to cache at the write premium
+	Model            string // selected model's display name; "" in the aggregate "All models" view (issue #534)
+	APIEndpoint      string // selected model's endpoint host or provider label; "" in the aggregate view (issue #534)
 }
 
 // overallMetricLines is the number of metric rows formatOverallStats emits
 // beneath the "Overall" title. overallBandHeight derives from it, and a test pins
 // the two together so a formatter change cannot silently desync the reserved
-// band height.
-const overallMetricLines = 9
+// band height. The cache read/write breakdown (issue #546) renders as two rows
+// ("cache rd" + "cache wr"), one more than the single pre-#546 "cache hit" row.
+const overallMetricLines = 10
 
 // overallSeparatorLines is the height of the thin horizontal rule drawn at the very
 // top of the Overall band (issue #233): one row, above the model selector, that
@@ -445,13 +454,16 @@ func buildOverallStats(report stats.Report, sessions, subAgents int, model *conf
 	// intentionally left out of this at-a-glance total.
 	prim := report.Totals.Primary
 	o := overallStats{
-		Sessions:    sessions,
-		SubAgents:   subAgents,
-		TokensIn:    prim.TokensIn,
-		TokensOut:   prim.TokensOut,
-		Requests:    prim.Requests,
-		Errors:      prim.Errors,
-		CacheHitPct: prim.CacheHitPercent(),
+		Sessions:         sessions,
+		SubAgents:        subAgents,
+		TokensIn:         prim.TokensIn,
+		TokensOut:        prim.TokensOut,
+		Requests:         prim.Requests,
+		Errors:           prim.Errors,
+		CacheHitPct:      prim.CacheHitPercent(),
+		CacheWritePct:    prim.CacheWritePercent(),
+		CacheReadTokens:  prim.CachedTokensIn,
+		CacheWriteTokens: prim.CacheWriteTokensIn,
 	}
 	if selectedModel != "" {
 		// Scope every metric to the selected model. A model with no recorded usage
@@ -464,6 +476,9 @@ func buildOverallStats(report stats.Report, sessions, subAgents int, model *conf
 		o.Requests = ms.Connector.Requests
 		o.Errors = ms.Connector.Errors
 		o.CacheHitPct = ms.Connector.CacheHitPercent()
+		o.CacheWritePct = ms.Connector.CacheWritePercent()
+		o.CacheReadTokens = ms.Connector.CachedTokensIn
+		o.CacheWriteTokens = ms.Connector.CacheWriteTokensIn
 	}
 	if selectedModel != "" && model != nil {
 		// Identify the backend only when a specific model is scoped. In the
@@ -517,7 +532,17 @@ func formatOverallStats(s overallStats) []string {
 		kv("tokens out", formatTokens(s.TokensOut)),
 		kv("requests", strconv.Itoa(s.Requests)),
 		kv("errors", strconv.Itoa(s.Errors)),
-		kv("cache hit", strconv.Itoa(s.CacheHitPct)+"%"),
+		// Cache read/write breakdown (issue #546): two narrow rows in place of the
+		// single pre-#546 "cache hit %". "cache rd" is the discounted reuse share
+		// with the read-token magnitude; "cache wr" is the write-premium share with
+		// the write-token magnitude. Both fit the 24-col minimum sidebar (label
+		// padded to overallLabelWidth=10 + a value <=9 cols, clipped at contentW=21).
+		// For providers that never write the cache, CacheWritePct/CacheWriteTokens
+		// are 0 and the row renders cleanly as "cache wr   0% 0". "rd"/"wr" are the
+		// standard read/write abbreviations; the spelled-out words overflow the label
+		// column at the minimum width.
+		kv("cache rd", strconv.Itoa(s.CacheHitPct)+"% "+formatTokens(s.CacheReadTokens)),
+		kv("cache wr", strconv.Itoa(s.CacheWritePct)+"% "+formatTokens(s.CacheWriteTokens)),
 		// The model/api values render verbatim, blank included: the aggregate "All
 		// models" view (and the first frame before any model is known) leaves them
 		// empty (issue #534), which prints the padded label and an empty value

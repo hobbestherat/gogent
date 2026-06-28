@@ -298,8 +298,11 @@ func TestIssue534_ErrorHighlightIndexUnchanged(t *testing.T) {
 }
 
 // TestIssue534_SpecificRenderIsByteIdenticalToPreFix guards the "specific model
-// unchanged" requirement with an exact full-output comparison: a populated
-// overallStats renders the same nine lines the band produced before #534.
+// unchanged" requirement with an exact full-output comparison. The #534 layout
+// (specific-model rows populated, aggregate-only rows blank) is unchanged; #546
+// expanded the single "cache hit" row into the two-row cache read/write breakdown,
+// so the panel now emits ten lines (this input records no cache write, so the write
+// row degrades to "cache wr   0% 0").
 func TestIssue534_SpecificRenderIsByteIdenticalToPreFix(t *testing.T) {
 	got := formatOverallStats(overallStats{
 		Sessions: 3, SubAgents: 5, TokensIn: 1234, TokensOut: 567,
@@ -313,7 +316,8 @@ func TestIssue534_SpecificRenderIsByteIdenticalToPreFix(t *testing.T) {
 		"tokens out 567",
 		"requests   42",
 		"errors     0",
-		"cache hit  25%",
+		"cache rd   25% 0",
+		"cache wr   0% 0",
 		"model      Groq",
 		"api        api.groq.com",
 	}

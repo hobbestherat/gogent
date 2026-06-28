@@ -195,6 +195,12 @@ func writeConnector(b *strings.Builder, c stats.ConnectorStat) {
 	fmt.Fprintf(b, "  %s %s %s\n",
 		padName("Cached in:", 14), padName(formatTokens(c.CachedTokensIn), 10),
 		padName(fmt.Sprintf("Cache hit: %d%%", c.CacheHitPercent()), 20))
+	// Cache-write row (issue #546): the write-token count and its share of input
+	// tokens, the companion to the read figures above. 0 for providers that never
+	// report a cache write, so this renders cleanly as "Cache wr: 0 ... 0%".
+	fmt.Fprintf(b, "  %s %s %s\n",
+		padName("Cache wr:", 14), padName(formatTokens(c.CacheWriteTokensIn), 10),
+		padName(fmt.Sprintf("Cache wr %%: %d%%", c.CacheWritePercent()), 20))
 	fmt.Fprintf(b, "  Errors: timeouts=%d overflows=%d refusals=%d generic=%d\n",
 		c.Timeouts, c.ContextOverflows, c.Refusals, c.GenericErrors)
 }
