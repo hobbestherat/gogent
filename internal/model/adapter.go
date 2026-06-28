@@ -1223,11 +1223,17 @@ func geminiToolConfigFor(tc ToolChoice) *geminiToolConfig {
 	return &geminiToolConfig{FunctionCallingConfig: cfg}
 }
 
-// geminiSchema normalizes a JSON-Schema document for Gemini by deep-copying it
-// (via a JSON round-trip, so it accepts a map, a struct or a json.RawMessage) and
-// upper-casing every "type" enum value (string→STRING, object→OBJECT, …), which
-// is Gemini's canonical Schema form. Returns nil for nil input and falls back to
-// the original value if it is not JSON-encodable.
+// geminiSchema normalizes a JSON-Schema document into the OpenAPI subset Gemini's
+// Schema proto accepts, by deep-copying it (via a JSON round-trip, so it accepts a
+// map, a struct or a json.RawMessage — and the caller's shared Parameters map is
+// never mutated) and running sanitizeGeminiSchema over the copy. That recursively:
+// strips every keyword Gemini rejects (additionalProperties, $ref/$defs, oneOf/
+// allOf/not, const, patternProperties, multipleOf, …); collapses union "type"
+// arrays to a single UPPERCASE scalar (+ nullable for a dropped "null"); infers a
+// "type" on any typeless node (Gemini requires one); converts const→enum,
+// oneOf→anyOf, allOf→merge; and prunes "required" to declared properties. Returns
+// nil for nil input and falls back to the original value if it is not
+// JSON-encodable.
 func geminiSchema(v interface{}) interface{} {
 	if v == nil {
 		return nil
@@ -1240,79 +1246,215 @@ func geminiSchema(v interface{}) interface{} {
 	if err := json.Unmarshal(b, &generic); err != nil {
 		return v
 	}
-	return uppercaseSchemaTypes(generic)
+	return sanitizeGeminiSchema(generic)
 }
 
-// uppercaseSchemaTypes walks a decoded JSON-Schema value and normalizes every
-// "type" field into Gemini's canonical Schema form, recursing through objects and
-// arrays so the rule applies at any depth (nested properties, items, …):
+// geminiSchemaAllowed is the set of JSON-Schema keywords Gemini's Schema proto (an
+// OpenAPI 3.0 subset) actually accepts on a node. Any key NOT in this set is an
+// unknown proto field and makes Vertex reject the whole request with HTTP 400
+// ("Invalid JSON payload received. Unknown name …"), so the sanitizer strips it.
+// This is the single source of truth for the allow-list; everything else is
+// dropped (additionalProperties, $ref/$defs, oneOf/allOf/not, const,
+// patternProperties, multipleOf, exclusiveMinimum/Maximum, …).
+var geminiSchemaAllowed = map[string]bool{
+	"type": true, "format": true, "title": true, "description": true,
+	"nullable": true, "enum": true, "items": true, "properties": true,
+	"required": true, "propertyOrdering": true,
+	"minItems": true, "maxItems": true,
+	"minProperties": true, "maxProperties": true,
+	"minLength": true, "maxLength": true, "pattern": true,
+	"minimum": true, "maximum": true,
+	"anyOf": true, "default": true, "example": true,
+}
+
+// sanitizeGeminiSchema deep-rewrites a decoded JSON-Schema value into a document
+// Gemini's Schema proto accepts, recursing through "properties", "items" and
+// "anyOf" so the rules apply at every depth. The decoded input is owned by this
+// call (geminiSchema round-trips through JSON first), so in-place mutation is safe
+// and the caller's shared Parameters map is never touched. Per node it:
 //
-//   - A plain string "type" is upper-cased (string→STRING, object→OBJECT, …).
-//   - A nullable-union "type" array (e.g. {"type":["string","null"]}) is COLLAPSED
-//     to the single surviving scalar (upper-cased) and the node's nullability is
-//     expressed the Gemini way by setting "nullable": true. Gemini's Schema.type
-//     proto field is a SCALAR enum, so a repeated/array value is rejected with an
-//     HTTP 400 ("Proto field is not repeating, cannot start list"); this is the
-//     fix for issue #573. An "enum" sibling is left untouched (a STRING enum is
-//     valid).
-//   - A genuine multi-non-null union (e.g. {"type":["object","string"]}, as the
-//     spawn_subagent items schema advertises) is COLLAPSED to its first member
-//     (after dropping any "null") as the scalar type, upper-cased, with "nullable"
-//     set when a "null" member was present. Gemini cannot express a union type, so
-//     leaving the array would 400 just like the nullable case; the first member is
-//     the most-permissive representable shape (the tools that emit such a union
-//     accept either form at runtime, so narrowing the advertised type is safe).
-//   - A degenerate ["null"]-only "type" is left as the trimmed array (no scalar to
-//     collapse to).
-//
-// Mirrors #567's Anthropic normalizer (dropNullFromType, reused as-is) but emits
-// the Gemini proto form (scalar type + nullable flag) rather than just dropping
-// the null member.
-func uppercaseSchemaTypes(v interface{}) interface{} {
+//   - Converts combinators Gemini lacks: "const" X → enum [X]; "oneOf" → "anyOf";
+//     "allOf" → a shallow merge of its subschemas (best-effort). "not" is dropped.
+//   - Strips every key not in geminiSchemaAllowed (additionalProperties, $ref,
+//     $defs, definitions, patternProperties, multipleOf, exclusive*, …) — each
+//     would otherwise 400 as an unknown proto field.
+//   - Normalizes "type": collapses a union array to a single scalar (dropping
+//     "null" and setting "nullable":true when present, #573), and upper-cases the
+//     surviving scalar to Gemini's enum form (string→STRING, object→OBJECT, …). A
+//     degenerate ["null"]-only type is removed (no representable scalar).
+//   - INFERS a "type" when none is declared (properties→OBJECT, items→ARRAY,
+//     enum→STRING, anyOf→leave typeless, else STRING). Gemini requires a type on
+//     every node ("schema didn't specify the schema type field"); gogent tools
+//     such as todo deliberately omit it on a property to let other providers
+//     accept array-or-null (#263), so inferring keeps both paths working.
+//   - Prunes "required" to names that actually exist in "properties" (a stray
+//     required entry is rejected).
+func sanitizeGeminiSchema(v interface{}) interface{} {
 	switch t := v.(type) {
 	case map[string]interface{}:
-		for k, val := range t {
-			if k == "type" {
-				if s, ok := val.(string); ok {
-					t[k] = strings.ToUpper(s)
-					continue
-				}
-				if union, ok := val.([]interface{}); ok {
-					// Drop any "null" member; "nullable" captures it the Gemini way.
-					// dropNullFromType is shared with the Anthropic caller and must
-					// not change signature, so reduce the remaining members here.
-					rewritten, droppedNull := dropNullFromType(union)
-					scalar, ok := geminiScalarType(rewritten)
-					if !ok {
-						// No non-null member survives (degenerate ["null"]-only): leave
-						// the array value untouched — there is no scalar to collapse to
-						// and the member must NOT be upper-cased ("null" is the JSON
-						// null type, not a Gemini type name).
-						t[k] = union
-						continue
-					}
-					// One non-null member (nullable-union, #573) OR several non-null
-					// members (genuine union, e.g. ["object","string"]): collapse to
-					// a single scalar Gemini accepts. Either path eliminates the
-					// array "type" that Vertex rejects with HTTP 400.
-					t[k] = strings.ToUpper(scalar)
-					if droppedNull {
-						t["nullable"] = true
-					}
-					continue
-				}
+		canonicalizeGeminiCombinators(t)
+		// Strip unknown keys first so they neither reach the wire nor confuse the
+		// type-inference/required-pruning that follows.
+		for k := range t {
+			if !geminiSchemaAllowed[k] {
+				delete(t, k)
 			}
-			t[k] = uppercaseSchemaTypes(val)
 		}
+		normalizeGeminiType(t)
+		// Recurse into the structural children that hold nested schemas.
+		if props, ok := t["properties"].(map[string]interface{}); ok {
+			for name, sub := range props {
+				props[name] = sanitizeGeminiSchema(sub)
+			}
+		}
+		if items, ok := t["items"]; ok {
+			t["items"] = sanitizeGeminiSchema(items)
+		}
+		if anyOf, ok := t["anyOf"].([]interface{}); ok {
+			for i := range anyOf {
+				anyOf[i] = sanitizeGeminiSchema(anyOf[i])
+			}
+		}
+		pruneGeminiRequired(t)
 		return t
 	case []interface{}:
+		// A bare array (e.g. a tuple "items") — sanitize each element defensively.
 		for i := range t {
-			t[i] = uppercaseSchemaTypes(t[i])
+			t[i] = sanitizeGeminiSchema(t[i])
 		}
 		return t
 	default:
 		return v
 	}
+}
+
+// canonicalizeGeminiCombinators rewrites the JSON-Schema constructs Gemini does
+// not support into ones it does, in place: "const" X becomes an enum of one
+// ([X]); "oneOf" becomes "anyOf" (the only combinator Gemini accepts), unless an
+// "anyOf" already exists, in which case oneOf is dropped; "allOf" is shallow-
+// merged into the node (later subschemas win on key collisions) so its
+// constraints survive without the unsupported keyword; "not" is dropped (no
+// equivalent). Called before the allow-list strip so the products (enum/anyOf)
+// survive and the originals (const/oneOf/allOf/not) are then removed.
+func canonicalizeGeminiCombinators(node map[string]interface{}) {
+	if c, ok := node["const"]; ok {
+		if _, hasEnum := node["enum"]; !hasEnum {
+			node["enum"] = []interface{}{c}
+		}
+	}
+	if oneOf, ok := node["oneOf"].([]interface{}); ok {
+		if _, hasAnyOf := node["anyOf"]; !hasAnyOf {
+			node["anyOf"] = oneOf
+		}
+	}
+	if allOf, ok := node["allOf"].([]interface{}); ok {
+		for _, sub := range allOf {
+			if m, ok := sub.(map[string]interface{}); ok {
+				for k, val := range m {
+					if _, exists := node[k]; !exists || k == "properties" {
+						mergeGeminiAllOfKey(node, k, val)
+					}
+				}
+			}
+		}
+	}
+}
+
+// mergeGeminiAllOfKey folds one key/value from an allOf subschema into the parent
+// node. "properties" and "required" accumulate (union); any other key is set only
+// when the parent lacks it (the caller already guards non-properties keys).
+func mergeGeminiAllOfKey(node map[string]interface{}, k string, val interface{}) {
+	switch k {
+	case "properties":
+		dst, _ := node["properties"].(map[string]interface{})
+		if dst == nil {
+			dst = map[string]interface{}{}
+			node["properties"] = dst
+		}
+		if src, ok := val.(map[string]interface{}); ok {
+			for name, sub := range src {
+				dst[name] = sub
+			}
+		}
+	case "required":
+		existing, _ := node["required"].([]interface{})
+		if add, ok := val.([]interface{}); ok {
+			node["required"] = append(existing, add...)
+		}
+	default:
+		node[k] = val
+	}
+}
+
+// normalizeGeminiType collapses a node's "type" to the single scalar Gemini's
+// proto enum requires and upper-cases it, then infers a type when none is present.
+// A union array is reduced via dropNullFromType (shared with the Anthropic caller,
+// #567): "null" is dropped and "nullable":true set; the first surviving non-null
+// member becomes the scalar. A ["null"]-only type is removed outright. When no
+// "type" exists it is inferred from sibling keywords so every node carries one.
+func normalizeGeminiType(node map[string]interface{}) {
+	switch tv := node["type"].(type) {
+	case string:
+		if up := strings.ToUpper(tv); up != "NULL" {
+			node["type"] = up
+		} else {
+			delete(node, "type")
+		}
+	case []interface{}:
+		rewritten, droppedNull := dropNullFromType(tv)
+		if scalar, ok := geminiScalarType(rewritten); ok {
+			node["type"] = strings.ToUpper(scalar)
+			if droppedNull {
+				node["nullable"] = true
+			}
+		} else {
+			// Degenerate ["null"]-only: no representable scalar — drop the type so
+			// it can be re-inferred below (and never reaches the wire as an array).
+			delete(node, "type")
+		}
+	}
+	if _, has := node["type"]; has {
+		return
+	}
+	// Infer a missing type from structural siblings (most specific first).
+	switch {
+	case hasGeminiKey(node, "properties", "minProperties", "maxProperties"):
+		node["type"] = "OBJECT"
+	case hasGeminiKey(node, "items", "minItems", "maxItems"):
+		node["type"] = "ARRAY"
+	case hasGeminiKey(node, "enum"):
+		node["type"] = "STRING"
+	case hasGeminiKey(node, "anyOf"):
+		// A union node carries its type in each branch; leave the parent typeless.
+	default:
+		node["type"] = "STRING"
+	}
+}
+
+// pruneGeminiRequired drops any "required" entry that does not name a declared
+// property, which Vertex rejects, and removes an empty/!array required.
+func pruneGeminiRequired(node map[string]interface{}) {
+	req, ok := node["required"].([]interface{})
+	if !ok {
+		if _, present := node["required"]; present {
+			delete(node, "required")
+		}
+		return
+	}
+	props, _ := node["properties"].(map[string]interface{})
+	kept := req[:0]
+	for _, r := range req {
+		if name, ok := r.(string); ok {
+			if _, exists := props[name]; exists {
+				kept = append(kept, name)
+			}
+		}
+	}
+	if len(kept) == 0 {
+		delete(node, "required")
+		return
+	}
+	node["required"] = kept
 }
 
 // geminiScalarType reduces the non-null remainder of a "type" union to the single
@@ -1337,6 +1479,16 @@ func geminiScalarType(rewritten interface{}) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// hasGeminiKey reports whether node contains any of the given keys.
+func hasGeminiKey(node map[string]interface{}, keys ...string) bool {
+	for _, k := range keys {
+		if _, ok := node[k]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // anthropicSchema normalizes a JSON-Schema document for Anthropic strict tool

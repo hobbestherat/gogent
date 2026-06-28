@@ -137,8 +137,13 @@ func TestIssue359StrictToolWireFormatGeminiDropsUnsupportedStrictField(t *testin
 	tools := got["tools"].([]interface{})
 	decls := tools[0].(map[string]interface{})["functionDeclarations"].([]interface{})
 	params := decls[0].(map[string]interface{})["parameters"].(map[string]interface{})
-	if got := params["additionalProperties"]; got != false {
-		t.Fatalf("Gemini parameters.additionalProperties = %v, want false", got)
+	// additionalProperties is NOT a field on Gemini's Schema proto — sending it
+	// 400s as an unknown name ("Invalid JSON payload received. Unknown name
+	// \"additionalProperties\""). The Gemini schema sanitizer strips it, so the
+	// wire must NOT carry it (unlike the OpenAI/Anthropic strict paths, which
+	// require it). This corrects the prior assertion, which leaked the field.
+	if _, ok := params["additionalProperties"]; ok {
+		t.Fatalf("Gemini parameters leaked additionalProperties (Vertex 400s on it): %v", params["additionalProperties"])
 	}
 	// Vertex AI's functionCallingConfig has no parallelFunctionCalls field (it 400s
 	// on it), so a strict tool set's parallel-disable override is simply not
