@@ -52,6 +52,17 @@ type ToolCall struct {
 	// round-trip deterministically rather than re-sniffing the bytes (issue #390).
 	// Kept off the wire (json:"-"): it is an internal assembly signal.
 	Truncated bool `json:"-"`
+	// ThoughtSignature carries the opaque, base64 thoughtSignature that Vertex
+	// attaches to a Gemini 3.x functionCall part. Gemini REQUIRES the signature to
+	// be echoed back on every functionCall replayed in conversation history, else
+	// the next turn fails with HTTP 400 ("Function call is missing a
+	// thought_signature in functionCall parts"). It is captured when parsing a
+	// Gemini response (geminiToolCall) and re-emitted when building the next
+	// request's history (geminiParts). Kept off the wire (json:"-"), exactly like
+	// Message.ThinkingSignature: it never reaches the OpenAI/Z.AI/OpenRouter
+	// tool_calls wire (where a stray field can be rejected) nor the persisted
+	// transcript. Empty for every non-Gemini provider and turn (issue #573).
+	ThoughtSignature string `json:"-"`
 }
 
 // argsTruncated reports whether an assembled tool-call Arguments string looks
