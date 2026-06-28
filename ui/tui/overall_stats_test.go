@@ -26,8 +26,10 @@ func TestBuildOverallStats(t *testing.T) {
 	// rows empty even though a focused-session model config is threaded through.
 	got := buildOverallStats(report, 3, 5,
 		&config.ModelConfig{Name: "groq-free", DisplayName: "Groq", Endpoint: "https://api.groq.com/openai/v1/chat/completions"}, "")
+	// CacheReadTokens mirrors prim.CachedTokensIn (250 here); the write fields are 0
+	// because this report records no cache writes (#546 aggregate populate path).
 	want := overallStats{Sessions: 3, SubAgents: 5, TokensIn: 1000, TokensOut: 500,
-		Requests: 42, Errors: 3, CacheHitPct: 25, Model: "", APIEndpoint: ""}
+		Requests: 42, Errors: 3, CacheHitPct: 25, CacheReadTokens: 250, Model: "", APIEndpoint: ""}
 	if got != want {
 		t.Fatalf("buildOverallStats = %+v, want %+v", got, want)
 	}
@@ -89,7 +91,7 @@ func TestBuildOverallStatsModel(t *testing.T) {
 func TestFormatOverallStats(t *testing.T) {
 	got := formatOverallStats(overallStats{
 		Sessions: 3, SubAgents: 5, TokensIn: 1234, TokensOut: 567,
-		Requests: 42, Errors: 0, CacheHitPct: 25,
+		Requests: 42, Errors: 0, CacheHitPct: 25, CacheReadTokens: 1234,
 		Model: "Groq", APIEndpoint: "api.groq.com",
 	})
 	want := []string{
@@ -99,7 +101,8 @@ func TestFormatOverallStats(t *testing.T) {
 		"tokens out 567",
 		"requests   42",
 		"errors     0",
-		"cache hit  25%",
+		"cache rd   25% 1.2k",
+		"cache wr   0% 0",
 		"model      Groq",
 		"api        api.groq.com",
 	}
@@ -271,7 +274,7 @@ func TestSidebarTodosRegionReservation(t *testing.T) {
 		wantTreeH int
 	}{
 		{"tall keeps band and todos", 30, overallBandHeight, todosH, 30 - 1 - overallBandHeight - todosH},
-		{"just enough for both regions + min tree", 21, overallBandHeight, todosH, minSidebarTreeHeight},
+		{"just enough for both regions + min tree", 22, overallBandHeight, todosH, minSidebarTreeHeight},
 		{"one short drops todos, keeps band", 20, overallBandHeight, 0, 20 - 1 - overallBandHeight},
 		{"very short drops both regions", 8, 0, 0, 8 - 1},
 	} {
@@ -356,9 +359,9 @@ func TestSidebarRegionDropMonotonic(t *testing.T) {
 		wantTodos int
 		note      string
 	}{
-		{21, overallBandHeight, todoRegionTitleLines + 3, "both regions shown"},
+		{22, overallBandHeight, todoRegionTitleLines + 3, "both regions shown"},
 		{20, overallBandHeight, 0, "todos dropped, band kept"},
-		{17, overallBandHeight, 0, "todos dropped, band still kept at the edge"},
+		{18, overallBandHeight, 0, "todos dropped, band still kept at the edge"},
 		{16, 0, 0, "both dropped once the band no longer fits"},
 		{12, 0, 0, "both dropped (no todos-without-band inversion)"},
 		{8, 0, 0, "both dropped on a short sidebar"},

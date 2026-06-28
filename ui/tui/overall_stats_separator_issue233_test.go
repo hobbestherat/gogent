@@ -104,21 +104,21 @@ func issue233RedrawFail(t *testing.T, w *Workbench) {
 // ----------------------------------------------------------------------------
 
 // TestIssue233_SeparatorConstants pins the data layout the renderer and LayoutFn
-// depend on: the separator is exactly one row, the band height is still 12 (so the
-// reserved space and the existing height-formula tests are unchanged), and the
-// height formula now names the separator as a distinct top row. If a future change
-// folds the separator into another row or lets the band grow, the rendered layout
-// (title at bandTop+2, 9 metrics filling the rest) would silently desync.
+// depend on: the separator is exactly one row, the band height is 13 (separator 1 +
+// selector 1 + 10 metric rows + title 1 — the #546 cache read/write breakdown grew
+// overallMetricLines 9→10, so the band grew 12→13), and the height formula names the
+// separator as a distinct top row. If a future change folds the separator into another
+// row or lets the band grow, the rendered layout (title at bandTop+2, 10 metrics
+// filling the rest) would silently desync.
 func TestIssue233_SeparatorConstants(t *testing.T) {
 	if overallSeparatorLines != 1 {
 		t.Errorf("overallSeparatorLines = %d, want 1 (issue #233 is a single thin line)",
 			overallSeparatorLines)
 	}
-	// The reserved band height must not change — only the separator's row relocated
-	// from below the selector to the top. A value change would shift every height
-	// boundary the sidebar's drop logic depends on.
-	if overallBandHeight != 12 {
-		t.Errorf("overallBandHeight = %d, want 12 (unchanged by the separator move)",
+	// The reserved band height is 13 post-#546 (the single "cache hit" row became the
+	// two-row read/write breakdown). The drop-logic boundary tests were shifted to match.
+	if overallBandHeight != 13 {
+		t.Errorf("overallBandHeight = %d, want 13 (separator 1 + selector 1 + 10 metrics + title 1, post-#546)",
 			overallBandHeight)
 	}
 	// The formula now accounts for the separator as its own top row.
@@ -126,7 +126,7 @@ func TestIssue233_SeparatorConstants(t *testing.T) {
 		t.Errorf("separator(%d)+selector(%d)+metrics(%d)+1 = %d, want overallBandHeight %d",
 			overallSeparatorLines, overallSelectorLines, overallMetricLines, got, overallBandHeight)
 	}
-	// Removing the separator must leave exactly selector + title + metrics (1+1+9=11),
+	// Removing the separator must leave exactly selector + title + metrics (1+1+10=12),
 	// i.e. the separator is a genuinely reserved row, not folded into a neighbour.
 	if overallBandHeight-overallSeparatorLines != overallSelectorLines+overallMetricLines+1 {
 		t.Errorf("band minus separator = %d, want selector+metrics+1 = %d (separator must be its own row)",
@@ -219,7 +219,7 @@ func TestIssue233_SeparatorRenderedAtBandTop(t *testing.T) {
 }
 
 // TestIssue233_SeparatorAboveTitleAndMetrics pins the vertical order the band
-// contract requires: separator → selector row → "Overall" title → 9 metric rows.
+// contract requires: separator → selector row → "Overall" title → 10 metric rows.
 // The separator must be strictly above the title and the first metric, with the
 // selector row between them — never under or over the stats text.
 func TestIssue233_SeparatorAboveTitleAndMetrics(t *testing.T) {
@@ -339,7 +339,7 @@ func TestIssue233_SeparatorIsSingleThinLine(t *testing.T) {
 }
 
 // TestIssue233_StatsContentNotClipped confirms the separator does not clip the
-// stats content: the title and all 9 metric labels render in full, and the last
+// stats content: the title and all 10 metric labels render in full, and the last
 // metric lands exactly on the band's bottom row (no row is lost to the separator).
 func TestIssue233_StatsContentNotClipped(t *testing.T) {
 	w := newTestWorkbench(t)
@@ -352,7 +352,7 @@ func TestIssue233_StatsContentNotClipped(t *testing.T) {
 		t.Errorf("title = %q, want \"Overall\"", got)
 	}
 	wantLabels := []string{"sessions", "sub-agents", "tokens in", "tokens out",
-		"requests", "errors", "cache hit", "model", "api"}
+		"requests", "errors", "cache rd", "cache wr", "model", "api"}
 	for i, label := range wantLabels {
 		seg := issue233Segment(w, titleY+1+i, p.X+2, len(label))
 		if seg != label {
