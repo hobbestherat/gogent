@@ -37,7 +37,7 @@ unattended 1 h clock; reconnect `kickApprovals` re-scans), but it still depends
 on the prompt surviving until the next fetch, and on the 750 ms poll/kick
 catching it — exactly the dependency acceptance criterion 3 forbids.
 
-## 2. Fix overview (two layers, both gogent-only)
+## 2. Fix overview (three layers, all gogent-only)
 
 **Layer A — daemon: don't charge un-presented time against the connected clock
 (load-bearing correctness fix).** Track per-approval `observed` state. The
@@ -62,10 +62,21 @@ non-blocking) — correctness still rests on Layer A + the authoritative
 
 **Layer C — client: never silently deny (usability).** Build on #560's
 `decide()`/`reportDecision` surface path: extend `reportDecision` so a `late`
-status on a one-shot `allow`/`deny` (not just `always*`) also emits a `[System]`
-notice, so if the connected-timeout legitimately fires *after* presentation
-(user genuinely unresponsive 5 min) and the user answers afterward, they are
-told the tool used the safe default rather than seeing nothing.
+status on a **one-shot decision of either kind** (`allow`/`deny` *and*
+`approve`/`reject`) also emits a `[System]` notice, so if the user answers after
+the prompt has already closed they are told their decision had no effect rather
+than seeing nothing. **The copy must be agnostic about *why* the prompt closed.**
+`"late"` (`approvals_handlers.go:43`) is returned both when the connected-timeout
+fired *and* when another attached client already answered — and the daemon's
+`concludedApproval` recall record (`approvals.go:81-86`) stores neither the cause
+nor the winning decision, so the client genuinely cannot distinguish. Claiming
+"the tool used the safe default (deny)" would be the **opposite** of the truth in
+the two-client race (client X answers allow → tool runs allow; client Y clicks
+allow later → `"late"`). The notice therefore mirrors the existing `always*`
+phrasing already in this function (`remote_handlers.go` `reportDecision`, the
+comment that explicitly forbids the safe-default claim): state only what is
+certain — *the prompt had already closed (it was answered elsewhere or timed
+out), so this decision had no effect.*
 
 Layer A satisfies acceptance criteria 1–3 on its own; B and C complete criteria
 2 (explicit notice alternative), 3 (no poll dependence) and 5 (SSE path test).
@@ -95,15 +106,21 @@ Layer A satisfies acceptance criteria 1–3 on its own; B and C complete criteri
   forever) is unchanged.
 
 ### gogent — `internal/server/hub.go` + `events.go` + `approvals.go` (Layer B)
-- `hub`: add `broadcastApprovalSignal()` — a non-blocking, drop-on-full fan-out
-  to global subscribers of a `taggedEvent` tagged as an approval signal (new
-  `approvalSignal bool` on `taggedEvent`, mutually exclusive with `notif`). **Not
-  ring-buffered**: a reconnecting client already runs `kickApprovals`, and
+- `hub`: add `broadcastApprovalSignal(id string)` — a non-blocking, drop-on-full
+  fan-out to global subscribers of a `taggedEvent` carrying the approval id. Add
+  two fields to `taggedEvent`: `approvalSignal bool` and `approvalID string`,
+  **mutually exclusive with `notif`** (a frame is exactly one of: session event,
+  notification, approval signal). The id is carried so `globalSSE` can put it in
+  the frame body for diagnostics; the client ignores the body and just re-scans.
+  **Not ring-buffered**: a reconnecting client already runs `kickApprovals`, and
   `/approvals` is authoritative, so no replay buffer is needed (and buffering
   would risk a stale wake after the approval resolved — harmless but pointless).
-- `events.go` `globalSSE`: emit an approval-signal frame under a new SSE event
-  name `approval` with a minimal body (`{"id": "..."}` for diagnostics; the
-  client ignores the body and just re-scans).
+- `events.go` `globalSSE` (the existing `te.notif` branch at ~`events.go:76` gets
+  a sibling): emit an approval-signal frame under a new SSE event name `approval`
+  with body `{"id":"apr_…"}`. Verified `approval` collides with no
+  `agent.SessionEventType` (thinking/final/error/notice/subagent/todo/plan/
+  background/…). Per-session subscribers never receive it (global-only, like
+  `notif`).
 - `approvals.go` `alloc()`: after registering the pending approval, call
   `b.hub.broadcastApprovalSignal(id)` (nil-hub guarded, as the bridge already is
   in `wait`).
@@ -122,10 +139,17 @@ Layer A satisfies acceptance criteria 1–3 on its own; B and C complete criteri
   (the poller goroutine remains the sole owner of `seen`).
 
 ### gogent — `ui/tui/remote_handlers.go` `reportDecision` (Layer C, client)
-- Extend the `status == "late"` branch so a one-shot `allow`/`deny` also emits a
-  concise `[System]` notice (e.g. "Your decision arrived after the prompt
-  closed; the tool used the safe default (deny)."). The existing `always*` notice
-  is unchanged. No new endpoint; rides #560's `decide()` return.
+- Extend the `status == "late"` branch so a one-shot decision of **either** kind
+  also emits a concise, cause-agnostic `[System]` notice — e.g. *"This prompt had
+  already closed (it was answered from another window, or it timed out), so your
+  decision had no effect."* Phrased the same way for `permission` (`allow`/`deny`)
+  and `edit_review` (`approve`/`reject`); the edit-review variant adds "the edit
+  was not re-applied." **Do not** assert the safe default was used — see the
+  rationale in §2 Layer C (the `"late"` cause is unknowable to the client). The
+  existing `always*`/`always_deny` late notice is unchanged. This also closes the
+  pre-existing silent-`late` gap for `edit_review` one-shots (today only
+  `permission always*` gets a late notice). No new endpoint; rides #560's
+  `decide()` return.
 
 ### Not touched
 - `cmd/daemon.go`, `cmd/main.go`, `cmd/handoff.go`, `cmd/attach.go` — bridge
@@ -140,7 +164,9 @@ Layer A satisfies acceptance criteria 1–3 on its own; B and C complete criteri
   (Layer B) is the correct seam instead.
 - `permission_dialog.go`, `sidebar.go`, `tui.go` — badge/dialog rendering is
   unchanged; we only change *when* `handleApproval` runs and *when* the daemon
-  auto-denies.
+  auto-denies. (Current badge render is `sidebar.sessionLabelState`, now at
+  `sidebar.go:1532`, fed by `setApproval` at `:691` — the issue's `:1485-1509`
+  cites are pre-#562 drift; this design uses the current locations throughout.)
 
 ## 4. User-facing behavior
 
@@ -153,9 +179,11 @@ Layer A satisfies acceptance criteria 1–3 on its own; B and C complete criteri
   fetch is **no longer auto-denied** before presentation: the 5-min clock only
   starts once a client has fetched it. The user always sees the badge + dialog.
 - Once the user *has* been shown the dialog, the normal 5-min
-  connected-but-unresponsive auto-deny still applies (unchanged). If it fires and
-  the user answers afterward, they now get an explicit `[System]` notice that the
-  safe default was used (Layer C) — never a silent deny.
+  connected-but-unresponsive auto-deny still applies (unchanged). If the prompt
+  has already closed by the time the user answers — whether it timed out or
+  another attached window answered first — they now get an explicit, cause-
+  agnostic `[System]` notice that their decision had no effect (Layer C), instead
+  of silence. The notice never claims a specific outcome the client cannot verify.
 - Badge appears for every remote approval regardless of poll timing, because the
   approval cannot vanish before it is observed.
 
@@ -170,18 +198,44 @@ issue's named directions.
 **(2) Usability.** The badge + the same modal the embedded path uses appear for
 every prompt; the user drives the decision exactly as before. The connected
 auto-deny only counts time after the user could actually see the prompt. When a
-decision genuinely can't be delivered in time, Layer C surfaces a `[System]`
-notice — the user is told, never silently denied.
+decision can't take effect (prompt already closed), Layer C surfaces a
+cause-agnostic `[System]` notice — the user is told their answer had no effect,
+never silently denied. **The notice deliberately does not claim a specific
+outcome** (e.g. "used the safe default"): `"late"` covers both a timeout *and*
+another window answering first, and the client cannot tell which, so an outcome
+claim would be wrong in the two-client race. This mirrors the existing
+`always*`-grant late notice's own warning in the same function. The wording is
+shared across `permission` and `edit_review` one-shots, closing the pre-existing
+silent-`late` gap for edit reviews.
 
 **(3) No regressions.**
-- All existing `approvals_issue358_test.go` tests stay green: each discovers the
-  pending approval via `bridge.list()` (which now marks `observed`) *before*
-  asserting connected-timeout behavior, so the connected clock starts as those
-  tests expect. Walked through all 7 cases — connected-auto-deny, unattended
-  wait, shorter-unattended-cap-ignored, disconnect-switches-to-unattended,
-  reconnect-fresh-window, unattended-answer-after-reconnect, unattended-safety —
-  none change outcome. The behavior change manifests *only* for a connected
-  client that has **not** yet called `list()`, a path no existing test exercises.
+- **`approvals_issue358_test.go` (7 tests) — all stay green; traced each.** Every
+  connected-client case discovers the pending approval via `waitForPendingIssue358`
+  → `bridge.list()` (`:333`) *before* asserting connected-timeout behavior, so
+  `observed` is set and the connected clock starts as those tests expect.
+  `…ConnectedClientKeepsShortAutoDeny` (20 ms) and `…IgnoresShorterUnattendedCap`
+  (180 ms) still auto-deny / stay-pending on schedule; `…DisconnectWhilePending…`,
+  `…ReconnectGetsFreshConnectedTimeout`, `…UnattendedWaitsPastConnectedTimeout`,
+  `…UnattendedPromptCanBeAnsweredAfterReconnect`, `…UnattendedTimeoutStillSafety…`
+  are unaffected (no-client paths use the unattended clock, where `observed` is
+  irrelevant). The natural impl — `connected && observed` accrues `connectedFor`,
+  *every other state resets it* — preserves the #358 fresh-window invariant.
+- **`approvals_test.go` (the other 5 tests) — also verified.**
+  `TestApprovalBridgeTimeoutDenies` (`:118`) and `…TimedOutEditRejects` (`:130`)
+  have **no subscriber and never call `list()`**, yet still deny/reject at 20 ms:
+  with no client connected the **unattended** clock governs and `observed` is
+  irrelevant — and these set `connectedTimeout == unattendedTimeout == 20 ms`, so
+  the outcome is identical either way. `…PermissionRoundTrip` / `…EditReviewRoundTrip`
+  (1 min bounds, `list()`-then-`resolve`) and `TestDecisionParsing` never reach a
+  timeout. None regress.
+- **Clock-start timing shift (called out):** the connected clock now starts at the
+  first `list()` (~1–2 ms after `alloc`) rather than at the first `wait()` ticker
+  tick (~one `pollInterval`, ≤5 ms in these tests). For the 20 ms test bounds this
+  margin is comfortable but *timing-sensitive*; the new #569 tests use bounds with
+  ample slack (≥50 ms) to avoid flake, and the behavior change is asserted on the
+  *un-observed* path, not on tightened timing of the observed one.
+- The behavior change manifests *only* for a connected client that has **not** yet
+  called `list()` — a path no existing test exercises.
 - #560 idempotent decide/recall path is unchanged; Layer C only adds a notice on
   an already-returned `late` status.
 - SSE push is non-blocking drop-on-full → no agent/daemon stall; a dropped signal
@@ -218,10 +272,12 @@ notifications; the *notice* lives where #560 put decision-surfacing.
 
 ## 7. Tests to add (acceptance criterion 5)
 - `internal/server/approvals_issue569_test.go`:
-  - Connected client (`subscribeGlobal`) + short `connectedTimeout`, **never call
-    `list()`** → assert the approval is still pending well past
-    `connectedTimeout`; then call `list()` (observe) and assert it now auto-denies
-    within `connectedTimeout` (the connected clock starts at observation).
+  - Connected client (`subscribeGlobal`), `connectedTimeout` ≈ 50 ms with a much
+    longer `unattendedTimeout`, **never call `list()`** → assert the approval is
+    still pending well past `connectedTimeout` (it is governed by the long
+    unattended bound while un-observed); then call `list()` (observe) and assert it
+    now auto-denies within ~`connectedTimeout` (the connected clock starts at
+    observation). Bounds carry ample slack so the test is not timing-fragile.
   - `alloc()` broadcasts an `approval` signal frame to a global subscriber
     (assert the frame is received on the subscriber channel).
 - `internal/server/events_*_test.go` (or extend existing): the `approval` frame
@@ -234,7 +290,10 @@ notifications; the *notice* lives where #560 put decision-surfacing.
   - Badge/approval surfacing across a simulated disconnect → reconnect
     (`kickApprovals`) and across the connected-timeout boundary, using a fake
     `Approver` to assert `AskPermission` is called exactly once (dedup holds).
-  - `reportDecision` emits a `[System]` notice on a `late` one-shot `allow`/`deny`.
+  - `reportDecision` emits a cause-agnostic `[System]` notice on a `late` one-shot
+    `allow`/`deny` **and** on a `late` `approve`/`reject` (edit_review); assert the
+    copy makes **no** safe-default/outcome claim (so the two-client-race case is
+    not misreported).
 
 ## 8. Gate / sequencing
 - Spans `ui/tui` (`remote_handlers.go`, `api_client.go`) **and** `internal/server`
