@@ -68,18 +68,24 @@ always agree because gogent installs the level it resolves at.
 
 3. **`ResolveTheme` (661)** — keep the **signature**
    `(cfg config.ThemeConfig, env func(string) string, noColorFlag bool)` to avoid
-   churning ~100 call sites, but change the body so it resolves at
-   `tui.GetColorLevel()` and keeps both layers in agreement:
+   churning ~100 call sites. Resolve at the level turbotui has detected, and — this
+   is the corrected body (see Risk **R1**) — **only write the global on the two
+   paths that must affect the renderer** (no-color, production); the explicit/test
+   `env != nil` path computes its level **locally and purely**, exactly as today:
    ```go
-   switch {
-   case noColorFlag || cfg.NoColor:
-       tui.SetColorLevel(tui.ColorLevelNone)        // force none at BOTH layers
-   case env != nil:
-       tui.SetColorLevel(tui.ColorLevelFromEnv(lookup(env)))  // explicit/test path
+   func ResolveTheme(cfg config.ThemeConfig, env func(string) string, noColorFlag bool) Theme {
+       var level ColorLevel
+       switch {
+       case noColorFlag || cfg.NoColor:
+           tui.SetColorLevel(tui.ColorLevelNone) // force none at BOTH layers (#2)
+           level = ColorNone
+       case env == nil:                          // production: resolve at the level the
+           level = detectColorLevel()            // entry point installed (terminfo-aware)
+       default:                                  // explicit/test env: PURE, no global write
+           level = fromTUILevel(tui.ColorLevelFromEnv(lookup(env)))
+       }
+       ... // the 50 degrade(...) lines unchanged
    }
-   // env == nil (production): resolve at the level the entry point installed
-   // via tui.SetColorLevel(tui.DetectColorLevel()) — terminfo-aware.
-   level := detectColorLevel() // == fromTUILevel(tui.GetColorLevel())
    ```
    - `env` gains a **nil sentinel**: *"resolve at the already-installed
      (terminfo-aware) level, don't recompute."* Production passes `nil`; tests
@@ -87,9 +93,17 @@ always agree because gogent installs the level it resolves at.
    - `lookup` adapts gogent's `func(string)string` to turbotui's
      `func(string)(string,bool)` via `v := env(k); return v, v != ""` (so empty
      `NO_COLOR` is correctly treated as absent, matching the old rule).
-   - The `if noColorFlag || cfg.NoColor { level = ColorNone }` block and the old
-     `detectColorLevel(env)` call are replaced by the above. The 50 `degrade(...)`
-     lines are unchanged.
+   - **Why the `env != nil` path must not call `SetColorLevel`**: today
+     `ResolveTheme` is side-effect-free (`level := detectColorLevel(env)`), so the
+     ~168 test call sites are hermetic. Writing the global there would leak the
+     last test's level across the sequential `ui` package run (the shared restore
+     helper `issue204RestoreTheme` snapshots only `tv.ActiveTheme()`, **not**
+     `tui.GetColorLevel()`), making render tests order-dependent. Computing
+     locally reproduces today's behaviour exactly. The global is written **only**
+     on the no-color path (required by #2) and the production `env == nil` path
+     (where the entry point already owns the level) — both deliberate.
+   - The old `if noColorFlag || cfg.NoColor { level = ColorNone }` block and the
+     old `detectColorLevel(env)` call are replaced by the switch above.
 
 **`cmd/main.go:199`, `cmd/attach.go:149`, `cmd/attach.go:302`,
 `cmd/embedded_handlers.go:145`** — install detection once per entry point and
@@ -114,21 +128,28 @@ confirmed by `go get`). No `replace`.
 
 - **`ui/tui/keybindings_issue401_test.go:175`** (version-pin guard) — update the
   pinned string to the new pseudo-version; the no-`replace` assertion stays.
-- **`TestDetectColorLevel`** (theme_test.go) — rewrite: for each case
+- **`TestDetectColorLevel`** (theme_test.go) — rewrite: snapshot the global with
+  `old := tui.GetColorLevel()` + `t.Cleanup(func(){ tui.SetColorLevel(old) })`
+  (mirroring `withIssue366ColorLevel`); for each case
   `tui.SetColorLevel(tui.ColorLevelFromEnv(lookup(envOf(c.env))))` then assert
-  `detectColorLevel() == c.want`, restoring the prior global with `t.Cleanup`.
-  Note: the `{}`-empty-`TERM` case now yields `Color16` (turbotui's baseline),
-  not `ColorNone` — a deliberate alignment to the shared detector (see Risks).
-- **New layer-agreement test** — after `ResolveTheme(cfg, env, false)`, assert
-  `fromTUILevel(tui.GetColorLevel()) == resolved.Level` for none/16/256/truecolor
-  envs (the two layers never disagree).
-- **`TestResolveThemeNoColor`** — passes unchanged: the `flag`/`cfg` cases hit
-  the `SetColorLevel(None)` branch; the `env` case (`NO_COLOR=1`) flows through
-  `ColorLevelFromEnv` → `None`.
-- **All other ~15 ResolveTheme test files** — **unchanged**: they pass a non-nil
-  `envOf(...)`, so `ResolveTheme` installs that env's level via
-  `ColorLevelFromEnv` and degrades at it, reproducing today's results exactly
-  (their envs are truecolor/256/16/no-color — none use empty `TERM`).
+  `detectColorLevel() == c.want`. Note: the `{}`-empty-`TERM` case now yields
+  `Color16` (turbotui's baseline), not `ColorNone` — a deliberate alignment to the
+  shared detector (see Risk **R3**).
+- **New layer-agreement test** — the property is *production* (`env == nil`): for
+  each of none/16/256/truecolor, `tui.SetColorLevel(L)` then
+  `th := ResolveTheme(cfg, nil, false)` and assert
+  `fromTUILevel(tui.GetColorLevel()) == th.Level` (the two layers never disagree).
+  Wrap with `old := tui.GetColorLevel()` + `t.Cleanup` restore.
+- **`TestResolveThemeNoColor`** — still passes; the `flag`/`cfg` subtests hit the
+  `SetColorLevel(None)` branch (a deliberate global write per #2) and the `env`
+  subtest (`NO_COLOR=1`) computes `None` locally. Add `old := tui.GetColorLevel()`
+  + `t.Cleanup` restore at the top so the three `None` writes don't leak (Risk
+  **R2**).
+- **All other ~15 ResolveTheme test files** — **genuinely unchanged**: they pass a
+  non-nil `envOf(...)`, which now hits the **pure** `default` branch (no global
+  write), so `ResolveTheme` is side-effect-free for them exactly as today and the
+  returned/degraded values match bit-for-bit (their envs are
+  truecolor/256/16/no-color — none use empty `TERM`).
 
 ## Criterion (1) GOAL MATCH
 
@@ -152,22 +173,34 @@ No new interaction — colour is automatic. User-visible behaviour:
 
 ## Criterion (3) NO REGRESSIONS
 
-- **Signature kept** → ~100 `ResolveTheme(cfg, env, flag)` call sites compile and
+- **Signature kept** → ~168 `ResolveTheme(cfg, env, flag)` call sites compile and
   pass unchanged; only `detectColorLevel`'s signature changes (1 prod caller, 1 test).
+- **R1 (resolved) — no new global side effect on the test path.** `ResolveTheme`
+  is side-effect-free today (`level := detectColorLevel(env)`), which is *why* the
+  168 test call sites are hermetic in a package with **no** `t.Parallel()` (so
+  ordering matters). The corrected body keeps the `env != nil` path **pure**
+  (computes `fromTUILevel(tui.ColorLevelFromEnv(lookup(env)))`, no
+  `SetColorLevel`), so those calls reproduce today's behaviour exactly — the
+  ~15 files are genuinely unchanged. The shared restore helper
+  `issue204RestoreTheme` snapshots only `tv.ActiveTheme()`, **not**
+  `tui.GetColorLevel()`; the only sanctioned global writes are the no-color path
+  (#2) and the production `env == nil` path, both covered by `t.Cleanup` in the
+  tests that exercise them.
+- **R2 (resolved)** — `TestResolveThemeNoColor`'s `flag`/`cfg` subtests write
+  `ColorLevelNone` to the global (required by #2); add a `t.Cleanup` save/restore
+  at the top of that test so nothing leaks to later tests.
 - **Double-degrade stays idempotent**: gogent degrades to level L, turbotui's
-  `adaptColor` at the *same* L is a no-op on already-degraded colours — and now
-  the two levels are guaranteed equal (previously they could drift: gogent
-  env-only vs turbotui's `init` env-only).
-- **Global-state hazard**: `tui.colorLevel` is a package global; `ResolveTheme`
-  now writes it. Each test call sets it from its own env, so results stay
-  deterministic; tests reading the global (render tests) set the matching env.
-  Mitigated by `t.Cleanup` in the rewritten `TestDetectColorLevel`; verified by
-  running the whole `ui/tui` package (incl. `theme_issue366` which already
-  toggles the global).
-- **Behaviour change — empty `TERM`**: was `ColorNone`, now `Color16`. This makes
-  gogent agree with turbotui (which already rendered its own widgets at 16 in
-  that case), removing a prior inconsistency rather than introducing one. No
-  built-in palette test exercises empty `TERM`.
+  `adaptColor` at the *same* L is a no-op on already-degraded colours (verified at
+  `turbotui/color.go:140-163`). In production the two levels are guaranteed equal
+  because the entry point installs the level gogent then resolves at (previously
+  they could drift: gogent env-only vs turbotui's `init` env-only).
+- **R3 — behaviour change, empty `TERM`**: was `ColorNone`, now `Color16`
+  (turbotui treats only `TERM=="dumb"` as none, `color.go:105-108`; deferring is
+  what removes the duplicate rule, so this is unavoidable). This makes gogent
+  agree with turbotui (which already rendered its own widgets at 16 in that case),
+  removing a prior inconsistency. Low impact (a TUI needs a terminal), but a
+  piped/non-interactive invocation now emits 16-colour ANSI where it emitted none
+  — **call this out in the PR body**. No built-in palette test exercises empty `TERM`.
 - Session/transcript invariants untouched (colour-only change); `ui/tui` keeps
   no `internal/daemon`/`server` imports (only `tui` + `config`, already present).
 
@@ -181,9 +214,29 @@ No new interaction — colour is automatic. User-visible behaviour:
   explicit entry-point `DetectColorLevel()` call.
 - **Downstream on turbotui**: none — gogent only reads the new API; turbotui's
   half is already merged and unchanged here.
-- **Both-layers-agree** is the structural guarantee: gogent always
-  `SetColorLevel`s the exact level it resolves at, so theme degrade and renderer
-  downsample can never diverge.
+- **Both-layers-agree** is the structural guarantee **in production**: the entry
+  point installs the level via `tui.SetColorLevel(tui.DetectColorLevel())` and
+  gogent resolves at that same `tui.GetColorLevel()`, so theme degrade and
+  renderer downsample never diverge; the no-color path forces `None` on both. (The
+  `env != nil` path is test-only and pure — it never reaches a real renderer, so
+  it needs no global write; see R1.)
+- **Parallel enum note**: gogent keeps its own `ColorLevel`
+  (`ColorNone/16/256/True`) bridged to turbotui's by a hand-written `fromTUILevel`
+  — a second representation of one concept. Justified by the pervasive
+  `degrade()`/audit usage and explicitly scoped as retained; the cost is that a
+  future new turbotui level must be added to `fromTUILevel` (a `default` should
+  map to `ColorNone` defensively). Long-term-cleaner direction (gogent adopts
+  turbotui's type) is out of scope for this fix.
+
+## PR body
+
+`Closes #549`. Summarise: gogent stops re-implementing colour detection and
+defers to turbotui's terminfo-aware level (fixes truecolor-over-SSH), forces
+`None` at both layers for `NO_COLOR`/`--no-color`, and installs detection once at
+each production entry point. **Behaviour note (R3):** with detection now owned by
+turbotui, an unset `TERM` resolves to 16-colour (turbotui's baseline) instead of
+gogent's old no-colour — a non-interactive/piped invocation now emits 16-colour
+ANSI where it previously emitted none.
 
 ## Open questions
 
