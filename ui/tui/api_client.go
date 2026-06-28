@@ -500,6 +500,37 @@ func (c *APIClient) Health() error {
 	return c.do(http.MethodGet, "/health", nil, nil)
 }
 
+// WorkspaceDTO mirrors the server's workspaceView (GET /api/workspace): the
+// DAEMON's own working directory — where ! shell commands and the agent's shell
+// tool calls actually run — plus optional git info. The attached TUI consumes
+// Root for the status-line working-directory affordance (issue #570), matching
+// what the embedded TUI shows locally; Git is carried verbatim for forward use
+// (a later status-line git decoration) but is not consumed today.
+type WorkspaceDTO struct {
+	Root string      `json:"root"`
+	Git  *GitInfoDTO `json:"git,omitempty"`
+}
+
+// GitInfoDTO mirrors the server's gitInfo (the optional git block on
+// workspaceView): the daemon workspace's current branch and dirty state.
+type GitInfoDTO struct {
+	Branch string `json:"branch,omitempty"`
+	Dirty  bool   `json:"dirty"`
+}
+
+// Workspace returns the daemon's workspace root (and optional git info) from GET
+// /api/workspace. It backs the attached status-line path (issue #570): the root
+// is the daemon-side directory where shell/tool calls run, so an SSH-attached
+// user sees the same path the local TUI shows rather than their client cwd. The
+// daemon root is immutable for the daemon's lifetime, so the caller caches it.
+func (c *APIClient) Workspace() (WorkspaceDTO, error) {
+	var out WorkspaceDTO
+	if err := c.do(http.MethodGet, "/workspace", nil, &out); err != nil {
+		return WorkspaceDTO{}, err
+	}
+	return out, nil
+}
+
 // ListSessions returns every saved + live session known to the daemon (index
 // metadata; no transcript replay), backing both Restore and the Saved Sessions
 // browser.
