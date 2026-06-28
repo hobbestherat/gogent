@@ -203,6 +203,20 @@ func (c ConnectorStat) CacheHitPercent() int {
 	return int(float64(c.CachedTokensIn) / float64(c.TokensIn) * 100)
 }
 
+// CacheWritePercent is the share of prompt (input) tokens WRITTEN to the
+// provider's cache, as a whole-number percentage of TokensIn (0 when no input
+// tokens have been processed). It is the companion to CacheHitPercent (issue
+// #546): where the hit percent shows how much of the prefix was reused at the
+// discounted read price, this shows how much was paid at the cache-write
+// premium. It is 0 for every provider that never reports a write count
+// (OpenAI/DeepSeek/Gemini/Z.AI/OpenRouter), so the UI degrades cleanly to "0%".
+func (c ConnectorStat) CacheWritePercent() int {
+	if c.TokensIn <= 0 {
+		return 0
+	}
+	return int(float64(c.CacheWriteTokensIn) / float64(c.TokensIn) * 100)
+}
+
 // ToolStat is the per-tool usage and duration breakdown.
 type ToolStat struct {
 	Name        string `json:"name"`
