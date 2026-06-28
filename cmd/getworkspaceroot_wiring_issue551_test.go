@@ -36,12 +36,16 @@ func TestGetWorkspaceRootWiredEmbeddedIssue551(t *testing.T) {
 	}
 }
 
-// TestGetWorkspaceRootAbsentFromRemoteHandlers documents the v1 scope: the remote
-// (attached) handler set does not expose the daemon's root (no protocol field),
-// so an attached client shows no path. This composes the attached handler set
-// exactly as runAttached does (rc.Handlers() then installPresentationHandlers),
-// mirroring the #507/#532 nil-while-attached precedent.
-func TestGetWorkspaceRootAbsentFromRemoteHandlersIssue551(t *testing.T) {
+// TestGetWorkspaceRootWiredInRemoteHandlersIssue570 FLIPS the #551 pin for issue
+// #570: the remote (attached) handler set now WIRES GetWorkspaceRoot to the daemon's
+// workspace root over GET /api/workspace, so an attached client shows the same
+// status-line path the local TUI does. This composes the attached handler set exactly
+// as runAttached does (rc.Handlers() then installPresentationHandlers), mirroring the
+// #507 daemon-owned precedent: like the default model, the workspace root is
+// daemon-owned and so is wired in RemoteClient.Handlers, NOT by
+// installPresentationHandlers (whose local g would report the client cwd). The value
+// the handler returns is asserted in TestAttachedGetWorkspaceRootReturnsDaemonRootIssue570.
+func TestGetWorkspaceRootWiredInRemoteHandlersIssue570(t *testing.T) {
 	_, client := daemonWithModelsIssue507(t, "daemon-model", "daemon-model")
 	clientG := gogent.NewGogent(t.TempDir())
 
@@ -49,7 +53,7 @@ func TestGetWorkspaceRootAbsentFromRemoteHandlersIssue551(t *testing.T) {
 	handlers := tuipkg.NewRemoteClient(client, wb.EmitSessionEvent, wb).Handlers()
 	installPresentationHandlers(&handlers, clientG, wb, false)
 
-	if handlers.GetWorkspaceRoot != nil {
-		t.Fatal("attached handlers must leave GetWorkspaceRoot nil in v1 (no protocol field for the daemon root)")
+	if handlers.GetWorkspaceRoot == nil {
+		t.Fatal("attached handlers must wire GetWorkspaceRoot (issue #570) so the status line shows the daemon root")
 	}
 }
