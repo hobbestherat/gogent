@@ -270,7 +270,7 @@ func TestIssue567AnthropicNormalizesGrepOutputMode(t *testing.T) {
 		}
 		first, _ := union[0].(string)
 		second, _ := union[1].(string)
-		if !((first == wantScalar && second == "null") || (first == "null" && second == wantScalar)) {
+		if (first != wantScalar || second != "null") && (first != "null" || second != wantScalar) {
 			t.Errorf("%s type = %#v, want [%q,null]", name, union, wantScalar)
 		}
 	}
