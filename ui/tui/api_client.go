@@ -312,6 +312,20 @@ type NotificationDTO struct {
 // GlobalEventDTO.
 const notificationEventName = "notification"
 
+// LogRecordDTO mirrors the server's streamed diagnostic-log record (issue #562):
+// the daemon's gogent.log lines surfaced over GET /api/logs/stream so the Logs
+// window can interlace them with the client's own logs. Text is already redacted
+// server-side. Time is RFC3339Nano; Level is "INFO"|"WARN"|"ERROR".
+type LogRecordDTO struct {
+	Time  string `json:"time"`
+	Level string `json:"level"`
+	Text  string `json:"text"`
+}
+
+// logEventName is the SSE event name the server uses for a streamed log record
+// (issue #562); the client filters the logs stream on it.
+const logEventName = "log"
+
 // ApprovalDTO mirrors the server's approvalView (a pending interactive gate).
 type ApprovalDTO struct {
 	ID         string            `json:"id"`
@@ -905,6 +919,53 @@ func (c *APIClient) StreamEvents(ctx context.Context) (<-chan GlobalEventDTO, er
 			}
 			select {
 			case out <- ge:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out, nil
+}
+
+// StreamLogs opens the daemon's diagnostic-log SSE stream (GET /api/logs/stream)
+// and delivers each decoded LogRecordDTO on the returned channel until ctx is
+// cancelled or the stream ends, at which point the channel is closed (issue
+// #562). Like StreamEvents the initial connect is synchronous (so a failure is
+// returned, not hidden) and it reuses the same auth and tolerant SSE parser; the
+// reconnect/backoff is the caller's (StreamLogsTo) — a best-effort log tail, not
+// a lossless stream.
+func (c *APIClient) StreamLogs(ctx context.Context) (<-chan LogRecordDTO, error) {
+	req, err := c.newRequest(ctx, http.MethodGet, "/logs/stream", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	// The body stays open for the whole stream: it is closed in the reader goroutine
+	// below (and in the non-2xx branch), not in this function.
+	resp, err := c.http.Do(req) //nolint:bodyclose // closed in the stream goroutine / error branch
+	if err != nil {
+		return nil, fmt.Errorf("open log stream: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("open log stream: %s: %s", resp.Status, strings.TrimSpace(string(msg)))
+	}
+
+	out := make(chan LogRecordDTO, 64)
+	go func() {
+		defer close(out)
+		defer func() { _ = resp.Body.Close() }()
+		for ev := range parseSSE(ctx, resp.Body) {
+			if ev.name != logEventName {
+				continue // ignore keep-alives and any non-log frame
+			}
+			var rec LogRecordDTO
+			if err := json.Unmarshal([]byte(ev.data), &rec); err != nil {
+				continue // skip a malformed frame rather than tearing down the stream
+			}
+			select {
+			case out <- rec:
 			case <-ctx.Done():
 				return
 			}

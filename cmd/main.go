@@ -108,8 +108,12 @@ func main() {
 	// In TUI mode, redirect diagnostics to a log file so warnings/errors never
 	// get written to stdout and corrupt the alternate screen (issue #17).
 	// Headless mode keeps the stderr default. A failed open falls back to stderr.
+	// The TUI logger also tees into an in-memory ring (issue #562) so the Logs
+	// window can surface diagnostics in-app; headless keeps the plain stderr sink.
+	var logRing *diag.Ring
 	if !*disableTUI {
-		if lg, err := diag.NewFile(filepath.Join(homeDir, ".gogent", "gogent.log")); err == nil {
+		logRing = diag.NewRing(logRingSize)
+		if lg, err := diag.NewFileWithRing(filepath.Join(homeDir, ".gogent", "gogent.log"), logRing); err == nil {
 			g.SetLogger(lg)
 		} else {
 			log.Printf("open diagnostic log: %v", err)
@@ -203,6 +207,9 @@ func main() {
 		tui.SetColorLevel(tui.DetectColorLevel())
 		tuipkg.ApplyTheme(tuipkg.ResolveTheme(g.GetConfig().Theme, nil, *noColor))
 		wb = tuipkg.NewWorkbench(g.GetConfig().ModelConfigs)
+		// Hand the Logs window (issue #562) the in-memory ring the diagnostic logger
+		// tees into, so it can prime from recent history and follow the live tail.
+		wb.SetLogRing(logRing)
 		fmt.Println("TUI enabled. Press Ctrl+C to exit.")
 
 		// Route interactive permission prompts to the workbench modal.
@@ -226,7 +233,7 @@ func main() {
 		// handlers are merged onto the in-process Handlers before they are installed.
 		dc := newEmbeddedController(wb, homeDir, *noColor, g, apiServer, embeddedHTTP{
 			srv: httpSrv, host: *httpHost, port: *httpPort, password: httpPassword,
-		}, embeddedHandlers)
+		}, embeddedHandlers, logRing)
 		handlers := embeddedHandlers(g)
 		dc.installMenuHandlers(&handlers)
 		wb.SetHandlers(handlers)

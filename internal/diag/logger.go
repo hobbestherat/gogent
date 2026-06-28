@@ -45,6 +45,37 @@ func New(w io.Writer) *Logger {
 // corrupt the alternate screen.
 func Stderr() *Logger { return New(os.Stderr) }
 
+// NewWithRing returns a logger that writes text-format records to w AND tees a
+// structured copy of every record into ring (issue #562), so the TUI can surface
+// logs in-app and the daemon can stream them to remote clients. The file/stderr
+// sink behaviour is byte-for-byte identical to New(w): the ring is an additional
+// fan-out branch, not a replacement. A nil w discards (like New); a nil ring
+// makes this equivalent to New(w). Secret redaction holds on the ring path
+// because the ring branch renders each record through slog, resolving
+// LogValuer/Stringer exactly as the file handler does.
+func NewWithRing(w io.Writer, ring *Ring) *Logger {
+	if w == nil {
+		w = io.Discard
+	}
+	h := slog.Handler(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	if ring != nil {
+		h = &fanoutHandler{handlers: []slog.Handler{h, newRingHandler(ring)}}
+	}
+	return &Logger{sl: slog.New(h)}
+}
+
+// NewFileWithRing opens (or creates) the diagnostics log file at path for
+// appending and returns a logger that writes to it AND tees structured records
+// into ring (issue #562). It is the ring-aware counterpart of NewFile, used by
+// the TUI and daemon entry points where logs are surfaced in-app.
+func NewFileWithRing(path string, ring *Ring) (*Logger, error) {
+	f, err := openAppend(path)
+	if err != nil {
+		return nil, err
+	}
+	return NewWithRing(f, ring), nil
+}
+
 // NewFile opens (or creates) a log file at path for appending and returns a
 // logger writing to it. The parent directory is created if needed. It is the
 // TUI-mode sink: a file is used instead of stderr so diagnostics land somewhere

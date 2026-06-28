@@ -310,6 +310,41 @@ func (rc *RemoteClient) consume(events <-chan GlobalEventDTO) {
 	}
 }
 
+// StreamLogsTo drives the daemon's diagnostic-log stream into sink until ctx is
+// cancelled (issue #562). Unlike the session-event consumer it reconnects
+// SILENTLY — no blocking "connection lost" modal, no tunnel restart, no "retry
+// now": a gap in a best-effort log tail is acceptable, and the session stream's
+// own disconnect modal already covers a real outage. It reuses only the shared
+// backoff schedule. The Logs window starts this in a goroutine on open and
+// cancels ctx on close, so a closed window holds no daemon stream.
+func (rc *RemoteClient) StreamLogsTo(ctx context.Context, sink func(LogRecordDTO)) {
+	attempt := 0
+	for {
+		ch, err := rc.client.StreamLogs(ctx)
+		if err == nil {
+			attempt = 0
+			for rec := range ch {
+				sink(rec)
+			}
+		} else {
+			attempt++
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		wait := rc.backoff(attempt)
+		if attempt == 0 {
+			// The stream opened then ended (not an open failure): retry promptly.
+			wait = rc.backoff(1)
+		}
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 // openStream opens a fresh SSE stream under a child context whose cancel is stored
 // so the health monitor can drop a wedged stream. The caller (consume) releases
 // the context via dropStream when the stream ends.

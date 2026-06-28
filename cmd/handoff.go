@@ -15,6 +15,7 @@ import (
 
 	"gogent/internal/agent"
 	"gogent/internal/daemon"
+	"gogent/internal/diag"
 	"gogent/internal/gogent"
 	"gogent/internal/server"
 	tuipkg "gogent/ui/tui"
@@ -44,6 +45,12 @@ type daemonController struct {
 	homeDir string
 	noColor bool
 	paths   daemon.Paths
+
+	// logRing is the local diagnostic-log ring the Workbench's Logs window reads
+	// (issue #562). A daemon->embedded handoff rebuilds the core's logger to keep
+	// teeing into this same ring, so the [local] stream is uninterrupted. May be
+	// nil (e.g. headless or a build that never opened a Logs window).
+	logRing *diag.Ring
 
 	// embeddedHandlers rebuilds the exact in-process Handlers for a given core. It
 	// is the same closure main() installs at startup, so a daemon->embedded handoff
@@ -75,12 +82,13 @@ type embeddedHTTP struct {
 // newEmbeddedController builds the controller for a process that started embedded
 // (the default `gogent` with no live daemon). g/apiServer are the in-process core
 // and server; embeddedHandlers rebuilds the in-process Handlers for a core.
-func newEmbeddedController(wb *tuipkg.Workbench, homeDir string, noColor bool, g *gogent.Gogent, apiServer *server.Server, httpInfo embeddedHTTP, embeddedHandlers func(*gogent.Gogent) tuipkg.Handlers) *daemonController {
+func newEmbeddedController(wb *tuipkg.Workbench, homeDir string, noColor bool, g *gogent.Gogent, apiServer *server.Server, httpInfo embeddedHTTP, embeddedHandlers func(*gogent.Gogent) tuipkg.Handlers, logRing *diag.Ring) *daemonController {
 	return &daemonController{
 		wb:               wb,
 		homeDir:          homeDir,
 		noColor:          noColor,
 		paths:            daemon.PathsFor(daemonDir(homeDir)),
+		logRing:          logRing,
 		embeddedHandlers: embeddedHandlers,
 		mode:             tuipkg.DaemonModeEmbedded,
 		g:                g,
@@ -94,7 +102,7 @@ func newEmbeddedController(wb *tuipkg.Workbench, homeDir string, noColor bool, g
 // layout, keybindings) the attach path builds; client/rc drive the daemon. local
 // selects attached-local (the Unix socket, "Stop daemon" applies) vs attached-
 // remote (a --connect address, where Start/Stop are inapplicable).
-func newAttachedController(wb *tuipkg.Workbench, homeDir string, noColor bool, g *gogent.Gogent, client *tuipkg.APIClient, rc *tuipkg.RemoteClient, addr string, local bool, httpInfo embeddedHTTP) *daemonController {
+func newAttachedController(wb *tuipkg.Workbench, homeDir string, noColor bool, g *gogent.Gogent, client *tuipkg.APIClient, rc *tuipkg.RemoteClient, addr string, local bool, httpInfo embeddedHTTP, logRing *diag.Ring) *daemonController {
 	mode := tuipkg.DaemonModeAttachedRemote
 	if local {
 		mode = tuipkg.DaemonModeAttachedLocal
@@ -104,6 +112,7 @@ func newAttachedController(wb *tuipkg.Workbench, homeDir string, noColor bool, g
 		homeDir: homeDir,
 		noColor: noColor,
 		paths:   daemon.PathsFor(daemonDir(homeDir)),
+		logRing: logRing,
 		// A process that started attached still needs the embedded Handlers builder
 		// so "Stop daemon" can migrate back in-process; it is the same package-level
 		// source main() uses, so the rebuilt embedded behaviour is identical.
@@ -283,6 +292,9 @@ func (dc *daemonController) switchToRemote(g *gogent.Gogent, client *tuipkg.APIC
 	dc.applyOnUI(func() {
 		dc.wb.SetHandlers(handlers)
 		dc.wb.SetReconnectControls(hostLabel(addr), rc.RetryNow)
+		// Now attached: feed the Logs window's [daemon] stream from the new client
+		// (issue #562). An already-open window picks this up on its next open.
+		dc.wb.SetDaemonLogStream(rc.StreamLogsTo)
 		dc.wb.RefreshMenu()
 	})
 	return rc, nil
@@ -362,8 +374,10 @@ func (dc *daemonController) Stop() error {
 		return fmt.Errorf("stop daemon: %w", err)
 	}
 
-	// 3. Build a fresh embedded core and restore sessions from disk.
-	g := buildDaemonCore(dc.homeDir, daemonStartOpts{})
+	// 3. Build a fresh embedded core and restore sessions from disk. Tee diagnostics
+	//    into the Workbench's existing log ring so the Logs window keeps following
+	//    the [local] stream across the handoff (issue #562).
+	g := buildDaemonCore(dc.homeDir, daemonStartOpts{}, dc.logRing)
 	// 4. Rewire each open window's backend observer to the new core so live sessions
 	//    keep streaming into their windows exactly as the embedded OnCreate does.
 	for _, id := range dc.wb.SessionIDs() {
@@ -386,6 +400,10 @@ func (dc *daemonController) Stop() error {
 	dc.applyOnUI(func() {
 		dc.wb.SetHandlers(handlers)
 		dc.wb.SetReconnectControls("", nil)
+		// Back in-process: no [daemon] stream. The local core's logger keeps teeing
+		// into the same ring (step 3 above), so the Logs window's [local] stream is
+		// uninterrupted (issue #562).
+		dc.wb.SetDaemonLogStream(nil)
 		dc.wb.SetNotifyConfig(g.Notifications())
 		g.SetNotifySink(dc.wb.NotifyFromBackend)
 		dc.wb.SetBudgetConfig(g.Budget())

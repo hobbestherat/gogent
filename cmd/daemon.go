@@ -282,7 +282,10 @@ func runDaemonForeground(p daemon.Paths, opts daemonStartOpts) error {
 	}
 	fmt.Printf("daemon listening on %s (pid %d)\n", addr, os.Getpid())
 
-	g := buildDaemonCore(homeDir, opts)
+	// The diagnostic-log ring (issue #562): the daemon's logger tees every record
+	// into it, and the API streams it to remote clients via /api/logs/stream.
+	logRing := diag.NewRing(logRingSize)
+	g := buildDaemonCore(homeDir, opts, logRing)
 
 	// The daemon is headless, so the API bridge is the only prompter/reviewer: a
 	// remote client (or curl) answers interactive prompts over /approvals.
@@ -291,6 +294,7 @@ func runDaemonForeground(p daemon.Paths, opts daemonStartOpts) error {
 		Token:                     os.Getenv("GOGENT_HTTP_TOKEN"),
 		ApprovalTimeout:           5 * time.Minute,
 		UnattendedApprovalTimeout: g.GetConfig().UnattendedApprovalTimeoutOrDefault(),
+		Logs:                      ringLogStreamer{ring: logRing},
 	})
 	apiServer.InstallApprovalGates()
 	// Route backend notifications (watcher completions) over the wire: when a
@@ -368,15 +372,17 @@ func runDaemonForeground(p daemon.Paths, opts daemonStartOpts) error {
 // core the embedded path builds, minus the TUI. It mirrors main's essential
 // setup — loggers, audit trail, the default session and its root agent, the
 // command registry and file tools — so the /api surface is fully functional.
-func buildDaemonCore(homeDir string, opts daemonStartOpts) *gogent.Gogent {
+func buildDaemonCore(homeDir string, opts daemonStartOpts, logRing *diag.Ring) *gogent.Gogent {
 	g := gogent.NewGogent(homeDir)
 	if opts.yolo {
 		g.SetGlobalYolo(true)
 	}
 
 	// Diagnostics and the security audit trail are file-backed (the daemon has no
-	// terminal). A failed open is non-fatal.
-	if lg, err := diag.NewFile(filepath.Join(homeDir, ".gogent", "gogent.log")); err == nil {
+	// terminal). A failed open is non-fatal. The diagnostic logger also tees into
+	// logRing (issue #562) so the API can stream logs to remote clients; a nil ring
+	// disables the tee (e.g. the handoff path).
+	if lg, err := diag.NewFileWithRing(filepath.Join(homeDir, ".gogent", "gogent.log"), logRing); err == nil {
 		g.SetLogger(lg)
 	} else {
 		log.Printf("open diagnostic log: %v", err)

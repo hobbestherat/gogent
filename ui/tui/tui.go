@@ -586,6 +586,10 @@ type Workbench struct {
 	// the window is stored directly. Set in showAgentMonolog, cleared on close /
 	// replace; nil when no monologue is open. Read/written on the UI thread.
 	monologWindow *tv.Window
+	// logs holds the persistent Logs window's live state (issue #562): the diag
+	// ring it tees from, the remote daemon-log stream, and the goroutine cancel.
+	// nil-valued until showLogsWindow first opens it; see logs_window.go.
+	logs logsState
 	// shutdown is cancelled (via quit) when the UI loop stops. Background
 	// goroutines blocked on a permission prompt select on it so they unblock
 	// instead of leaking when the user quits. See AskPermission.
@@ -1225,6 +1229,10 @@ func (w *Workbench) settingsItems() []*tv.MenuItem {
 		tv.NewMenuItem("&Models…", func() { w.showModelsDialog() }),
 	}
 	items = append(items, tv.NewMenuItem("&Resources…", func() { w.showResourcesDialog() }))
+	// Logs window (issue #562): a persistent, non-modal viewer for tool/daemon
+	// diagnostics. Always available — with no captured logs it simply opens empty.
+	// Reopening raises the existing window rather than duplicating it.
+	items = append(items, tv.NewMenuItem("&Logs…", func() { w.showLogsWindow() }))
 	// Statistics is surfaced only when the backend wires the report handler.
 	if w.handlers.GetStatistics != nil {
 		items = append(items, tv.NewMenuItem("S&tatistics…", func() { w.showStatisticsDialog() }))
@@ -1773,10 +1781,29 @@ func (w *Workbench) openWindow(id, title string) *SessionWindow {
 	return w.openWindowAny(id, title, false)
 }
 
-// openWindowAny is the core window builder shared by live sessions (readOnly
-// false) and the read-only analysis windows (readOnly true, issue #58) opened
-// from the Sessions browser.
+// openLogsWindow builds and registers the persistent Logs window (issue #562) as
+// a winLogs read-only window, so it joins w.sessions/w.order and inherits tiling,
+// cycle, raise, activeIDLocked and layout-exclusion exactly like an analysis
+// window. It is the construction half of showLogsWindow (see logs_window.go).
+func (w *Workbench) openLogsWindow(id, title string) *SessionWindow {
+	return w.openWindowKind(id, title, winLogs)
+}
+
+// openWindowAny is the back-compatible builder for live sessions (readOnly false)
+// and the read-only analysis windows (readOnly true, issue #58) opened from the
+// Sessions browser. The Logs window (issue #562) uses openWindowKind with winLogs.
 func (w *Workbench) openWindowAny(id, title string, readOnly bool) *SessionWindow {
+	kind := winLive
+	if readOnly {
+		kind = winAnalysis
+	}
+	return w.openWindowKind(id, title, kind)
+}
+
+// openWindowKind is the core window builder shared by every window kind: it
+// cascades the new window, registers it in w.sessions/w.order and the sidebar,
+// and adds its layer to the desktop z-stack.
+func (w *Workbench) openWindowKind(id, title string, kind windowKind) *SessionWindow {
 	w.mu.Lock()
 	// Collision tripwire (issue #518): this is the sole w.sessions[id]= write site,
 	// so it is the last line of defense against a duplicate window. The callers
@@ -1816,7 +1843,7 @@ func (w *Workbench) openWindowAny(id, title string, readOnly bool) *SessionWindo
 	}
 	x := 2 + offset*3
 	y := 2 + offset*1
-	sw := newSessionWindow(w, id, title, tv.Rect{X: x, Y: y, W: width, H: height}, readOnly)
+	sw := newSessionWindowKind(w, id, title, tv.Rect{X: x, Y: y, W: width, H: height}, kind)
 	w.sessions[id] = sw
 	w.order = append(w.order, id)
 	pinned := w.pinned[id]
@@ -1871,7 +1898,14 @@ func (w *Workbench) Focus(id string) {
 	// Re-adding the layer moves it to the top of the z-stack.
 	w.desktop.RemoveLayer(sw.layer)
 	w.desktop.AddLayer(sw.layer)
-	w.desktop.SetFocus(sw.input)
+	// A read-only window (analysis #58, logs #562) has no input box, so focus its
+	// transcript instead — otherwise SetFocus(nil) leaves the window unfocused and
+	// keyboard scroll / close keys do nothing until the user clicks the body.
+	if sw.input != nil {
+		w.desktop.SetFocus(sw.input)
+	} else {
+		w.desktop.SetFocus(sw.history)
+	}
 	// Lazily load a deferred session's transcript the first time it is focused
 	// (issue #517). This is the single user-driven focus chokepoint — cycle, the
 	// session menu, the sidebar and watcher-open all route through it — while
@@ -2019,6 +2053,11 @@ func (w *Workbench) CloseSession(id string) {
 	if sw == nil {
 		w.mu.Unlock()
 		return
+	}
+	// The Logs window (issue #562) owns live ring/daemon-stream subscriptions; tear
+	// them down so a closed window holds no goroutine or open daemon stream.
+	if id == logsWindowID {
+		w.closeLogsWindow()
 	}
 	delete(w.sessions, id)
 	delete(w.pinned, id)

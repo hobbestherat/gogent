@@ -60,6 +60,11 @@ type Server struct {
 	// (issue #358 §9) and reused wherever the server needs the current time.
 	now func() time.Time
 
+	// logs is the diagnostic-log source streamed by GET /api/logs/stream (issue
+	// #562). Wired by the daemon (Options.Logs); nil in embedded mode, where the
+	// in-process TUI reads the diag ring directly and the endpoint streams nothing.
+	logs LogStreamer
+
 	api *webapi.API
 }
 
@@ -79,7 +84,11 @@ type Options struct {
 	// auto-denied (issue #358 §8). Zero is replaced by the built-in default
 	// (config.DefaultUnattendedApprovalTimeout, 1h) in NewServer.
 	UnattendedApprovalTimeout time.Duration
-	now                       func() time.Time // injectable clock (tests)
+	// Logs, when set, is the diagnostic-log source surfaced over GET
+	// /api/logs/stream (issue #562). The daemon wires an adapter over its diag
+	// ring; embedded mode leaves it nil.
+	Logs LogStreamer
+	now  func() time.Time // injectable clock (tests)
 }
 
 // NewServer builds the server: it wires the event hub as the session observer,
@@ -110,6 +119,7 @@ func NewServer(g *gogent.Gogent, opts Options) *Server {
 		busy:      make(map[string]struct{}),
 		startedAt: opts.now(),
 		now:       opts.now,
+		logs:      opts.Logs,
 	}
 
 	// Re-wire every already-live session's observer through the hub (sessions
@@ -193,6 +203,9 @@ func (s *Server) buildAPI() *webapi.API {
 			// --- events ---
 			{Path: "/sessions/:id/events", Method: http.MethodGet, Handler: ev.SessionEvents, AuthLevel: req},
 			{Path: "/events", Method: http.MethodGet, Handler: ev.GlobalEvents, AuthLevel: req},
+
+			// --- logs (issue #562) ---
+			{Path: "/logs/stream", Method: http.MethodGet, Handler: ev.LogStream, AuthLevel: req},
 
 			// --- approvals ---
 			{Path: "/approvals", Method: http.MethodGet, Handler: appr.List, AuthLevel: req},
