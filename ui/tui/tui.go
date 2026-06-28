@@ -202,6 +202,14 @@ type Handlers struct {
 	// workspace). May be nil, in which case @-mentions are sent verbatim for the
 	// model to read themselves.
 	ReadWorkspaceFile func(path string) (content string, ok bool)
+	// GetWorkspaceRoot returns the session's working directory — the immutable
+	// WorkspaceRoot where !-prefixed and agent shell commands run, set once at
+	// launch — shown right-aligned on the status line as an awareness affordance
+	// (issue #551). May be nil, in which case the status line simply omits the
+	// path (remote/daemon handlers and the read-only analysis window leave it
+	// unwired). Read live on each status refresh via Workbench.WorkspaceRoot, so a
+	// runtime Handlers swap (a daemon attach/handoff) is reflected immediately.
+	GetWorkspaceRoot func() string
 	// OnUndo reverts the last turn's file mutations for a session (issue #41),
 	// returning a human-readable summary. May be nil (the /undo command then
 	// reports the feature as unavailable).
@@ -900,6 +908,21 @@ func (w *Workbench) modelByIndex(i int) *config.ModelConfig {
 func (w *Workbench) SetHandlers(h Handlers) {
 	w.handlers = h
 	w.refreshConnectionStatus()
+}
+
+// WorkspaceRoot returns the live session working directory for the status-line
+// path affordance (issue #551), or "" when the getter is unwired (remote/daemon
+// handlers, the read-only analysis window). It is read on every status refresh
+// rather than memoised: the underlying getter (g.GetWorkspaceRoot) is a single
+// struct-field return, and the Handlers can be swapped at runtime — SetHandlers is
+// called by cmd/attach.go and cmd/handoff.go during a daemon attach/handoff — so a
+// cache would risk pinning a stale root after a handoff for no measurable gain.
+// Called on the UI thread, like the rest of the per-render state, so it needs no lock.
+func (w *Workbench) WorkspaceRoot() string {
+	if w.handlers.GetWorkspaceRoot == nil {
+		return ""
+	}
+	return w.handlers.GetWorkspaceRoot()
 }
 
 // Post marshals fn onto the UI (event-loop) thread, so background goroutines —

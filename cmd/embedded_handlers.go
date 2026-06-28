@@ -398,6 +398,12 @@ func embeddedHandlersFor(g *gogent.Gogent, wb *tuipkg.Workbench, noColor bool) t
 			}
 			return content, true
 		},
+		// Working-directory affordance (issue #551): the status line shows the
+		// session's immutable WorkspaceRoot right-aligned. The getter is a free
+		// field read, so the status refresh queries it live (no cache).
+		GetWorkspaceRoot: func() string {
+			return g.GetWorkspaceRoot()
+		},
 		// Watchers (issue #329 Phase 4). The TUI dialog, sidebar and /watcher
 		// command read through ListWatchers and drive the controls below, which
 		// map onto the Phase-3 gogent wrappers. Enable/Disable are the two

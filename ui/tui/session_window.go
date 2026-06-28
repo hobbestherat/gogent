@@ -7,6 +7,8 @@ import (
 	tv "github.com/hobbestherat/turbotui/turbotv"
 	"gogent/internal/agent"
 	"gogent/internal/config"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -105,6 +107,11 @@ type SessionWindow struct {
 	// refreshStatus composes the two into the single bottom status line.
 	statusState string
 	statusStats agent.SessionStats
+	// statusPath is the right-aligned working-directory string the status label's
+	// custom DrawFn paints in colorInfo (issue #551). refreshStatus recomputes it
+	// each refresh (shortened to the reserved budget) and clears it when there is
+	// no room or no wired getter; "" means "no path drawn", the pre-#551 look.
+	statusPath string
 	// turnStart / turnStartOut anchor the live elapsed timer and output
 	// throughput shown while a turn is generating. turnStart is the zero time
 	// when the session is idle. budgetAlerted latches the one-time "budget
@@ -285,6 +292,33 @@ func newSessionWindow(wb *Workbench, id, title string, bounds tv.Rect, readOnly 
 	effortLabel.SetTarget(effortSelect)
 	status := tv.NewLabel("idle", tv.Rect{})
 	status.FG = colorNote
+	// Two-colour status render (issue #551): the left content keeps the label's own
+	// FG (the idle/working/severity colour set by refreshStatus via statusColorFor),
+	// and the working-directory path is painted flush-right in colorInfo — a less-dim
+	// chrome colour that stands out from the dim idle grey but stays subordinate to the
+	// green/amber/red severity colours. turbotui's Label paints its whole text in one
+	// colour, so the only way to give the path an independent colour without a second
+	// widget is to replace the label's DrawFn and write the two spans onto the surface
+	// directly (the same surface.WriteString primitive Label.draw uses). reseedLabel does
+	// not touch DrawFn, so this survives live theme switches; colorInfo is a theme var
+	// recoloured by ApplyTheme, so the path recolours with the rest of the chrome.
+	status.Component.DrawFn = func(c *tv.VisualComponent, surface tv.Surface) {
+		abs := c.AbsoluteBounds()
+		if abs.W < 1 || abs.H < 1 {
+			return
+		}
+		// GetText returns the mnemonic-clean text, matching Label.draw's output for
+		// this non-mnemonic, single-row label (it carries no &-marker and is never an
+		// Alt-navigation target, so no hot-char highlight is lost).
+		surface.WriteString(abs.X, abs.Y, status.GetText(), tui.Cell{FG: status.FG, BG: status.BG})
+		if sw.statusPath != "" {
+			// refreshStatus reserved room so the left content (truncated to leftW) can
+			// never reach this x; surface.WriteString clips, so the path never overdraws
+			// a neighbour even if the math were off.
+			x := abs.X + abs.W - tui.StringWidth(sw.statusPath)
+			surface.WriteString(x, abs.Y, sw.statusPath, tui.Cell{FG: colorInfo, BG: status.BG})
+		}
+	}
 	// The divider rule above the controls region (issue #195). Its text is built per
 	// layout from the window width (layoutControlsSeparator); it carries the chrome
 	// divider colour so it matches the separators used elsewhere (e.g. the sidebar).
@@ -1661,7 +1695,22 @@ func (sw *SessionWindow) refreshStatus() {
 		// the chip never crowds out the rest of the status line.
 		state += " · queued: " + queuedPreview(sw.pending)
 	}
-	sw.status.SetText(formatStatusLine(state, sw.statusStats, live, budget, sw.status.Component.Bounds.W))
+	// Working-directory path (issue #551): right-align the (shortened) workspace root
+	// and reserve its columns so the left content truncates before it, never colliding.
+	// The path is dropped on narrow windows (and when no getter is wired), leaving the
+	// pre-#551 full-width left content untouched.
+	W := sw.status.Component.Bounds.W
+	leftW := W
+	sw.statusPath = ""
+	if root := sw.wb.WorkspaceRoot(); root != "" && W >= minStatusWidthForPath {
+		if p := shortenPath(root, homeDir(), pathBudget(W)); p != "" {
+			if pw := tui.StringWidth(p); W-pw-statusPathGap >= minLeftWidth {
+				sw.statusPath = p
+				leftW = W - pw - statusPathGap
+			}
+		}
+	}
+	sw.status.SetText(formatStatusLine(state, sw.statusStats, live, budget, leftW))
 	sw.alertBudgetIfNewlyExceeded(budget)
 }
 
@@ -2956,6 +3005,102 @@ func formatArgs(args map[string]interface{}) []string {
 
 // statusSep joins the state and each stat segment in the status line.
 const statusSep = " · "
+
+// Status-line working-directory path tunables (issue #551). The path is drawn
+// flush-right on the status row in colorInfo; refreshStatus reserves its columns
+// so the left content truncates before it.
+const (
+	// statusPathGap is the minimum blank columns kept between the left content and
+	// the right-aligned path so the two never read as one run.
+	statusPathGap = 2
+	// pathFloor is the smallest path budget that still renders something useful
+	// (e.g. "~/…/agent"); below it shortenPath returns "" and the path is omitted.
+	pathFloor = 8
+	// pathMax caps the path's share so a deep cwd never crowds the stats out on a
+	// very wide terminal; ~/…/internal/agent fits comfortably within it.
+	pathMax = 28
+	// minLeftWidth is the floor the left content keeps when a path is shown — enough
+	// for the state plus at least one stat — below which the path is dropped instead.
+	minLeftWidth = 12
+	// minStatusWidthForPath is the total status width below which no path is drawn at
+	// all, leaving the narrowest windows byte-for-byte as they were before #551.
+	minStatusWidthForPath = 24
+)
+
+// pathBudget is the display-column budget shortenPath is given for the current
+// status width: a third of the row, clamped to [pathFloor, pathMax].
+func pathBudget(width int) int {
+	b := width / 3
+	if b < pathFloor {
+		b = pathFloor
+	}
+	if b > pathMax {
+		b = pathMax
+	}
+	return b
+}
+
+// homeDir returns the user's home directory for the ~-collapse in the status-line
+// path, or "" when it cannot be determined (in which case shortenPath simply skips
+// the collapse). os.UserHomeDir already honours $HOME on Unix and the user-profile
+// vars on Windows.
+func homeDir() string {
+	h, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return h
+}
+
+// shortenPath renders a filesystem path for the status line within maxW display
+// columns. It first normalises separators to "/" (so a Windows \-separated root
+// collapses and splits correctly) and collapses a home-directory prefix to "~";
+// if the result still exceeds the budget it keeps the first segment plus "…/" plus
+// the trailing two — then one — segment(s) (~/code/gogent/internal/agent →
+// ~/…/internal/agent), and as a last resort width-truncates the final segment with
+// a trailing "…". It returns "" when nothing legible fits within maxW (below
+// pathFloor), so the caller can omit the path entirely.
+func shortenPath(path, home string, maxW int) string {
+	if path == "" || maxW < pathFloor {
+		return ""
+	}
+	path = filepath.ToSlash(path)
+	if home != "" {
+		home = filepath.ToSlash(home)
+		if path == home {
+			path = "~"
+		} else if strings.HasPrefix(path, home+"/") {
+			path = "~" + path[len(home):]
+		}
+	}
+	if tui.StringWidth(path) <= maxW {
+		return path
+	}
+
+	segs := strings.Split(path, "/")
+	head := segs[0] // "~", "" (absolute leading "/"), or a drive/first component
+	last := segs[len(segs)-1]
+	// Elide the middle, keeping head + the trailing two — then one — segment(s).
+	// Guard on length so the elision only fires when there is genuinely a middle to
+	// drop (head + … + tail), never duplicating head on a shallow path.
+	if len(segs) >= 4 {
+		if c := head + "/…/" + strings.Join(segs[len(segs)-2:], "/"); tui.StringWidth(c) <= maxW {
+			return c
+		}
+	}
+	if len(segs) >= 3 {
+		if c := head + "/…/" + last; tui.StringWidth(c) <= maxW {
+			return c
+		}
+		// Width-truncate the final segment with a trailing ellipsis, behind the elision.
+		prefix := head + "/…/"
+		if room := maxW - tui.StringWidth(prefix); room >= 2 {
+			return prefix + tv.Truncate(last, room, "…")
+		}
+	}
+	// Shallow path (or no room for the elision): truncate the whole thing.
+	return tv.Truncate(path, maxW, "…")
+}
 
 // gaugeCells is the width of the context-usage bar in display cells (e.g.
 // "▰▰▰▱▱▱").
