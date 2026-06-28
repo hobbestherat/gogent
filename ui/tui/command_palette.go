@@ -560,10 +560,11 @@ func newCloseableDialog(title string, x, y, width, height int, closeFn func()) *
 func (w *Workbench) showCommandPalette() {
 	all := w.actions()
 	// List-driven, so it benefits from width — keep it near the percentage default
-	// (no PreferredW) with a 40×10 floor — but cap the height to the actual command
-	// count (+ chrome) so a short palette does not fill 42 rows on a roomy terminal
-	// (issues #299, #309).
-	spec := tv.DialogSpec{MinW: 40, MinH: 10, MaxH: availableCommandCount(all) + paletteVChrome}
+	// (no PreferredW) with a 40×10 floor — but cap the width at comfortableMaxWidth
+	// (120) so it does not balloon toward ~610 cols on a very wide terminal (issue
+	// #552), and cap the height to the actual command count (+ chrome) so a short
+	// palette does not fill 42 rows on a roomy terminal (issues #299, #309).
+	spec := tv.DialogSpec{MinW: 40, MaxW: comfortableMaxWidth, MinH: 10, MaxH: availableCommandCount(all) + paletteVChrome}
 	x, y, width, height := w.dialogRect(spec)
 
 	var layer *tv.Layer
@@ -659,10 +660,11 @@ func (w *Workbench) showCommandPalette() {
 func (w *Workbench) showHelpOverlay() {
 	help := helpText(w.actions())
 	// Read-only and list-driven, so keep it near the percentage default width (no
-	// PreferredW) with a 44×12 floor — but cap the height to the cheatsheet's line
-	// count (+ chrome) so a short binding list does not fill 42 rows (issues #299,
-	// #309).
-	spec := tv.DialogSpec{MinW: 44, MinH: 12, MaxH: textLineCount(help) + helpVChrome}
+	// PreferredW) with a 44×12 floor — but cap the width at comfortableMaxWidth (120)
+	// so it does not balloon toward ~610 cols on a very wide terminal (issue #552),
+	// and cap the height to the cheatsheet's line count (+ chrome) so a short binding
+	// list does not fill 42 rows (issues #299, #309).
+	spec := tv.DialogSpec{MinW: 44, MaxW: comfortableMaxWidth, MinH: 12, MaxH: textLineCount(help) + helpVChrome}
 	x, y, width, height := w.dialogRect(spec)
 
 	var layer *tv.Layer

@@ -1781,6 +1781,13 @@ func (w *Workbench) openWindowAny(id, title string, readOnly bool) *SessionWindo
 	if width < 50 {
 		width = avail - 2
 	}
+	// Cap the initial open width on very wide terminals (issue #552). This is the
+	// auto-sizing path only — a later resize/drag/maximize/tile goes through other
+	// functions and still reaches full width. Applied after the <50 floor so the
+	// floor can't re-inflate past the comfortable max.
+	if width > comfortableMaxWidth {
+		width = comfortableMaxWidth
+	}
 	if height < 12 {
 		height = w.app.Height() - 2
 	}
@@ -2456,7 +2463,16 @@ func (w *Workbench) applyLayout(layout gogent.Layout) {
 		// Restore the per-session supervisor goal (issue #172) so the idle watchdog
 		// resumes supervising the same objective after a restart.
 		sw.goal = e.Goal
-		bounds := clampWindowRect(tv.Rect{X: e.X, Y: e.Y, W: e.W, H: e.H},
+		// Apply the comfortable max as a CEILING on the restored width (issue #552,
+		// option b): a wide-monitor restart re-introducing a ~660-col window is the
+		// reported annoyance. A persisted width <= the cap restores verbatim; a wider
+		// one clamps down. clampWindowRect below stays boundary-only (screen/sidebar).
+		// (Local is restoredW, not w, so it does not shadow the *Workbench receiver.)
+		restoredW := e.W
+		if restoredW > comfortableMaxWidth {
+			restoredW = comfortableMaxWidth
+		}
+		bounds := clampWindowRect(tv.Rect{X: e.X, Y: e.Y, W: restoredW, H: e.H},
 			area.W, area.H, sw.window.MinWidth, sw.window.MinHeight)
 		sw.window.Component.SetBounds(bounds)
 		if e.Minimized && !sw.window.IsMinimized() {

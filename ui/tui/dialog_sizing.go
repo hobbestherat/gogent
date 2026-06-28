@@ -21,15 +21,20 @@ func (w *Workbench) dialogRect(spec tv.DialogSpec) (x, y, wid, h int) {
 }
 
 // browserDialogSpec is the sizing intent of the Resources browser: a two-pane
-// read-only browser that still fills the screen, large by default at ≈85% of the
-// terminal width with a 60×14 floor so it stays usable on a small terminal.
-// PreferredW is a share of the *current* terminal, so it is recomputed (via this
+// read-only browser that fills the screen up to a comfortable cap, with a 60×14
+// floor so it stays usable on a small terminal. MaxW caps it at
+// comfortableMaxWidth (120) so it no longer balloons toward ~650 cols on a very
+// wide terminal (issue #552); below ~150 cols the cap is inert and the dialog
+// still grows with the terminal. The PreferredW share is recomputed (via this
 // method as the specFn) on every resize rather than baked at open time (issue
-// #299). The list/detail split is derived from the resolved width, so the panes
-// grow with the dialog. (The Statistics dialog used to share this spec but now has
-// its own content-driven statisticsDialogSpec — issue #345.)
+// #299); it is already functionally dead — turbotui clamps the 85% request down
+// to its 80% percentage default (issue #309), and the new MaxW is the binding
+// constraint above 120 — but it is kept so resolved widths track the terminal
+// below the cap. The list/detail split is derived from the resolved width, so the
+// panes grow with the dialog. (The Statistics dialog used to share this spec but
+// now has its own content-driven statisticsDialogSpec — issue #345.)
 func (w *Workbench) browserDialogSpec() tv.DialogSpec {
-	return tv.DialogSpec{MinW: 60, MinH: 14, PreferredW: w.app.Width() * 85 / 100}
+	return tv.DialogSpec{MinW: 60, MaxW: comfortableMaxWidth, MinH: 14, PreferredW: w.app.Width() * 85 / 100}
 }
 
 // sessionsDialogSpec is the content-driven size of the Saved Sessions browser
