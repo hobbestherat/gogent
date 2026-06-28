@@ -653,15 +653,39 @@ func darkPalette() Theme {
 	}
 }
 
-// ResolveTheme builds the active Theme from the theme config and the
-// environment. It selects a built-in palette, applies any config overrides,
-// then degrades every colour to the terminal's detected ColorLevel — forcing
-// ColorNone when NO_COLOR, the --no-color flag, or cfg.NoColor is set. env is
-// the environment accessor (os.Getenv in production, a stub in tests).
+// ResolveTheme builds the active Theme from the theme config and the colour
+// level turbotui has detected. It selects a built-in palette, applies any config
+// overrides, then degrades every colour to that level.
+//
+// turbotui owns colour detection (env + terminfo, the signal that survives an SSH
+// hop); see detectColorLevel. Production callers install the level once at startup
+// with tui.SetColorLevel(tui.DetectColorLevel()) and pass env == nil here, so the
+// theme is resolved at exactly the level the renderer downsamples through — the two
+// layers can never disagree.
+//
+// env is a nil-able environment accessor:
+//   - env == nil: resolve at the already-installed level (tui.GetColorLevel()).
+//     This is the production path.
+//   - env != nil: resolve at the level turbotui's env-only detector reports for
+//     that env, computed purely (no global write) so callers — chiefly tests —
+//     stay hermetic. This path never reaches a real renderer.
+//
+// NO_COLOR / --no-color / cfg.NoColor force ColorNone at BOTH layers: the flag and
+// cfg cases call tui.SetColorLevel(tui.ColorLevelNone) so the renderer blanks too,
+// and a NO_COLOR env is honoured by turbotui's detector on either path.
 func ResolveTheme(cfg config.ThemeConfig, env func(string) string, noColorFlag bool) Theme {
-	level := detectColorLevel(env)
-	if noColorFlag || cfg.NoColor {
+	var level ColorLevel
+	switch {
+	case noColorFlag || cfg.NoColor:
+		// Force none at both layers: blank the renderer too, not just the palette.
+		tui.SetColorLevel(tui.ColorLevelNone)
 		level = ColorNone
+	case env == nil:
+		// Production: resolve at the level the entry point already installed.
+		level = detectColorLevel()
+	default:
+		// Explicit env (tests): pure, no global write — keeps callers hermetic.
+		level = fromTUILevel(tui.ColorLevelFromEnv(envLookup(env)))
 	}
 
 	t := paletteByName(cfg.Name)
@@ -711,27 +735,42 @@ func ResolveTheme(cfg config.ThemeConfig, env func(string) string, noColorFlag b
 	return t
 }
 
-// detectColorLevel infers the terminal's colour fidelity from the environment,
-// honouring the NO_COLOR convention (https://no-color.org/): any non-empty
-// NO_COLOR disables colour. A missing or "dumb" TERM is treated as no colour;
-// COLORTERM=truecolor|24bit reports truecolor; a "256"-suffixed TERM reports
-// 256 colours; everything else falls back to the 16-colour baseline.
-func detectColorLevel(env func(string) string) ColorLevel {
-	if env("NO_COLOR") != "" {
-		return ColorNone
-	}
-	term := strings.ToLower(env("TERM"))
-	if term == "" || term == "dumb" {
-		return ColorNone
-	}
-	switch strings.ToLower(env("COLORTERM")) {
-	case "truecolor", "24bit":
-		return ColorTrue
-	}
-	if strings.Contains(term, "256") {
+// detectColorLevel reports, in gogent's ColorLevel enum, the colour level
+// turbotui has detected. turbotui is the single source of truth: it owns
+// detection from the environment and the terminal's terminfo entry — the one
+// colour-capability signal that survives an SSH hop, where sshd sets a valid TERM
+// on the remote but rarely forwards COLORTERM. gogent no longer re-implements the
+// env rules; it installs the level once at each production entry point with
+// tui.SetColorLevel(tui.DetectColorLevel()) and reads it back here.
+func detectColorLevel() ColorLevel {
+	return fromTUILevel(tui.GetColorLevel())
+}
+
+// fromTUILevel maps turbotui's ColorLevel onto gogent's ColorLevel enum (kept
+// separate because gogent's degrade/audit machinery is written against it). An
+// unrecognised level degrades safely to ColorNone.
+func fromTUILevel(level tui.ColorLevel) ColorLevel {
+	switch level {
+	case tui.ColorLevel16:
+		return Color16
+	case tui.ColorLevel256:
 		return Color256
+	case tui.ColorLevelTrueColor:
+		return ColorTrue
+	default: // tui.ColorLevelNone and any future level
+		return ColorNone
 	}
-	return Color16
+}
+
+// envLookup adapts gogent's func(string) string environment accessor to the
+// func(string) (string, bool) lookup turbotui's detector expects. An empty value
+// is reported as absent (ok == false) so an empty NO_COLOR is correctly ignored,
+// matching the NO_COLOR convention (https://no-color.org/).
+func envLookup(env func(string) string) func(string) (string, bool) {
+	return func(k string) (string, bool) {
+		v := env(k)
+		return v, v != ""
+	}
 }
 
 // applyOverrides applies "name → colour" config overrides on top of a palette.

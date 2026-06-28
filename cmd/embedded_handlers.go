@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
 
 	"gogent/internal/agent"
 	"gogent/internal/command"
@@ -15,6 +14,8 @@ import (
 	"gogent/internal/stats"
 	"gogent/internal/tool"
 	tuipkg "gogent/ui/tui"
+
+	tui "github.com/hobbestherat/turbotui"
 )
 
 // embeddedHandlersFor builds the in-process Handlers that drive the embedded core
@@ -140,9 +141,12 @@ func embeddedHandlersFor(g *gogent.Gogent, wb *tuipkg.Workbench, noColor bool) t
 		},
 		SetTheme: func(t config.ThemeConfig) {
 			// Persist, then re-resolve and install the palette so the live
-			// UI recolours without a restart (issue #103).
+			// UI recolours without a restart (issue #103). Re-detect the colour
+			// level (terminfo-aware — issue #549) so a changed terminal/env
+			// reflects consistently, then resolve at that level (env == nil).
 			g.SetTheme(t)
-			tuipkg.ApplyTheme(tuipkg.ResolveTheme(t, os.Getenv, noColor))
+			tui.SetColorLevel(tui.DetectColorLevel())
+			tuipkg.ApplyTheme(tuipkg.ResolveTheme(t, nil, noColor))
 			wb.RefreshTheme()
 		},
 		// Named custom themes (issue #462): persisted alongside the active theme.

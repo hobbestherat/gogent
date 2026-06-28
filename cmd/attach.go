@@ -15,6 +15,8 @@ import (
 	"gogent/internal/gogent"
 	"gogent/internal/sshtunnel"
 	tuipkg "gogent/ui/tui"
+
+	tui "github.com/hobbestherat/turbotui"
 )
 
 // resolveMode decides whether the default `gogent` invocation attaches the TUI
@@ -144,9 +146,14 @@ func runAttached(homeDir, addr, token string, noColorFlag bool) error {
 	// Presentation-config source only (no sessions/server/watchers/MCP started).
 	g := gogent.NewGogent(homeDir)
 
-	// Resolve and install the colour theme before the workbench is built, exactly
-	// as the embedded path does.
-	tuipkg.ApplyTheme(tuipkg.ResolveTheme(g.GetConfig().Theme, os.Getenv, noColorFlag))
+	// Install colour detection once (terminfo-aware — issue #549), then resolve and
+	// install the theme at that level before the workbench is built, exactly as the
+	// embedded path does. Detection runs on the LOCAL terminal here (the TUI renders
+	// in this attach process, not the remote daemon), so a local `--connect
+	// ssh://host` is coloured at the local terminal's fidelity. env == nil resolves
+	// at the level just installed, keeping the palette degrade and renderer in sync.
+	tui.SetColorLevel(tui.DetectColorLevel())
+	tuipkg.ApplyTheme(tuipkg.ResolveTheme(g.GetConfig().Theme, nil, noColorFlag))
 
 	// Populate the model dropdown from the daemon's configured models (the daemon
 	// owns the agent models); fall back to the local config if that read fails.
@@ -299,7 +306,10 @@ func installPresentationHandlers(h *tuipkg.Handlers, g *gogent.Gogent, wb *tuipk
 	h.GetTheme = func() config.ThemeConfig { return g.Theme() }
 	h.SetTheme = func(t config.ThemeConfig) {
 		g.SetTheme(t)
-		tuipkg.ApplyTheme(tuipkg.ResolveTheme(t, os.Getenv, noColorFlag))
+		// Re-detect on a live theme switch so a changed terminal/env reflects
+		// consistently (issue #549), then resolve at that level (env == nil).
+		tui.SetColorLevel(tui.DetectColorLevel())
+		tuipkg.ApplyTheme(tuipkg.ResolveTheme(t, nil, noColorFlag))
 		wb.RefreshTheme()
 	}
 	// Named custom themes (issue #462): persisted alongside the active theme; the
