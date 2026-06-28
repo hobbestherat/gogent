@@ -574,3 +574,117 @@ func TestStatusLineSeverityColoursPreserved(t *testing.T) {
 		})
 	}
 }
+
+// TestRefreshStatusResetsStatusPathAcrossWidths guards the per-call reset of
+// statusPath (refreshStatus clears it before recomputing). Reusing one window
+// across a wide→narrow→wide sweep, the narrow step must clear the path the wide
+// step set — a missing reset would leak a wide path onto a narrow row.
+func TestRefreshStatusResetsStatusPathAcrossWidths(t *testing.T) {
+	const root = "/proj"
+	w := newTestWorkbench(t)
+	w.SetHandlers(Handlers{GetWorkspaceRoot: func() string { return root }})
+	sw := w.openWindow("s", "S")
+
+	set := func(wd int) {
+		sw.status.Component.SetBounds(tv.Rect{X: 0, Y: 0, W: wd, H: 1})
+		sw.refreshStatus()
+	}
+
+	set(100)
+	if sw.statusPath == "" {
+		t.Fatal("wide: statusPath empty, want the path shown")
+	}
+	wide := sw.statusPath
+
+	set(minStatusWidthForPath - 1) // narrow: below the threshold
+	if sw.statusPath != "" {
+		t.Errorf("narrow: statusPath = %q, want \"\" (reset must clear the wide path %q)", sw.statusPath, wide)
+	}
+
+	set(100)
+	if sw.statusPath != wide {
+		t.Errorf("wide again: statusPath = %q, want %q (recomputed after reset)", sw.statusPath, wide)
+	}
+}
+
+// TestStatusLinePathSurvivesThemeSwitch is the criterion-3 regression guard for
+// the design's reliance on reseedLabel NOT touching DrawFn: a live theme switch
+// (ApplyTheme + Workbench.RefreshTheme) must keep the custom two-colour painter
+// in place and recolour the path to the live colorInfo — not drop the path or
+// leave it on the pre-switch colour.
+func TestStatusLinePathSurvivesThemeSwitch(t *testing.T) {
+	withThemeRestore(t) // ApplyTheme mutates the global colour vars; restore after
+	const root = "/proj"
+	w := newTestWorkbench(t)
+	w.SetHandlers(Handlers{GetWorkspaceRoot: func() string { return root }})
+	w.app.Resize(120, 40)
+	sw := w.openWindow("s", "S")
+	w.desktop.Redraw()
+	if sw.statusPath == "" {
+		t.Fatal("precondition: path should render before the theme switch")
+	}
+	before := colorInfo
+
+	// Switch palettes the way the app does on a live theme change.
+	truecolor := envOf(map[string]string{"TERM": "xterm", "COLORTERM": "truecolor"})
+	ApplyTheme(ResolveTheme(config.ThemeConfig{Name: "high-contrast"}, truecolor, false))
+	w.RefreshTheme() // reseeds labels + refreshStatus; must NOT reset DrawFn (Redraws)
+
+	if sw.statusPath == "" {
+		t.Fatal("statusPath cleared by theme switch; the path affordance must survive")
+	}
+	cells, _ := statusRowCells(t, w, sw)
+	pw := tui.StringWidth(sw.statusPath)
+	pathCells := cells[len(cells)-pw:]
+	if got := cellString(pathCells); got != sw.statusPath {
+		t.Errorf("post-switch painted path = %q, want %q (custom DrawFn dropped?)", got, sw.statusPath)
+	}
+	// The DrawFn reads the live colorInfo var, so the path must match whatever the
+	// new theme installed.
+	if !allFG(pathCells, colorInfo) {
+		t.Errorf("post-switch path FG = %v, want live colorInfo %v (DrawFn must read the recoloured var)",
+			pathCells, colorInfo)
+	}
+	// If the theme actually moved colorInfo, the paint must have moved with it —
+	// proving a real recolour, not a stale pre-switch paint.
+	if before != colorInfo && allFG(pathCells, before) {
+		t.Errorf("path still painted in the pre-switch colorInfo %v after a live theme change", before)
+	}
+}
+
+// TestStatusLineLongLeftContentCoexistsWithPath proves the reservation actually
+// clips a long left content to make room for the path: at a narrow width with
+// full stats the left line is bounded by leftW (not the full row), so it never
+// reaches the right-aligned path.
+func TestStatusLineLongLeftContentCoexistsWithPath(t *testing.T) {
+	const root = "/proj"
+	w := newTestWorkbench(t)
+	w.SetHandlers(Handlers{GetWorkspaceRoot: func() string { return root }})
+	sw := w.openWindow("s", "S")
+	sw.statusState = "working..."
+	sw.statusStats = agent.SessionStats{
+		TokensIn: 12300, TokensOut: 4100, Turns: 7,
+		ContextTokens: 38000, ContextWindow: 100000,
+	}
+	const W = 30
+	sw.status.Component.SetBounds(tv.Rect{X: 0, Y: 0, W: W, H: 1})
+	sw.refreshStatus()
+
+	if sw.statusPath == "" {
+		t.Fatal("statusPath empty at W=30 with full stats; the path should still reserve room")
+	}
+	pw := tui.StringWidth(sw.statusPath)
+	leftW := W - pw - statusPathGap
+	if leftW >= W {
+		t.Errorf("no room reserved for the path: leftW=%d == W=%d", leftW, W)
+	}
+	left := sw.status.GetText()
+	if lw := tui.StringWidth(left); lw > leftW {
+		t.Errorf("left content %q (width %d) exceeds reserved leftW %d at W=%d — would collide with the path",
+			left, lw, leftW, W)
+	}
+	if tui.StringWidth(left)+statusPathGap+pw > W {
+		t.Errorf("left(%d)+gap(%d)+path(%d) > W(%d): collision",
+			tui.StringWidth(left), statusPathGap, pw, W)
+	}
+}
