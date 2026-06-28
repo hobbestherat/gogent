@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"gogent/internal/config"
+	"gogent/internal/model"
 	"gogent/internal/modelsdev"
 
 	tui "github.com/hobbestherat/turbotui"
@@ -371,20 +372,32 @@ func tokensShort(n int) string {
 }
 
 // showCatalogReviewStep is wizard step 3: a pre-filled, fully-editable review
-// form. Every field models.dev can supply is auto-filled; API type is read-only
-// ("from catalog"); the API key (or Vertex project/location) is blank and
-// required. Save creates a NEW entry via handlers.AddModel and refreshes the app.
+// form. Every aspect models.dev can supply is surfaced with consistent provenance
+// (issue #542): read-only facts (API type, context window, cost, capabilities,
+// docs) render as "(from catalog)" labels; catalog-seeded editable fields (max
+// tokens, reasoning effort) show their source as a hint; the derive-base Endpoint
+// shows the resolved/derived base read-only while staying overridable; and the
+// provider credential env var is carried forward. Save creates a NEW entry via
+// handlers.AddModel and refreshes the app.
 func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, modelID string, onClose func()) {
 	p := cat[providerID]
 	cm := p.Models[modelID]
 
 	draft := modelsdev.ToModelConfig(providerID, p, cm)
 	draft.Name = modelsdev.UniqueName(providerID, modelID, w.takenModelNames())
+	apiType := model.StringToAPIType(draft.APIType)
 	isVertex := strings.HasPrefix(draft.APIType, "vertex")
+
+	// Endpoint provenance: derive-base providers resolve their own base (or build it
+	// from project/location), so the persisted endpoint must stay blank unless the
+	// user overrides it. ResolvedBaseURL returns ("",false) for OpenAI-compatible
+	// gateways, which keep the editable box prefilled with the catalog's p.API.
+	derivedBase, derivedFromProjectLocation := model.ResolvedBaseURL(apiType)
+	deriveBase := derivedBase != "" || derivedFromProjectLocation
 
 	const labelW = 16
 	const boxX = 2 + labelW
-	spec := tv.DialogSpec{MinW: 70, MinH: 18, MaxH: 18, PreferredW: 84}
+	spec := tv.DialogSpec{MinW: 76, MinH: 21, MaxH: 21, PreferredW: 84}
 	x, y, width, height := w.dialogRect(spec)
 	boxW := width - boxX - 3
 
@@ -392,26 +405,63 @@ func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, mod
 	applyWindowShadow(dialog.Window)
 	dialog.Window.ShowClose = false
 
+	// field adds a full-width labelled editable TextBox.
 	field := func(text string, row int) *tv.TextBox {
 		dialog.Window.AddContent(dialogLabel(text, tv.Rect{X: 2, Y: row, W: labelW, H: 1}))
 		box := tv.NewTextBox("", tv.Rect{X: boxX, Y: row, W: boxW, H: 1})
 		dialog.Window.AddContent(box)
 		return box
 	}
+	// fieldHint adds a labelled editable TextBox of width bw plus a read-only hint to
+	// its right — used to attach catalog provenance without crowding out the input.
+	fieldHint := func(text string, row, bw int, hint string) *tv.TextBox {
+		dialog.Window.AddContent(dialogLabel(text, tv.Rect{X: 2, Y: row, W: labelW, H: 1}))
+		box := tv.NewTextBox("", tv.Rect{X: boxX, Y: row, W: bw, H: 1})
+		dialog.Window.AddContent(box)
+		if hint != "" {
+			hx := boxX + bw + 1
+			if hw := width - 3 - hx; hw > 0 {
+				dialog.Window.AddContent(dialogLabel(hint, tv.Rect{X: hx, Y: row, W: hw, H: 1}))
+			}
+		}
+		return box
+	}
+	// infoRow adds a full-width read-only catalog-fact line.
+	infoRow := func(text string, row int) {
+		dialog.Window.AddContent(dialogLabel(text, tv.Rect{X: 2, Y: row, W: width - 4, H: 1}))
+	}
 
-	name := field("Name:", 1)
+	row := 1
+	name := field("Name:", row)
 	name.SetText(draft.Name)
+	row++
 
 	// API type is read-only ("from catalog"): turbotui's Select has no disabled
 	// state, so render the derived type as a static label rather than a control the
 	// user can't meaningfully change. The value travels in the draft.
-	dialog.Window.AddContent(dialogLabel("API type:", tv.Rect{X: 2, Y: 2, W: labelW, H: 1}))
-	dialog.Window.AddContent(dialogLabel(draft.APIType+"  (from catalog)", tv.Rect{X: boxX, Y: 2, W: boxW, H: 1}))
+	dialog.Window.AddContent(dialogLabel("API type:", tv.Rect{X: 2, Y: row, W: labelW, H: 1}))
+	dialog.Window.AddContent(dialogLabel(draft.APIType+"  (from catalog)", tv.Rect{X: boxX, Y: row, W: boxW, H: 1}))
+	row++
 
-	display := field("Display name:", 3)
+	display := field("Display name:", row)
 	display.SetText(draft.DisplayName)
-	endpoint := field("Endpoint:", 4)
-	endpoint.SetText(draft.Endpoint)
+	row++
+
+	// Endpoint: empty box + read-only derived hint for derive-base providers (the
+	// blank persists unless the user types an override); editable box prefilled with
+	// p.API for OpenAI-compatible gateways.
+	var endpoint *tv.TextBox
+	if deriveBase {
+		hint := "(derived from Project + Location)"
+		if !derivedFromProjectLocation {
+			hint = fmt.Sprintf("(derived: %s)", derivedBase)
+		}
+		endpoint = fieldHint("Endpoint:", row, 8, hint) // box left blank on purpose
+	} else {
+		endpoint = field("Endpoint:", row)
+		endpoint.SetText(draft.Endpoint)
+	}
+	row++
 
 	// Model id: a plain, editable text field pre-filled with the catalog
 	// selection. Unlike the manual editor there is deliberately NO "Scan" button
@@ -419,26 +469,94 @@ func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, mod
 	// scanning is redundant — and a draft scan cannot work in remote mode anyway,
 	// where ScanModels is keyed by a SAVED model name (the unsaved draft would
 	// 404). The user can still hand-edit the id.
-	modelIDBox := field("Model id:", 5)
+	modelIDBox := field("Model id:", row)
 	modelIDBox.SetText(draft.Model)
+	row++
 
-	apiKey := field("API key:", 6)
-	temp := field("Temperature:", 7)
+	// Credential: Vertex authenticates with ADC (project/location, no key); every
+	// other provider needs an API key, with the provider's credential env var
+	// carried forward from the picker step as a hint.
+	var apiKey, project, location *tv.TextBox
+	if isVertex {
+		project = field("Project:", row)
+		project.SetText(draft.Project)
+		row++
+		location = field("Location:", row)
+		location.SetText(draft.Location)
+		row++
+	} else if len(p.Env) > 0 {
+		apiKey = fieldHint("API key:", row, boxW-28, "(env: "+strings.Join(p.Env, ", ")+")")
+		row++
+	} else {
+		apiKey = field("API key:", row)
+		row++
+	}
+
+	temp := field("Temperature:", row)
 	temp.SetText(strconv.FormatFloat(float64(draft.Temperature), 'g', -1, 32))
-	maxTokens := field("Max tokens:", 8)
-	maxTokens.SetText(strconv.Itoa(draft.MaxTokens))
-	reasoning := field("Reasoning:", 9)
-	reasoning.SetText(draft.ReasoningEffort)
+	row++
 
-	dialog.Window.AddContent(dialogLabel("Thinking:", tv.Rect{X: 2, Y: 10, W: labelW, H: 1}))
-	thinking := newSelect(w.desktop, []string{"default", "on", "off"}, tv.Rect{X: boxX, Y: 10, W: boxW, H: 1})
+	maxHint := ""
+	if draft.MaxTokens > 0 {
+		maxHint = "(from catalog output limit)"
+	}
+	maxTokens := fieldHint("Max tokens:", row, 12, maxHint)
+	maxTokens.SetText(strconv.Itoa(draft.MaxTokens))
+	row++
+
+	// Reasoning effort: a Select constrained to the catalog's valid set when the
+	// model exposes one (with a leading "(none)" that clears the effort, preserving
+	// the opt-out the old free-text box allowed); the free-text fallback otherwise.
+	var effortSelect *tv.Select
+	var effortBox *tv.TextBox
+	if len(draft.EffortOptions) > 0 {
+		opts := append([]string{effortNone}, draft.EffortOptions...)
+		dialog.Window.AddContent(dialogLabel("Reasoning:", tv.Rect{X: 2, Y: row, W: labelW, H: 1}))
+		effortSelect = newSelect(w.desktop, opts, tv.Rect{X: boxX, Y: row, W: boxW - 16, H: 1})
+		effortSelect.SetSelected(effortIndex(opts, draft.ReasoningEffort))
+		dialog.Window.AddContent(effortSelect)
+		dialog.Window.AddContent(dialogLabel("(from catalog)", tv.Rect{X: boxX + boxW - 15, Y: row, W: 14, H: 1}))
+	} else {
+		effortBox = field("Reasoning:", row)
+		effortBox.SetText(draft.ReasoningEffort)
+	}
+	row++
+
+	// Thinking: shown for every model but annotated with whether it actually does
+	// anything — the provider must emit `thinking` AND the model must advertise a
+	// toggle. Kept editable (no lockout) and normal-coloured; relevance is signalled
+	// by the hint, never by greying (grey means "inert" elsewhere in the app).
+	thinkingHint := "(no effect for this model)"
+	if model.SupportsThinking(apiType) && modelsdev.HasThinkingToggle(cm) {
+		thinkingHint = "(supported)"
+	}
+	dialog.Window.AddContent(dialogLabel("Thinking:", tv.Rect{X: 2, Y: row, W: labelW, H: 1}))
+	thinking := newSelect(w.desktop, []string{"default", "on", "off"}, tv.Rect{X: boxX, Y: row, W: 12, H: 1})
 	thinking.SetSelected(thinkingIndex(draft.Thinking))
 	dialog.Window.AddContent(thinking)
+	if hx := boxX + 13; width-3-hx > 0 {
+		dialog.Window.AddContent(dialogLabel(thinkingHint, tv.Rect{X: hx, Y: row, W: width - 3 - hx, H: 1}))
+	}
+	row++
 
-	project := field("Project:", 11)
-	project.SetText(draft.Project)
-	location := field("Location:", 12)
-	location.SetText(draft.Location)
+	// Read-only catalog facts: context window + pricing on one line, then
+	// capabilities, then docs (when present).
+	facts := make([]string, 0, 2)
+	if cm.Limit.Context > 0 {
+		facts = append(facts, "Context "+tokensShort(cm.Limit.Context))
+	}
+	facts = append(facts, "Cost "+modelsdev.CostSummary(cm))
+	infoRow(strings.Join(facts, " · ")+"  (from catalog)", row)
+	row++
+
+	if caps := modelsdev.CapabilityLabels(cm); len(caps) > 0 {
+		infoRow("Capabilities: "+strings.Join(caps, " · "), row)
+		row++
+	}
+	if doc := strings.TrimSpace(p.Doc); doc != "" {
+		infoRow("Docs: "+doc, row)
+		row++
+	}
 
 	var layer *tv.Layer
 	cancel := func() {
@@ -453,15 +571,30 @@ func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, mod
 		draft.DisplayName = display.GetText()
 		draft.Endpoint = strings.TrimSpace(endpoint.GetText())
 		draft.Model = strings.TrimSpace(modelIDBox.GetText())
-		draft.APIKey = apiKey.GetText()
+		if apiKey != nil {
+			draft.APIKey = apiKey.GetText()
+		}
 		if v, err := strconv.ParseFloat(temp.GetText(), 32); err == nil {
 			draft.Temperature = float32(v)
 		}
 		draft.MaxTokens = atoiOr(maxTokens.GetText(), draft.MaxTokens)
-		draft.ReasoningEffort = strings.TrimSpace(reasoning.GetText())
+		switch {
+		case effortSelect != nil:
+			if v := effortSelect.Value(); v == effortNone {
+				draft.ReasoningEffort = ""
+			} else {
+				draft.ReasoningEffort = strings.TrimSpace(v)
+			}
+		case effortBox != nil:
+			draft.ReasoningEffort = strings.TrimSpace(effortBox.GetText())
+		}
 		draft.Thinking = thinkingValue(thinking.Value())
-		draft.Project = strings.TrimSpace(project.GetText())
-		draft.Location = strings.TrimSpace(location.GetText())
+		if project != nil {
+			draft.Project = strings.TrimSpace(project.GetText())
+		}
+		if location != nil {
+			draft.Location = strings.TrimSpace(location.GetText())
+		}
 
 		if draft.Name == "" {
 			w.showConfirm("Add model", "A unique model name is required.", nil)
@@ -534,7 +667,30 @@ func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, mod
 	layer = tv.NewModalLayer("catalog-review", dialog)
 	w.desktop.AddLayer(layer)
 	dialog.Fit(spec)
-	w.desktop.SetFocus(apiKey) // the one field the user must supply
+	// Focus the one field the user must supply: the API key, or — for Vertex (ADC,
+	// no key) — the GCP project.
+	if isVertex {
+		w.desktop.SetFocus(project)
+	} else {
+		w.desktop.SetFocus(apiKey)
+	}
+}
+
+// effortNone is the leading reasoning-effort Select option that clears
+// ReasoningEffort (opting the model out of reasoning), preserving the opt-out the
+// pre-#542 free-text field allowed while still constraining the rest of the choices
+// to the catalog's valid set.
+const effortNone = "(none)"
+
+// effortIndex returns the index of want in opts, or 0 (the "(none)" entry) when it
+// is absent, so the effort Select opens on the catalog default.
+func effortIndex(opts []string, want string) int {
+	for i, o := range opts {
+		if o == want {
+			return i
+		}
+	}
+	return 0
 }
 
 // takenModelNames is the set of currently-configured model names, used to keep a

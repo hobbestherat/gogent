@@ -2,6 +2,7 @@ package modelsdev
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"gogent/internal/config"
@@ -104,6 +105,53 @@ func HasThinkingToggle(m Model) bool {
 		}
 	}
 	return false
+}
+
+// ReasoningCapable reports whether the model can reason in any form, honoring
+// Model.Reasoning directly so a reasoning:true model with only a toggle (or no
+// reasoning option at all) is still flagged — the picker badge infers this only
+// from an effort option (issue #542 note 2). The review form shows it as a
+// capability indicator.
+func ReasoningCapable(m Model) bool {
+	return m.Reasoning || len(effortOptions(m)) > 0 || HasThinkingToggle(m)
+}
+
+// CapabilityLabels returns the display-only capability indicators models.dev
+// supplies for a model, in a stable order, omitting those it lacks. These are
+// surfaced as a "Capabilities:" row in the review form; none is persisted to
+// ModelConfig. Model.Temperature reports only WHETHER a custom temperature is
+// accepted (a capability), not a value.
+func CapabilityLabels(m Model) []string {
+	var labels []string
+	if ReasoningCapable(m) {
+		labels = append(labels, "reasoning")
+	}
+	if m.ToolCall {
+		labels = append(labels, "tool calling")
+	}
+	if m.Attachment {
+		labels = append(labels, "vision")
+	}
+	if m.Temperature {
+		labels = append(labels, "custom temperature")
+	}
+	return labels
+}
+
+// CostSummary renders a model's per-million-token pricing for the review form's
+// "Cost:" indicator: "Free" when both sides are zero, otherwise
+// "$<in> in / $<out> out per M".
+func CostSummary(m Model) string {
+	if m.Cost.Input == 0 && m.Cost.Output == 0 {
+		return "Free"
+	}
+	return fmt.Sprintf("$%s in / $%s out per M", trimCost(m.Cost.Input), trimCost(m.Cost.Output))
+}
+
+// trimCost formats a USD-per-million figure without trailing zeros (5 -> "5",
+// 0.15 -> "0.15", 2.5 -> "2.5") so the cost row stays compact.
+func trimCost(v float64) string {
+	return strconv.FormatFloat(v, 'f', -1, 64)
 }
 
 // UniqueName returns a config-unique model name for a provider+model, suffixing
