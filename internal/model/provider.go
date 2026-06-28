@@ -1,6 +1,7 @@
 package model
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -319,6 +320,48 @@ func (c *ModelConnection) doJSON(ctx context.Context, method, rawURL string, ext
 		return nil, c.analyzeError(resp.StatusCode, string(body))
 	}
 	return body, nil
+}
+
+// doJSONBody is doJSON with a request body — the same auth/error seam for the
+// write-side non-completion operations (today: native-Gemini cachedContents
+// create/refresh/delete, issue #547). A nil body sends an empty payload (e.g. a
+// DELETE). Content-Type is set when a body is present; auth is still injected by
+// the client's round-tripper. Returns the 200 response bytes (empty for a
+// no-content success).
+func (c *ModelConnection) doJSONBody(ctx context.Context, method, rawURL string, extraHeaders http.Header, body []byte) ([]byte, error) {
+	if c.configErr != nil {
+		return nil, c.configErr
+	}
+	var rdr io.Reader
+	if len(body) > 0 {
+		rdr = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, rdr)
+	if err != nil {
+		return nil, &ModelError{Type: ErrorConnection, Message: fmt.Sprintf("failed to create request: %v", err)}
+	}
+	req.Header.Set("Accept", "application/json")
+	if len(body) > 0 {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	for k, vs := range extraHeaders {
+		for _, v := range vs {
+			req.Header.Set(k, v)
+		}
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, &ModelError{Type: ErrorConnection, Message: fmt.Sprintf("request failed: %v", err)}
+	}
+	defer func() { _ = resp.Body.Close() }()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, &ModelError{Type: ErrorGeneric, Message: fmt.Sprintf("failed to read response: %v", err)}
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.analyzeError(resp.StatusCode, string(respBody))
+	}
+	return respBody, nil
 }
 
 // ---------------------------------------------------------------------------
