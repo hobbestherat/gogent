@@ -208,24 +208,42 @@ func TestStreamLogsTo_DeliversRecords(t *testing.T) {
 	<-done
 }
 
-// TestStreamLogsTo_ReconnectMustNotDuplicate exposes a real defect in the remote
-// interlace (issue #562's headline capability). The daemon's LogStream primes its
-// full Snapshot() on EVERY connection (internal/server/logs.go), and StreamLogsTo
-// reconnects silently when a stream ends. There is no client-side dedup and no
-// server resumption cursor, so after a reconnect the same history is re-delivered
-// and re-appended — [daemon] lines appear twice (and then crowd out real lines at
-// the display cap). The server below re-primes a fixed snapshot then closes
-// (mimicking a blip after priming); a correct client must not re-append records
-// it already received. This test FAILS against the current implementation.
+// TestStreamLogsTo_ReconnectMustNotDuplicate validates the resume-cursor fix for
+// the remote interlace (issue #562). The daemon's LogStream primes its Snapshot()
+// on every connection, and StreamLogsTo reconnects silently on a stream end, so to
+// avoid re-delivering history the client sends ?since=<last record's time> and the
+// server skips records at or before it (internal/server/logs.go + StreamLogsSince).
+// The mock below honours that contract like the real daemon, then closes after
+// priming (mimicking a blip); across reconnects each history line must arrive once.
 func TestStreamLogsTo_ReconnectMustNotDuplicate(t *testing.T) {
+	// Fixed monotonic history the mock re-primes on every connection.
+	history := []struct {
+		time string
+		text string
+	}{
+		{"1970-01-01T00:00:01Z", "hist-one"},
+		{"1970-01-01T00:00:02Z", "hist-two"},
+		{"1970-01-01T00:00:03Z", "hist-three"},
+	}
 	var reqCount int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&reqCount, 1)
+		// Honour the resume cursor exactly as the real LogStream does.
+		var since time.Time
+		if raw := r.URL.Query().Get("since"); raw != "" {
+			if t, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+				since = t
+			}
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		flusher, _ := w.(http.Flusher)
-		for i, txt := range []string{"hist-one", "hist-two", "hist-three"} {
-			frame := fmt.Sprintf("event: log\ndata: {\"time\":\"1970-01-01T00:00:0%dZ\",\"level\":\"INFO\",\"text\":%q}\n\n", i+1, txt)
+		for _, h := range history {
+			rt, _ := time.Parse(time.RFC3339Nano, h.time)
+			if !since.IsZero() && !rt.After(since) {
+				continue // already delivered before this reconnect
+			}
+			frame := fmt.Sprintf("event: log\ndata: {\"time\":%q,\"level\":\"INFO\",\"text\":%q}\n\n", h.time, h.text)
 			_, _ = io.WriteString(w, frame)
 			if flusher != nil {
 				flusher.Flush()
@@ -255,13 +273,13 @@ func TestStreamLogsTo_ReconnectMustNotDuplicate(t *testing.T) {
 		close(done)
 	}()
 
-	// Wait for at least one reconnect (2+ connections), then let the re-primed
+	// Wait for at least one reconnect (2+ connections), then let any re-primed
 	// batch arrive. backoff(1)=500ms gates the first reconnect.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) && atomic.LoadInt32(&reqCount) < 2 {
 		time.Sleep(25 * time.Millisecond)
 	}
-	time.Sleep(400 * time.Millisecond) // allow the re-primed batch to be delivered
+	time.Sleep(400 * time.Millisecond)
 	cancel()
 	<-done
 
@@ -275,14 +293,85 @@ func TestStreamLogsTo_ReconnectMustNotDuplicate(t *testing.T) {
 	for _, txt := range delivered {
 		seen[txt]++
 	}
-	duped := false
 	for txt, n := range seen {
 		if n > 1 {
-			duped = true
-			t.Errorf("daemon line %q delivered %d× across reconnects — duplicated in the window (no dedup / no resumption cursor)", txt, n)
+			t.Errorf("daemon line %q delivered %d× across reconnects — resume cursor failed to suppress it", txt, n)
 		}
 	}
-	if duped {
+	if t.Failed() {
 		t.Fatalf("StreamLogsTo re-delivered history on reconnect: deliveries=%v", delivered)
+	}
+}
+
+// StreamLogsSince must put the resume cursor on the wire (?since=…, URL-encoded)
+// so the daemon can skip already-delivered history. The server echoes the decoded
+// value back in the frame, so the test asserts a clean round-trip without sharing
+// state across goroutines.
+func TestStreamLogsSince_SendsResumeCursor(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		since := r.URL.Query().Get("since")
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		frame := fmt.Sprintf("event: log\ndata: {\"time\":\"1970-01-01T00:00:09Z\",\"level\":\"INFO\",\"text\":\"cursor=%s\"}\n\n", since)
+		_, _ = io.WriteString(w, frame)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}))
+	defer srv.Close()
+
+	client, err := NewAPIClient(srv.URL, "")
+	if err != nil {
+		t.Fatalf("NewAPIClient: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := client.StreamLogsSince(ctx, "1970-01-01T00:00:05Z")
+	if err != nil {
+		t.Fatalf("StreamLogsSince: %v", err)
+	}
+	select {
+	case rec := <-ch:
+		// The colons in the RFC3339Nano timestamp must survive URL encode→decode.
+		if rec.Text != "cursor=1970-01-01T00:00:05Z" {
+			t.Fatalf("resume cursor did not round-trip: got %q", rec.Text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("StreamLogsSince did not deliver the frame")
+	}
+}
+
+// StreamLogs (the since-less convenience wrapper) must not send a cursor, so a
+// fresh view primes the whole snapshot.
+func TestStreamLogs_OmitsSinceForFreshView(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		since := r.URL.Query().Get("since")
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		frame := fmt.Sprintf("event: log\ndata: {\"time\":\"1970-01-01T00:00:01Z\",\"level\":\"INFO\",\"text\":\"since=%s\"}\n\n", since)
+		_, _ = io.WriteString(w, frame)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}))
+	defer srv.Close()
+
+	client, err := NewAPIClient(srv.URL, "")
+	if err != nil {
+		t.Fatalf("NewAPIClient: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := client.StreamLogs(ctx)
+	if err != nil {
+		t.Fatalf("StreamLogs: %v", err)
+	}
+	select {
+	case rec := <-ch:
+		if rec.Text != "since=" {
+			t.Fatalf("fresh StreamLogs sent since=%q, want empty", rec.Text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("StreamLogs did not deliver the frame")
 	}
 }

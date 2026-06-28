@@ -152,3 +152,35 @@ func TestRingLogStreamer_MultipleSubscribersEachReceive(t *testing.T) {
 		}
 	}
 }
+
+// The adapter is the daemon-side hop before SSE: ring → server.LogRecord. A Secret
+// redacted by the ring handler must stay redacted through the adapter (it only
+// copies Text), so the streamed [daemon] line never leaks it.
+func TestRingLogStreamer_RedactionHoldsAcrossAdapter(t *testing.T) {
+	t.Parallel()
+	ring := diag.NewRing(8)
+	lg := diag.NewWithRing(io.Discard, ring)
+
+	// Subscribe BEFORE logging: the ring fans a record only to subscribers
+	// registered at append time, so a subscriber attached after the log would
+	// never receive it (history is not replayed to a new subscriber).
+	out, unsub := ringLogStreamer{ring: ring}.Subscribe()
+	defer unsub()
+	lg.Info("auth", "key", diag.Secret("adapter-secret"), "user", "alice")
+
+	var rec server.LogRecord
+	select {
+	case rec = <-out:
+	case <-time.After(time.Second):
+		t.Fatal("adapter did not deliver the live record")
+	}
+	if strings.Contains(rec.Text, "adapter-secret") {
+		t.Fatalf("SECRET LEAKED through the ringLogStreamer adapter: %q", rec.Text)
+	}
+	if !strings.Contains(rec.Text, "[REDACTED]") {
+		t.Fatalf("adapter record lost the redaction: %q", rec.Text)
+	}
+	if !strings.Contains(rec.Text, "user=alice") {
+		t.Fatalf("adapter record dropped the non-secret attr: %q", rec.Text)
+	}
+}

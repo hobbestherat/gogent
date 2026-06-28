@@ -214,3 +214,100 @@ func TestLogSSE_NameAndPayload(t *testing.T) {
 		}
 	}
 }
+
+// The ?since= resume cursor (issue #562) makes a reconnecting client pass the
+// last record's wire time so the server skips history it already has — otherwise
+// every reconnect would re-prime the full ring and duplicate the interlaced
+// [daemon] lines. A record at the boundary's exact time is treated as already
+// seen (the design's accepted "gap" over a dup).
+func TestLogStream_SinceCursorSkipsAlreadySeenHistory(t *testing.T) {
+	t.Parallel()
+	live := make(chan LogRecord, 4)
+	src := fakeLogStreamer{
+		hist: []LogRecord{
+			{Time: time.Unix(1, 0).UTC(), Level: "INFO", Text: "a"},
+			{Time: time.Unix(2, 0).UTC(), Level: "INFO", Text: "b"},
+			{Time: time.Unix(3, 0).UTC(), Level: "INFO", Text: "c"},
+		},
+		live: live,
+	}
+	srv := NewServer(gogent.NewGogent(t.TempDir()), Options{Logs: src})
+
+	// since=T2: skip a (T1) and b (T2, the exact boundary), keep c (T3), then live.
+	req := httptest.NewRequest(http.MethodGet, "/api/logs/stream?since=1970-01-01T00:00:02Z", nil)
+	resp, err := eventsSvc{s: srv}.LogStream(req)
+	if err != nil {
+		t.Fatalf("LogStream: %v", err)
+	}
+	esr := resp.(*webapi.EventStreamResponse)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stream := newFakeStream(ctx)
+	done := make(chan error, 1)
+	go func() { done <- esr.Producer(stream) }()
+
+	live <- LogRecord{Time: time.Unix(4, 0).UTC(), Level: "WARN", Text: "live"}
+
+	got := make([]webapi.SSEvent, 0, 2)
+	for len(got) < 2 {
+		select {
+		case ev := <-stream.sent:
+			got = append(got, ev)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for events; got %d", len(got))
+		}
+	}
+	cancel()
+	<-done
+
+	// c (history > T2) then live; a and b (<= T2, incl. the exact-boundary b) skipped.
+	all := string(got[0].Data) + string(got[1].Data)
+	if !strings.Contains(all, `"text":"c"`) || !strings.Contains(all, `"text":"live"`) {
+		t.Fatalf("expected c + live, got: %s", all)
+	}
+	if strings.Contains(all, `"text":"a"`) || strings.Contains(all, `"text":"b"`) {
+		t.Fatalf("since=T2 failed to skip already-seen history (a/b re-sent): %s", all)
+	}
+}
+
+// An empty/absent since primes the whole snapshot (the first-connect / fresh-view
+// case); only an explicitly-set cursor suppresses history.
+func TestLogStream_EmptySincePrimesFullSnapshot(t *testing.T) {
+	t.Parallel()
+	src := fakeLogStreamer{
+		hist: []LogRecord{
+			{Time: time.Unix(1, 0).UTC(), Level: "INFO", Text: "a"},
+			{Time: time.Unix(2, 0).UTC(), Level: "INFO", Text: "b"},
+		},
+		live: make(chan LogRecord), // never delivers; cancelled below
+	}
+	srv := NewServer(gogent.NewGogent(t.TempDir()), Options{Logs: src})
+
+	resp, err := eventsSvc{s: srv}.LogStream(httptest.NewRequest(http.MethodGet, "/api/logs/stream", nil))
+	if err != nil {
+		t.Fatalf("LogStream: %v", err)
+	}
+	esr := resp.(*webapi.EventStreamResponse)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stream := newFakeStream(ctx)
+	done := make(chan error, 1)
+	go func() { done <- esr.Producer(stream) }()
+
+	got := make([]webapi.SSEvent, 0, 2)
+	for len(got) < 2 {
+		select {
+		case ev := <-stream.sent:
+			got = append(got, ev)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for primed history; got %d", len(got))
+		}
+	}
+	cancel()
+	<-done
+
+	all := string(got[0].Data) + string(got[1].Data)
+	if !strings.Contains(all, `"text":"a"`) || !strings.Contains(all, `"text":"b"`) {
+		t.Fatalf("empty since should prime the full snapshot, got: %s", all)
+	}
+}

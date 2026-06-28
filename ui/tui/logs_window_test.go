@@ -329,3 +329,24 @@ func TestParseLogTime(t *testing.T) {
 		t.Fatal("malformed timestamp fell back to zero time")
 	}
 }
+
+// The menu item is "always available" — with neither a ring nor a daemon stream
+// wired, opening must still succeed (empty window) and close cleanly, never panic.
+func TestShowLogsWindow_OpensEmptyWhenFullyUnwired(t *testing.T) {
+	w := newTestWorkbench(t)
+	// No SetLogRing, no SetDaemonLogStream.
+	w.showLogsWindow()
+
+	sw := w.sessions[logsWindowID]
+	if sw == nil {
+		t.Fatal("window not opened when fully unwired")
+	}
+	if len(logsKindRecords(t, w)) != 0 {
+		t.Fatalf("unwired window should be empty, got %+v", logsKindRecords(t, w))
+	}
+	// A nil ring must not panic when the live subscriber goroutine starts.
+	w.CloseSession(logsWindowID)
+	if w.sessions[logsWindowID] != nil {
+		t.Fatal("unwired window not removed on close")
+	}
+}
