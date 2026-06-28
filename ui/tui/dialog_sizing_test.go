@@ -149,7 +149,7 @@ func TestDialogsSizedToContent(t *testing.T) {
 		}
 	})
 
-	t.Run("list-driven dialogs stay wide but cap height to content", func(t *testing.T) {
+	t.Run("list-driven dialogs stay wide but cap width to the comfortable max", func(t *testing.T) {
 		for _, tc := range []struct {
 			name string
 			open func(*Workbench)
@@ -162,8 +162,10 @@ func TestDialogsSizedToContent(t *testing.T) {
 				w.app.Resize(termW, termH)
 				tc.open(w)
 				b := dialogBounds(w)
-				if b.W != defW {
-					t.Errorf("%s width = %d, want the %d percentage default (list-driven)", tc.name, b.W, defW)
+				// Issue #552: list-driven dialogs cap width at comfortableMaxWidth
+				// (120) instead of the 160 percentage default on a wide terminal.
+				if b.W != comfortableMaxWidth {
+					t.Errorf("%s width = %d, want the %d comfortable cap (issue #552)", tc.name, b.W, comfortableMaxWidth)
 				}
 				// Height never exceeds the default, and is capped to the item count
 				// (+chrome) so a short list does not fill 42 rows.
@@ -254,7 +256,7 @@ func TestDialogsClampToTinyTerminal(t *testing.T) {
 // #309 it keeps its content size across the resize but must still re-center — the
 // new distinction: small dialogs no longer balloon to the percentage box.
 func TestDialogReResolvesOnResize(t *testing.T) {
-	t.Run("percentage-driven palette grows with the terminal", func(t *testing.T) {
+	t.Run("percentage-driven palette grows with the terminal but stops at the comfortable cap", func(t *testing.T) {
 		w := newTestWorkbench(t)
 		w.app.Resize(80, 24)
 		w.showCommandPalette()
@@ -266,8 +268,10 @@ func TestDialogReResolvesOnResize(t *testing.T) {
 		if after.W <= before.W {
 			t.Errorf("palette width did not grow on resize: before=%d after=%d", before.W, after.W)
 		}
-		if after.W != 160 {
-			t.Errorf("palette width after resize = %d, want 160 (80%% of 200)", after.W)
+		// Issue #552: the palette caps at comfortableMaxWidth (120), not the old
+		// 160 (80% of 200), once the terminal is wide enough for the cap to bind.
+		if after.W != comfortableMaxWidth {
+			t.Errorf("palette width after resize = %d, want %d (capped, issue #552)", after.W, comfortableMaxWidth)
 		}
 		if after.X != (200-after.W)/2 || after.Y != (50-after.H)/2 {
 			t.Errorf("palette not re-centered after resize: origin (%d,%d)", after.X, after.Y)
@@ -380,12 +384,13 @@ func TestBrowserDialogSpecTracksLiveTerminal(t *testing.T) {
 	}
 }
 
-// TestBrowserPreferredWidthClamped documents a #309 finding: the Resources browser
-// still declares PreferredW = 85% of the terminal, but turbotui's percentage is now
-// an 80% CAP, so ResolveDialogRect clamps the 85% request down to 80%. The 85%
-// intent is therefore dead — the browser renders at 80% wide. This remains
-// intentional for Resources, which genuinely benefits from the large browser
-// footprint.
+// TestBrowserPreferredWidthClamped documents two findings. The #309 finding: the
+// Resources browser still declares PreferredW = 85% of the terminal, but
+// turbotui's percentage is an 80% CAP, so ResolveDialogRect clamps the 85% request
+// down to 80%. The #552 finding: browserDialogSpec now also carries
+// MaxW = comfortableMaxWidth (120), so on a wide terminal the resolved width is
+// further clamped to min(80%, 120). The dead 85% intent is retained only so
+// resolved widths track the terminal below the cap.
 func TestBrowserPreferredWidthClamped(t *testing.T) {
 	w := newTestWorkbench(t)
 	for _, screenW := range []int{120, 160, 200} {
@@ -396,8 +401,12 @@ func TestBrowserPreferredWidthClamped(t *testing.T) {
 		}
 		_, _, gotW, _ := tv.ResolveDialogRect(spec, screenW, 50)
 		want := screenW * 80 / 100 // the 80% cap, below the 85% the spec asks for
+		if want > comfortableMaxWidth {
+			want = comfortableMaxWidth // issue #552: MaxW further tightens it above 120
+		}
 		if gotW != want {
-			t.Errorf("screenW=%d: resolved width = %d, want %d (85%% PreferredW clamped to the 80%% cap)", screenW, gotW, want)
+			t.Errorf("screenW=%d: resolved width = %d, want %d (85%% PreferredW clamped to min(80%%, comfortableMaxWidth))",
+				screenW, gotW, want)
 		}
 		if gotW >= spec.PreferredW {
 			t.Errorf("screenW=%d: resolved width %d met the 85%% PreferredW %d — the clamp finding no longer holds",

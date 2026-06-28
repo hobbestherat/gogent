@@ -279,20 +279,24 @@ func TestLoadItemsNilGetter(t *testing.T) {
 // PreferredW=85% is no longer reachable — ResolveDialogRect clamps it down to the
 // 80% width default. The browser therefore renders at 80% wide, not the intended
 // 85%; the *5 share is now effectively dead. See TestBrowserPreferredWidthClamped.
+// Issue #552 adds MaxW = comfortableMaxWidth (120), so on a wide terminal the
+// resolved width is min(80%, 120); this mirror must stay faithful to the real
+// browserDialogSpec (guarded by TestResourcesSpecMirrorsBrowserDialogSpec).
 func resourcesSpec(screenW int) tv.DialogSpec {
-	return tv.DialogSpec{MinW: 60, MinH: 14, PreferredW: screenW * 85 / 100}
+	return tv.DialogSpec{MinW: 60, MaxW: comfortableMaxWidth, MinH: 14, PreferredW: screenW * 85 / 100}
 }
 
-// TestResourcesDialogSize covers the spec-driven sizing: the width is the 80% cap
-// (the 85% PreferredW is clamped down to it, see resourcesSpec), the height grows
-// toward 85%, and both floor at 60×14 on a small terminal.
+// TestResourcesDialogSize covers the spec-driven sizing: below ~150 cols the width
+// is the 80% cap (the 85% PreferredW clamps down to it, see resourcesSpec); above
+// that it is the comfortableMaxWidth ceiling (issue #552). The height grows toward
+// 85% and both floor at 60×14 on a small terminal.
 func TestResourcesDialogSize(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		screenW, H   int
 		wantW, wantH int
 	}{
-		{"large screen capped at 80% wide", 200, 100, 160, 85},
+		{"large screen capped at comfortable max", 200, 100, 120, 85},
 		{"medium terminal capped at 80% wide", 120, 40, 96, 34},
 		{"short terminal floors height", 120, 16, 96, 14},
 		{"tiny terminal floors both", 50, 20, 60, 16},
@@ -317,8 +321,8 @@ func TestResourcesDialogOpensWithBrowserFootprint(t *testing.T) {
 		t.Fatalf("top layer = %v, want resources-dialog", top)
 	}
 	b := dialogBounds(w)
-	if b.W != 160 || b.H != 42 {
-		t.Fatalf("resources dialog on 200x50 = %dx%d, want unchanged browser footprint 160x42", b.W, b.H)
+	if b.W != 120 || b.H != 42 {
+		t.Fatalf("resources dialog on 200x50 = %dx%d, want capped browser footprint 120x42 (issue #552)", b.W, b.H)
 	}
 	if b.W == 100 && b.H == 24 {
 		t.Fatal("resources dialog was accidentally moved to the statistics content footprint")
