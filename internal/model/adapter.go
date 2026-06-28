@@ -440,6 +440,10 @@ func (a anthropicAdapter) buildBody(req CompletionRequest, buf *bytes.Buffer) er
 			// Anthropic requires an object schema even for a no-argument tool.
 			schema = map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
 		}
+		// Normalize the tool schema for Anthropic strict validation: a property that
+		// combines a nullable union "type" with an "enum" is rejected (issue #567).
+		// Deep-copies so the caller's shared Parameters map is never mutated.
+		schema = anthropicSchema(schema)
 		out.Tools = append(out.Tools, anthropicTool{
 			Name:        t.Function.Name,
 			Description: t.Function.Description,
@@ -1253,6 +1257,91 @@ func uppercaseSchemaTypes(v interface{}) interface{} {
 	default:
 		return v
 	}
+}
+
+// anthropicSchema normalizes a JSON-Schema document for Anthropic strict tool
+// validation by deep-copying it (via a JSON round-trip, so it accepts a map, a
+// struct or a json.RawMessage) and reconciling every property that combines a
+// nullable union "type" with an "enum". Anthropic's strict validator cannot
+// match a scalar enum member against a union type, so such a property is
+// rejected with HTTP 400 before the model runs (issue #567). The deep copy means
+// the caller's shared Parameters map is never mutated (concurrent-reuse safe).
+// Returns nil for nil input and falls back to the original value if it is not
+// JSON-encodable. Applied only on the Anthropic/Vertex-Anthropic path — the
+// OpenAI/Z.AI/OpenRouter and Gemini adapters are unaffected.
+func anthropicSchema(v interface{}) interface{} {
+	if v == nil {
+		return nil
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return v
+	}
+	var generic interface{}
+	if err := json.Unmarshal(b, &generic); err != nil {
+		return v
+	}
+	return normalizeAnthropicSchemaTypes(generic)
+}
+
+// normalizeAnthropicSchemaTypes walks a decoded JSON-Schema value and, for every
+// node that declares BOTH an "enum" and a union "type" array containing "null"
+// (e.g. {"type":["string","null"],"enum":[...]}), drops the "null" member from
+// the type so the surviving shape is a verified-valid Anthropic strict schema
+// (plain "string" + enum). The "enum" and "required" siblings are left untouched
+// — nullability for these fields is expressed by the model omitting them / the
+// handler defaulting, not by a wire-level null the strict validator rejects. When
+// exactly one non-null member remains the type collapses to that scalar string;
+// with several it stays an array; a degenerate ["null"]-only type is left as-is.
+// Recurses through every map value and array element, so the rule applies
+// wherever it appears — nested properties, items, $defs, and anyOf/allOf/oneOf
+// combinators — covering MCP and future strict tools too.
+func normalizeAnthropicSchemaTypes(v interface{}) interface{} {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		if _, hasEnum := t["enum"]; hasEnum {
+			if union, ok := t["type"].([]interface{}); ok {
+				if rewritten, changed := dropNullFromType(union); changed {
+					t["type"] = rewritten
+				}
+			}
+		}
+		for k, val := range t {
+			t[k] = normalizeAnthropicSchemaTypes(val)
+		}
+		return t
+	case []interface{}:
+		for i := range t {
+			t[i] = normalizeAnthropicSchemaTypes(t[i])
+		}
+		return t
+	default:
+		return v
+	}
+}
+
+// dropNullFromType removes every "null" member from a union "type" array. It
+// returns the rewritten value (a scalar string when exactly one non-null member
+// remains, otherwise the trimmed array) and whether anything changed. If no
+// non-null member remains, the original is returned unchanged (changed=false) so
+// a degenerate ["null"]-only enum field is left for the caller to keep as-is.
+func dropNullFromType(union []interface{}) (interface{}, bool) {
+	kept := make([]interface{}, 0, len(union))
+	sawNull := false
+	for _, m := range union {
+		if s, ok := m.(string); ok && s == "null" {
+			sawNull = true
+			continue
+		}
+		kept = append(kept, m)
+	}
+	if !sawNull || len(kept) == 0 {
+		return union, false
+	}
+	if len(kept) == 1 {
+		return kept[0], true
+	}
+	return kept, true
 }
 
 // geminiResponse is the native :generateContent response, and also the shape of
