@@ -57,72 +57,87 @@ idle · ctx ▰▰▱▱▱ 38%                                  ~/…/agent
 
 ## Design
 
-### 1. Path getter + cache (immutable → cache once)
+### 1. Path getter (no cache — read the live handler each refresh)
 
 - Add to `Handlers` (`ui/tui/tui.go`):
   ```go
   // GetWorkspaceRoot returns the session's working directory (the immutable
   // WorkspaceRoot where !-prefixed and agent shell commands run), shown
   // right-aligned on the status line (issue #551). May be nil — when unwired
-  // the status line simply omits the path.
+  // (remote/daemon handlers, analysis windows) the status line omits the path.
   GetWorkspaceRoot func() string
   ```
 - Wire in embedded mode (`cmd/embedded_handlers.go`, beside `ListWorkspaceFiles`):
   ```go
   GetWorkspaceRoot: func() string { return g.GetWorkspaceRoot() },
   ```
-- **Cache once on the Workbench**, not per-render: add an unexported memo on `Workbench`
-  and a small accessor:
+- **No cache.** Add a thin nil-safe accessor on `Workbench` that reads the *current*
+  handler every time:
   ```go
-  // workspaceRoot is the cached, immutable session working directory (issue #551),
-  // resolved once on first use from handlers.GetWorkspaceRoot so the hot status
-  // refresh path never re-queries the backend. "" when unwired (path is hidden).
-  workspaceRoot     string
-  workspaceRootOnce bool
-  ```
-  ```go
+  // WorkspaceRoot returns the live session working directory for the status line
+  // (issue #551), or "" when the getter is unwired. Read on each status refresh
+  // rather than memoised: the underlying getter (g.GetWorkspaceRoot) is a single
+  // struct-field return, and the Handlers can be swapped at runtime (SetHandlers
+  // is called from cmd/attach.go and cmd/handoff.go during a daemon attach/handoff),
+  // so a cache would risk showing a stale root after a handoff for no measurable gain.
   func (w *Workbench) WorkspaceRoot() string {
-      if !w.workspaceRootOnce {
-          w.workspaceRootOnce = true
-          if w.handlers.GetWorkspaceRoot != nil {
-              w.workspaceRoot = w.handlers.GetWorkspaceRoot()
-          }
+      if w.handlers.GetWorkspaceRoot == nil {
+          return ""
       }
-      return w.workspaceRoot
+      return w.handlers.GetWorkspaceRoot()
   }
   ```
-  Touched only on the UI thread (same as the rest of the workbench's per-render state),
-  so no lock is needed. Justified deviation from call-each-time: the value is immutable
-  and the status line is a hot path. (If a future `SetHandlers` swap could change the
-  root we'd re-resolve; today it cannot — the root is per-process and remote handlers
-  leave the getter nil, so the cache is correct.)
+  This was the original design's one real defect: an earlier draft memoised on first
+  read and justified it with "the handlers cannot swap after caching." That is **false**
+  — `SetHandlers` is invoked at runtime by `cmd/attach.go:208` and twice in
+  `cmd/handoff.go` (`:284`, `:387`), so a daemon attach/handoff *does* replace the
+  handlers after the first render. A memo would then pin the pre-handoff root and the
+  status line would point at the wrong directory. Since `g.GetWorkspaceRoot()` is a free
+  field read (`internal/gogent/gogent.go:357`), dropping the cache removes the
+  staleness hazard at zero cost. Called only on the UI thread, like the rest of the
+  per-render state, so no lock is needed.
 
-### 2. `shortenPath` helper (pure, testable, shared)
+### 2. `shortenPath` helper (pure, testable, cross-platform)
 
 `internal/`-free, in `ui/tui` (alongside `formatStatusLine`). Pure function, `home`
 passed explicitly so tests are hermetic (no `os.Getenv` inside):
 
 ```go
 // shortenPath renders path for the status line within maxW display columns:
-// it first collapses a $HOME prefix to "~", and if the result still exceeds the
-// budget keeps the first segment plus "…/" plus the trailing two segments
-// (~/code/gogent/internal/agent -> ~/…/internal/agent), shortening the tail to
-// a single segment and finally width-truncating it down to a small floor. Returns
-// "" when maxW is below the floor so the caller can omit the path entirely.
+// it first normalises separators to "/" and collapses a home prefix to "~", and
+// if the result still exceeds the budget keeps the first segment plus "…/" plus
+// the trailing two segments (~/code/gogent/internal/agent -> ~/…/internal/agent),
+// shortening the tail to a single segment and finally width-truncating it down to
+// a small floor. Returns "" when maxW is below the floor so the caller can omit
+// the path entirely.
 func shortenPath(path, home string, maxW int) string
 ```
 
-Stages (each guarded by `tui.StringWidth <= maxW`, returning early):
-1. `~`-collapse: if `path == home` or `strings.HasPrefix(path, home+"/")`, replace the
-   `home` prefix with `~`.
-2. If it fits, done.
-3. Head + `…/` + last **two** segments.
-4. Head + `…/` + last **one** segment.
-5. As a last resort, width-truncate the final segment (reusing `truncateToWidth`, the
-   existing width-aware ellipsis helper) to `maxW`; below the ~8-col floor, return "".
+**Cross-platform first.** The stored root comes from `os.Getwd()` /
+`filepath.Join(...)` (`internal/gogent/gogent.go:172-176`), so it carries OS separators
+— backslashes on Windows, which gogent supports (`signal_windows.go`,
+`shell_windows_test.go`). An earlier draft claimed the root is "always slash-formed" and
+split on `/`; that is **false on Windows** — the `~`-collapse and segment split would both
+fail and the line would show a raw, overflowing `C:\Users\...`. The helper therefore
+normalises **both** `path` and `home` with `filepath.ToSlash` up front and operates purely
+on `/`-separated strings thereafter. (Display is `/`-formed even on Windows, which is the
+conventional, readable form for this kind of affordance.)
 
-Uses `path/filepath` only for `Separator`/splitting semantics on the stored path; splits
-on `/` (the stored root is always slash-formed). No new dependency.
+Stages (each guarded by `tui.StringWidth <= maxW`, returning early):
+1. `ToSlash` both `path` and `home`.
+2. `~`-collapse: if `path == home` or `strings.HasPrefix(path, home+"/")`, replace the
+   `home` prefix with `~`. (Empty `home` skips this — never collapse on `""`.)
+3. If it fits, done.
+4. Head + `…/` + last **two** segments.
+5. Head + `…/` + last **one** segment.
+6. Last resort: width-truncate the final segment with `tv.Truncate(seg, maxW, "…")` — the
+   turbotui width-aware ellipsis helper (`turbotv/surface.go:116`), so the floor fallback
+   shows a trailing `…` consistent with the `…/` middle stages rather than a bare clip.
+   Below the ~8-col floor, return "".
+
+(Note: gogent's local `truncateToWidth`, `permission_dialog.go:595`, is a **bare** clip
+with no ellipsis — it is deliberately *not* used here; `tv.Truncate` is the right tool for
+the ellipsis we want.) No new dependency — `path/filepath` and `tv` are already imported.
 
 ### 3. Two-colour render via a custom `DrawFn` (no new widget, no turbotui change)
 
@@ -137,8 +152,8 @@ func (sw *SessionWindow) refreshStatus() {
     leftW := W
     sw.statusPath = ""
     if root := sw.wb.WorkspaceRoot(); root != "" && W >= minStatusWidthForPath {
-        budget := pathBudget(W)                       // clamp(W/3, pathFloor=8, pathMax)
-        p := shortenPath(root, homeDir(), budget)
+        pb := pathBudget(W)                           // clamp(W/3, pathFloor=8, pathMax)
+        p := shortenPath(root, homeDir(), pb)         // NB: `budget` is already the BudgetConfig
         if pw := tui.StringWidth(p); pw > 0 && W-pw-statusPathGap >= minLeftWidth {
             sw.statusPath = p
             leftW = W - pw - statusPathGap            // statusPathGap = 2 (>=1 visible gap)
@@ -179,13 +194,35 @@ status.Component.DrawFn = func(c *tv.VisualComponent, surface tv.Surface) {
 Notes:
 - `surface.WriteString` is exactly the primitive `Label.draw` uses, and it clips to the
   surface, so the path can never overdraw a neighbouring widget.
-- The status label carries no mnemonic and is a single row, so dropping `Label.draw`'s
-  Wrap/mnemonic branches loses nothing for this widget.
+- **Dead `Wrap`/mnemonic state, accepted explicitly.** `tv.NewLabel` defaults `Wrap = true`
+  and computes a mnemonic, but the custom `DrawFn` supersedes `Label.draw` entirely, so
+  for `sw.status` both become inert. This is correct *for this widget*: it is a single row
+  (`H == 1`, so wrapping never applied anyway) and its text (`idle`, `working...`, stats)
+  contains no `&` mnemonic. The reviewer should sign off that the status label no longer
+  honours `Label.Wrap` — it never meaningfully did at one row, and no caller toggles it.
 - `status.FG` is still set by `refreshStatus` via `statusColorFor` — **the left-side
   severity/idle/working/background colour logic is entirely unchanged**; only the path
   gets the independent `colorInfo`.
 - `colorInfo` and the theme reseed: `reseedLabel` leaves `DrawFn` intact, and `colorInfo`
-  is updated by `ApplyTheme`, so a live theme switch recolours both halves correctly.
+  is updated by `ApplyTheme` (`theme.go:1180`), so a live theme switch recolours both
+  halves correctly.
+
+**Path colour vs. the left colour — the one collision state, accepted.** The path uses
+`colorInfo` (cyan), which is brighter/less-dim than the `colorNote` grey of the idle left
+content — the contrast the issue asks for. There is exactly **one** state where the two
+match: a session running *only* background sub-agents, where `statusColorFor`
+(`session_window.go:3120-3126`) already substitutes `colorInfo` for the whole left line
+(the `background && !busy && c == colorNote` branch). In that state the path is the same
+cyan as the left text. This is **accepted, not overlooked**: (a) it is transient and rare
+(background-only, no foreground turn, no budget/context severity); (b) the path stays
+legible — it is separated by the reserved `statusPathGap` and is distinct text flush-right;
+(c) the path is an *awareness* affordance, not a severity signal, so it never needs to win
+attention over the left content. In every other state — idle (grey), working (green),
+approaching/over budget or context (amber/red) — the cyan path is clearly distinct. If a
+reviewer wants zero collision, the alternative is a dedicated theme role (e.g. a
+`StatusPath` colour) instead of reusing `colorInfo`; that is a larger surface (new Theme
+field, override key, degrade line, contrast audit) and is deferred unless requested (see
+Open questions).
 
 ### Constants (with the other status-line tunables near `formatStatusLine`)
 
@@ -200,8 +237,8 @@ Notes:
 ## Files touched
 
 **gogent (only):**
-- `ui/tui/tui.go` — add `Handlers.GetWorkspaceRoot`; add `Workbench.workspaceRoot`
-  memo + `WorkspaceRoot()` accessor.
+- `ui/tui/tui.go` — add `Handlers.GetWorkspaceRoot`; add the thin nil-safe
+  `Workbench.WorkspaceRoot()` accessor (no cache — reads the live handler).
 - `cmd/embedded_handlers.go` — wire `GetWorkspaceRoot: g.GetWorkspaceRoot`.
 - `ui/tui/session_window.go` — add `SessionWindow.statusPath`; install the custom status
   `DrawFn` at construction; reserve `leftW` and set `sw.statusPath` in `refreshStatus`;
@@ -222,16 +259,22 @@ and the existing `Component.DrawFn` override seam.
   the input/transcript geometry is untouched.
 - On narrow windows the left stats drop first (unchanged order); the path shortens to
   `~/…/tail` and then disappears below the minimum width — never overlapping the left text.
-- Read-only analysis windows (no status chrome) and remote/daemon mode (getter nil) simply
-  show no path — no error, no change to those surfaces.
+- Read-only analysis windows (no status chrome) and remote/daemon mode (getter nil) show
+  no path — no error, no change to those surfaces. **Known gap, not a feature:** an
+  attached/remote user — arguably the population that most wants a "where am I" cue — gets
+  nothing in v1, because the remote handlers do not currently expose the daemon's
+  workspace root. Surfacing it there means threading the root through the remote
+  `Handlers` (an RPC field), which is out of scope for this gogent-only, no-protocol-change
+  change; tracked as a follow-up (see Open questions).
 
 ## Design criteria
 
 **(1) Goal match.** Does exactly what #551 asks: right-aligned, `colorInfo`-cyan,
 shortened `WorkspaceRoot` on the status line; left content unchanged; narrow truncation
-with floor. No scope creep — the `!`-prefix shell-out dispatch (`handleBangCommand`), the
-per-command transcript echo, and any path-change tracking are explicitly **out of scope**
-(the root is immutable). No refactor of the status pipeline beyond the width split.
+with floor. No scope creep — the `!`-prefix shell-out dispatch (a future addition to the
+`submit` closure at `session_window.go:400`; there is no `!`-dispatch in `submit` today),
+the per-command transcript echo, and any path-change tracking are explicitly **out of
+scope** (the root is immutable). No refactor of the status pipeline beyond the width split.
 
 **(2) Usability.** The cwd is always visible (the awareness affordance the upcoming
 `!`-shell-out and `@`-mentions need), readable yet subordinate to severity colours, with
@@ -244,11 +287,16 @@ severity/idle/working/background logic are untouched; `formatStatusLine`'s signa
 behaviour are unchanged (it is merely called with a reserved width). `reseedLabel` leaves
 `DrawFn` intact so theme switches still work; `colorInfo` recolours live via `ApplyTheme`.
 The path painter clips via `surface.WriteString`, so no overdraw. Below the minimum width
-the render is identical to today. Existing status-line tests keep passing (left content is
-the same string they assert when the path is absent/narrow). Nil getter (remote/daemon,
-analysis window) → no path, no panic. `gofmt`/`build`/`vet`/`golangci-lint` clean;
-`go test ./...` green (pre-existing `TestUserSessionSendMessage` 404 the only acceptable
-failure).
+the render is identical to today. **No stale-root hazard:** the getter is read live on
+each refresh (not memoised), so a runtime `SetHandlers` swap from a daemon attach/handoff
+(`cmd/attach.go:208`, `cmd/handoff.go:284`/`:387`) is reflected immediately. **Windows
+safe:** `shortenPath` normalises separators via `filepath.ToSlash`, so a `\`-separated
+root collapses and shortens correctly rather than overflowing. Existing status-line tests
+keep passing (left content is the same string they assert when the path is absent/narrow;
+none of the ~80 `SetHandlers` test sites wire `GetWorkspaceRoot`, so all see the
+path-absent path). Nil getter (remote/daemon, analysis window) → no path, no panic.
+`gofmt`/`build`/`vet`/`golangci-lint` clean; `go test ./...` green (pre-existing
+`TestUserSessionSendMessage` 404 the only acceptable failure).
 
 **(4) Holistic across both repos.** The change is entirely in gogent, in the right layer:
 the getter is a thin `Handlers` closure mirroring `ListWorkspaceFiles`/`ReadWorkspaceFile`;
@@ -269,11 +317,19 @@ already overrides `DrawFn` for window/button/separator chrome.
   only when wired and wide enough; tests that build a `SessionWindow` without a
   `GetWorkspaceRoot` handler, or at narrow widths, see the unchanged string. New tests
   cover the with-path case explicitly.
-- **Hot-path cost** → the root is cached once on the Workbench; `shortenPath` is a handful
-  of string ops on a short path per refresh (cheap, same order as the existing segment
+- **Stale root after a daemon attach/handoff** → eliminated by *not* caching: `WorkspaceRoot()`
+  reads the live handler each refresh, so a runtime `SetHandlers` swap is picked up. The
+  getter is a single field read, so the live call is effectively free; `shortenPath` is a
+  handful of string ops on a short path per refresh (same order as the existing segment
   formatting).
+- **Windows `\`-separated root** → `shortenPath` `ToSlash`-normalises `path` and `home`
+  before collapse/split, so the home-collapse and segment logic work on Windows; covered by
+  a Windows-path test fixture.
 - **Wide-glyph / multibyte paths** → all width math goes through `tui.StringWidth` and the
-  width-aware `WriteString`/`truncateToWidth`, matching the rest of the status line.
+  width-aware `WriteString` / `tv.Truncate`, matching the rest of the status line.
+- **Floor ellipsis consistency** → the floor fallback uses `tv.Truncate(seg, maxW, "…")`
+  (not the bare-clip `truncateToWidth`), so a truncated tail shows a trailing `…` like the
+  `…/` middle stages.
 
 ## Open questions
 
@@ -287,6 +343,16 @@ already overrides `DrawFn` for window/button/separator chrome.
    `shortenPath` (two segments when they fit, one when they don't). Confirm two-segment
    tail is the preferred wide form.
 3. **`~`-collapse home source.** Use `os.UserHomeDir()` (falling back to `$HOME`) resolved
-   once for the live render; the helper takes `home` as a param for hermetic tests. Assumed
-   acceptable; flag if a different home convention is wanted (e.g. respecting a configured
-   workspace home).
+   per render for the live path; the helper takes `home` as a param for hermetic tests.
+   Assumed acceptable; flag if a different home convention is wanted (e.g. respecting a
+   configured workspace home).
+4. **Path colour: reuse `colorInfo`, or a dedicated role?** The design reuses `colorInfo`
+   and accepts the single background-only state where the left content is also `colorInfo`
+   (legible via the gap + flush-right position). A zero-collision alternative is a new
+   `StatusPath` theme role (new Theme field + override key + degrade line + contrast audit
+   against `WindowBG`). Reusing `colorInfo` is the lighter, recommended call; confirm before
+   I add a whole new role.
+5. **Remote/attach follow-up.** Surfacing the daemon's workspace root to attached/remote
+   users needs the remote `Handlers` to carry the root (an RPC/protocol field). Out of scope
+   here (gogent-only, no protocol change). Worth a follow-up issue — confirm that's the right
+   disposition rather than blocking v1 on it.
