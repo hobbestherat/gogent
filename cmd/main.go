@@ -27,6 +27,8 @@ import (
 	"gogent/internal/server"
 	"gogent/internal/watcher"
 	tuipkg "gogent/ui/tui"
+
+	tui "github.com/hobbestherat/turbotui"
 )
 
 var (
@@ -193,10 +195,13 @@ func main() {
 	// above alongside the HTTP server startup.)
 	var wb *tuipkg.Workbench
 	if !*disableTUI {
-		// Resolve and install the colour theme before the workbench (and its
-		// desktop chrome) are built, honouring config, NO_COLOR and --no-color, and
-		// degrading to the terminal's colour fidelity (issue #66).
-		tuipkg.ApplyTheme(tuipkg.ResolveTheme(g.GetConfig().Theme, os.Getenv, *noColor))
+		// Install colour detection once (terminfo-aware, so truecolor survives an
+		// SSH hop — issue #549), then resolve and install the theme at that level
+		// before the workbench (and its desktop chrome) are built, honouring config,
+		// NO_COLOR and --no-color (issue #66). Passing env == nil resolves at the
+		// level just installed, so the palette degrade and the renderer agree.
+		tui.SetColorLevel(tui.DetectColorLevel())
+		tuipkg.ApplyTheme(tuipkg.ResolveTheme(g.GetConfig().Theme, nil, *noColor))
 		wb = tuipkg.NewWorkbench(g.GetConfig().ModelConfigs)
 		fmt.Println("TUI enabled. Press Ctrl+C to exit.")
 
