@@ -24,7 +24,7 @@ at the gate (heavy `internal/model` overlap with #542/#543, which merge before u
 | 2 | `discount` is not a number for Gemini/Z.AI (gate 1) | §2.3 table: Gemini **0.25**, Z.AI **0.20 (PROVISIONAL, Open Q3)**, OpenRouter **1.0 documented-inaccurate**. No `discount` placeholders remain. |
 | 3 | Writes silent in CSV; `writeConnectorCSV` never extended (gate 2) | §2.2 adds `set("cache_write_tokens_in", int64(c.CacheWriteTokensIn))` after `stats.go:347`; §3 lists the renderer; §5 report assertion now satisfiable. |
 | 4 | Legacy `cached_tokens` unmarshal broken by field→method (alias loses the field) (gate 3) | §2.1 `raw` struct adds explicit `LegacyCachedTokens int json:"cached_tokens"` + `CacheWriteTokens` fields and a specified **three-way read precedence** (nested > `prompt_cache_hit_tokens` > legacy). |
-| 5 | MarshalJSON byte-order unspecified (gate 3) | §2.1 pins exact reflection key order (`…,cached_tokens,cache_write_tokens(omitempty),reasoning_tokens`) with a golden-string test in §5. |
+| 5 | MarshalJSON byte-order unspecified (gate 3) | §2.1 pins key order — five existing keys keep today's reflection positions, `cache_write_tokens(omitempty)` appended **last** so the write==0 output is byte-identical; golden-string test in §5. |
 | 6 | Rename enumeration incomplete (gate 3) | §3 + §5 now list **both** `issue487_failure_persist_test.go` files (`internal/model` `:165/:182`, `internal/gogent` `:61/:228/:381`). |
 | 7 | Budget-fallback rationale mechanistically wrong (gate 3) | §2.3 "the real mechanism": `*ModelConnection` **does** satisfy `CacheCostReporter` (assertion succeeds); raw fallback is empty `caps()`→1.0 + nil `ModelCaps` overrides + no cache tokens, not interface non-implementation. |
 
@@ -139,18 +139,18 @@ Read precedence for `Cache.ReadTokens` is **explicit and three-way, most-authori
 `Cache.WriteTokens` ← `cache_write_tokens` (our own persisted writes; providers never send it — the
 Anthropic write enters via the adapter, §below). Reasoning lifting unchanged.
 
-`MarshalJSON` (new) — emit a flat object in **exactly reflection order so byte-identity is real, not
-aspirational**:
+`MarshalJSON` (new) — emit a flat object whose **first five keys keep today's exact reflection
+positions** and append the one new key **last**, so byte-identity is a guarantee, not a hope:
 
 ```
 prompt_tokens, completion_tokens, total_tokens, cached_tokens(=Cache.ReadTokens,omitempty),
-cache_write_tokens(=Cache.WriteTokens,omitempty), reasoning_tokens(omitempty)
+reasoning_tokens(omitempty), cache_write_tokens(=Cache.WriteTokens,omitempty)
 ```
 
-When `WriteTokens==0`, `cache_write_tokens` is omitted and the remaining keys are
+When `WriteTokens==0`, `cache_write_tokens` is omitted and the keys are exactly
 `prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens` — **byte-identical
-to today's reflection output**. A golden-string test (§5) pins this. `cache_write_tokens` appears
-only on Anthropic write turns, between `cached_tokens` and `reasoning_tokens`.
+to today's reflection output** (the existing five keys never move). A golden-string test (§5) pins
+this. `cache_write_tokens` appears only on Anthropic write turns, appended after `reasoning_tokens`.
 
 > The `CacheStats` inner json tags (`cache_read_tokens`/`cache_write_tokens`) are used only if a
 > `CacheStats` were ever marshaled standalone; inside `TokenUsage` the custom marshaler maps reads
@@ -404,7 +404,7 @@ build on).
   `{"cache_write_tokens":N}` loads into `Cache.WriteTokens`.
 - **Golden byte-identity:** `json.Marshal` of a read-only `TokenUsage` produces the exact today-bytes
   `{"prompt_tokens":…,"completion_tokens":…,"total_tokens":…,"cached_tokens":…}` (pins reflection
-  key order); a write turn inserts `cache_write_tokens` between `cached_tokens` and `reasoning_tokens`.
+  key order); a write turn appends `cache_write_tokens` after `reasoning_tokens` (existing keys unmoved).
 - 3-way read precedence: nested `prompt_tokens_details.cached_tokens` > `prompt_cache_hit_tokens` >
   legacy `cached_tokens`.
 - Per-provider normalization: OpenAI nested→read; DeepSeek `prompt_cache_hit_tokens`→read; Gemini
