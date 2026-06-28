@@ -191,16 +191,19 @@ func (c *ModelConnection) ensureGeminiCache(ctx context.Context, reqBody *Comple
 }
 
 // dropGeminiCacheRefAfterError clears the explicit-cache state after a request
-// that REFERENCED a resource failed with a client error (4xx). This is the
+// that REFERENCED a resource failed with a PERMANENT client error. This is the
 // reactive safety net for a referenced cache the server rejects for a reason the
 // proactive expiry check cannot see — eviction before the estimated TTL, a region
 // that dropped the resource, a stale reference — so the next turn recreates
-// instead of re-referencing a dead resource and 400ing forever. It is gated to
-// 4xx (a bad/again-rejected reference is a client error); transient 5xx/429 are
-// retried by the caller and need no invalidation. A needless drop merely
-// recreates the resource next turn, so the heuristic is safe and self-healing.
+// instead of re-referencing a dead resource and 400ing forever. It is gated to a
+// permanent 4xx: a 5xx or a RETRYABLE 4xx (408/409/429) is transient — the caller
+// retries it — so invalidating the reference there would churn an unnecessary
+// recreate during a rate-limit/conflict, the opposite of ideal. The gate tracks
+// the retry policy exactly (isRetryableStatus), not a raw status range. A needless
+// drop on a genuine permanent 4xx merely recreates next turn, so the heuristic is
+// safe and self-healing.
 func (c *ModelConnection) dropGeminiCacheRefAfterError(referenced bool, status int) {
-	if !referenced || status < 400 || status >= 500 {
+	if !referenced || status < 400 || status >= 500 || isRetryableStatus(status) {
 		return
 	}
 	st := &c.geminiCache
