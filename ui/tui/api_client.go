@@ -45,10 +45,12 @@ type APIClient struct {
 	base  string // request base, e.g. "http://unix" or "http://host:port"
 	token string // optional bearer token (TCP auth); empty for the local socket
 
-	// notifyMu guards onNotification, the callback for "notification" SSE frames on
-	// the global stream (issue #358 §9). It is the client's only mutable state.
-	notifyMu       sync.Mutex
-	onNotification func(NotificationDTO)
+	// notifyMu guards onNotification and onApprovalSignal, the callbacks for
+	// "notification" (issue #358 §9) and "approval" (issue #569) SSE frames on the
+	// global stream. They are the client's only mutable state.
+	notifyMu         sync.Mutex
+	onNotification   func(NotificationDTO)
+	onApprovalSignal func()
 }
 
 // SetNotificationHandler installs the callback invoked for each "notification"
@@ -68,6 +70,27 @@ func (c *APIClient) notificationHandler() func(NotificationDTO) {
 	c.notifyMu.Lock()
 	defer c.notifyMu.Unlock()
 	return c.onNotification
+}
+
+// SetApprovalSignalHandler installs the callback invoked for each "approval" SSE
+// frame on the global stream (issue #569). The attached TUI points it at the
+// RemoteClient's approval re-scan so a freshly-raised remote prompt surfaces its
+// ⏳ badge + dialog immediately rather than on the next poll tick. The handler
+// takes no argument: the frame is only a nudge, and GET /approvals is the
+// authoritative source. A nil handler drops the frame. Safe to call from any
+// goroutine and at any time.
+func (c *APIClient) SetApprovalSignalHandler(h func()) {
+	c.notifyMu.Lock()
+	c.onApprovalSignal = h
+	c.notifyMu.Unlock()
+}
+
+// approvalSignalHandler returns the currently-installed approval-signal callback
+// (nil if none), read under the lock so it never races SetApprovalSignalHandler.
+func (c *APIClient) approvalSignalHandler() func() {
+	c.notifyMu.Lock()
+	defer c.notifyMu.Unlock()
+	return c.onApprovalSignal
 }
 
 // quickTimeout bounds the short request/response calls (create, stop, settings,
@@ -311,6 +334,11 @@ type NotificationDTO struct {
 // notification on the global stream (issue #358 §9); every other frame there is a
 // GlobalEventDTO.
 const notificationEventName = "notification"
+
+// approvalEventName is the SSE event: name the server uses for an "approval
+// pending" nudge on the global stream (issue #569). Its body is an approval id the
+// client ignores — the frame just triggers an immediate /approvals re-scan.
+const approvalEventName = "approval"
 
 // LogRecordDTO mirrors the server's streamed diagnostic-log record (issue #562):
 // the daemon's gogent.log lines surfaced over GET /api/logs/stream so the Logs
@@ -910,6 +938,15 @@ func (c *APIClient) StreamEvents(ctx context.Context) (<-chan GlobalEventDTO, er
 					if err := json.Unmarshal([]byte(ev.data), &n); err == nil {
 						h(n)
 					}
+				}
+				continue
+			}
+			if ev.name == approvalEventName {
+				// An "approval pending" nudge (issue #569): trigger an immediate
+				// /approvals re-scan. The body (an approval id) is intentionally ignored
+				// — GET /approvals is authoritative and the poller dedups by id.
+				if h := c.approvalSignalHandler(); h != nil {
+					h()
 				}
 				continue
 			}

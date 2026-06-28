@@ -19,6 +19,14 @@ type taggedEvent struct {
 	// channels (no separate channel) and is emitted as an SSE event named
 	// "notification"; per-session subscribers never receive it.
 	notif *NotificationEvent
+	// approvalSignal marks this frame as a best-effort "approval pending" nudge
+	// (issue #569): it carries no event payload, only approvalID for diagnostics,
+	// and tells a connected client to re-fetch GET /approvals now rather than wait
+	// for its next poll tick. Like notif it rides the global channels and is
+	// emitted under the SSE event name "approval"; per-session subscribers never
+	// receive it. A frame is exactly one of: session event, notif, or approvalSignal.
+	approvalSignal bool
+	approvalID     string
 }
 
 // notificationRingSize bounds the missed-notification ring (issue #358 Open
@@ -182,6 +190,26 @@ func (h *hub) deliverNotification(nev NotificationEvent) bool {
 		h.ring = h.ring[len(h.ring)-notificationRingSize:]
 	}
 	return false
+}
+
+// broadcastApprovalSignal wakes every connected global subscriber to re-fetch GET
+// /approvals immediately rather than waiting for its 750ms poll tick (issue #569).
+// It is a best-effort nudge: non-blocking, drop-on-full, and NOT ring-buffered — a
+// reconnecting client re-scans approvals on its own, and /approvals is the
+// authoritative source, so a dropped signal only forfeits the latency it was
+// shaving, never the prompt. The frame carries the approval id for diagnostics;
+// the client ignores the body and just re-scans. Per-session subscribers are not
+// signalled (the approval list is a global resource).
+func (h *hub) broadcastApprovalSignal(id string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	te := taggedEvent{approvalSignal: true, approvalID: id}
+	for ch := range h.global {
+		select {
+		case ch <- te:
+		default:
+		}
+	}
 }
 
 // cloneSubs returns a snapshot of a subscriber map's channels under the lock so

@@ -60,6 +60,21 @@ non-blocking) — correctness still rests on Layer A + the authoritative
 `/approvals` fetch; the push only removes the up-to-750 ms latency and the
 "poll endpoint flaky while stream is up" edge.
 
+> **Implementation note (Layer C revised):** during implementation a deliberate,
+> tested #560 invariant was found — `TestReportDecisionLateNonStickyIsSilent`
+> asserts a *late one-shot* decision must stay **silent** ("carries no future
+> effect → must not surface"). Surfacing it (original Layer C) would break that
+> test → a regression (criterion 3). Since **Layer A already satisfies acceptance
+> criterion 2** (timeout not charged against un-presented time; the prompt is
+> surfaced, never auto-denied before presentation), Layer C's behavioural change
+> was **dropped**: `reportDecision` is left exactly as #560 wrote it (late
+> *sticky* grants still notice; late one-shots stay silent). The residual
+> post-presentation-timeout late case is the rare, intended connected-unresponsive
+> path #560 deliberately kept quiet. Flagged for the maintainer: if you *do* want
+> a late one-shot to notify, that is a #560 policy reversal and needs its test
+> updated — out of scope for this no-regression fix. The text below documents the
+> originally-designed Layer C for record.
+
 **Layer C — client: never silently deny (usability).** Build on #560's
 `decide()`/`reportDecision` surface path: extend `reportDecision` so a `late`
 status on a **one-shot decision of either kind** (`allow`/`deny` *and*

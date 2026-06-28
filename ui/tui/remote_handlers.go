@@ -281,6 +281,12 @@ func (rc *RemoteClient) StartGated(parent context.Context) (begin func(), err er
 			}
 		}
 		if rc.approver != nil {
+			// Surface a freshly-raised remote prompt without waiting for the next poll
+			// tick: the daemon pushes an "approval" SSE nudge on alloc, which we turn
+			// into an immediate /approvals re-scan via the same coalesced kick reconnect
+			// uses (issue #569). The poller stays the authoritative backstop; the seen
+			// dedup keeps a push + a racing poll from double-presenting.
+			rc.client.SetApprovalSignalHandler(rc.kickApprovals)
 			go rc.pollApprovals()
 		}
 	})
@@ -738,6 +744,13 @@ func (rc *RemoteClient) decide(aid, decision string) (status string, err error) 
 // "[System]" note, and a sticky permission grant that the daemon reconciled after
 // the prompt had already expired ("late") tells the user it will apply going
 // forward. The common in-time success is silent.
+//
+// A late ONE-SHOT decision (allow/deny, approve/reject) stays silent by design
+// (issue #560): "late" means the daemon had already removed the prompt — it timed
+// out OR another attached window answered it first — and a one-shot carries no
+// future effect, so a notice would be noise. With issue #569 the daemon no longer
+// auto-denies a prompt before any client has surfaced it, so this residual late
+// path is the rare post-presentation timeout, left silent to preserve #560.
 func (rc *RemoteClient) reportDecision(sessionID, kind, resource, wire, status string, err error) {
 	if err != nil {
 		switch kind {

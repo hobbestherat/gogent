@@ -24,6 +24,13 @@ type pendingApproval struct {
 	editReview *editReviewDetail
 	createdAt  time.Time
 	decided    chan decision // closed/sent to unblock the waiting tool goroutine
+	// observed is set true the first time a client fetches this approval via
+	// GET /approvals (b.list). Until then no attached client has had the chance to
+	// surface the prompt, so the connected-but-unresponsive auto-deny must NOT be
+	// charged against this un-presented time (issue #569): wait holds the connected
+	// clock at zero while !observed, governing the prompt by the longer unattended
+	// safety bound instead. Guarded by b.mu.
+	observed bool
 }
 
 // decision carries the user's answer. For permissions it is a permission.Decision
@@ -40,14 +47,20 @@ type decision struct {
 // in which case it denies — the safe default that matches headless behavior).
 //
 // The applicable bound tracks the live connected-client count continuously
-// (issue #358 §8): connectedTimeout governs while a client is connected (the
-// connected-but-unresponsive auto-deny), unattendedTimeout governs while none is
-// — each measuring only continuous time in its own state and resetting on the
-// opposite transition. So a daemon whose TUI blips offline keeps its long watcher
-// turns alive, on reconnect a client picks the prompt up via GET /approvals with
-// a fresh grace window, and the unattended bound never alters the connected case
-// (connectedTimeout == 0 still means "never"). A delivered decision always wins.
-// See wait for the exact accrual rules.
+// (issue #358 §8): connectedTimeout governs while a client is connected AND has
+// observed the prompt (the connected-but-unresponsive auto-deny), unattendedTimeout
+// governs otherwise — each measuring only continuous time in its own state and
+// resetting on the opposite transition. So a daemon whose TUI blips offline keeps
+// its long watcher turns alive, on reconnect a client picks the prompt up via GET
+// /approvals with a fresh grace window, and the unattended bound never alters the
+// connected case (connectedTimeout == 0 still means "never"). A delivered decision
+// always wins.
+//
+// Crucially the connected clock is charged only against time AFTER a client has
+// fetched the prompt (issue #569): an approval raised while the TUI is briefly
+// disconnected, or before the first GET /approvals poll lands, is never
+// auto-denied before the attached TUI can surface its ⏳ badge + dialog. See wait
+// for the exact accrual rules.
 type approvalBridge struct {
 	hub *hub
 	// connectedTimeout bounds the wait when a human client IS connected (it could
@@ -148,8 +161,12 @@ func (b *approvalBridge) ReviewEdit(req gogent.EditReviewRequest) gogent.EditRev
 // --- internals --------------------------------------------------------------
 
 // alloc registers a new pending approval and returns its id. Clients discover it
-// by polling GET /approvals (there is no SSE push for approvals); the blocked
-// tool goroutine then waits in wait until a decision arrives or a bound fires.
+// by polling GET /approvals; the blocked tool goroutine then waits in wait until a
+// decision arrives or a bound fires. To shorten discovery latency (issue #569) a
+// best-effort SSE "approval" signal is broadcast to connected global subscribers
+// so an attached client re-fetches /approvals immediately rather than waiting for
+// its next poll tick. The broadcast is non-blocking and the poll remains the
+// authoritative backstop, so a dropped signal never loses the prompt.
 func (b *approvalBridge) alloc(kind, sessionID, agentID string, perm *permissionDetail, edit *editReviewDetail) string {
 	b.mu.Lock()
 	b.nextSeq++
@@ -166,6 +183,12 @@ func (b *approvalBridge) alloc(kind, sessionID, agentID string, perm *permission
 	}
 	b.pending[id] = ap
 	b.mu.Unlock()
+	// Nudge connected clients to re-scan now (outside b.mu: broadcast takes the hub
+	// lock, and wait reads clientCount then isObserved sequentially, so the two
+	// locks are never nested in either order).
+	if b.hub != nil {
+		b.hub.broadcastApprovalSignal(id)
+	}
 	return id
 }
 
@@ -178,13 +201,17 @@ func (b *approvalBridge) alloc(kind, sessionID, agentID string, perm *permission
 // only the continuous wall-time spent in its own state and RESETS on the opposite
 // transition:
 //
-//   - While a client is connected, connectedTimeout governs — the
-//     connected-but-unresponsive auto-deny (default 5 min). The unattended clock
-//     is held at zero, so the unattended cap can never shorten or alter the
-//     connected case (in particular connectedTimeout == 0 still means "never").
-//   - While no client is connected, unattendedTimeout governs (default 1h), so a
-//     daemon whose TUI blips offline keeps the prompt alive and a reconnecting
-//     client gets a fresh connected grace window to answer it.
+//   - While a client is connected AND has observed the prompt (fetched it via GET
+//     /approvals), connectedTimeout governs — the connected-but-unresponsive
+//     auto-deny (default 5 min). The unattended clock is held at zero, so the
+//     unattended cap can never shorten or alter the connected case (in particular
+//     connectedTimeout == 0 still means "never").
+//   - Otherwise — no client connected, OR a client is connected but has not yet
+//     fetched the prompt — unattendedTimeout governs (default 1h) and the
+//     connected clock is held at zero. This keeps the prompt alive across a TUI
+//     blip, AND keeps an approval raised before the first poll from being
+//     auto-denied before any client has had the chance to surface it (issue #569);
+//     a reconnecting/first-polling client then gets a fresh connected grace window.
 //
 // A non-positive bound disables auto-deny for that state ("0 = wait forever");
 // with both disabled the prompt blocks until a decision arrives.
@@ -213,15 +240,21 @@ func (b *approvalBridge) wait(id, sessionID string, def decision) decision {
 		case now := <-ticker.C:
 			delta := now.Sub(lastTick)
 			lastTick = now
-			if b.hub != nil && b.hub.clientCount() > 0 {
-				// Connected: accrue the connected clock, reset the unattended one.
+			if b.hub != nil && b.hub.clientCount() > 0 && b.isObserved(id) {
+				// Connected AND a client has fetched the prompt: the
+				// connected-but-unresponsive auto-deny governs. Accrue the connected
+				// clock, reset the unattended one.
 				connectedFor += delta
 				unattendedFor = 0
 				if b.connectedTimeout > 0 && connectedFor >= b.connectedTimeout {
 					return def
 				}
 			} else {
-				// Unattended: accrue the unattended clock, reset the connected one.
+				// Either no client is connected, or a client is connected but has not
+				// yet observed the prompt (so no human has had the chance to answer):
+				// the longer unattended safety bound governs and the connected clock is
+				// held at zero (issue #569). Accrue the unattended clock, reset the
+				// connected one.
 				unattendedFor += delta
 				connectedFor = 0
 				if b.unattendedTimeout > 0 && unattendedFor >= b.unattendedTimeout {
@@ -256,6 +289,17 @@ func (b *approvalBridge) get(id string) *pendingApproval {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.pending[id]
+}
+
+// isObserved reports whether a client has fetched the pending approval at least
+// once via GET /approvals (issue #569). A removed/unknown id is reported false.
+// wait reads it each tick to decide whether the connected-but-unresponsive
+// auto-deny clock may accrue.
+func (b *approvalBridge) isObserved(id string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	ap := b.pending[id]
+	return ap != nil && ap.observed
 }
 
 func (b *approvalBridge) remove(id string) {
@@ -312,12 +356,19 @@ func (b *approvalBridge) resolve(id string, d decision) bool {
 	}
 }
 
-// list returns a snapshot of all pending approvals as views.
+// list returns a snapshot of all pending approvals as views. Fetching the list is
+// what marks each returned approval "observed" (issue #569): a successful GET
+// /approvals is precisely the moment an attached client has the prompt in hand and
+// can surface its badge/dialog, so from here the connected-but-unresponsive
+// auto-deny clock is allowed to run (see wait). The only production caller is the
+// GET /approvals handler; the test helpers that call it simulate that same client
+// poll.
 func (b *approvalBridge) list() []approvalView {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	out := make([]approvalView, 0, len(b.pending))
 	for _, ap := range b.pending {
+		ap.observed = true
 		out = append(out, ap.toView())
 	}
 	return out
