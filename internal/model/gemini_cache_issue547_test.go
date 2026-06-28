@@ -166,14 +166,14 @@ func (s *geminiCacheServer) handle(w http.ResponseWriter, r *http.Request) {
 		cached := s.cachedReadTokenCount
 		s.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(fmt.Sprintf(`{"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"totalTokenCount":11,"cachedContentTokenCount":%d}}`, cached)))
+		_, _ = fmt.Fprintf(w, `{"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"totalTokenCount":11,"cachedContentTokenCount":%d}}`, cached)
 	case strings.HasSuffix(path, ":streamGenerateContent"):
 		s.mu.Lock()
 		s.streamBody = body
 		cached := s.cachedReadTokenCount
 		s.mu.Unlock()
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte(fmt.Sprintf("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":1,\"totalTokenCount\":11,\"cachedContentTokenCount\":%d}}\n\n", cached)))
+		_, _ = fmt.Fprintf(w, "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":1,\"totalTokenCount\":11,\"cachedContentTokenCount\":%d}}\n\n", cached)
 	default:
 		http.Error(w, "unexpected request "+r.URL.String(), http.StatusInternalServerError)
 	}
