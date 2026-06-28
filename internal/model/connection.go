@@ -486,7 +486,7 @@ func (u TokenUsage) CachedTokens() int { return u.Cache.ReadTokens }
 // cache_write_tokens (=Cache.WriteTokens) is omitempty and appended LAST, so it
 // appears only on Anthropic write turns and never shifts an existing key.
 func (u TokenUsage) MarshalJSON() ([]byte, error) {
-	return json.Marshal(struct {
+	b, err := json.Marshal(struct {
 		PromptTokens     int `json:"prompt_tokens"`
 		CompletionTokens int `json:"completion_tokens"`
 		TotalTokens      int `json:"total_tokens"`
@@ -501,6 +501,10 @@ func (u TokenUsage) MarshalJSON() ([]byte, error) {
 		ReasoningTokens:  u.ReasoningTokens,
 		CacheWriteTokens: u.Cache.WriteTokens,
 	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal token usage: %w", err)
+	}
+	return b, nil
 }
 
 // UnmarshalJSON parses provider token usage, normalizing the prompt-cache split
@@ -558,13 +562,17 @@ func orOne(m float64) float64 {
 // costWeightedInput prices a turn's prompt tokens by cache tier: the full-price
 // remainder (prompt minus reads and writes) plus reads at readMult plus writes at
 // writeMult, rounded to the nearest whole token. ReadTokens and WriteTokens are
-// subsets of prompt, so the remainder is non-negative. A 0 multiplier means 1.0
-// (face value), so an unpriced provider reduces to raw prompt tokens.
+// subsets of prompt for every well-formed provider response, so the remainder is
+// normally non-negative. A 0 multiplier means 1.0 (face value), so an unpriced
+// provider reduces to raw prompt tokens. The result is floored at 0 so a malformed
+// response that over-reports cached tokens (Read+Write > prompt) can never charge a
+// negative cost and rewind the agent budget.
 func (c CacheStats) costWeightedInput(prompt int, readMult, writeMult float64) int {
 	base := prompt - c.ReadTokens - c.WriteTokens
-	return int(math.Round(float64(base) +
+	weighted := math.Round(float64(base) +
 		float64(c.ReadTokens)*orOne(readMult) +
-		float64(c.WriteTokens)*orOne(writeMult)))
+		float64(c.WriteTokens)*orOne(writeMult))
+	return int(math.Max(0, weighted))
 }
 
 // StreamResponse is one event delivered on the streaming channel. Content/Role
