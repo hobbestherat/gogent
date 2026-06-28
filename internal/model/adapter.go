@@ -1034,6 +1034,14 @@ func (geminiAdapter) buildBody(req CompletionRequest, buf *bytes.Buffer) error {
 			n = len(contents) // defensive: never slice past the available contents
 		}
 		out.Contents = contents[n:]
+		// toolConfig (tool_choice) is a per-request directive, NOT part of the cached
+		// resource, so a non-default forcing (ANY/NONE/specific) must still ride the
+		// request or caching would silently drop it. AUTO is Gemini's default when
+		// toolConfig is omitted, so leave it off on the cached branch (keeping the
+		// referencing request minimal). The agent loop only ever sends AUTO.
+		if req.ToolChoice != nil && req.ToolChoice.Mode != ToolChoiceAuto {
+			out.ToolConfig = toolCfg
+		}
 	} else {
 		// Inactive path — identical to the prior inline mapping, so a non-cached
 		// request marshals byte-for-byte as before.

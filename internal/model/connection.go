@@ -1543,6 +1543,9 @@ func (c *ModelConnection) complete(ctx context.Context, messages []Message, stre
 	// size gate. When it engages, it annotates reqBody with the CachedContent
 	// reference the adapter then emits in place of the shadowed prefix.
 	c.ensureGeminiCache(ctx, &reqBody)
+	// Whether this request references an explicit Gemini cache — so a 4xx rejection
+	// of that reference can invalidate it and let the next turn recreate (issue #547).
+	cacheRef := reqBody.GeminiCachedContent != ""
 
 	// Marshal the request body ONCE, before the retry loop. Only the socket send
 	// needs retrying, so re-marshaling the (potentially large) transcript on every
@@ -1635,6 +1638,7 @@ func (c *ModelConnection) complete(ctx context.Context, messages []Message, stre
 		// Fail fast on permanent errors (most 4xx); retry only transient
 		// classes (408/409/429/5xx), honoring Retry-After when present.
 		if !isRetryableStatus(resp.StatusCode) || attempt == attempts-1 {
+			c.dropGeminiCacheRefAfterError(cacheRef, resp.StatusCode)
 			return nil, c.analyzeError(resp.StatusCode, string(bodyBytes))
 		}
 
@@ -1684,6 +1688,7 @@ func (c *ModelConnection) completeStream(ctx context.Context, messages []Message
 	// annotate contract as the blocking path, so streaming references the resource
 	// identically.
 	c.ensureGeminiCache(ctx, &reqBody)
+	cacheRef := reqBody.GeminiCachedContent != ""
 
 	// Marshal into a pooled buffer (issue #20): the bytes stay live through the
 	// single request send and the buffer is returned to the pool on return.
@@ -1734,6 +1739,7 @@ func (c *ModelConnection) completeStream(ctx context.Context, messages []Message
 		c.Stats.Mutex.Lock()
 		c.Stats.TotalTimeMs += time.Since(startTime).Milliseconds()
 		c.Stats.Mutex.Unlock()
+		c.dropGeminiCacheRefAfterError(cacheRef, resp.StatusCode)
 		return "", c.analyzeError(resp.StatusCode, string(body))
 	}
 

@@ -34,11 +34,14 @@ import (
 // stray concurrent caller safe.
 
 // geminiMinCacheTokens is the estimated prefix-token floor below which explicit
-// caching is NOT engaged. Vertex's hard minimum is far smaller (~1024–4096 by
-// model), but a billable CachedContent only pays off for a genuinely large,
-// reused prefix, so the gate is deliberately conservative. The estimate is a
-// cheap bytes/4 approximation (no extra token-count round-trip).
-const geminiMinCacheTokens = 32768
+// caching is NOT engaged: small prefixes are left to Gemini's free implicit
+// caching, where a billable CachedContent would not pay off. It is set above
+// Vertex's hard minimum (~1024–4096 by model) but WELL BELOW a typical context
+// window so the feature actually triggers for genuinely large prefixes — at the
+// old 32768 floor it equalled config.defaultContextWindow, so compaction fired
+// before the prefix ever reached it and the opt-in was a silent no-op. The
+// estimate is a cheap bytes/4 approximation (no extra token-count round-trip).
+const geminiMinCacheTokens = 8192
 
 // geminiCacheState is the per-connection explicit-cache lifecycle state. The zero
 // value is "no resource, never tried" and is safe for every non-vertex-native
@@ -114,31 +117,51 @@ func (c *ModelConnection) ensureGeminiCache(ctx context.Context, reqBody *Comple
 	// transcript is immutable, so contents[:prefixLen] is byte-identical across
 	// turns and only the post-snapshot tail grows.
 	if st.name != "" {
-		if st.prefixLen <= len(contents) {
-			if raw, herr := geminiPrefixBytes(sys, tools, contents[:st.prefixLen]); herr == nil && geminiHashHex(raw) == st.prefixHash {
+		matches := st.prefixLen <= len(contents)
+		if matches {
+			raw, herr := geminiPrefixBytes(sys, tools, contents[:st.prefixLen])
+			matches = herr == nil && geminiHashHex(raw) == st.prefixHash
+		}
+		if matches {
+			// The prefix is unchanged. Refresh the TTL when at/near expiry so a
+			// long-running session persists past the configured window — the whole
+			// point of explicit caching. CRUCIALLY, when the resource is already PAST
+			// its (estimated) expiry and the refresh fails, the resource is gone
+			// server-side: drop it and fall through to recreate rather than reference
+			// a dead resource — otherwise the request 400s and, because the frozen
+			// prefix hash never changes, every later turn 400s too, wedging the
+			// session across exactly the >1h gap the feature exists to bridge. A
+			// failed refresh while the resource is still comfortably live is non-fatal
+			// (it stays referenced; the next turn retries the refresh).
+			live := true
+			if st.expiresAt.IsZero() || time.Now().After(st.expiresAt.Add(-ttl/4)) {
+				if exp, ok := c.geminiCacheRefresh(ctx, st.name, ttlStr, ttl); ok {
+					st.expiresAt = exp
+				} else if st.expiresAt.IsZero() || time.Now().After(st.expiresAt) {
+					live = false // expired and unrevivable → recreate below
+				}
+			}
+			if live {
 				reqBody.GeminiCachedContent = st.name
 				reqBody.GeminiCachedPrefixContents = st.prefixLen
-				// Refresh the TTL when within the last quarter of its lifetime, so a
-				// long-running session keeps the resource alive past the configured
-				// window. Best-effort: a failed refresh still references the cache.
-				if time.Now().After(st.expiresAt.Add(-ttl / 4)) {
-					if exp, ok := c.geminiCacheRefresh(ctx, st.name, ttlStr, ttl); ok {
-						st.expiresAt = exp
-					}
-				}
 				return
 			}
 		}
-		// The cached prefix changed (tools/system edited, or compaction rewrote the
-		// transcript): the frozen resource is stale. Delete it best-effort and fall
-		// through to recreate.
+		// Stale (tools/system edited, or compaction rewrote the transcript) or
+		// expired-and-unrevivable: delete the old resource best-effort and fall
+		// through to recreate on the current prefix.
 		c.geminiCacheDelete(ctx, st.name)
-		st.name, st.prefixHash, st.prefixLen = "", "", 0
+		st.name, st.prefixHash, st.prefixLen, st.expiresAt = "", "", 0, time.Time{}
 	}
 
 	// Create: cache the largest stable prefix — everything up to and including the
-	// last model(assistant) turn, so the post-snapshot tail starts on a user turn
-	// and the seam (cached.contents ++ request.contents) stays role-alternating.
+	// last model(assistant) turn. Ending on a model turn means the post-snapshot
+	// tail starts on a user turn, so the seam (cached.contents ++ request.contents)
+	// stays role-alternating. This subsumes the provider-agnostic Volatile-tail
+	// rule: the volatile per-turn context is always a TRAILING user turn (see
+	// model_session.go), so "up to the last model turn" necessarily excludes it —
+	// and additionally guarantees the alternating seam that Gemini needs, which the
+	// Volatile flag alone would not.
 	b := geminiStablePrefixBoundary(contents)
 	if b == 0 {
 		return // no completed assistant turn yet → nothing stable to cache
@@ -152,15 +175,38 @@ func (c *ModelConnection) ensureGeminiCache(ctx context.Context, reqBody *Comple
 	}
 	name, exp, ok := c.geminiCacheCreate(ctx, sys, tools, contents[:b], ttlStr, ttl)
 	if !ok {
-		// Fail-safe: a create failure (unsupported region, quota, transient error)
-		// disables explicit caching for the rest of this connection's life rather
-		// than retrying every turn; the session degrades cleanly to implicit caching.
-		st.disabled = true
+		// A cancelled context is transient — the turn is aborting anyway, so never
+		// let it disable caching for the session. Any other failure (unsupported
+		// region, quota, persistent error) disables explicit caching for the rest of
+		// this connection's life rather than retrying a doomed create every turn; the
+		// session degrades cleanly to implicit caching.
+		if ctx.Err() == nil {
+			st.disabled = true
+		}
 		return
 	}
 	st.name, st.prefixLen, st.prefixHash, st.expiresAt = name, b, geminiHashHex(raw), exp
 	reqBody.GeminiCachedContent = name
 	reqBody.GeminiCachedPrefixContents = b
+}
+
+// dropGeminiCacheRefAfterError clears the explicit-cache state after a request
+// that REFERENCED a resource failed with a client error (4xx). This is the
+// reactive safety net for a referenced cache the server rejects for a reason the
+// proactive expiry check cannot see — eviction before the estimated TTL, a region
+// that dropped the resource, a stale reference — so the next turn recreates
+// instead of re-referencing a dead resource and 400ing forever. It is gated to
+// 4xx (a bad/again-rejected reference is a client error); transient 5xx/429 are
+// retried by the caller and need no invalidation. A needless drop merely
+// recreates the resource next turn, so the heuristic is safe and self-healing.
+func (c *ModelConnection) dropGeminiCacheRefAfterError(referenced bool, status int) {
+	if !referenced || status < 400 || status >= 500 {
+		return
+	}
+	st := &c.geminiCache
+	st.mu.Lock()
+	st.name, st.prefixHash, st.prefixLen, st.expiresAt = "", "", 0, time.Time{}
+	st.mu.Unlock()
 }
 
 // geminiStablePrefixBoundary returns the count of leading contents that form the
@@ -217,7 +263,18 @@ func (c *ModelConnection) geminiCacheCreate(ctx context.Context, sys *geminiCont
 	if err := json.Unmarshal(respBytes, &res); err != nil || strings.TrimSpace(res.Name) == "" {
 		return "", time.Time{}, false
 	}
-	return res.Name, time.Now().Add(ttl), true
+	return res.Name, geminiCacheExpiry(res.ExpireTime, ttl), true
+}
+
+// geminiCacheExpiry resolves the resource's expiry: the server's authoritative
+// expireTime when present and parseable (Vertex may cap the requested TTL, so the
+// local now+ttl estimate would drift and refresh too late), falling back to
+// now+ttl otherwise.
+func geminiCacheExpiry(expireTime string, ttl time.Duration) time.Time {
+	if t, err := time.Parse(time.RFC3339, strings.TrimSpace(expireTime)); err == nil {
+		return t
+	}
+	return time.Now().Add(ttl)
 }
 
 // geminiCacheRefresh PATCHes the resource's TTL (updateMask=ttl) to extend its
@@ -232,10 +289,13 @@ func (c *ModelConnection) geminiCacheRefresh(ctx context.Context, name, ttlStr s
 	if err != nil {
 		return time.Time{}, false
 	}
-	if _, err := c.doJSONBody(ctx, http.MethodPatch, resURL+"?updateMask=ttl", nil, body); err != nil {
+	respBytes, err := c.doJSONBody(ctx, http.MethodPatch, resURL+"?updateMask=ttl", nil, body)
+	if err != nil {
 		return time.Time{}, false
 	}
-	return time.Now().Add(ttl), true
+	var res geminiCachedContentsResource
+	_ = json.Unmarshal(respBytes, &res) // best-effort: fall back to now+ttl on a bodyless/odd response
+	return geminiCacheExpiry(res.ExpireTime, ttl), true
 }
 
 // geminiCacheDelete DELETEs a stale resource. Best-effort — errors are ignored
