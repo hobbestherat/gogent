@@ -1202,7 +1202,9 @@ func (w *Workbench) showThemeEditor() {
 	// #462); without them the editor is the built-ins-only editor it was before.
 	var saveAsBtn, deleteBtn *tv.Button
 	if savable {
-		saveAsBtn = newButton("Save As…", tv.Rect{X: 12, Y: height - 3, W: 11, H: 1}, saveAs)
+		// W:12 = caption "Save As…" (8 cols) + turbotui's "[ … ]" chrome (4 cols); W:11
+		// left only 7 cols and truncated the caption to "Save A…" (issue #548).
+		saveAsBtn = newButton("Save As…", tv.Rect{X: 12, Y: height - 3, W: 12, H: 1}, saveAs)
 		deleteBtn = newButton("Delete", tv.Rect{X: 24, Y: height - 3, W: 10, H: 1}, deleteTheme)
 		dialog.Window.AddContent(saveAsBtn)
 		dialog.Window.AddContent(deleteBtn)
@@ -1261,7 +1263,7 @@ func (w *Workbench) showThemeEditor() {
 		bar.SetBounds(tv.Rect{X: layout.scrollbarX, Y: layout.contentTop, W: 1, H: layout.visibleRows})
 		resetBtn.Root().SetBounds(tv.Rect{X: 2, Y: nh - 3, W: 9, H: 1})
 		if saveAsBtn != nil {
-			saveAsBtn.Root().SetBounds(tv.Rect{X: 12, Y: nh - 3, W: 11, H: 1})
+			saveAsBtn.Root().SetBounds(tv.Rect{X: 12, Y: nh - 3, W: 12, H: 1}) // W:12 keeps "Save As…" untruncated on resize (issue #548)
 		}
 		if deleteBtn != nil {
 			deleteBtn.Root().SetBounds(tv.Rect{X: 24, Y: nh - 3, W: 10, H: 1})
