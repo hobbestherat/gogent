@@ -162,7 +162,7 @@ func TestSendCtxStampsTimestampOnBothPaths_Issue487(t *testing.T) {
 // it is captured on the error-path turn. No real connector does this today (both
 // return resp==nil on error), so this is the only place the guard is exercised.
 func TestSendCtxErrorCapturesUsageWhenProviderReturnsIt_Issue487(t *testing.T) {
-	usage := &TokenUsage{PromptTokens: 4242, CompletionTokens: 0, TotalTokens: 4242, CachedTokens: 10}
+	usage := &TokenUsage{PromptTokens: 4242, CompletionTokens: 0, TotalTokens: 4242, Cache: CacheStats{ReadTokens: 10}}
 	conn := &fakeIssue487Conn{
 		resp: &CompletionResponse{Role: RoleAssistant, Usage: usage},
 		err:  &ModelError{Type: ErrorConnection, Message: "reset"},
@@ -179,7 +179,7 @@ func TestSendCtxErrorCapturesUsageWhenProviderReturnsIt_Issue487(t *testing.T) {
 	if turn.Usage == nil {
 		t.Fatal("Usage not captured on the error path even though the provider returned it")
 	}
-	if turn.Usage.PromptTokens != 4242 || turn.Usage.CachedTokens != 10 {
+	if turn.Usage.PromptTokens != 4242 || turn.Usage.CachedTokens() != 10 {
 		t.Errorf("captured usage = %+v, want the provider-reported prompt/cached tokens", turn.Usage)
 	}
 }

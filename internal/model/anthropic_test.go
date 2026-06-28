@@ -195,7 +195,7 @@ func TestAnthropicParseResponse(t *testing.T) {
 	}
 	// prompt = input_tokens + cache reads; cached subset preserved.
 	if resp.Usage.PromptTokens != 15 || resp.Usage.CompletionTokens != 7 ||
-		resp.Usage.CachedTokens != 3 || resp.Usage.TotalTokens != 22 {
+		resp.Usage.CachedTokens() != 3 || resp.Usage.TotalTokens != 22 {
 		t.Errorf("usage = %+v", resp.Usage)
 	}
 }
@@ -213,8 +213,14 @@ func TestAnthropicUsageCacheReadInputTokensFlowToCachedTokensIssue404(t *testing
 	if got.PromptTokens != 23 {
 		t.Errorf("PromptTokens = %d, want input + cache_read + cache_creation = 23", got.PromptTokens)
 	}
-	if got.CachedTokens != 7 {
-		t.Errorf("CachedTokens = %d, want cache_read_input_tokens = 7", got.CachedTokens)
+	if got.CachedTokens() != 7 {
+		t.Errorf("CachedTokens = %d, want cache_read_input_tokens = 7", got.CachedTokens())
+	}
+	// #544: the cache WRITE count (cache_creation_input_tokens) must be retained,
+	// not silently discarded the way it was before the read/write split. This is
+	// the headline fix — Anthropic is the only provider with a write count.
+	if got.Cache.WriteTokens != 5 {
+		t.Errorf("Cache.WriteTokens = %d, want cache_creation_input_tokens = 5 (no longer discarded)", got.Cache.WriteTokens)
 	}
 	if got.TotalTokens != 26 {
 		t.Errorf("TotalTokens = %d, want prompt + completion = 26", got.TotalTokens)
@@ -342,7 +348,7 @@ func TestAnthropicParseStream(t *testing.T) {
 		t.Errorf("streamed tool call = %+v", tc)
 	}
 	if terminal.Usage == nil || terminal.Usage.PromptTokens != 15 ||
-		terminal.Usage.CompletionTokens != 9 || terminal.Usage.CachedTokens != 4 {
+		terminal.Usage.CompletionTokens != 9 || terminal.Usage.CachedTokens() != 4 {
 		t.Errorf("usage = %+v", terminal.Usage)
 	}
 }

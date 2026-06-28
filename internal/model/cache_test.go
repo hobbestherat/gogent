@@ -53,8 +53,8 @@ func TestTokenUsageUnmarshalCachedTokens(t *testing.T) {
 			if err := json.Unmarshal([]byte(tc.in), &u); err != nil {
 				t.Fatalf("unmarshal: %v", err)
 			}
-			if u.CachedTokens != tc.want {
-				t.Errorf("CachedTokens = %d, want %d", u.CachedTokens, tc.want)
+			if u.CachedTokens() != tc.want {
+				t.Errorf("CachedTokens = %d, want %d", u.CachedTokens(), tc.want)
 			}
 			if u.PromptTokens != 100 {
 				t.Errorf("PromptTokens = %d, want 100 (other fields must still decode)", u.PromptTokens)
@@ -66,7 +66,7 @@ func TestTokenUsageUnmarshalCachedTokens(t *testing.T) {
 // TestTokenUsageMarshalRoundTrip ensures CachedTokens survives gogent's own
 // persistence (marshal -> unmarshal), since usage is carried in stored turns.
 func TestTokenUsageMarshalRoundTrip(t *testing.T) {
-	orig := TokenUsage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120, CachedTokens: 80}
+	orig := TokenUsage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120, Cache: CacheStats{ReadTokens: 80}}
 	data, err := json.Marshal(orig)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -102,7 +102,7 @@ func TestCompleteAccumulatesCachedTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
-	if resp.Usage == nil || resp.Usage.CachedTokens != 80 {
+	if resp.Usage == nil || resp.Usage.CachedTokens() != 80 {
 		t.Fatalf("response cached tokens = %v, want 80", resp.Usage)
 	}
 
