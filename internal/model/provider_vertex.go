@@ -37,12 +37,17 @@ func init() {
 		adapter: openAIAdapter{},
 		// OpenAI-compatible surface: response_format works; reasoning_effort /
 		// thinking are native-Gemini features not exposed through the compat shim.
-		caps:        Capabilities{SupportsResponseFormat: true},
-		endpoints:   staticBaseEndpoints{baseURLFunc: vertexOpenAIBaseURL, chatPath: "/endpoints/openapi/chat/completions"},
-		auth:        adcAuth{},
-		lister:      vertexPublisherLister{publisher: "google", format: googlePublisherModelID, keep: hasPrefixAny("gemini", "gemma")},
-		validate:    vertexValidate,
-		derivesBase: true, // base URL is derived from project/location; an empty endpoint is routable
+		caps:      Capabilities{SupportsResponseFormat: true},
+		endpoints: staticBaseEndpoints{baseURLFunc: vertexOpenAIBaseURL, chatPath: "/endpoints/openapi/chat/completions"},
+		auth:      adcAuth{},
+		lister:    vertexPublisherLister{publisher: "google", format: googlePublisherModelID, keep: hasPrefixAny("gemini", "gemma")},
+		validate:  vertexValidate,
+		// Defense in depth: a bare "gemini-…" that escaped ValidateModelConfig is
+		// auto-qualified to "google/gemini-…" at the send seam, so it can never reach
+		// Vertex bare and 400 opaquely (issue #574). Set only on the shim, whose model
+		// travels in the request body; the native route carries the model in the URL.
+		normalizeModelID: ensureGooglePublisher,
+		derivesBase:      true, // base URL is derived from project/location; an empty endpoint is routable
 	})
 
 	registerProvider(&provider{
@@ -237,6 +242,20 @@ func lastPathSegment(s string) string {
 // which addresses Gemini as "google/<model>".
 func bareModelID(id string) string            { return id }
 func googlePublisherModelID(id string) string { return "google/" + id }
+
+// ensureGooglePublisher qualifies a bare model id for the Vertex OpenAI-compat shim,
+// which addresses Gemini as "google/<model>". It is the request-build counterpart of the
+// lister's googlePublisherModelID — the same rule the Model-Garden lister applies to
+// discovered ids — but only when the id lacks a publisher, so an already-correct
+// "google/gemini-…" (or another publisher) is left untouched. An empty id is left empty.
+// Wired as the shim provider's normalizeModelID, it is the last-line guarantee that a bare
+// name escaping ValidateModelConfig is never sent verbatim and 400s opaquely (issue #574).
+func ensureGooglePublisher(id string) string {
+	if id == "" || strings.Contains(id, "/") {
+		return id
+	}
+	return googlePublisherModelID(id)
+}
 
 // hasPrefixAny returns a keep-filter matching ids that start with any prefix.
 func hasPrefixAny(prefixes ...string) func(string) bool {

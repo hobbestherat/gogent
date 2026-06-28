@@ -237,6 +237,15 @@ type provider struct {
 	// validate returns a deferred config error (e.g. Vertex missing
 	// project/location); nil = always valid.
 	validate func(cfg *config.ModelConfig) error
+	// normalizeModelID, when non-nil, rewrites the outgoing request's model id at the
+	// send seam (buildRequest), as a last-line defense in depth. It is the request-build
+	// counterpart of the lister's format func: the Vertex OpenAI-compat shim uses it to
+	// auto-qualify a bare "gemini-…" to "google/gemini-…" so a model that escaped
+	// ValidateModelConfig can never be sent bare and 400 opaquely (issue #574). nil =
+	// the model id is sent verbatim (every non-shim provider). It is applied ONLY to a
+	// provider whose model travels in the request body; providers that carry the model
+	// in the URL (vertex-native/anthropic) leave it nil and validate the shape instead.
+	normalizeModelID func(id string) string
 	// derivesBase reports that this provider synthesizes its own request base URL
 	// (from the api_type alone, or from project/location) when the config leaves
 	// Endpoint empty, so an empty endpoint is still a complete, routable config. The

@@ -216,8 +216,16 @@ func TestRoutableValidation_AnthropicEmptyModelAcceptedDocumentsScope(t *testing
 // the fix must NOT reject.
 func TestRoutableValidation_ValidConfigs_Accepted(t *testing.T) {
 	vertexReady := func(apiType string) *config.ModelConfig {
+		// The OpenAI-compat shim ("vertex") addresses Gemini as "google/<model>";
+		// the native and anthropic Vertex routes name the model bare (issue #574).
+		// Each fixture uses the shape its route expects so it stays a *valid* config
+		// under the #574 publisher-prefix rules.
+		model := "gemini-2.5-flash"
+		if StringToAPIType(apiType) == APITypeVertex {
+			model = "google/gemini-2.5-flash"
+		}
 		return &config.ModelConfig{
-			Name: "v", APIType: apiType, Model: "gemini-2.5-flash",
+			Name: "v", APIType: apiType, Model: model,
 			Project: "my-proj", Location: "us-central1",
 		}
 	}
@@ -250,16 +258,18 @@ func TestRoutableValidation_ValidConfigs_Accepted(t *testing.T) {
 }
 
 // TestRoutableValidation_VertexMissingProjectLocation_StillUsesVertexValidate:
-// a deriving provider (vertex) with an empty endpoint must NOT trip the new
+// a deriving provider (vertex) with an empty endpoint must NOT trip the
 // routability check; Vertex's own validateConfig still demands project/location.
+// The model is publisher-qualified so the #574 publisher-prefix rule passes and
+// this test keeps isolating the project/location precedence it was written for.
 func TestRoutableValidation_VertexMissingProjectLocation_StillUsesVertexValidate(t *testing.T) {
-	cfg := &config.ModelConfig{Name: "v", APIType: "vertex", Model: "gemini-2.5-flash"}
+	cfg := &config.ModelConfig{Name: "v", APIType: "vertex", Model: "google/gemini-2.5-flash"}
 	me := requireMisconfig(t, configErrOf(t, cfg))
 	if !strings.Contains(me.Message, "project and location are required") {
 		t.Errorf("expected Vertex's own project/location error, got: %q", me.Message)
 	}
-	if strings.Contains(me.Message, "is misconfigured") {
-		t.Errorf("the new routability check must not fire for a deriving provider; got: %q", me.Message)
+	if strings.Contains(me.Message, "publisher-qualified") {
+		t.Errorf("publisher-prefix rule must not fire for a qualified model; got: %q", me.Message)
 	}
 }
 

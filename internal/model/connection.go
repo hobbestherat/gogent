@@ -976,6 +976,38 @@ func validateRoutableConfig(cfg *config.ModelConfig) error {
 		}
 	}
 
+	// 3. Vertex model-id shape. The OpenAI-compat shim ("vertex") addresses Gemini as
+	//    "google/<model>"; the native route ("vertex-native"/"gemini") names it bare and
+	//    interpolates it into the URL path. A mismatch reaches Vertex and 400s opaquely
+	//    (shim — "Malformed publisher model … expected '<publisher>/<model>'") or builds a
+	//    broken publishers/google/models/google/… URL (native), so reject it here — at
+	//    save/load — with an actionable message instead (issue #574). vertex-anthropic is
+	//    left alone: its bare-model publishers/anthropic/models/<model> path is correct.
+	switch resolved {
+	case APITypeVertex:
+		if m := strings.TrimSpace(cfg.Model); m != "" && !strings.Contains(m, "/") {
+			return &ModelError{
+				Type: ErrorGeneric,
+				Message: fmt.Sprintf(
+					"model %q is misconfigured: api_type %q requires a publisher-qualified "+
+						"model id like \"google/gemini-3.5-flash\" (got %q). Use api_type "+
+						"\"vertex-native\" (alias \"gemini\") for bare Gemini model names.",
+					configModelName(cfg), cfg.APIType, m),
+			}
+		}
+	case APITypeVertexNative:
+		if m := strings.TrimSpace(cfg.Model); strings.Contains(m, "/") {
+			return &ModelError{
+				Type: ErrorGeneric,
+				Message: fmt.Sprintf(
+					"model %q is misconfigured: api_type %q requires a bare model id like "+
+						"\"gemini-3.5-flash\" (got %q). Use api_type \"vertex\" for "+
+						"publisher-qualified model ids.",
+					configModelName(cfg), cfg.APIType, m),
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -1497,6 +1529,12 @@ func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []
 	}
 	if c.ModelName != "" {
 		reqBody.Model = c.ModelName
+		// Last-line model-id normalization for providers whose model travels in the body
+		// (the Vertex OpenAI-compat shim auto-qualifies a bare "gemini-…" to "google/…").
+		// nil for every other provider, so the id is sent verbatim (issue #574).
+		if c.provider != nil && c.provider.normalizeModelID != nil {
+			reqBody.Model = c.provider.normalizeModelID(reqBody.Model)
+		}
 	}
 
 	// Resolve the Anthropic prompt-cache directive (issue #545). The model config
