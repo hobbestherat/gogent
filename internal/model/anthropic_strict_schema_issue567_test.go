@@ -625,11 +625,15 @@ func TestIssue567OpenAIDoesNotNormalize(t *testing.T) {
 	}
 }
 
-func TestIssue567GeminiDoesNotCollapseNullableEnum(t *testing.T) {
-	// Gemini uses its own geminiSchema normalizer (uppercases scalar type names,
-	// leaves union arrays as-is) — the Anthropic collapse must NOT be applied
-	// here. After the Gemini wire, output_mode's type is still a union containing
-	// "null" (Gemini accepts it; issue says Gemini is unaffected).
+// TestIssue567GeminiCollapsesNullableEnumOwnShape guards the provider-scoping
+// seam crossed by both #567 and #573: the Gemini path uses its OWN geminiSchema
+// normalizer, NOT the Anthropic strict normalizer. As of #573, Gemini collapses a
+// nullable-union+enum to its proto form — scalar "type":"STRING" + "nullable":true
+// with the enum preserved — instead of leaving the union array, which Vertex 3.x
+// rejects ("Proto field is not repeating, cannot start list"). A plain "string"
+// with NO "nullable" would mean the Anthropic normalizer (which only drops null)
+// leaked onto the Gemini path; a surviving array "type" would mean no collapse ran.
+func TestIssue567GeminiCollapsesNullableEnumOwnShape(t *testing.T) {
 	req := CompletionRequest{
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
 		Tools:    []ToolDef{grepToolDef()},
@@ -645,19 +649,19 @@ func TestIssue567GeminiDoesNotCollapseNullableEnum(t *testing.T) {
 	decls := got["tools"].([]interface{})[0].(map[string]interface{})["functionDeclarations"].([]interface{})
 	params := decls[0].(map[string]interface{})["parameters"].(map[string]interface{})
 	outMode := params["properties"].(map[string]interface{})["output_mode"].(map[string]interface{})
-	// Gemini path keeps the union (the Anthropic collapse did not leak in).
-	union, ok := outMode["type"].([]interface{})
-	if !ok {
-		t.Fatalf("Gemini output_mode type = %#v, want preserved union array (not collapsed)", outMode["type"])
+
+	// Gemini proto form: scalar STRING type (a repeated/array "type" is what Vertex
+	// 3.x rejects), with nullability expressed as "nullable": true.
+	requireStringType(t, outMode, "STRING")
+	nullable, ok := outMode["nullable"].(bool)
+	if !ok || !nullable {
+		t.Fatalf("Gemini output_mode nullable = %#v, want true (Gemini proto nullability)", outMode["nullable"])
 	}
-	hasNull := false
-	for _, m := range union {
-		if s, ok := m.(string); ok && s == "null" {
-			hasNull = true
-		}
-	}
-	if !hasNull {
-		t.Fatalf("Gemini output_mode type lost null: %#v — Anthropic normalizer leaked into Gemini", union)
+	// The enum survives, members left lower-cased (they are data values, not type
+	// names that geminiSchema upper-cases).
+	enum, ok := outMode["enum"].([]interface{})
+	if !ok || len(enum) != 3 {
+		t.Fatalf("Gemini output_mode enum = %#v, want 3 members preserved", outMode["enum"])
 	}
 }
 
