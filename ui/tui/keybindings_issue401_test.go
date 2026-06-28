@@ -172,8 +172,13 @@ func TestIssue401GoModHasRequestedTurbotuiAndNoReplace(t *testing.T) {
 		t.Fatalf("read go.mod: %v", err)
 	}
 	text := string(b)
-	if !strings.Contains(text, "github.com/hobbestherat/turbotui v0.3.1-0.20260627191040-1cdd5ba10982") {
-		t.Fatalf("go.mod does not pin turbotui 1cdd5ba pseudo-version (issue #529 tall-button bump):\n%s", text)
+	// Issue #549 bumped turbotui to the merged terminfo colour-detection SHA
+	// 4151a29defc4. Assert the pseudo-version carries that SHA (rather than the
+	// brittle full timestamp, which `go get` can recompute) and that the module
+	// line is present.
+	if !strings.Contains(text, "github.com/hobbestherat/turbotui v0.3.1-0.") ||
+		!strings.Contains(text, "4151a29defc4") {
+		t.Fatalf("go.mod does not pin turbotui terminfo-detection SHA 4151a29defc4 (issue #549):\n%s", text)
 	}
 	if strings.Contains(text, "\nreplace ") || strings.Contains(text, "\nreplace(") {
 		t.Fatalf("go.mod contains a replace directive:\n%s", text)
