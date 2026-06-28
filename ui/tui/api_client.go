@@ -935,7 +935,21 @@ func (c *APIClient) StreamEvents(ctx context.Context) (<-chan GlobalEventDTO, er
 // reconnect/backoff is the caller's (StreamLogsTo) — a best-effort log tail, not
 // a lossless stream.
 func (c *APIClient) StreamLogs(ctx context.Context) (<-chan LogRecordDTO, error) {
-	req, err := c.newRequest(ctx, http.MethodGet, "/logs/stream", nil)
+	return c.StreamLogsSince(ctx, "")
+}
+
+// StreamLogsSince is StreamLogs with a resume cursor (issue #562): since is the
+// wire timestamp (RFC3339Nano) of the last record the caller already has, sent as
+// ?since= so the server's catch-up history skips records already delivered. An
+// empty since primes the full recent history (a fresh connection). It is the
+// reconnect entry point used by RemoteClient.StreamLogsTo to avoid duplicating
+// the interlaced [daemon] lines across a reconnect.
+func (c *APIClient) StreamLogsSince(ctx context.Context, since string) (<-chan LogRecordDTO, error) {
+	path := "/logs/stream"
+	if since != "" {
+		path += "?since=" + url.QueryEscape(since)
+	}
+	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
 	}

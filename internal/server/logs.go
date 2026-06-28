@@ -40,6 +40,18 @@ const logSSEEventName = "log"
 // (embedded mode) it streams nothing and ends when the client goes away.
 func (svc eventsSvc) LogStream(r *http.Request) (interface{}, error) {
 	src := svc.s.logs
+	// since is a resume cursor (issue #562): a reconnecting client passes the wire
+	// timestamp of the last record it saw, so the catch-up history excludes records
+	// it already has — otherwise every reconnect would re-prime the full ring and
+	// duplicate the interlaced [daemon] lines. Empty (a fresh client) primes the
+	// whole snapshot. A record sharing the boundary's exact nanosecond is treated as
+	// already-seen (a rare dropped record, the design's accepted "gap" over a dup).
+	var since time.Time
+	if raw := r.URL.Query().Get("since"); raw != "" {
+		if t, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+			since = t
+		}
+	}
 	return &webapi.EventStreamResponse{
 		Producer: func(stream webapi.EventStream) error {
 			if src == nil {
@@ -47,6 +59,9 @@ func (svc eventsSvc) LogStream(r *http.Request) (interface{}, error) {
 				return nil
 			}
 			for _, rec := range src.Snapshot() {
+				if !since.IsZero() && !rec.Time.After(since) {
+					continue // already delivered before the reconnect
+				}
 				if err := stream.Send(logSSE(rec)); err != nil {
 					return fmt.Errorf("send log history: %w", err)
 				}

@@ -319,11 +319,13 @@ func (rc *RemoteClient) consume(events <-chan GlobalEventDTO) {
 // cancels ctx on close, so a closed window holds no daemon stream.
 func (rc *RemoteClient) StreamLogsTo(ctx context.Context, sink func(LogRecordDTO)) {
 	attempt := 0
+	since := "" // resume cursor: the last record's wire timestamp (issue #562)
 	for {
-		ch, err := rc.client.StreamLogs(ctx)
+		ch, err := rc.client.StreamLogsSince(ctx, since)
 		if err == nil {
 			attempt = 0
 			for rec := range ch {
+				since = rec.Time // advance the cursor so a reconnect skips this record
 				sink(rec)
 			}
 		} else {
