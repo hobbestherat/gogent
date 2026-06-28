@@ -54,8 +54,18 @@ func (svc approvalsSvc) Decide(r *http.Request, req approvalDecisionRequest, aid
 		return nil, webapi.NewHTTPError(http.StatusBadRequest, "unknown approval kind")
 	}
 	if !svc.s.approvals.resolve(aid, d) {
-		// Raced by another delivered decision (a double-consumer): the winner already
-		// applied and persisted it, so acknowledge idempotently rather than 409.
+		// Raced by another delivered decision (a double-consumer). The winner's
+		// answer was applied to the in-flight call; but if the winner's was a
+		// one-shot allow/deny and THIS loser's is a sticky grant, persisting only on
+		// the winner would silently lose the grant. So persist a sticky permission
+		// decision here too (idempotent — same key, mirrors the late-arrival path),
+		// then acknowledge idempotently rather than 409.
+		if pending.kind == "permission" && pending.permission != nil &&
+			(d.perm == permission.DecisionAlways || d.perm == permission.DecisionAlwaysDeny) {
+			svc.s.g.GetPermissionService().Persist(
+				permission.RequestContext{SessionID: pending.sessionID, Agent: pending.agentID},
+				permission.Action(pending.permission.Action), pending.permission.Resource, d.perm)
+		}
 		return map[string]string{"id": aid, "status": "resolved"}, nil
 	}
 	return map[string]string{"id": aid, "status": "resolved"}, nil

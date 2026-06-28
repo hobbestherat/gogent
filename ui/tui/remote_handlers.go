@@ -664,7 +664,12 @@ func (rc *RemoteClient) reportDecision(sessionID, kind, resource, wire, status s
 		if wire == "always_deny" {
 			verb = "deny"
 		}
-		rc.emitNotice(sessionID, fmt.Sprintf("The request that prompted this already used the safe default; your 'always %s' for %s has been saved and will apply to future requests.", verb, resource))
+		// "late" means the original prompt had already closed (timed out, or another
+		// attached client answered it) before this decision arrived, so do not claim
+		// the request used the safe default — that is only true for the timeout case.
+		// State just what is certain: the sticky grant was saved and applies going
+		// forward.
+		rc.emitNotice(sessionID, fmt.Sprintf("Your 'always %s' for %s was saved after the original prompt closed; it will apply to future requests.", verb, resource))
 	}
 }
 
