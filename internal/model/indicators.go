@@ -41,6 +41,17 @@ func ResolvedBaseURL(apiType APIType) (base string, fromProjectLocation bool) {
 	return "", false
 }
 
+// DerivesBase reports whether the provider synthesizes its own request base URL
+// (from the api_type alone, or from project/location) when the config leaves
+// Endpoint empty — i.e. an empty endpoint is still routable. It is the registry's
+// single source of truth (which modelsdev.deriveBaseAPITypes mirrors), so the
+// catalog review form can decide whether to show a derived-Endpoint indicator (and
+// keep the box blank) or an editable, p.API-prefilled box without re-deriving that
+// fact from ResolvedBaseURL's outputs.
+func DerivesBase(apiType APIType) bool {
+	return providerFor(apiType).derivesBase
+}
+
 // SupportsThinking reports whether the provider actually emits the `thinking`
 // request parameter (its caps.SupportsThinking). The review form ANDs this with
 // the catalog's per-model thinking toggle so it never claims the Thinking selector

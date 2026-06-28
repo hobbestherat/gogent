@@ -388,12 +388,15 @@ func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, mod
 	apiType := model.StringToAPIType(draft.APIType)
 	isVertex := strings.HasPrefix(draft.APIType, "vertex")
 
-	// Endpoint provenance: derive-base providers resolve their own base (or build it
-	// from project/location), so the persisted endpoint must stay blank unless the
-	// user overrides it. ResolvedBaseURL returns ("",false) for OpenAI-compatible
-	// gateways, which keep the editable box prefilled with the catalog's p.API.
-	derivedBase, derivedFromProjectLocation := model.ResolvedBaseURL(apiType)
-	deriveBase := derivedBase != "" || derivedFromProjectLocation
+	// Endpoint provenance: a provider that derives its own base (the registry's
+	// derivesBase flag — the SAME source of truth ToModelConfig leaves Endpoint blank
+	// for) shows the resolved/derived base read-only while the box stays blank, so the
+	// persisted endpoint stays empty unless the user overrides it. Branching on
+	// DerivesBase rather than on ResolvedBaseURL's outputs keeps the dialog aligned
+	// with routing even for a future derive-base provider whose base ResolvedBaseURL
+	// cannot name. OpenAI-compatible gateways (derivesBase=false) keep the editable
+	// box prefilled with the catalog's p.API.
+	derivesBase := model.DerivesBase(apiType)
 
 	const labelW = 16
 	const boxX = 2 + labelW
@@ -451,10 +454,16 @@ func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, mod
 	// blank persists unless the user types an override); editable box prefilled with
 	// p.API for OpenAI-compatible gateways.
 	var endpoint *tv.TextBox
-	if deriveBase {
-		hint := "(derived from Project + Location)"
-		if !derivedFromProjectLocation {
-			hint = fmt.Sprintf("(derived: %s)", derivedBase)
+	if derivesBase {
+		base, fromProjectLocation := model.ResolvedBaseURL(apiType)
+		var hint string
+		switch {
+		case fromProjectLocation:
+			hint = "(derived from Project + Location)"
+		case base != "":
+			hint = fmt.Sprintf("(derived: %s)", base)
+		default:
+			hint = "(derived by the adapter)" // derive-base type whose base we can't name
 		}
 		endpoint = fieldHint("Endpoint:", row, 8, hint) // box left blank on purpose
 	} else {
@@ -554,8 +563,7 @@ func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, mod
 		row++
 	}
 	if doc := strings.TrimSpace(p.Doc); doc != "" {
-		infoRow("Docs: "+doc, row)
-		row++
+		infoRow("Docs: "+doc, row) // Docs is the last content row; the button row is pinned to height-3
 	}
 
 	var layer *tv.Layer
