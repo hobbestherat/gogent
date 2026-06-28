@@ -2,7 +2,16 @@
 
 Branch: `pair1/persistent-logs-window-surface-tool-daem`
 Scope: **gogent only**. No turbotui change, no new deps, no `go.mod` bump (see Gate 4).
-Serializes **after #560** (which established the shared-file-sink / stdlib-log-redirect discipline) and after #546.
+Serializes **after #560** (shared-file-sink / stdlib-log redirect discipline) and after #546.
+
+> **Revision note (post-critique).** This version resolves seven defects found in review:
+> (1) TextView has no trim primitive → line-cap is now *compaction-while-following*, not per-line trim;
+> (2) the `internal/server → internal/diag` import boundary is respected via a server-local interface;
+> (3) chronological interlace by **arrival order** (not absolute cross-host timestamps), which dissolves the out-of-order rebuild entirely;
+> (4) the Logs window is now a **readOnly `SessionWindow`** (the analysis-window path), which inherits `Focus`/`cycle`/`activeIDLocked`/tiling/layout-exclusion correctly instead of requiring surgery on them;
+> (5) `StreamLogs` reconnect is its own minimal loop (no blocking modal) with an explicit per-window goroutine lifecycle;
+> (6) `colorWarn` does not exist — level→color mapping uses the real palette;
+> (7) client auth is bearer-token + transport (no "password" path).
 
 ---
 
@@ -10,161 +19,155 @@ Serializes **after #560** (which established the shared-file-sink / stdlib-log-r
 
 A persistent, **non-modal** "Logs" window in the TUI that:
 
-1. Surfaces gogent's structured diagnostics (the `internal/diag` / `log/slog` stream) **in-app**, well-formatted (timestamp · level · message), wrapped, and **level-colored** (info/warn/error).
+1. Surfaces gogent's structured diagnostics (`internal/diag` over `log/slog`) **in-app**: timestamp · level · message, wrapped, **level-colored**.
 2. **Stays open** alongside session windows — tileable, cycleable, focusable, movable, minimizable — *not* a blocking modal. Reopening **raises** the existing window (no duplicate).
-3. **Live-follows the tail**: auto-scrolls when parked at the bottom, does **not** yank focus/scroll when the user has scrolled up.
-4. In **remote/attach mode**, **interlaces** local (client) logs with **daemon (remote)** logs in one view, each line tagged `[local]` / `[daemon]`, ordered chronologically.
+3. **Live-follows the tail**: auto-scrolls when parked at the bottom, does **not** yank when the user has scrolled up.
+4. In **remote/attach mode**, **interlaces** local (client) logs with **daemon (remote)** logs in one view, each line tagged `[local]` / `[daemon]`.
 
-The diagnostics today are write-only to sinks the user can't see in-app: headless→stderr (`internal/diag/logger.go:46`), TUI→`~/.gogent/gogent.log` (`cmd/main.go:113`), daemon→`gogent.log` + detached `daemon.log`. There is **no in-memory buffer and no UI surface**, and in remote mode the daemon's logs never leave the remote host. This feature adds an in-memory **tee** + an observable broadcast + a UI window + an SSE bridge for the daemon side.
+Today diagnostics are write-only to invisible sinks: headless→stderr (`internal/diag/logger.go:46`), TUI→`~/.gogent/gogent.log` (`cmd/main.go:113`), daemon→`gogent.log` + detached `daemon.log`; in remote mode the daemon's logs never leave the host. This feature adds an in-memory **tee** + observable broadcast + a UI window + an SSE bridge for the daemon side.
 
 ---
 
 ## 2. Architecture overview
 
 ```
-                 ┌──────────────────────── internal/diag ────────────────────────┐
-   log call ───► │  *diag.Logger (slog)                                           │
-                 │     └─ fanoutHandler ──┬─► TextHandler → file/stderr (UNCHANGED)│
-                 │                        └─► ringHandler → *diag.Ring (NEW)       │
-                 │                                  • bounded []Record             │
-                 │                                  • Subscribe() (<-chan, cancel) │
-                 └───────────────────────────────────┬───────────────────────────┘
+                 ┌──────────────────────── internal/diag (stays a stdlib-only leaf) ──────────┐
+   log call ───► │  *diag.Logger (slog)                                                       │
+                 │     └─ fanoutHandler ──┬─► TextHandler → file/stderr (UNCHANGED bytes)      │
+                 │                        └─► ringHandler → *diag.Ring (NEW)                    │
+                 │                                  • bounded []Record (Time,Level,Text)        │
+                 │                                  • Snapshot() / Subscribe() (chan + cancel)  │
+                 └───────────────────────────────────┬────────────────────────────────────────┘
                                                       │
-        embedded/TUI ────────────────────────────────┤ (Workbench holds the local ring)
+   embedded/TUI (cmd/main.go) ────────────────────────┤ Workbench holds the local *diag.Ring
+   remote client (cmd/attach.go) ─────────────────────┤ client ring = the [local] stream
                                                       │
-        daemon (cmd/daemon.go) ──► same ring ─► internal/server  GET /api/logs/stream (SSE)
-                                                      │                    ▲
-                                                      │                    │ AuthRequired
-   remote client (ui/tui) ────────────────────────────┘   StreamLogs() ───┘ + reconnect/backoff
+   daemon (cmd/daemon.go) ─► ring ─► adapter ─► internal/server.LogStreamer (interface)
+                                                      │            │
+                                                      │   GET /api/logs/stream (SSE, AuthRequired)
+   remote client (ui/tui) ◄───────────────────────────┘   StreamLogs() → [daemon] stream
+                                                      │   (minimal reconnect: backoffFor, no modal)
                                                       │
-                          ┌───────────────────────────┴───────────────────────────┐
-                          │  ui/tui/logs_window.go (NEW)  — singleton non-modal     │
-                          │   • tv.Window + tv.NewWindowLayer (Modal=false)         │
-                          │   • body = tv.TextView (Wrap, follow)                   │
-                          │   • merges local ring records + [daemon] SSE records    │
-                          │   • chronological interlace, level color, redacted      │
-                          └─────────────────────────────────────────────────────────┘
+            ┌──────────────────────────────────────────┴───────────────────────────────────┐
+            │  Logs window = a readOnly SessionWindow (id "logs"), built in logs_window.go    │
+            │   • lives in w.sessions / w.order → tiling, cycle, Focus, activeIDLocked,        │
+            │     layout-exclusion all inherited (same as analysis windows, #58)              │
+            │   • body = sw.history (tv.TextView): Wrap + follow; search/fold/yank for free    │
+            │   • merges [local] ring + [daemon] SSE by ARRIVAL order; level-colored; redacted │
+            │   • line-cap by compaction-while-following (no per-line trim needed)             │
+            └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Single source of truth for "what a log line is": a small structured `Record` defined in `internal/diag`, produced through the existing `diag.Logger` slog path so **Secret redaction (`internal/diag/secret.go`) holds on every captured/streamed line**.
+Single source of truth for "what a log line is": a structured `Record` produced through the existing `diag.Logger` slog path, so **`Secret` redaction (`internal/diag/secret.go`) holds on every captured/streamed line**.
 
 ---
 
 ## 3. gogent changes — exact files & functions
 
-### 3.1 `internal/diag/ring.go` (NEW) — bounded, observable log ring
-
-Mirror the hub broadcast pattern (`internal/server/hub.go:24,189,218`) but local and log-typed.
+### 3.1 `internal/diag/ring.go` (NEW) — bounded, observable log ring (keeps `diag` a leaf)
 
 ```go
-// Record is one captured diagnostic line: enough to color by level and
-// interlace by time, with the fully-formatted (already-redacted) text.
 type Record struct {
     Time  time.Time
     Level slog.Level   // Info/Warn/Error → window color
-    Text  string       // formatted "msg key=val ..." (redacted), no trailing \n
+    Text  string       // formatted "msg key=val …" (redacted), no trailing \n
 }
 
 type Ring struct {
     mu   sync.Mutex
-    buf  []Record                       // bounded history (rolling), cap = size
+    buf  []Record
     size int
-    subs map[chan Record]struct{}       // live subscribers
+    subs map[chan Record]struct{}
 }
 
 func NewRing(size int) *Ring
-func (r *Ring) append(rec Record)                       // history + non-blocking fanout
-func (r *Ring) Snapshot() []Record                      // history copy (prime on open)
-func (r *Ring) Subscribe() (<-chan Record, func())      // buffered chan + unsubscribe
+func (r *Ring) append(rec Record)                   // history + non-blocking fanout (drop-on-full)
+func (r *Ring) Snapshot() []Record                  // history copy (prime on open)
+func (r *Ring) Subscribe() (<-chan Record, func())  // buffered chan (256) + unsubscribe
 ```
 
-- `append`: under lock, push to `buf` (trim oldest past `size`), then non-blocking `select { case ch<-rec: default: }` to each subscriber (drop-on-full — best-effort live, never stall the logger / agent loop). Same discipline as `hub.deliver`.
-- `Subscribe`: buffered channel (e.g. 256), returns unsubscribe func; **does not** auto-prime — the window primes from `Snapshot()` then subscribes, under a short guard to avoid a gap/dup at the seam (see §3.6).
-- Ring size: **2000** records (the issue notes the 50-line notification ring is far too small for logs; logs warrant larger; window display itself caps at ~1000 lines).
+- `append`: under lock, push to `buf` (trim oldest past `size`), then non-blocking `select { case ch<-rec: default: }` to each subscriber — same drop-on-full discipline as `hub.deliver` (`hub.go:94-109`); never stalls the logger/agent loop.
+- Ring `size` = **2000** records (the 50-line notification ring is far too small for logs; window display caps at ~1000 — see §3.4).
+- **Imports: stdlib only** (`sync`, `time`, `log/slog`). No `internal/*`. This is load-bearing for Gate 3 / §3.7: `internal/diag` must stay a leaf so the new `server`-side consumer (which deliberately avoids importing `diag`, `api.go:19,37`) can sit behind an interface.
 
-### 3.2 `internal/diag/logger.go` — tee the logger into the ring
+### 3.2 `internal/diag/logger.go` — tee the logger into the ring (additive)
 
-The `Logger` wraps `*slog.Logger` over a single `TextHandler`. Add a **fan-out `slog.Handler`** so the existing sink is untouched and a second handler captures structured records into the ring.
+`Logger` wraps one `*slog.Logger` over a `TextHandler`. Add a private **fan-out `slog.Handler`** so the existing sink is untouched and a second handler captures structured records.
 
-- New `fanoutHandler` (private) implementing `slog.Handler`: `Enabled`/`Handle`/`WithAttrs`/`WithGroup` delegate to **both** an inner `TextHandler` (file/stderr, exactly as today) and a `ringHandler`.
-- `ringHandler.Handle(ctx, rec)`: render the record to a line via a *throwaway* `slog.NewTextHandler` writing into a pooled `bytes.Buffer` (this resolves `LogValuer`, so `Secret` is redacted identically to the file sink), capture the formatted text, strip timestamp/level prefix duplication (or keep the raw slog text — we store `rec.Level` and `rec.Time` separately and the message+attrs as `Text`), then `ring.append(Record{rec.Time, rec.Level, text})`.
-- New constructors (additive; existing `New`/`Stderr`/`NewFile` unchanged so headless/embedded behavior is byte-for-byte the same when no ring is wired):
+- `fanoutHandler` implements `slog.Handler`; `Enabled`/`Handle`/`WithAttrs`/`WithGroup` delegate to **both** the inner `TextHandler` (file/stderr, exactly as today) and a `ringHandler`.
+- `ringHandler.Handle(ctx, rec)`: render `rec` to text via a pooled `bytes.Buffer` + a throwaway `slog.NewTextHandler` (this resolves `LogValuer`, so `Secret` is redacted identically to the file sink), strip the leading `time=… level=…` that we already carry as fields, and `ring.append(Record{rec.Time, rec.Level, text})`.
+- **Additive constructors** (existing `New`/`Stderr`/`NewFile` stay byte-identical so headless/embedded are untouched):
   ```go
-  func NewWithRing(w io.Writer, ring *Ring) *Logger        // tee: TextHandler(w) + ring
+  func NewWithRing(w io.Writer, ring *Ring) *Logger
   func NewFileWithRing(path string, ring *Ring) (*Logger, error)
   ```
-- Redaction: preserved because both branches go through slog attr resolution; `Secret.LogValue()`/`String()` already redact. A unit test asserts a `Secret` value never appears in a `Ring` record.
+- Handler tee (not `io.MultiWriter`): keeps `slog.Level`/`time.Time` first-class for color + future filtering, avoiding text re-parse (the issue's RECOMMENDED "structured records over raw file lines").
 
-Why a handler tee, not an `io.MultiWriter`: a multi-writer would force us to **re-parse** `level=INFO`/timestamps out of the text format to color lines. The handler tee keeps `slog.Level` and `time.Time` first-class (the issue's RECOMMENDED "structured records over raw file lines"), enabling color + future filtering with no string parsing.
+### 3.3 Wiring the ring at startup
 
-### 3.3 Wiring the ring at startup (where the tee is installed)
+The ring is a **client-side** capability wherever a Logs window can exist, and a **daemon-side** capability to feed SSE.
 
-The ring is a **client-side capability** wherever a Logs window can exist, and a **daemon-side capability** to feed SSE.
+- `cmd/main.go:113` (embedded TUI): `ring := diag.NewRing(2000)`; build the logger with `diag.NewFileWithRing(gogent.log, ring)`; `g.SetLogger(lg)`; pass `ring` to the Workbench. **Headless path keeps `diag.Stderr()` — unchanged, no ring.**
+- `cmd/attach.go:245` (remote client TUI): tee the client logger (`diag.New(f)` → `diag.NewWithRing(f, ring)`) and pass `ring` to the Workbench. This is the `[local]` stream in remote mode.
+- `cmd/daemon.go:380` (daemon): build `diag.NewFileWithRing(gogent.log, ring)`; `g.SetLogger(lg)`; pass an **adapter** (ring → `server.LogStreamer`, §3.7) into `server.Options`. This is the `[daemon]` stream.
 
-- `cmd/main.go:113` (embedded TUI): create `ring := diag.NewRing(2000)`, build the logger with `diag.NewFileWithRing(gogent.log, ring)` instead of `NewFile`, `g.SetLogger(lg)`, and hand `ring` to the Workbench (new field on the TUI constructor / handlers struct). Headless path (`!*disableTUI` false) keeps `diag.Stderr()` — **unchanged**, no ring, no behavior change.
-- `cmd/attach.go:245` (remote client TUI): same — tee the client logger (`diag.New(f)` → `diag.NewWithRing(f, ring)`) and pass `ring` to the Workbench. This is the `[local]` stream in remote mode.
-- `cmd/daemon.go:380` (daemon): create a ring, build `diag.NewFileWithRing(gogent.log, ring)`, `g.SetLogger(lg)`, and pass the ring to the API server (new `server.Options.LogRing *diag.Ring`, consumed in `NewServer` at `internal/server/api.go:88`). This is the `[daemon]` stream surfaced over SSE.
+Workbench gains `logRing *diag.Ring` (nil-safe: nil ⇒ the window shows only `[daemon]` records, or nothing locally; never panics).
 
-The Workbench gains a `logRing *diag.Ring` field (nil-safe: if nil, the Logs window simply shows only remote/`[daemon]` records, or nothing locally — never panics).
+### 3.4 `ui/tui/logs_window.go` (NEW) — the persistent window, built on the analysis-window path
 
-### 3.4 `ui/tui/logs_window.go` (NEW) — the persistent non-modal window
+**Window-approach decision (was the largest review gap).** The Logs window is a **readOnly `SessionWindow`** with a synthetic singleton id `"logs"`, opened through the same `openWindowAny(id, title, readOnly=true)` machinery (`tui.go:1779`) that already backs analysis windows (#58). **Rationale, verified in code:** analysis windows are already non-conversational readOnly windows that live in `w.sessions`/`w.order`, and the entire UI already copes with "the active window is a readOnly window" — `activeIDLocked` (`tui.go:1970`) finds it in `w.sessions` (no desync), `Focus`/`cycle` already iterate it, tiling's `openWindows()` (`tiling.go:28`) already gathers it, `captureLayout` already **excludes** it (`tui.go:2397 if sw.readOnly continue`), and chrome already branches on `activeRO`/`!sw.readOnly` (`tui.go:1006`, `command_palette.go:375`, `disconnect_modal.go:207-239`). So the Logs window inherits **tiling, cycle, focus, raise, minimize, move, and layout-exclusion correctly and for free**, with no surgery on `Focus`/`cycle`/`activeIDLocked`. *(The discarded alternative — a bare `tv.Window` per the issue's literal wording — would require teaching all three of those session-keyed functions about a non-session window, including the `activeIDLocked` "no session matches → wrong sidebar/Overall highlight" desync. That is strictly more regression-prone; we reject it.)*
 
-Modeled on the monologue popup (`agent_monolog.go`: bare `*tv.Window` + `tv.NewWindowLayer`, tracked by a single Workbench field) rather than `SessionWindow` (no input/transcript/agent semantics needed).
-
-State on `Workbench` (mirroring `monolog`/`monologWindow` at `tui.go:582-588`):
-```go
-logsLayer   *tv.Layer        // non-modal layer (nil when closed)
-logsWindow  *tv.Window       // the frame (for re-clamp on sidebar width change)
-logsView    *tv.TextView     // the scrolling body
-logsCancel  func()           // ring/SSE unsubscribe(s); called on close
-logsRecords []logLine        // merged, bounded (~1000) backing buffer for interlace
-```
+Minimal generalization needed on the SessionWindow shell (well-contained, in `session_window.go` + `openWindowAny`):
+- A window-kind discriminator so the logs window (a) skips the `" (analysis)"` title suffix (`session_window.go:215`) and uses title `"Logs"`, (b) skips the `"[System] … ready"` transcript banner (`:243`), and (c) marks itself for log population instead of transcript restore. Concretely: add `kind windowKind` (`kindLive`/`kindAnalysis`/`kindLogs`) to `SessionWindow`, derive `readOnly = kind != kindLive` so **every existing `sw.readOnly` check keeps working unchanged**, and branch the suffix/banner on `kind`.
 
 `func (w *Workbench) showLogsWindow()`:
-1. **Raise-not-duplicate**: if `w.logsLayer != nil` → `w.desktop.RemoveLayer(layer); w.desktop.AddLayer(layer); w.desktop.SetFocus(w.logsView)` and return (same raise idiom as `Focus`, `tui.go:1872-1874`).
-2. Build the frame: `win := tv.NewWindow("Logs", bounds, tui.LineSingle)`; enable `win.Minimizable = true`, `win.Maximizable = true`, `win.Resizable = true`, `ShowClose=true` (defaults), `applyWindowShadow(win)` (theme parity with other windows).
-3. Body: `tv := tv.NewTextView("", bounds)` with `Wrap = true`, `follow = true` (default). `win.AddContent(tv)` + `win.Content.LayoutFn` to size the TextView to the content rect (same as `session_window.go:259-267`).
-4. `win.OnClose = func(*tv.Window){ w.closeLogsWindow() }` → calls `logsCancel()`, removes layer, nils fields. Optional `q`/`Esc` when the view is focused (close key handler on the TextView).
-5. **Prime history**: `for _, r := range w.logRing.Snapshot() { w.appendLogRecord(localSource, r) }`.
-6. **Subscribe live (local)**: `ch, cancel := w.logRing.Subscribe()`; goroutine drains `ch` and marshals each onto the UI thread via `w.Post(func(){ w.appendLogRecord(localSource, r) })` (`tui.go:932` — thread-safe; never touch widgets off the UI thread).
-7. **Remote**: if attached, also subscribe to the daemon SSE stream (see §3.7), appending with `daemonSource`.
-8. `layer := tv.NewWindowLayer("logs", win)` (**Modal=false**, `turbotv/layer.go:99` — menu shortcuts of lower layers stay live, the window is non-blocking). `w.desktop.AddLayer(layer); w.desktop.SetFocus(tv)`.
+1. **Raise-not-duplicate**: `openWindowAny("logs", …)` already returns the existing window on id collision (`tui.go:1788-1791`, the analysis duplicate-guard verified by `duplicate_window_guard_issue518_test.go`); after it returns, call `w.Focus("logs")` to raise + focus. So reopening raises, never duplicates — inherited, not re-implemented.
+2. On first open: populate history from `w.logRing.Snapshot()` (each record → `appendLogLine(localSource, r)`), then start the live subscriptions (§3.5).
+3. Body is the window's existing `sw.history` `tv.TextView` (`Wrap=true`, `follow=true` default) — we get the search/filter/fold/yank toolkit (`registerTranscriptBindings`) over log lines for free.
 
-`func (w *Workbench) appendLogRecord(src logSource, r diag.Record)` (UI thread only):
-- Build the display line: `"<HH:MM:SS.mmm> [local|daemon] <LEVEL> <text>"` (the `[local]/[daemon]` tag is **omitted in embedded mode**, present in remote mode — keeps the local-only view clean).
-- Color by level: `colorInfo` (cyan, `theme.go:25`), `colorWarn`, `colorError` (reuse the existing theme roles).
-- **Interlace / auto-follow discipline** (the only subtle part):
-  - Keep `logsRecords` bounded at ~1000 (trim oldest).
-  - **Common path (in-order):** if the new record's `Time >= ` last appended time → `logsView.AddColored(line, color)` (append-only). TextView's own `follow` flag keeps it pinned to the bottom only when the user is parked there, and `scrollBy` re-enables follow only at the absolute bottom (`widget_textview.go:383`) — so we get auto-scroll-when-at-bottom and no-yank-when-scrolled-up **for free**, and selection is preserved.
-  - **Out-of-order path (stream skew in remote mode):** if the record's time precedes the last shown line, insert into `logsRecords` at the correct sorted position and **rebuild** the TextView (`Clear()` + re-add) **preserving the prior follow/scroll state** (capture `follow`/`scrollY` before, restore after). This is rare (streams arrive ~ordered) so the expensive rebuild is the exception, not the per-line cost.
+`func (w *Workbench) appendLogLine(src logSource, r diag.Record)` — **UI thread only**, append-only hot path:
+- Build the display line: `"<HH:MM:SS.mmm> [local|daemon] <LVL> <text>"`. The `[local]/[daemon]` tag is **present only in remote mode** (omitted in embedded mode for a clean local view).
+- Color by level using the **real palette** (`theme.go:23-26`): `colorInfo` (cyan) for Info, **`colorTool` (yellow)** for Warn — *there is no `colorWarn`; either reuse `colorTool` or introduce a `colorWarn` alias if a distinct role is wanted* — `colorError` (red) for Error. `sw.history.AddColored(line, color)`.
+- **Ordering = ARRIVAL order, not absolute timestamp.** Local and daemon records are appended as they arrive and merged into the one view; each line shows its own host's clock in the text. We deliberately do **not** sort across the two streams: their timestamps come from two different hosts, so absolute-time merge is meaningless under clock skew, and two live tails interleaved by arrival *are* the chronological reality of "what happened on the wire." This keeps the hot path strictly append-only and removes any insert-above-the-viewport rebuild (the previous design's out-of-order case is gone).
+- **Auto-follow discipline = free** (verified in `widget_textview.go`): `follow=true` default (`:168`); `touch()` pins to bottom only while following (`:401`); `scrollBy()` re-enables follow only at the absolute bottom and clears it on scroll-up (`:799-805`); `clampScroll()` re-anchors each draw (`:625`). So append auto-scrolls only when parked at the bottom and never yanks when scrolled up — no extra code.
 
-This satisfies: well-formatted + level-colored + wrapped + live-follow + chronological interlace, while keeping the hot path append-only.
+**Line cap — compaction-while-following (resolves the "TextView has no trim" blocker).** Verified: `TextView` exposes only `SetText`/`Clear`/`AddLine`/`AddColored`/`AddStyled` — **no trim/remove/`SetMaxLines`**. So we cannot drop the oldest displayed line cheaply. Mechanism:
+- Keep a bounded backing slice `logsLines []displayLine` (cap ~1000, trim oldest — cheap, it's a slice).
+- The displayed `TextView` is allowed to exceed the cap *while the user is scrolled up reading history*. **Compaction (`history.Clear()` then re-add the last ~1000 from `logsLines`) runs only when `follow==true`** (user parked at the tail) and the displayed count crosses a high-water mark (e.g. 1500). When following, re-adding ends at the tail with `follow` intact, so the rebuild is invisible. A user reading history is **never** disrupted; compaction simply waits until they return to the tail. This is an amortized O(N) compaction (~once per 500 lines), not a per-line cost, so it does not contradict the append-only hot path, and it needs no scroll-position restore (we only compact when the position is "bottom").
+- *Optional clean alternative, called out for the seam (Gate 4):* a one-method turbotui `TextView.TrimFront(n int)` would make the cap O(1) and drop the compaction entirely. We keep the gogent-side compaction as primary to honor "no turbotui change"; `TrimFront` is noted as an explicit, optional cross-repo addition if a maintainer prefers it.
 
-### 3.5 Menu + keybinding — `ui/tui/tui.go` `settingsItems()` (~:1170, near Statistics :1209)
+**Close / lifecycle.** `window.OnClose` already routes to `CloseSession("logs")` (the readOnly shell wires `OnClose → CloseSession(id)`, `session_window.go:226`). We hook the `"logs"` id in/near `CloseSession` to also call the subscription cancel (below). Optional `q`/`Esc`-to-close while focused via a binding on the history view.
 
-- Add `tv.NewMenuItem("&Logs…", func() { w.showLogsWindow() })` to the Settings menu, alongside Statistics. No handler-gating needed (the window is always available; with no ring it shows remote-only / empty).
-- Optional chord **Ctrl+Shift+L**: add an action id to `command_palette.go` (mirror "Sub-agents" at :246) so `rebuildBindings` (`keybindings.go:239`) registers it → `showLogsWindow`. Reopen via chord also raises (same `showLogsWindow` entry point).
+### 3.5 Subscriptions & the per-window goroutine lifecycle (new, explicit)
 
-### 3.6 Tiling / cycle / layout — `ui/tui/tiling.go`, `ui/tui/tui.go`
+There is **no** existing per-window goroutine convention (the Workbench has only the global `shutdown`/`quit`, `tui.go:592`; the monolog owns no goroutine). The Logs window introduces one, spelled out:
+- On open, store `w.logsCancel`. Start a goroutine that drains `w.logRing.Subscribe()` and, per record, `w.Post(func(){ w.appendLogLine(localSource, r) })` (`tui.go:932` marshals onto the UI thread; widgets are touched only there).
+- In remote mode, start a second goroutine for the daemon SSE stream (§3.7), appending with `daemonSource`.
+- `w.logsCancel()` (called from the `"logs"` `CloseSession` hook and from app shutdown) cancels a `context.Context`, unsubscribes the ring channel, and tears down the SSE stream — so we never hold an idle daemon stream when the window is closed.
 
-The Logs window is a bare `*tv.Window` (not in `w.sessions`), like the monologue. To meet the acceptance ("tileable Ctrl+Shift+V/H/G, cycleable, focusable, movable, minimizable"):
+### 3.6 Menu + keybinding — `ui/tui/tui.go` `settingsItems()` (~:1170, near Statistics :1209)
 
-- **Tiling** (`tiling.go:28 openWindows`, `:50 arrange`): append `w.logsWindow` to the returned `wins []*tv.Window` when open, so `tv.TileWindows` lays it out alongside session windows. Movable/minimizable/maximizable come from the `tv.Window` buttons (no extra work). Re-clamp on sidebar width change next to the monolog re-clamp (`tui.go:2207-2211`): `if w.logsWindow != nil { clampWindowToArea(w, w.logsWindow) }`.
-- **Cycle** (`tui.go:1948 cycle` / `:1970 activeIDLocked` / `:1864 Focus`): `cycle`/`Focus` are keyed off session ids in `w.order`/`w.sessions`. Generalize minimally so the logs window participates: include it as a pseudo-entry in the cycle order and add a focus branch that raises `w.logsLayer` + `SetFocus(w.logsView)` when the cycle lands on it. Keep the SessionWindow-specific code (`ensureTranscript`, input focus) guarded so the logs branch never touches transcript/agent state. *(Regression-sensitive — see Gate 3.)*
-- **Layout persistence** (`tui.go:2382 captureLayout` / `:2440 applyLayout`): **EXCLUDE** the Logs window from capture/restore initially (issue's recommendation; same treatment as `readOnly` analysis windows at `:2395`). It is a transient diagnostic surface; not restoring it on next launch is the expected behavior and avoids layout-schema churn.
+- Add `tv.NewMenuItem("&Logs…", func() { w.showLogsWindow() })` to the Settings menu. No handler gating (the window is always available; nil ring ⇒ remote-only/empty).
+- Optional chord **Ctrl+Shift+L**: add an action id in `command_palette.go` (mirror "Sub-agents" at :246) so `rebuildBindings` (`keybindings.go:239`) registers it → `showLogsWindow` (which raises if already open).
 
-### 3.7 Remote interlace — SSE endpoint + client consumer (CORE remote requirement)
+### 3.7 Remote interlace — SSE endpoint + client consumer
 
-**Server (`internal/server`)** — copy the `events.go` SSE shape exactly:
+**Server (`internal/server`) — respecting the `diag` boundary.** `internal/server` deliberately does not import `internal/diag` (`api.go:19,37`). We keep it that way: define a server-local interface and DTO; the daemon supplies the adapter.
 
-- `internal/server/api.go:88 NewServer` + `:157` endpoint table: register
-  `{Path: "/api/logs/stream", Method: GET, Handler: ev.LogStream, AuthLevel: req}` (`req = webapi.AuthRequired`, same gate as `/events`). Optionally `{Path: "/api/logs", Method: GET, Handler: ev.LogsTail, AuthLevel: req}` (one-shot `?tail=N` catch-up from `ring.Snapshot()`).
-- `internal/server/events.go` (or a new `logs.go`): `func (svc eventsSvc) LogStream(r *http.Request) (interface{}, error)` returning a `webapi.EventStreamResponse` whose `Producer` (a) primes from `ring.Snapshot()` then (b) drains `ring.Subscribe()` and `stream.Send(logSSE(rec))` until `stream.Context().Done()`, `defer cancel()`. SSE event name `"log"` (distinct from session-event type names and `"notification"`, so the client discriminates frames — same discrimination already used for `notification` at `events.go:70`).
-- The server's ring is `Options.LogRing` (the daemon's teed ring from §3.3). Embedded mode leaves it nil → endpoint returns an empty/ended stream (or is simply never hit, since embedded TUI uses the in-process ring directly).
-- Backpressure: ring fan-out is already non-blocking drop-on-full; the SSE producer is a normal subscriber. **Never stalls the daemon/agent.**
+```go
+// internal/server (new logs.go) — no import of internal/diag.
+type LogRecord struct { Time time.Time; Level string; Text string }
+type LogStreamer interface {
+    Snapshot() []LogRecord
+    Subscribe() (<-chan LogRecord, func())
+}
+```
+- `server.Options` gains `Logs LogStreamer` (nil in embedded mode ⇒ the endpoint streams nothing / is unused).
+- `cmd/daemon.go` (which already imports both `diag` and `server`) provides a tiny adapter from `*diag.Ring` to `server.LogStreamer` (mapping `slog.Level` → `"INFO"/"WARN"/"ERROR"`). This is the *only* place the two packages meet — boundary preserved, `diag` stays a leaf.
+- Endpoint: register `{Path: "/api/logs/stream", Method: GET, Handler: ev.LogStream, AuthLevel: req}` in the `api.go:157` table (`req = webapi.AuthRequired`, same gate as `/events`). Handler returns a `webapi.EventStreamResponse{Producer}` (the proven shape, `events.go:22-37`, `webapi/sse.go:47`): prime from `Snapshot()`, then drain `Subscribe()` and `stream.Send(logSSE(rec))` until `stream.Context().Done()`, `defer cancel()`. SSE event name `"log"` (distinct from session-event type names and `"notification"` at `events.go:70`, so the client discriminates frames). Optional one-shot `{Path:"/api/logs", …}` with `?tail=N` from `Snapshot()` for reconnect catch-up.
+- Backpressure: the SSE producer is an ordinary drop-on-full subscriber; never stalls the daemon/agent.
 
-**Client (`ui/tui`)**:
-
+**Client (`ui/tui`).**
 - DTO near `api_client.go:312`:
   ```go
   type LogRecordDTO struct {
@@ -173,47 +176,53 @@ The Logs window is a bare `*tv.Window` (not in `w.sessions`), like the monologue
       Text  string `json:"text"`   // already redacted server-side
   }
   ```
-- `func (c *APIClient) StreamLogs(ctx) (<-chan LogRecordDTO, error)` — a sibling of `StreamEvents` (`api_client.go:867`) reusing `parseSSE` (`:927`), filtering frames named `"log"`. Same auth (token/password/loopback/SSH-tunnel `DialContext`) and **same reconnect/backoff** path as `StreamEvents` (0.5→1→2→5→10s cap, `remote_handlers.go:455`). On reconnect, re-prime via `?tail=N` or just resume live (gap acceptable for a diagnostic tail; note in Open Questions).
-- `remote_handlers.go` (near the event consumer ~:294): when attached and the Logs window is open, drive `StreamLogs` and `w.Post(func(){ w.appendLogRecord(daemonSource, rec) })`. Convert `LogRecordDTO` → `diag.Record` (parse time, map level string → `slog.Level`). Lifecycle bound to the window (subscribe on open, cancel on close) so we don't hold an idle daemon stream when the window is closed.
+- `func (c *APIClient) StreamLogs(ctx) (<-chan LogRecordDTO, error)` — sibling of `StreamEvents` (`api_client.go:867`) reusing `parseSSE` (`:927`), filtering frames named `"log"`. **Auth is bearer-token + transport** (`api_client.go:195`: token for non-loopback TCP; unix-socket file perms; SSH `DialContext` for the tunnel) — *there is no client "password" path; the brief's "token/password/loopback" is imprecise.*
+- **Reconnect — its own minimal loop, not the session scaffolding.** The session `reconnect`/`consume` path (`remote_handlers.go`) raises a blocking "connection lost" modal, restarts the tunnel, and offers "retry now" — appropriate for the interactive session stream, **wrong for a best-effort log tail**. `StreamLogs`'s loop reuses only the pure `backoffFor` helper (`remote_handlers.go:457`: 0.5→1→2→5→10s cap) and reconnects **silently** (no modal, no "retry now"); a gap in the log tail is acceptable and optionally re-primed via `?tail=N`. The loop is the per-window goroutine of §3.5, cancelled on window close.
+- In `remote_handlers.go`, when attached and the Logs window is open, the SSE goroutine does `w.Post(func(){ w.appendLogLine(daemonSource, toRecord(dto)) })`.
 
 ---
 
 ## 4. The four design gates
 
-### Gate 1 — Goal match (feature, no scope creep)
-Delivers exactly the issue: a persistent **non-modal** Logs window, **in-memory ring tee** on `diag.Logger` (existing file/stderr sink **untouched**), **level-colored live-follow** TextView, and **`/api/logs/stream` SSE** interlacing `[local]`+`[daemon]` in remote mode. No filtering UI (explicitly deferred by the issue), no daemon.log raw-stdout capture (we capture the structured `diag` path only — the complete-but-heavier raw-stdout capture overlaps #560's stdlib-log redirect and is called out in Open Questions, not built). No layout persistence for the window (issue's recommendation). Nothing beyond the ask.
+### Gate 1 — Goal match → **OK**
+Delivers exactly the issue: persistent **non-modal** Logs window, **in-memory ring tee** on `diag.Logger` (file/stderr sink untouched), **level-colored live-follow** body, **`/api/logs/stream` SSE** interlacing `[local]`+`[daemon]` in remote mode. Filtering UI deferred (issue-sanctioned); raw `daemon.log` stdout capture deferred with the #560 overlap noted; window excluded from layout persistence (issue recommendation). One honored deviation from the issue's *literal* wording: the window is built on the readOnly-`SessionWindow` shell rather than a bare `tv.Window` — same user-facing result (a non-modal `NewWindowLayer` window), lower regression risk (Gate 3).
 
-### Gate 2 — Usability
-- **User drives it**: opens via `Settings ▸ Logs…` (and optional Ctrl+Shift+L). Keeps working in session windows while it stays open (non-modal layer — lower-layer menu shortcuts stay active, `layer.go:99`).
-- **Right thing surfaced, not silent**: previously-invisible diagnostics are now visible in-app; remote daemon logs that used to be stranded on the host are streamed and clearly tagged `[daemon]` vs `[local]`.
-- **Behaves as expected**: reopening **raises** (no duplicate); **history on open** then **live updates**; **auto-scroll only when parked at bottom**, **no yank** when scrolled up (TextView `follow` semantics); tileable/cycleable/movable/minimizable like any window; standard close button (+ optional `q`/`Esc` when focused).
+### Gate 2 — Usability → **OK**
+- **Auto-follow-only-at-bottom, no-yank-when-scrolled-up**: free from `TextView.follow` semantics (verified `widget_textview.go:168,401,799-805,625`).
+- **Tileable / cycleable / focusable / movable / minimizable / raised-via-cycle**: inherited from the analysis-window path (lives in `w.sessions`/`w.order`); `activeIDLocked` finds it (no sidebar/Overall desync), unlike the rejected bare-window approach.
+- **Reopen raises, never duplicates**: inherited from `openWindowAny`'s id-collision guard (verified test `duplicate_window_guard_issue518_test.go`).
+- **History on open then live updates**; `[local]/[daemon]` tags only in remote mode; standard close button (+ optional `q`/`Esc`); search/fold/yank over logs for free.
+- **Right thing surfaced, not silent**: previously-invisible diagnostics are in-app; stranded remote daemon logs are streamed and clearly tagged.
 
-### Gate 3 — No regressions
-- **Embedded/headless unchanged**: `diag.New/Stderr/NewFile` are untouched; the tee is opt-in via new `*WithRing` constructors used only where a Logs window/SSE consumer exists. Headless still goes to stderr; TUI/daemon still write the same `gogent.log` line-for-line (the ring is an *additional* handler branch).
-- **Redaction preserved**: captured/streamed lines go through the same slog attr resolution; `Secret` redacts on the ring path. Asserted by a new unit test.
-- **Non-blocking / bounded**: ring fan-out and SSE sends are drop-on-full over bounded buffers (hub discipline). The logger/agent/daemon never stall on a slow/absent UI consumer.
-- **Risk — cycle/Focus generalization** (`tui.go:1864/1948`): these are keyed to session ids today; adding a non-session window to the cycle order must not break session focus, `ensureTranscript`, or `activeIDLocked`. Mitigation: the logs branch is guarded and never enters SessionWindow-specific code; covered by a focused unit test on cycle order with the logs window open/closed. *If this proves invasive, fall back to implementing the window as a `readOnly` SessionWindow (like analysis windows) which already participates in tiling/cycle and is already layout-excluded — at the cost of more SessionWindow plumbing.*
-- **Risk — out-of-order rebuild** could disturb scroll/selection: mitigated by capturing/restoring `follow`+`scrollY` around the rare rebuild; common path is append-only.
-- **Tests stay green**: gofmt/build/vet/golangci-lint clean; `go test ./...` green (pre-existing `TestUserSessionSendMessage` 404 and load-induced `TestStopGracefulAndForced` flake noted as acceptable per the brief). Tests run **without `-race`** on the Pi5 per the dev gate.
+### Gate 3 — No regressions → **OK**
+- **Embedded/headless unchanged**: `diag.New/Stderr/NewFile` untouched; tee is opt-in via `*WithRing`. Same `gogent.log` bytes.
+- **Redaction preserved**: ring branch resolves attrs via `slog.NewTextHandler`, so `Secret` redacts identically (`secret.go:23`); asserted by a new unit test.
+- **Non-blocking / bounded**: ring fan-out and SSE sends are drop-on-full over bounded buffers (hub discipline); logger/agent/daemon never stall.
+- **Import boundary preserved**: `internal/server` still does not import `internal/diag` (interface + daemon-side adapter); `internal/diag` stays a stdlib-only leaf.
+- **Session-keyed UI integration is reuse, not surgery**: the window is just another readOnly `SessionWindow`; the only new code in `Focus`/`cycle`/`activeIDLocked` is **none** — they already handle readOnly windows. The contained change is the `windowKind` discriminator on the SessionWindow shell, with `readOnly` *derived* so every existing `sw.readOnly` check is unchanged.
+- **New per-window goroutine lifecycle** (§3.5) is explicitly bounded by `w.logsCancel` on close/shutdown — no leaked goroutine, no idle daemon stream.
+- **Line-cap compaction** only runs while following, so it never disturbs a user's scroll/selection.
+- gofmt/build/vet/golangci-lint clean; `go test ./...` green (pre-existing `TestUserSessionSendMessage` 404 and load-induced `TestStopGracefulAndForced` flake acceptable per brief; tests run **without `-race`** on the Pi5).
 
-### Gate 4 — Holistic, both repos / right seam
-- **turbotui: NO change required.** `tv.Window` + `tv.NewWindowLayer` (non-modal) + `tv.TextView` (`Wrap`, `follow`, `AddColored`, `ScrollToBottom`) already provide everything: framed window with title/border/shadow/close/min/max, a scrolling color-capable wrapped text body, and the exact auto-follow-only-at-bottom semantics we need. A native `LogView` widget would be **redundant** — we explicitly avoid it (no go.mod bump, no cross-repo dependency). The seam is respected: gogent composes turbotui primitives; turbotui stays a generic toolkit with no log-domain knowledge.
-- **Right place in gogent**: capture lives in `internal/diag` (where redaction already lives, so every sink is covered), the broadcast reuses the proven hub pattern, the SSE endpoint sits with the other event streams in `internal/server`, and the UI is one new `ui/tui/logs_window.go` plus minimal menu/tiling hooks. `ui/tui` stays free of forbidden imports (consumes `diag.Record`/`diag.Ring` types and the API client DTO only).
-- **Downstream**: no new deps; stdlib-first (`log/slog`, `bytes`, `sync`, `time`). Coexists with #547 (internal/model). Builds **on top of** #560 (rebase onto current `origin/main` at the gate).
+### Gate 4 — Holistic (both repos) → **OK**
+- **turbotui: NO change required.** `tv.Window` (`ShowClose`/`Resizable`/`Minimizable`/`Maximizable`/`OnClose`) + `NewWindowLayer` (non-modal, `layer.go:99` — lower-layer menu shortcuts stay live) + `TextView` (`Wrap`/`follow`/`AddColored`/`ScrollToBottom`/search/scrollbar) cover everything via the existing SessionWindow shell. A native `LogView` widget would be redundant. The **only** place a turbotui primitive would be *cleaner* is line-cap (`TextView.TrimFront`); we keep that gogent-side (compaction-while-following) so "no turbotui change" holds honestly, and flag `TrimFront` as an explicit optional cross-repo addition rather than hand-waving it.
+- **Right place in gogent**: capture in `internal/diag` (where redaction lives), broadcast reuses the hub pattern, SSE sits with the other event streams behind a boundary-respecting interface, UI reuses the analysis-window shell + one new `logs_window.go`. `ui/tui` stays free of forbidden imports (consumes `diag.Record`/`diag.Ring` + the client DTO only).
+- No new deps; stdlib-first; rebase onto current `origin/main` (post-#560) at the gate.
 
 ---
 
-## 5. Test plan (sketch — implementation phase)
-- `internal/diag`: ring append/trim/snapshot; subscribe fan-out + drop-on-full; **`Secret` redaction holds on the ring path**; fan-out logger writes identical bytes to the file sink as the non-teed logger.
-- `internal/server`: `LogStream` producer primes snapshot then streams live; bounded/non-blocking under a stalled subscriber; auth gate = `AuthRequired`.
-- `ui/tui`: `showLogsWindow` raises-not-duplicates; `appendLogRecord` append-only in-order + sorted rebuild out-of-order with follow/scroll preserved; level→color mapping; `[local]/[daemon]` tagging only in remote mode; cycle order includes/excludes the window correctly. Mock SSE interlace test merging two timestamped streams.
+## 5. Test plan (sketch)
+- `internal/diag`: ring append/trim/snapshot; subscribe fan-out + drop-on-full under a stalled subscriber; **`Secret` redaction holds on the ring path**; fan-out logger writes byte-identical output to the file sink vs the non-teed logger; `diag` has no `internal/*` import (leaf assertion).
+- `internal/server`: `LogStream` producer primes snapshot then streams live; bounded/non-blocking under a stalled subscriber; auth gate `AuthRequired`; server package does not import `internal/diag`.
+- `ui/tui`: `showLogsWindow` raises-not-duplicates (reuses the analysis collision guard); `appendLogLine` arrival-order append + level→color mapping (`colorInfo`/`colorTool`/`colorError`); `[local]/[daemon]` tag only in remote mode; **compaction runs only while following** and is a no-op while scrolled up; the `windowKind` discriminator leaves all existing `readOnly` behavior intact; mock SSE interlace test merging two arrival-ordered streams; goroutine cancelled on close.
 
 ---
 
 ## 6. Open questions (implementer decides + documents)
-1. **Reconnect catch-up**: on SSE reconnect, re-prime daemon tail via `GET /api/logs?tail=N`, or accept a small gap (diagnostic tail, not lossless)? Lean: accept the gap initially; add `?tail=N` if cheap.
-2. **daemon.log raw stdout** (stdlib `log.Printf`, webapi warnings detached to `~/.gogent/daemon.log`): capture too (most complete) or structured `diag` path only? This overlaps #560's stdlib-log redirect. Lean: **structured `diag` path only** for this issue; raw-stdout capture is a follow-up once #560's redirect discipline is in place.
-3. **Ring size**: 2000 records proposed (display cap ~1000). Confirm against memory budget.
-4. **Cycle integration vs readOnly-SessionWindow fallback**: prefer the bare-window + minimal cycle/tiling hook; fall back to a `readOnly` SessionWindow if generalizing `cycle`/`Focus` proves too invasive (Gate 3 risk).
-5. **Source filter UI** (`[local]`-only / `[daemon]`-only / level filter): deferred to a follow-up per the issue (the structured `Record` already carries level/source to make this cheap later).
-6. **Embedded-mode tag**: omit `[local]/[daemon]` when not attached (cleaner) — assumed yes.
+1. **Reconnect catch-up**: on SSE reconnect, re-prime daemon tail via `GET /api/logs?tail=N`, or accept a small gap (best-effort tail)? Lean: accept the gap; add `?tail=N` if cheap.
+2. **`daemon.log` raw stdout** (stdlib `log.Printf`, webapi warnings detached to `~/.gogent/daemon.log`): capture too, or structured `diag` path only? Overlaps #560's stdlib-log redirect. Lean: **structured `diag` path only** for this issue; raw-stdout capture is a follow-up once #560 lands.
+3. **Ring size 2000 / display cap ~1000 / compaction high-water 1500** — confirm against memory budget; tune if needed.
+4. **Warn color**: reuse `colorTool` (yellow) or introduce a dedicated `colorWarn` theme role? Lean: reuse `colorTool` initially; a distinct role is a one-line theme addition if desired.
+5. **`windowKind` vs `readOnly bool`**: introduce the kind enum with `readOnly` derived (recommended, keeps all call sites), or thread a separate flag? Lean: derived enum.
+6. **Source/level filter UI** (`[local]`-only / `[daemon]`-only / level filter): deferred per the issue; the structured `Record` already carries level+source to make it cheap later.
+7. **Optional turbotui `TextView.TrimFront(n)`**: keep gogent-side compaction (default), or land the one-method primitive for an O(1) cap? Cross-repo, opt-in.
