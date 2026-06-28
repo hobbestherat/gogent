@@ -53,15 +53,27 @@ per-model write numbers are already in the report and already in the CSV
 
 The issue's illustrative one-liner `cache: 78% read (12.4k) · 9% write` is **~34 cols wide**
 and will not fit: the sidebar is `defaultSidebarWidth = 32` / `minSidebarWidth = 24`
-(`sidebar.go:20,27`) and metric rows are clipped to content width. So split into **two narrow
-rows** that replace the single `cache hit` row:
+(`sidebar.go:20,27`) and `drawOverall` clips each metric row to `contentW = abs.W - 3`
+(`sidebar.go:936`) via `truncateRunes` (`:958`). So split into **two narrow rows** that replace
+the single `cache hit` row:
 
 ```
 cache rd   78% 12.4k
 cache wr   9% 1.1k
 ```
 
-(label padded to `overallLabelWidth = 10`, value ≈ 9 chars → ~20 cols, safely inside 24.)
+**Exact width budget.** At the `minSidebarWidth = 24` floor the clip ceiling is
+`contentW = 24 − 3 = 21` cols (not 24). Each row is `padName(label, overallLabelWidth=10)` + `" "`
++ value. Worst-case value is `"100% 9.9M"` = 9 cols, so the row is `10 + 1 + 9 = 20 ≤ 21` —
+**1 col of slack**, no truncation. (The earlier "safely inside 24" was loose; the real ceiling is
+21 and the margin is one column.)
+
+**Label choice — `cache rd` / `cache wr` (decided).** These are the standard I/O read/write
+abbreviations and keep the value column aligned at `overallLabelWidth=10` with 2 cols of label
+slack. We **reject** the clearer `cache read` / `cache write`: `"cache write"` is 11 cols, one over
+`overallLabelWidth`, which both shifts the write row's value column out of alignment with the read
+row *and* pushes the worst case to `11 + 1 + 9 = 21` = the clip ceiling exactly (zero slack at the
+24-col floor). Width forces the abbreviation; `rd`/`wr` is the least-ambiguous pair that fits.
 
 Concretely:
 
@@ -83,14 +95,22 @@ Concretely:
 
 ### C. gogent — `ui/tui/statistics_render.go` (per-connector full detail; goal #2)
 
-`writeConnector` (`:185`) renders the full per-backend block in the Statistics dialog Overview
-(called for `Totals.Primary` and `Totals.Fast`). It already prints `Cached in:` and
-`Cache hit:` (`:195–197`). **Add a parallel `Cache wr: <tokens>` / `Cache wr %: <pct>%`**
-on the same block so the dialog shows write tokens and write share next to the read figures.
-This is the visible per-connector breakdown; combined with the already-emitted per-session CSV
-column it satisfies goal #2 ("per-session numbers reachable"). The `Sessions` table
-(`renderStatsSessions:78`) is already 8 columns wide and width-constrained, so **no new column
-there** — the CSV remains the per-session machine-readable path.
+`writeConnector` (`:185`) renders the full per-backend block in the Statistics dialog Overview.
+**It is called only for the cluster aggregate** `Totals.Primary` / `Totals.Fast`
+(`statistics_render.go:54,57`) — **never per session**. It already prints `Cached in:` and
+`Cache hit:` (`:195–197`). **Add a parallel `Cache wr: <tokens>` / `Cache wr %: <pct>%`** on the
+same block so the dialog shows write tokens and write share next to the read figures.
+
+**Be precise about what goal #2 actually buys in the TUI:** this adds a *cluster-aggregate*
+read/write block to the dialog, plus the model-selector scoping already in the Overall panel
+(section B reads `ms.Connector` per selected model). **True per-session cache write is reachable
+only via the CSV** — `writeConnectorCSV` is emitted per `session:<id>` (`stats.go:307`), so the
+data is exported per session, but the dialog renders it aggregated. That meets the issue's stated
+minimum ("per-session numbers reachable") but does **not** put a per-session cache figure in the
+Sessions table. The `Sessions` table (`renderStatsSessions:78`) is already 8 columns wide and
+width-constrained, so **no new column there** — the CSV remains the per-session path. If the
+maintainer wants per-session *on screen*, that is a follow-up (a 9th column or a detail expander),
+called out in Open questions.
 
 ### D. Tests to update (in the build phase, not now)
 
@@ -103,15 +123,21 @@ there** — the CSV remains the per-session machine-readable path.
 ## The four design gates
 
 **(1) Goal match.** Overall panel gains an explicit read **and** write breakdown (effectiveness +
-spend); `internal/stats` exposes `CacheWritePercent()`; the Statistics dialog surfaces per-connector
-write tokens; per-session write numbers already flow via `SessionModelStat.Connector` and the CSV.
-No scope creep — no new cost model, no provider changes (those were #544/#556). The CSV column the
-issue asked for already exists, so we deliberately *don't* re-add it.
+spend); `internal/stats` exposes `CacheWritePercent()`; the Statistics dialog surfaces the
+*cluster-aggregate* read/write block, with model-scoped numbers via the Overall panel's selector.
+Per-session write is reachable **via the CSV** (`writeConnectorCSV` per `session:<id>`), the issue's
+stated minimum — not as an on-screen Sessions-table figure (a deliberate, width-driven scope line;
+see section C and OQ#4). No scope creep — no new cost model, no provider changes (those were
+#544/#556). The CSV column the issue asked for already exists, so we deliberately *don't* re-add it.
 
-**(2) Usability.** Two short rows fit the 24-col minimum sidebar without truncation; the user sees
-`cache rd` (is caching saving money?) and `cache wr` (am I paying a write premium every turn —
-the #545 symptom?). Both are populated from one consistent source (the primary connector), matching
-the existing panel convention. Nothing is silent: write tokens get their own labelled row.
+**(2) Usability.** Two short rows fit at the 24-col minimum sidebar: the clip ceiling there is
+`contentW = 24 − 3 = 21` and each row is ≤ 20 cols (worst-case `"100% 9.9M"` value), so **1 col of
+slack, no truncation** — not the looser "inside 24" stated earlier. The user sees `cache rd` (is
+caching saving money?) and `cache wr` (am I paying a write premium every turn — the #545 symptom?);
+`rd`/`wr` are the standard read/write abbreviations, chosen because the spelled-out `cache write`
+overflows `overallLabelWidth` and breaks both alignment and the width budget (section B). Both rows
+draw from one consistent source (the primary connector). Nothing is silent: write tokens get their
+own labelled row.
 
 **(3) No regressions.** Risks and mitigations:
 - *Band desync.* `overallMetricLines` must equal the emitted row count. It is pinned by
@@ -121,8 +147,13 @@ the existing panel convention. Nothing is silent: write tokens get their own lab
   it, so it does not move. Pinned by `:179`.
 - *Duplicate CSV column.* `cache_write_tokens_in` already exists — we must **not** touch
   `writeConnectorCSV`. Flagged so the build phase doesn't re-add it.
-- *Width clipping.* Chosen format ≈20 cols < 24 min; verified against `overallLabelWidth=10`.
+- *Width clipping.* Worst-case row 20 cols ≤ 21-col clip ceiling at the 24-col floor
+  (`contentW = sidebarW − 3`, `sidebar.go:936`); verified against `overallLabelWidth=10`.
 - *Non-write providers.* `CacheWriteTokensIn==0 → CacheWritePercent()==0 → cache wr 0% 0`. Clean.
+- *`TestBuildOverallStats` struct-equality* (`overall_stats_test.go:31`) stays green by
+  coincidence-of-zero: the test report sets no write tokens, so the three new `overallStats` fields
+  are zero on both the produced and expected struct. No edit needed there — but the build phase
+  should add a case with write tokens set to actually exercise the new fields, not rely on the zero.
 - Existing `CacheHitPct`-named test references are preserved by keeping the field name.
 
 **(4) Holistic / cross-repo seam.** The decisive finding: **turbotui needs no change.** The "data
@@ -134,6 +165,13 @@ package both the panel and the dialog already read — the right seam. The chang
 `internal/stats` + `ui/tui`, loosely coupled to the #542 (ui/tui) and model-cache work as the
 orchestration note anticipated.
 
+> **BLOCKING ALIGNMENT ITEM (only the maintainer can settle).** This gogent-only shape is
+> technically correct but **departs from the task's written acceptance gate**, which demands a
+> turbotui PR, a recorded turbotui merge SHA, and a `go.mod` bump. We assert the cross-repo half is
+> moot because the target file is gogent's and turbotui has no stats code — but that inverts a stated
+> deliverable, so it must be confirmed by kloune (the issue author) before building. See OQ#1 for the
+> two concrete contingency plans.
+
 ## Verification / gate
 
 - `gofmt`, `go build ./...`, `go vet ./...`, `golangci-lint` (v2, 0 new), `go test ./...`
@@ -143,21 +181,36 @@ orchestration note anticipated.
 
 ## PR / merge plan
 
-Single gogent PR, `Closes #546`. No turbotui PR. Rebase onto `origin/main` at the gate. Because
-the gogent half is self-contained (no dependency on an unmerged turbotui widget), the gogent-first
-sequencing concern in the orchestration note is moot — there is no second repo to sequence against.
+**Conditional on OQ#1.** Default (path 1a, recommended): single gogent PR, `Closes #546`, no
+turbotui PR. Rebase onto `origin/main` at the gate. Because the gogent half is self-contained (no
+dependency on an unmerged turbotui widget), the gogent-first sequencing concern in the orchestration
+note is moot — there is no second repo to sequence against. If path 1b is chosen instead, revert to
+the orchestration note's sequence: turbotui widget PR → merge → record SHA → gogent `go.mod` bump →
+gogent display PR, with the gogent PR `Refs #546` until both land.
 
 ## Open questions
 
-1. **Is turbotui involvement truly intended?** Our reading: no — `overall_stats.go` is gogent's and
-   turbotui carries no stats code. If the maintainer specifically wants a *reusable cache-breakdown
-   widget* extracted into turbotui, that is a larger, separate refactor (turbotui must stay
-   stats-agnostic, so it would take primitive inputs, not `stats.ConnectorStat`). Recommend
-   confirming before doing any turbotui work; default plan ships gogent-only.
-2. **One packed row vs. two rows.** We chose two rows for width safety. If the maintainer prefers the
+1. **[BLOCKING] Is turbotui involvement actually intended, or is the gogent-only shape accepted?**
+   This is the one item that must close before building — it inverts the written acceptance gate.
+   Two concrete contingency plans:
+   - **(1a) Maintainer confirms gogent-only (our recommendation, expected).** Build sections A–D as
+     written; single gogent PR `Closes #546`; no turbotui PR, no SHA to record, no `go.mod` bump.
+     Update the issue/acceptance note to reflect that the file was always gogent's.
+   - **(1b) Maintainer wants a reusable widget in turbotui.** Then turbotui must stay
+     stats-agnostic: add a small primitive (e.g. a `CacheBreakdown`/two-row renderer taking plain
+     `(readPct, readTokens, writePct, writeTokens int)` ints, **not** `stats.ConnectorStat`), merge
+     it to turbotui main first, record its SHA, bump gogent's `go.mod` to it, then have
+     `formatOverallStats` call the new primitive. This is the original gogent-first cross-repo
+     sequence — larger, and only justified if the breakdown is wanted by other turbotui consumers,
+     of which there are currently none.
+2. **Per-session cache *on screen* (vs. CSV-only).** Goal #2 is met at the issue's minimum via the
+   CSV + model-selector scoping. If kloune wants a per-session figure visible in the TUI Sessions
+   table (`renderStatsSessions`), that needs a 9th column or a row detail-expander — a follow-up, not
+   in this change. Flag for preference.
+3. **One packed row vs. two rows.** We chose two rows for width safety. If the maintainer prefers the
    issue's single `cache: 78% read · 9% write` line, it only fits if we drop the read-token
    magnitude; flag for preference. (Two rows keeps the magnitude and `overallErrLineIdx` stable.)
-3. **Field naming.** Keep `CacheHitPct` (minimal churn, test-referenced) vs. rename to
+4. **Field naming.** Keep `CacheHitPct` (minimal churn, test-referenced) vs. rename to
    `CacheReadPct` for symmetry with new `CacheWritePct`. Defaulting to keep; trivial to revisit.
-4. **Write magnitude on row.** We show `formatTokens(write)` on the `cache wr` row (write *spend* is
+5. **Write magnitude on row.** We show `formatTokens(write)` on the `cache wr` row (write *spend* is
    the point of the issue). Drop it if the column proves too tight in practice.
