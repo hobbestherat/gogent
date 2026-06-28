@@ -248,45 +248,36 @@ func TestIssue573GeminiSchemaPreExistingNullableSurvivesWithoutUnion(t *testing.
 // Fix 1 — documented edge cases (pinned, not "fixed")
 // ---------------------------------------------------------------------------
 
-// TestIssue573GeminiSchemaMultiNonNullUnionLeftAsArray pins the documented
-// out-of-scope case: a genuine multi-non-null union (no "null" member, not in
-// any default tool) is NOT collapsed and stays an array (Vertex would still
-// reject it; representing it needs anyOf, which #573 does not introduce). The
-// test documents the current behavior so a future change is intentional.
-func TestIssue573GeminiSchemaMultiNonNullUnionLeftAsArray(t *testing.T) {
+// TestIssue573GeminiSchemaMultiNonNullUnionCollapsesToFirst covers the genuine
+// multi-non-null union (no "null" member, e.g. the spawn_subagent items schema
+// ["object","string"]): Gemini cannot express a union type, so it is COLLAPSED
+// to its first member as a scalar (no spurious nullable). This was left as an
+// array by #573 and caused a fresh first-turn HTTP 400 ("cannot start list");
+// fixed here so no array type reaches Vertex.
+func TestIssue573GeminiSchemaMultiNonNullUnionCollapsesToFirst(t *testing.T) {
 	out := geminiSchema(map[string]interface{}{
 		"type": []interface{}{"string", "integer"},
 	}).(map[string]interface{})
-	if _, ok := out["type"].([]interface{}); !ok {
-		t.Fatalf("multi-non-null union type = %#v, want left as array (out-of-scope)", out["type"])
-	}
+	requireStringType(t, out, "STRING")
 	if _, hasNullable := out["nullable"]; hasNullable {
-		t.Fatalf("multi-non-null union gained nullable (only nullable unions are collapsed): %#v", out)
+		t.Fatalf("non-null union gained a spurious nullable: %#v", out)
 	}
 }
 
-// TestIssue573GeminiSchemaMultiNonNullNullableDropsNullButStaysArray pins the
-// subtle mixed case ["string","integer","null"]: the null is dropped and
-// nullable:true is set, but with >1 non-null survivor the type stays an array
-// (still unrepresentable as a single scalar). Documents current behavior.
-func TestIssue573GeminiSchemaMultiNonNullNullableDropsNullButStaysArray(t *testing.T) {
+// TestIssue573GeminiSchemaMultiNonNullNullableCollapsesAndFlagsNullable covers
+// the mixed case ["string","integer","null"]: the null is dropped (so nullable
+// is set) AND the remaining multi-member union is collapsed to its first member
+// as a scalar, so no array type reaches Vertex.
+func TestIssue573GeminiSchemaMultiNonNullNullableCollapsesAndFlagsNullable(t *testing.T) {
 	out := geminiSchema(map[string]interface{}{
 		"type": []interface{}{"string", "integer", "null"},
 	}).(map[string]interface{})
-	got, ok := out["type"].([]interface{})
-	if !ok {
-		t.Fatalf("type = %#v, want surviving array [string integer]", out["type"])
-	}
-	if len(got) != 2 {
-		t.Fatalf("surviving members = %v, want null dropped ([string integer])", got)
-	}
-	for _, m := range got {
-		if s, _ := m.(string); s == "null" {
-			t.Fatalf("null member survived: %v", got)
-		}
-	}
+	requireStringType(t, out, "STRING")
 	if !nullableOf(t, out) {
 		t.Fatalf("nullable = false, want true (a null was dropped from the union)")
+	}
+	if _, ok := out["type"].([]interface{}); ok {
+		t.Fatalf("type still an array %#v, want collapsed scalar (would 400)", out["type"])
 	}
 }
 
@@ -705,5 +696,49 @@ func TestIssue573ThoughtSignatureNotPersistedAcrossTranscript(t *testing.T) {
 	if back.ToolCalls[0].ThoughtSignature != "" {
 		t.Fatalf("ThoughtSignature survived transcript round-trip = %q, want empty (json:\"-\" not persisted)",
 			back.ToolCalls[0].ThoughtSignature)
+	}
+}
+
+// TestIssue573GeminiSchemaSpawnSubagentItemsUnionCollapses reproduces the exact
+// schema that still 400'd a fresh Gemini first turn after #573: the
+// spawn_subagent tool advertises its array-item shape as a non-null union
+// {"type":["object","string"]} (an item may be a {name,task} object or a bare
+// string). #573 only collapsed nullable unions, so this survived as an array and
+// Vertex rejected it at function_declarations[...].parameters.properties[...]
+// .value.items ("Proto field is not repeating, cannot start list"). It must now
+// collapse to a scalar, and the whole normalized schema must carry no array type.
+func TestIssue573GeminiSchemaSpawnSubagentItemsUnionCollapses(t *testing.T) {
+	in := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"subtasks": map[string]interface{}{
+				"type": "array",
+				"items": map[string]interface{}{
+					"type": []string{"object", "string"},
+					"properties": map[string]interface{}{
+						"name": map[string]interface{}{"type": "string"},
+						"task": map[string]interface{}{"type": "string"},
+					},
+				},
+			},
+		},
+	}
+	out := geminiSchema(in)
+
+	subtasks := prop(t, out.(map[string]interface{}), "subtasks")
+	requireStringType(t, subtasks, "ARRAY")
+	items, ok := subtasks["items"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("subtasks.items = %#v, want map", subtasks["items"])
+	}
+	// "object" is the first union member, so the collapsed scalar is OBJECT and
+	// the nested name/task properties are preserved (still object-shaped).
+	requireStringType(t, items, "OBJECT")
+	if _, hasNullable := items["nullable"]; hasNullable {
+		t.Fatalf("non-null union items gained a spurious nullable: %#v", items)
+	}
+	if anyTypeIsArray(out) {
+		t.Fatalf("spawn_subagent schema still has an array type after normalization "+
+			"(Vertex would 400 with \"cannot start list\"):\n%#v", out)
 	}
 }

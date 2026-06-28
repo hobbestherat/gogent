@@ -1254,10 +1254,16 @@ func geminiSchema(v interface{}) interface{} {
 //     proto field is a SCALAR enum, so a repeated/array value is rejected with an
 //     HTTP 400 ("Proto field is not repeating, cannot start list"); this is the
 //     fix for issue #573. An "enum" sibling is left untouched (a STRING enum is
-//     valid). A degenerate ["null"]-only or a genuine multi-non-null union (not
-//     produced by any gogent tool) is left as the trimmed array — Gemini would
-//     still reject the latter, but representing it needs anyOf, which is out of
-//     scope here.
+//     valid).
+//   - A genuine multi-non-null union (e.g. {"type":["object","string"]}, as the
+//     spawn_subagent items schema advertises) is COLLAPSED to its first member
+//     (after dropping any "null") as the scalar type, upper-cased, with "nullable"
+//     set when a "null" member was present. Gemini cannot express a union type, so
+//     leaving the array would 400 just like the nullable case; the first member is
+//     the most-permissive representable shape (the tools that emit such a union
+//     accept either form at runtime, so narrowing the advertised type is safe).
+//   - A degenerate ["null"]-only "type" is left as the trimmed array (no scalar to
+//     collapse to).
 //
 // Mirrors #567's Anthropic normalizer (dropNullFromType, reused as-is) but emits
 // the Gemini proto form (scalar type + nullable flag) rather than just dropping
@@ -1272,20 +1278,28 @@ func uppercaseSchemaTypes(v interface{}) interface{} {
 					continue
 				}
 				if union, ok := val.([]interface{}); ok {
-					// dropNullFromType's changed==true means a "null" was dropped
-					// and at least one non-null member survives — i.e. the node is
-					// nullable. Collapse to that scalar and flag nullable the Gemini
-					// way. dropNullFromType is shared with the Anthropic caller and
-					// must not change signature.
-					if rewritten, changed := dropNullFromType(union); changed {
-						if s, ok := rewritten.(string); ok {
-							t[k] = strings.ToUpper(s)
-						} else {
-							t[k] = rewritten
-						}
-						t["nullable"] = true
+					// Drop any "null" member; "nullable" captures it the Gemini way.
+					// dropNullFromType is shared with the Anthropic caller and must
+					// not change signature, so reduce the remaining members here.
+					rewritten, droppedNull := dropNullFromType(union)
+					scalar, ok := geminiScalarType(rewritten)
+					if !ok {
+						// No non-null member survives (degenerate ["null"]-only): leave
+						// the array value untouched — there is no scalar to collapse to
+						// and the member must NOT be upper-cased ("null" is the JSON
+						// null type, not a Gemini type name).
+						t[k] = union
 						continue
 					}
+					// One non-null member (nullable-union, #573) OR several non-null
+					// members (genuine union, e.g. ["object","string"]): collapse to
+					// a single scalar Gemini accepts. Either path eliminates the
+					// array "type" that Vertex rejects with HTTP 400.
+					t[k] = strings.ToUpper(scalar)
+					if droppedNull {
+						t["nullable"] = true
+					}
+					continue
 				}
 			}
 			t[k] = uppercaseSchemaTypes(val)
@@ -1299,6 +1313,30 @@ func uppercaseSchemaTypes(v interface{}) interface{} {
 	default:
 		return v
 	}
+}
+
+// geminiScalarType reduces the non-null remainder of a "type" union to the single
+// scalar Gemini can carry in its (scalar enum) Schema.type proto field. It accepts
+// either a scalar string (already collapsed by dropNullFromType when one non-null
+// member remained) or an array of remaining members, returning the first non-null
+// string member. Returns ("", false) when no non-null string scalar is available
+// (e.g. an empty or degenerate ["null"]-only remainder), so the caller leaves the
+// value as-is rather than upper-casing "null" into a bogus "NULL" type.
+func geminiScalarType(rewritten interface{}) (string, bool) {
+	switch r := rewritten.(type) {
+	case string:
+		if r == "null" {
+			return "", false
+		}
+		return r, true
+	case []interface{}:
+		for _, m := range r {
+			if s, ok := m.(string); ok && s != "null" {
+				return s, true
+			}
+		}
+	}
+	return "", false
 }
 
 // anthropicSchema normalizes a JSON-Schema document for Anthropic strict tool
