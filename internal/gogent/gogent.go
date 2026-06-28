@@ -311,6 +311,13 @@ func (g *Gogent) SetLogger(lg *diag.Logger) {
 	g.mu.Lock()
 	g.log = lg
 	g.mu.Unlock()
+	// Propagate to the permission service so a failed grant persist is reported on
+	// the same sink (issue #560). In remote mode the daemon does the persisting and
+	// already installs a file logger here, so its grant-write failures land in
+	// gogent.log rather than being silently swallowed.
+	if g.permissions != nil {
+		g.permissions.SetLogger(lg)
+	}
 }
 
 // SetAudit redirects gogent's security audit trail to a (typically file-backed)

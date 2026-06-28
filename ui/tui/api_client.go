@@ -834,11 +834,24 @@ func (c *APIClient) ListApprovals() ([]ApprovalDTO, error) {
 
 // DecideApproval delivers a decision for a pending approval. decision is the
 // wire token the server expects ("allow"/"deny"/"always"/"always_deny" for a
-// permission; "approve"/"approve_all"/"reject" for an edit review). A 404/409
-// (already resolved or timed out) is surfaced as an error the caller can ignore.
-func (c *APIClient) DecideApproval(aid, decision string) error {
-	return c.do(http.MethodPost, "/approvals/"+url.PathEscape(aid)+"/decision",
-		map[string]string{"decision": decision}, nil)
+// permission; "approve"/"approve_all"/"reject" for an edit review).
+//
+// The endpoint is idempotent (issue #560): a decision that lands after its prompt
+// was removed is reconciled, not rejected. The returned status is "resolved" for
+// an in-time decision and "late" for a reconciled one (e.g. a sticky "always"
+// grant the daemon persisted even though the original prompt had timed out), so
+// the caller can tell the user the grant will apply going forward. A genuinely
+// unknown id still returns an error (a 404 the caller retries then surfaces).
+func (c *APIClient) DecideApproval(aid, decision string) (status string, err error) {
+	var out struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	if derr := c.do(http.MethodPost, "/approvals/"+url.PathEscape(aid)+"/decision",
+		map[string]string{"decision": decision}, &out); derr != nil {
+		return "", derr
+	}
+	return out.Status, nil
 }
 
 // --- SSE event stream -------------------------------------------------------

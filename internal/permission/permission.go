@@ -15,6 +15,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	"gogent/internal/diag"
 )
 
 // Action identifies the kind of operation being gated.
@@ -158,6 +160,7 @@ type Service struct {
 	saved     map[string]Decision
 	prompter  Prompter
 	audit     AuditSink
+	logger    *diag.Logger
 
 	// yolo is the global auto-approve default (issue #356): when set, an "ask"
 	// resolves to allow instead of prompting/denying. sessionYolo holds per-session
@@ -191,6 +194,16 @@ func (s *Service) SetPrompter(p Prompter) {
 func (s *Service) SetAuditSink(sink AuditSink) {
 	s.mu.Lock()
 	s.audit = sink
+	s.mu.Unlock()
+}
+
+// SetLogger installs the diagnostics logger used to report persistence failures
+// (a failed permissions.json write/read) so a dropped grant is diagnosable in
+// gogent.log instead of silently swallowed (issue #560). A nil *diag.Logger is a
+// safe no-op.
+func (s *Service) SetLogger(l *diag.Logger) {
+	s.mu.Lock()
+	s.logger = l
 	s.mu.Unlock()
 }
 
@@ -417,11 +430,42 @@ func (s *Service) persist(a Action, resource string, d Decision) {
 	s.mu.Lock()
 	s.saved[key(a, resource)] = d
 	data, err := json.MarshalIndent(savedFile{Saved: s.saved}, "", "  ")
+	logger := s.logger
 	s.mu.Unlock()
 	if err != nil {
+		// nil-safe: a Logger with a nil receiver/handler discards.
+		logger.Errorf("permission: marshal saved decisions: %v", err)
 		return
 	}
-	_ = s.write(data)
+	if werr := s.write(data); werr != nil {
+		// Surface a failed grant write so it is diagnosable in gogent.log rather
+		// than silently dropped (issue #560). The decision is already applied
+		// in-memory for this process; only durability across restart is lost.
+		logger.Errorf("permission: persist decision to disk: %v", werr)
+	}
+}
+
+// Persist records a sticky decision out-of-band — outside the normal
+// CheckWithContext cascade — and records it on the audit trail. It exists so the
+// daemon's remote-approval bridge can make a late "always"/"always_deny" answer
+// stick even after the originating prompt was already resolved or timed out
+// (issue #560): the in-time path persists from CheckWithContext, but a decision
+// that arrives after the pending approval was removed must be applied here.
+//
+// Only DecisionAlways/DecisionAlwaysDeny carry sticky state; any other decision
+// is per-call and is ignored. The audit entry mirrors the in-time path
+// (allowed == DecisionAlways) so a late grant is never off-record (issue #51).
+func (s *Service) Persist(rc RequestContext, a Action, resource string, d Decision) {
+	if d != DecisionAlways && d != DecisionAlwaysDeny {
+		return
+	}
+	s.persist(a, resource, d)
+	s.mu.Lock()
+	sink := s.audit
+	s.mu.Unlock()
+	if sink != nil {
+		sink(rc, a, resource, d == DecisionAlways)
+	}
 }
 
 func (s *Service) configPath() string {
@@ -446,6 +490,9 @@ func (s *Service) load() {
 	}
 	var f savedFile
 	if err := json.Unmarshal(data, &f); err != nil {
+		// A corrupt store is left untouched (the in-memory default holds); surface
+		// it so it is diagnosable rather than a silent re-prompt (issue #560).
+		s.logger.Errorf("permission: parse %s: %v", path, err)
 		return
 	}
 	if f.Saved != nil {

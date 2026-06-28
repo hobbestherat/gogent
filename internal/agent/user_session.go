@@ -43,6 +43,13 @@ const (
 	SessionEventFinal SessionEventType = "final"
 	// SessionEventError reports a failure during the loop.
 	SessionEventError SessionEventType = "error"
+	// SessionEventNotice carries an informational, non-error system note for the
+	// session transcript (rendered as a "[System]" line). Text holds the message.
+	// It is a UI-facing, fire-and-forget notice — the attached TUI uses it to tell
+	// the user, in-band, that a remote approval decision could not be delivered or
+	// that a late "always allow" grant will apply to future requests (issue #560).
+	// The agent loop itself never emits it; it is injected by the client.
+	SessionEventNotice SessionEventType = "notice"
 	// SessionEventSubAgent reports a sub-agent lifecycle change (spawned/finished).
 	SessionEventSubAgent SessionEventType = "subagent"
 	// SessionEventCompaction reports that the context was compressed; Text holds

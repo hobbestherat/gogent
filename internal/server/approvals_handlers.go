@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/hobbestherat/webapi"
+	"gogent/internal/permission"
 )
 
 // approvalsSvc handles the async approval gate: listing pending prompts and
@@ -17,10 +18,30 @@ func (svc approvalsSvc) List(r *http.Request) (interface{}, error) {
 
 // Decide handles POST /approvals/:aid/decision. It maps the wire decision to the
 // right typed value (permission vs edit review) and unblocks the waiting tool
-// goroutine. Unknown/already-resolved ids return 404.
+// goroutine.
+//
+// The endpoint is idempotent (issue #560): a decision that arrives after its
+// pending approval was removed (resolved by a faster client, or auto-denied on
+// timeout) is reconciled rather than hard-404'd, so the user's answer is never
+// silently lost. In particular a late "always"/"always_deny" permission grant is
+// persisted directly here so per-host "always allow" sticks even when the original
+// prompt had already timed out. status is "resolved" for an in-time decision and
+// "late" for a reconciled one; only a genuinely unknown id returns 404.
 func (svc approvalsSvc) Decide(r *http.Request, req approvalDecisionRequest, aid string) (interface{}, error) {
 	pending := svc.s.approvals.get(aid)
 	if pending == nil {
+		// Late arrival: reconcile against the recall ring so a sticky grant still
+		// sticks and the client sees a benign result rather than a lost decision.
+		if rec, ok := svc.s.approvals.recall(aid); ok {
+			if rec.kind == "permission" && rec.permission != nil {
+				if d := parsePermDecision(req.Decision); d == permission.DecisionAlways || d == permission.DecisionAlwaysDeny {
+					svc.s.g.GetPermissionService().Persist(
+						permission.RequestContext{SessionID: rec.sessionID, Agent: rec.agentID},
+						permission.Action(rec.permission.Action), rec.permission.Resource, d)
+				}
+			}
+			return map[string]string{"id": aid, "status": "late"}, nil
+		}
 		return nil, webapi.NewHTTPError(http.StatusNotFound, "approval not found")
 	}
 	var d decision
@@ -33,7 +54,19 @@ func (svc approvalsSvc) Decide(r *http.Request, req approvalDecisionRequest, aid
 		return nil, webapi.NewHTTPError(http.StatusBadRequest, "unknown approval kind")
 	}
 	if !svc.s.approvals.resolve(aid, d) {
-		return nil, webapi.NewHTTPError(http.StatusConflict, "approval already resolved")
+		// Raced by another delivered decision (a double-consumer). The winner's
+		// answer was applied to the in-flight call; but if the winner's was a
+		// one-shot allow/deny and THIS loser's is a sticky grant, persisting only on
+		// the winner would silently lose the grant. So persist a sticky permission
+		// decision here too (idempotent — same key, mirrors the late-arrival path),
+		// then acknowledge idempotently rather than 409.
+		if pending.kind == "permission" && pending.permission != nil &&
+			(d.perm == permission.DecisionAlways || d.perm == permission.DecisionAlwaysDeny) {
+			svc.s.g.GetPermissionService().Persist(
+				permission.RequestContext{SessionID: pending.sessionID, Agent: pending.agentID},
+				permission.Action(pending.permission.Action), pending.permission.Resource, d.perm)
+		}
+		return map[string]string{"id": aid, "status": "resolved"}, nil
 	}
 	return map[string]string{"id": aid, "status": "resolved"}, nil
 }
