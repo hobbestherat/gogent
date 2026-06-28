@@ -1284,10 +1284,17 @@ func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []
 		reqBody.MaxTokens = &mt
 	}
 
-	// Sampling params. Omit them for reasoning models on providers that reject a
-	// custom temperature (OpenAI reasoning tiers); otherwise send temperature
-	// (pointer, so a deliberate 0 survives) and top_p when configured.
-	if !reasoning || !caps.ReasoningRejectsTemperature {
+	// Sampling params. Drop temperature/top_p when EITHER the (provider,model)
+	// capability layer says this model rejects them outright — current-gen Claude
+	// 400s on the mere presence of temperature, independent of reasoning (issue
+	// #543) — OR this is a reasoning model on a provider that rejects a custom
+	// temperature (OpenAI reasoning tiers). Otherwise send temperature (pointer,
+	// so a deliberate 0 survives) and top_p when configured. With no override the
+	// resolved ModelCaps is empty, so this reduces to the prior reasoning-only gate
+	// and is byte-identical for every other model.
+	modelCaps := resolveModelCaps(c.APIType, c.ModelName)
+	dropSampling := modelCaps.RejectsSampling || (reasoning && caps.ReasoningRejectsTemperature)
+	if !dropSampling {
 		t := temperature
 		reqBody.Temperature = &t
 		if topP > 0 {
