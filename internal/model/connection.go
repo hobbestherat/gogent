@@ -1857,6 +1857,14 @@ func (c *ModelConnection) analyzeError(statusCode int, response string) *ModelEr
 
 	lowerResponse := strings.ToLower(response)
 
+	// reason is the bounded, provider-agnostic rejection reason lifted from the
+	// response body (error.message, see extractProviderMessage). It is spliced
+	// into every branch's Message via withReason so ModelError.Error() surfaces
+	// the actual cause — naming the offending field — instead of an opaque status
+	// (issue #555). Empty/unparsable bodies yield "" and withReason leaves the
+	// prior status-only message untouched. RawResponse still keeps the full body.
+	reason := boundedReason(extractProviderMessage(response))
+
 	switch statusCode {
 	case 400:
 		if strings.Contains(lowerResponse, "context") || strings.Contains(lowerResponse, "length") {
@@ -1866,7 +1874,7 @@ func (c *ModelConnection) analyzeError(statusCode int, response string) *ModelEr
 			return &ModelError{
 				Type:           ErrorContextOverflow,
 				HTTPStatusCode: statusCode,
-				Message:        "context window overflow",
+				Message:        withReason("context window overflow", reason),
 				RawResponse:    response,
 			}
 		}
@@ -1878,7 +1886,7 @@ func (c *ModelConnection) analyzeError(statusCode int, response string) *ModelEr
 			return &ModelError{
 				Type:           ErrorRefusal,
 				HTTPStatusCode: statusCode,
-				Message:        "content policy refusal",
+				Message:        withReason("content policy refusal", reason),
 				RawResponse:    response,
 			}
 		}
@@ -1893,7 +1901,7 @@ func (c *ModelConnection) analyzeError(statusCode int, response string) *ModelEr
 		return &ModelError{
 			Type:           ErrorGeneric,
 			HTTPStatusCode: statusCode,
-			Message:        "not found (status 404): the endpoint or model path is wrong — check api_type/endpoint/model",
+			Message:        withReason("not found (status 404): the endpoint or model path is wrong — check api_type/endpoint/model", reason),
 			RawResponse:    response,
 		}
 	case 429:
@@ -1903,7 +1911,7 @@ func (c *ModelConnection) analyzeError(statusCode int, response string) *ModelEr
 		return &ModelError{
 			Type:           ErrorRateLimit,
 			HTTPStatusCode: statusCode,
-			Message:        "rate limit exceeded",
+			Message:        withReason("rate limit exceeded", reason),
 			RawResponse:    response,
 		}
 	case 504:
@@ -1913,7 +1921,7 @@ func (c *ModelConnection) analyzeError(statusCode int, response string) *ModelEr
 		return &ModelError{
 			Type:           ErrorTimeout,
 			HTTPStatusCode: statusCode,
-			Message:        "gateway timeout",
+			Message:        withReason("gateway timeout", reason),
 			RawResponse:    response,
 		}
 	}
@@ -1925,7 +1933,7 @@ func (c *ModelConnection) analyzeError(statusCode int, response string) *ModelEr
 	return &ModelError{
 		Type:           ErrorGeneric,
 		HTTPStatusCode: statusCode,
-		Message:        fmt.Sprintf("unexpected error: status %d", statusCode),
+		Message:        withReason(fmt.Sprintf("unexpected error: status %d", statusCode), reason),
 		RawResponse:    response,
 	}
 }
