@@ -65,6 +65,17 @@ unchanged. The existing `dropNullFromType` (`:1328`) is reused as-is.
 4. Keep recursing into every other map value and array element (`properties`, `items`, nested
    objects), exactly as today, so the rule applies at any depth.
 
+`dropNullFromType` is reused **with no signature change**: its `changed` return already encodes
+nullability (`changed==true` ⟺ a `null` was dropped *and* ≥1 non-null member survives), so it
+doubles as the "set `nullable:true`" signal. Do **not** alter `dropNullFromType` — it is shared
+with the Anthropic caller (`normalizeAnthropicSchemaTypes`, `:1304`) and any signature change
+would ripple there.
+
+Note `geminiSchema` is also the normalizer for the structured-output `ResponseSchema`
+(`adapter.go:1083`), so Fix 1 *uniformly* also fixes any structured-output schema that carries a
+nullable union — consistent and correct (acceptance criterion 3, structured output still works),
+not a separate code path.
+
 Because `geminiSchema` already deep-copies via the JSON round-trip before walking, mutating the
 decoded map is safe — the caller's shared `Parameters` map is never touched (criterion 4 /
 no-shared-mutation gate). Setting the new `"nullable"` key while ranging the map is safe in Go
@@ -156,8 +167,19 @@ drives nothing new; the fix is transparent. Errors that *should* surface still d
 - Existing Gemini tests (`gemini_adapter_test.go`: build-body, parse-response, parse-stream,
   tool-choice, function-response) keep passing — emitted bodies are unchanged except where a
   schema *had* a union type (now collapsed) or a tool call *had* a signature (now re-emitted).
-- gofmt/build/vet/golangci-lint clean; `go test ./...` green except the pre-existing
-  `TestUserSessionSendMessage` 404 (the one acceptable failure).
+- **One existing test must be rewritten in lockstep with Fix 1** (it currently encodes the #573
+  bug): `TestIssue567GeminiDoesNotCollapseNullableEnum` in
+  `anthropic_strict_schema_issue567_test.go:628-662`. It runs `grepToolDef()` through
+  `geminiAdapter{}.buildBody` and asserts (`:649-651`) that `output_mode.type` survives as a
+  **union array still containing `"null"`** — exactly the falsehood Fix 1 corrects. After Fix 1
+  the type collapses to scalar `"STRING"` + `nullable:true`, so this assertion fatals. It is **not**
+  a regression to suppress: the test's premise was wrong. The fix rewrites it to assert the new
+  correct Gemini shape (`type:"STRING"`, `nullable:true`, enum `[content,files_with_matches,count]`
+  preserved, no surviving `null`) and corrects its now-stale comment (`:629-632`, which currently
+  claims "Gemini accepts the union"). This edit lives in the #567 test file (different file from
+  `gemini_adapter_test.go`), which is why it is called out explicitly here.
+- gofmt/build/vet/golangci-lint clean; `go test ./...` green (with the rewrite above) except the
+  pre-existing `TestUserSessionSendMessage` 404 (the one acceptable failure).
 
 **(4) Holistic / two-repo seam.** Both fixes sit in `internal/model`, the correct layer (wire
 adapter). `thoughtSignature` is `json:"-"`, so it never crosses into the transcript or out to
@@ -185,8 +207,18 @@ In `internal/model` (new file, e.g. `gemini_vertex_native_issue573_test.go`):
   that `ToolCall` into a `Message`, run the build path, and assert the emitted `functionCall`
   part re-emits the same `thoughtSignature`. Assert a signature-less tool call emits no
   `thoughtSignature` key (`omitempty`).
+- **Structured-output guard:** call `geminiSchema` on a `ResponseSchema` carrying a nullable
+  union (the same path as `adapter.go:1083`) and assert the same scalar+`nullable` collapse, so
+  structured output keeps working on `vertex-native`.
 - **Regression guard:** assert a non-Gemini `ToolCall` marshals with no `thought_signature`/
   `thoughtSignature` key (it is `json:"-"`).
+
+**Existing test to rewrite (mandatory, same PR):**
+`TestIssue567GeminiDoesNotCollapseNullableEnum` (`anthropic_strict_schema_issue567_test.go:628`)
+— flip its assertions from "union preserved with `null`" to the new correct Gemini shape
+(`output_mode.type == "STRING"`, `nullable == true`, enum preserved, no `null`), and rewrite the
+stale doc comment (`:629-632`) to describe the collapse. Without this edit `go test ./...` is red
+at the gate.
 
 ---
 
