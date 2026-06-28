@@ -127,7 +127,7 @@ func themeEditorFooterButtonRect(w *Workbench, label string) tv.Rect {
 	case "Reset":
 		return tv.Rect{X: 2, Y: y, W: 9, H: 1}
 	case "Save As…":
-		return tv.Rect{X: 12, Y: y, W: 11, H: 1}
+		return tv.Rect{X: 12, Y: y, W: 12, H: 1} // W:12 = caption "Save As…" (8) + "[ … ]" chrome (4); W:11 truncated to "Save A…" (issue #548)
 	case "Delete":
 		return tv.Rect{X: 24, Y: y, W: 10, H: 1}
 	case "Save":
