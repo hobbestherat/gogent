@@ -338,6 +338,14 @@ type CompletionRequest struct {
 	// forced to false when any advertised tool is strict, because OpenAI rejects
 	// parallel tool calls alongside strict tool schemas.
 	ParallelToolCalls *bool `json:"parallel_tool_calls,omitempty"`
+	// CacheTTL is the resolved Anthropic prompt-cache directive: "" (the default
+	// 5-minute ephemeral cache), "1h" (the 1-hour cache), or "off" (suppress all
+	// cache_control). buildRequest sets it from the model config's
+	// AnthropicCacheTTL, forced to "off" when the provider does not advertise the
+	// CacheControlBreakpoints capability (issue #545). It is consumed ONLY by the
+	// Anthropic adapter; json:"-" keeps it off the OpenAI-compatible wire, which
+	// marshals the whole request (see openAIAdapter.buildBody).
+	CacheTTL string `json:"-"`
 }
 
 // ToolChoiceMode is the provider-independent tool-selection policy. It abstracts
@@ -1461,6 +1469,17 @@ func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []
 	if c.ModelName != "" {
 		reqBody.Model = c.ModelName
 	}
+
+	// Resolve the Anthropic prompt-cache directive (issue #545). The model config
+	// chooses the breakpoint TTL (5m default / 1h) or disables caching ("off"); a
+	// provider that does not advertise client-side cache_control breakpoints can
+	// never emit them, so force "off" there. The Anthropic adapter is the only
+	// consumer (the field is json:"-"); on every other adapter this is inert.
+	reqBody.CacheTTL = c.Config.AnthropicCacheTTL()
+	if caps.CacheControl != CacheControlBreakpoints {
+		reqBody.CacheTTL = "off"
+	}
+
 	return reqBody
 }
 
