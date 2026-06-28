@@ -1704,6 +1704,10 @@ func (sw *SessionWindow) refreshStatus() {
 	sw.statusPath = ""
 	if root := sw.wb.WorkspaceRoot(); root != "" && W >= minStatusWidthForPath {
 		if p := shortenPath(root, homeDir(), pathBudget(W)); p != "" {
+			// The minLeftWidth check is a defensive floor: pathBudget caps pw at W/3, so
+			// the reserved left width (W-pw-gap >= 2W/3-2 >= 14 for any W >= 24) already
+			// clears minLeftWidth today. The guard keeps that invariant explicit so a
+			// future budget/threshold change can't silently starve the left content.
 			if pw := tui.StringWidth(p); W-pw-statusPathGap >= minLeftWidth {
 				sw.statusPath = p
 				leftW = W - pw - statusPathGap
@@ -3053,12 +3057,18 @@ func homeDir() string {
 }
 
 // shortenPath renders a filesystem path for the status line within maxW display
-// columns. It first normalises separators to "/" (so a Windows \-separated root
-// collapses and splits correctly) and collapses a home-directory prefix to "~";
-// if the result still exceeds the budget it keeps the first segment plus "…/" plus
-// the trailing two — then one — segment(s) (~/code/gogent/internal/agent →
-// ~/…/internal/agent), and as a last resort width-truncates the final segment with
-// a trailing "…". It returns "" when nothing legible fits within maxW (below
+// columns. It first maps the host path separator to "/" via filepath.ToSlash, then
+// collapses a home-directory prefix to "~". ToSlash rewrites only the host
+// separator (a no-op on Unix, where roots are already "/"-separated; on Windows it
+// rewrites the "\\" that os.Getwd returns), which is exactly right for the live
+// WorkspaceRoot — it always uses the host separator, so the collapse and the
+// "/"-segment split below work on every platform the binary runs on. (A synthetic
+// foreign-separator string, e.g. a "\\" path fed to a Unix build, is therefore left
+// as-is rather than normalised; that never arises from the real root source.) If
+// the result still exceeds the budget it keeps the first segment plus "…/" plus the
+// trailing two — then one — segment(s) (~/code/gogent/internal/agent →
+// ~/…/internal/agent), and as a last resort width-truncates the final segment with a
+// trailing "…". It returns "" when nothing legible fits within maxW (below
 // pathFloor), so the caller can omit the path entirely.
 func shortenPath(path, home string, maxW int) string {
 	if path == "" || maxW < pathFloor {
