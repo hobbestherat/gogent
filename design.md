@@ -45,9 +45,22 @@ handler — it never execs and never imports `internal/shell`.
   - `strings.TrimSpace(text[1:]) == ""` (bare `!`) → `sw.addNote("usage: !<shell command>")`, return `true` (no-op, no exec).
   - else strip the leading `!`, and dispatch on a **background goroutine**
     (shell can block up to `shell.DefaultTimeout` = 5 min; must not freeze the
-    UI thread). The goroutine calls `wb.handlers.OnShell(cmd)` and marshals the
-    result back onto the UI thread (same `wb.EmitSessionEvent`/post-to-UI
-    pattern `OnSend` uses) before calling `addShellResult`.
+    UI thread). The goroutine calls `wb.handlers.OnShell(cmd)` and **must** hand
+    the result back onto the UI thread via the existing public
+    `Workbench.Post` primitive (`tui.go:936`, `w.desktop.Post`) — the same
+    mechanism `EmitSessionEvent` uses (`tui.go:2632`) — before touching the
+    transcript:
+    ```go
+    go func() {
+        res, err := wb.handlers.OnShell(cmd)
+        sw.wb.Post(func() { sw.addShellResult(cmd, res, err) })
+    }()
+    ```
+    Calling `addShellResult` (which mutates `sw.transcript`) directly from the
+    goroutine would race the UI thread — and because `!cmd` is allowed **while
+    busy**, several can be in flight at once, so funneling every transcript
+    mutation through `Post` is mandatory, not optional. This is the single
+    highest-risk spot; it is spelled out here rather than left to the implementer.
   - If `wb.handlers.OnShell == nil` → `sw.addNote("shell commands are unavailable")`, return `true`.
 - **`submit`** (~L468-535): insert the bang check **before** the `if sw.busy`
   block (right after `recordHistory`), so `!cmd` works whether idle or busy and
@@ -119,7 +132,7 @@ handler — it never execs and never imports `internal/shell`.
   `err` here is reserved for genuine launch failures.
 
 ### 5. Daemon endpoint — `internal/server`
-- **`api.go`** (system block, ~L117): add
+- **`api.go`** (system block, ~L264-268, beside `/workspace`/`/stats`): add
   ```go
   {Path: "/shell", Method: http.MethodPost, Handler: sys.Shell, AuthLevel: req},
   ```
@@ -156,23 +169,38 @@ handler — it never execs and never imports `internal/shell`.
   (`shellView` mirrors `shell.ExecuteResult`'s JSON tags so the client unmarshals symmetrically.)
 
 ### 6. Remote client — `ui/tui/api_client.go`
-- **New** `ShellResultDTO` (mirrors `shellView`) + method:
+- **New** `ShellResultDTO` (mirrors `shellView`) + method.
+  **Must NOT use `c.do()`**: `do` caps every call at `quickTimeout = 30s`
+  (`api_client.go:121`, applied at `:250`), which would kill any `!cmd` running
+  longer than 30 s and contradict the daemon's 5-minute `shell.DefaultTimeout`.
+  Instead mirror `SendMessage` (`api_client.go:623-642`), which deliberately
+  bypasses `do` by taking a caller `ctx` and calling `newRequest`/`http.Do`
+  directly so a long turn is not capped:
   ```go
-  func (c *APIClient) Shell(command string) (ShellResultDTO, error) {
+  func (c *APIClient) Shell(ctx context.Context, command string) (ShellResultDTO, error) {
+      req, err := c.newRequest(ctx, http.MethodPost, "/shell", shellRequestDTO{Command: command})
+      if err != nil { return ShellResultDTO{}, err }
+      resp, err := c.http.Do(req)
+      if err != nil { return ShellResultDTO{}, fmt.Errorf("shell: %w", err) }
+      defer resp.Body.Close()
+      if resp.StatusCode < 200 || resp.StatusCode >= 300 { /* read body → error, as SendMessage does */ }
       var out ShellResultDTO
-      if err := c.do(http.MethodPost, "/shell", shellRequestDTO{Command: command}, &out); err != nil {
-          return ShellResultDTO{}, err
-      }
+      // decode …
       return out, nil
   }
   ```
-  (Background context is fine — `do` is the existing client helper.)
+  The caller (RemoteClient) passes `context.Background()`, so the request's only
+  bound is the daemon-side `shell.Execute` timeout — making remote `!cmd` honour
+  the same 5-minute `[timed out]` semantics as embedded. This keeps embedded and
+  remote behaviour identical (the usability defect the critic flagged).
 
 ### 7. Remote wiring — `ui/tui/remote_handlers.go`
 - In `RemoteClient.Handlers()` (~L876), add:
   ```go
   OnShell: func(command string) (ShellResult, error) {
-      dto, err := c.Shell(command)
+      // Background context: the request's only bound is the daemon's 5-min
+      // shell timeout, NOT the 30s quickTimeout — matching embedded behaviour.
+      dto, err := c.Shell(context.Background(), command)
       if err != nil { return ShellResult{}, err }
       return ShellResult{Stdout: dto.Stdout, Stderr: dto.Stderr,
           ExitCode: dto.ExitCode, Timeout: dto.Timeout}, nil
@@ -191,7 +219,18 @@ handler — it never execs and never imports `internal/shell`.
 - Bare `!` → one-line usage note, nothing executed.
 - `!cmd` is recallable via Up/Down history, like `/cmd`.
 - Long-running `!cmd` honours `shell.DefaultTimeout` (5 min) and reports
-  `[timed out]`; the UI stays responsive (dispatch is on a background goroutine).
+  `[timed out]` **in both embedded and remote modes** — the remote client uses a
+  background-context request (not the 30 s `quickTimeout`), so the only bound is
+  the daemon-side shell timeout (see §6). The UI stays responsive (dispatch is on
+  a background goroutine, result marshalled back via `Workbench.Post`).
+- **Interject path note:** the `!` interception is on the `submit`/Enter path
+  only. The Interject button (`session_window.go:542`, `OnPress = sw.interject`)
+  is a separate path that injects a clarification into a live turn; a `!cmd`
+  typed and sent via Interject goes to the model verbatim. This is an accepted
+  edge (Interject is explicitly "slip text into the model's turn"); `!` is a
+  no-turn affordance and intentionally does not interject. Documented so it is a
+  conscious choice, not an oversight. (Optional follow-up: short-circuit `!` in
+  `interject` too — out of scope here.)
 
 ---
 
@@ -207,7 +246,12 @@ Matches the chat-with-shell mental model (`/` = client command, `!` = shell, pla
 = model). The user drives the input directly; output is **surfaced** inline (not
 silent) and visually distinct from model turns; bare `!` gives a help note rather
 than a confusing no-op; errors/exit/timeout are shown explicitly; no token cost.
-Dispatch is async so the UI never blocks on a slow command.
+Dispatch is async so the UI never blocks on a slow command. **Embedded and remote
+behave identically**, including the 5-minute timeout: §6 routes the remote `Shell`
+call through a background-context request (mirroring `SendMessage`) instead of the
+30 s `quickTimeout`-capped `do()`, eliminating the embedded-vs-remote divergence.
+The one deliberate asymmetry — Interject does not honour `!` — is documented above
+as an accepted edge.
 
 ## Criterion 3 — NO REGRESSIONS
 - `handleSlashCommand` and the `addUser`+`OnSend` fall-through are untouched; the
@@ -218,6 +262,11 @@ Dispatch is async so the UI never blocks on a slow command.
 - `ui/tui` stays exec-free: **no** `os/exec` and **no** `internal/shell` import
   there (execution dispatched via `OnShell`); only `cmd/` and `internal/server`
   import `internal/shell`, both already core-side.
+- **UI-thread safety** (the highest-risk spot, resolved in §1): all transcript
+  mutation from the `OnShell` goroutine funnels through `Workbench.Post`
+  (`tui.go:936`) — the same primitive `EmitSessionEvent` uses — so concurrent
+  `!cmd`s (allowed while busy) never race `sw.transcript`. Spelled out in §1, not
+  deferred to implementation.
 - New daemon route is additive and `AuthRequired`; existing routes unchanged.
 - gofmt/build/vet/golangci-lint clean; `go test ./...` green save the
   pre-existing `TestUserSessionSendMessage` 404.
@@ -244,10 +293,15 @@ shell execution and gains none.
    403 (requireHuman gate); `APIClient.Shell` round-trips against the mock/test
    server.
 4. **Remote wiring**: `RemoteClient.Handlers().OnShell` maps `ShellResultDTO` →
-   `ShellResult` against a stub server.
+   `ShellResult` against a stub server. **Plus a timeout-bound test**: assert
+   `APIClient.Shell` does **not** inherit `quickTimeout` — e.g. a stub handler
+   that sleeps >30 s (or, deterministically, that the call path uses
+   `newRequest` with the caller ctx, not `do`) so a future refactor back onto
+   `do()` is caught.
 5. **Transcript**: `addShellResult` adds a system record carrying the output and
    the model is **not** called (assert no `OnSend`, transcript record kind is not
-   `kindUser`).
+   `kindUser`). UI-thread marshalling via `Workbench.Post` is exercised by the
+   routing test (the result lands in the transcript after the posted closure runs).
 
 ## Open questions
 1. **Result shape**: I chose a structured `ShellResult`/`shellView` (exit/timeout
@@ -262,7 +316,9 @@ shell execution and gains none.
    and return it whole, matching the agent shell tool. No incremental streaming
    (would need an SSE channel) — acceptable for `!`-style one-shots; flag if a
    long-running `!cmd` live-tail is desired.
-4. **Persistence/restore**: shell records render into the live transcript; they
-   are display-only and never re-sent to the model. If session restore replays
-   transcript records, shell blocks reappear as inert text (harmless). Confirm we
-   don't want them excluded from the persisted index.
+4. **Persistence/restore** — *resolved, not open*: `restore()`
+   (`session_window.go:2952`) rebuilds the transcript **solely** from persisted
+   agent messages (user/assistant/tool/system). Shell records are display-only
+   and are therefore **dropped** on reopen/restore — which is exactly correct for
+   "not part of the conversation." No persistence work is needed; this is a
+   feature of the chosen seam, not a gap.
