@@ -67,6 +67,39 @@ func (tr *ToolRegistry) clientForPath(mgr *lsp.Manager, ctx context.Context, pat
 	return client, abs, nil
 }
 
+// workspaceClientForHint resolves the client for a workspace-scoped tool
+// (lsp_workspace_symbols). A path hint routes like any file; without one the
+// Manager routes to the sole configured server, and an ambiguous routing (more
+// than one server) is surfaced as a clean structured result asking for a path
+// hint rather than silently biasing to one language.
+func (tr *ToolRegistry) workspaceClientForHint(mgr *lsp.Manager, ctx context.Context, hint string) (*lsp.Client, map[string]interface{}) {
+	if hint != "" {
+		client, _, miss := tr.clientForPath(mgr, ctx, hint)
+		return client, miss
+	}
+	client, err := mgr.WorkspaceClient(ctx, "")
+	if err != nil {
+		switch {
+		case errors.Is(err, lsp.ErrAmbiguousServer):
+			return nil, map[string]interface{}{
+				"supported": false,
+				"reason":    "multiple language servers are configured; pass \"path\" (any file in the target workspace) to select one",
+			}
+		case errors.Is(err, lsp.ErrNoServer):
+			return nil, map[string]interface{}{
+				"supported": false,
+				"reason":    "no LSP server configured",
+			}
+		default:
+			return nil, map[string]interface{}{
+				"supported": false,
+				"reason":    fmt.Sprintf("language server unavailable: %v", err),
+			}
+		}
+	}
+	return client, nil
+}
+
 // opCtx returns the operation's context, defaulting to Background.
 func opCtx(ctx ToolContext) context.Context {
 	if ctx.Context != nil {
@@ -265,21 +298,17 @@ func (tr *ToolRegistry) registerLSPWorkspaceSymbols(mgr *lsp.Manager) {
 	tr.Register(&Tool{
 		Name:        "lsp_workspace_symbols",
 		ReadOnly:    true,
-		Description: "Search the whole workspace for symbols matching a fuzzy query (functions, types, ...). Faster and more precise than grepping for a definition by name.",
+		Description: "Search the whole workspace for symbols matching a fuzzy query (functions, types, ...). Faster and more precise than grepping for a definition by name. With a single language server configured the query routes to it automatically; pass \"path\" (any file in the target workspace) to pick the server when more than one is configured.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"query": map[string]interface{}{"type": "string", "description": "Symbol name query (fuzzy)."},
-				"path":  map[string]interface{}{"type": "string", "description": "Any file in the target workspace, to select the server (optional; defaults to a Go file)."},
+				"path":  map[string]interface{}{"type": "string", "description": "Any file in the target workspace, to select the server (optional; required only when more than one server is configured)."},
 			},
 			"required": []string{"query"},
 		},
 		Execute: func(args map[string]interface{}, ctx ToolContext) (interface{}, error) {
-			hint := strArg(args["path"])
-			if hint == "" {
-				hint = "_.go"
-			}
-			client, _, miss := tr.clientForPath(mgr, opCtx(ctx), hint)
+			client, miss := tr.workspaceClientForHint(mgr, opCtx(ctx), strArg(args["path"]))
 			if miss != nil {
 				return miss, nil
 			}
@@ -511,6 +540,15 @@ func (tr *ToolRegistry) registerLSPExecuteCommand(mgr *lsp.Manager) {
 				return miss, nil
 			}
 			command := strArg(args["command"])
+			// Consult the server's allow-list before prompting so an off-list command
+			// is declined up front rather than after a spurious ActionLSPCommand
+			// request (ExecuteCommand re-checks it as defence in depth, §12).
+			if !client.CommandAllowed(command) {
+				return map[string]interface{}{
+					"executed": false,
+					"reason":   "command is not in this server's allow-list",
+				}, nil
+			}
 			// Gate the higher-risk command through its own action (resource = server +
 			// command id), distinct from ActionWrite — its effects are not undoable.
 			perm := ctx.PermissionService

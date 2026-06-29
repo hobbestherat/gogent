@@ -146,6 +146,13 @@ func (c *Client) pushConfiguration(ctx context.Context) {
 // Name returns the configured server name.
 func (c *Client) Name() string { return c.cfg.Name }
 
+// CommandAllowed reports whether command is on this server's executeCommand
+// allow-list (§12). The tool layer consults it before issuing the
+// ActionLSPCommand prompt so an off-list command is declined up front rather
+// than after a spurious permission request; ExecuteCommand re-checks it as a
+// defence in depth.
+func (c *Client) CommandAllowed(command string) bool { return c.cfg.commandAllowed(command) }
+
 // logf forwards a server-originated message to the Host log, prefixed with the
 // server name. A nil Host discards.
 func (c *Client) logf(format string, args ...any) {

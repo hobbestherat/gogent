@@ -157,6 +157,50 @@ func (m *Manager) ClientForFile(ctx context.Context, path string) (*Client, erro
 	return client, nil
 }
 
+// WorkspaceClient resolves the client for a workspace-scoped request that is not
+// tied to a specific file (workspace symbols, §12). With a path hint it routes
+// exactly like a file request. Without one it routes to the sole configured
+// server; when more than one server is configured it returns ErrAmbiguousServer
+// so the tool can ask for a path hint rather than silently biasing the query to
+// one language. With no servers configured it returns ErrNoServer.
+func (m *Manager) WorkspaceClient(ctx context.Context, hint string) (*Client, error) {
+	if strings.TrimSpace(hint) != "" {
+		return m.ClientForFile(ctx, hint)
+	}
+	cfg, ok := m.soleConfig()
+	if !ok {
+		// Disambiguate "none configured" from "more than one configured".
+		if len(m.byExt) == 0 {
+			return nil, ErrNoServer
+		}
+		return nil, ErrAmbiguousServer
+	}
+	// Route via a representative path under the workspace root carrying the sole
+	// server's extension; the path is only used for extension routing (root
+	// detection falls back to the workspace root). This keeps the choice config-
+	// derived rather than a hard-coded language assumption.
+	ext := ".unknown"
+	if len(cfg.Extensions) > 0 {
+		ext = cfg.Extensions[0]
+	}
+	return m.ClientForFile(ctx, filepath.Join(m.workspaceRoot, "_workspace"+ext))
+}
+
+// soleConfig returns the single configured server when exactly one server backs
+// every routed extension; ok is false when none or more than one is configured.
+func (m *Manager) soleConfig() (cfg ServerConfig, ok bool) {
+	for _, c := range m.byExt {
+		if !ok {
+			cfg, ok = c, true
+			continue
+		}
+		if c.Name != cfg.Name {
+			return ServerConfig{}, false
+		}
+	}
+	return cfg, ok
+}
+
 // spawnClient gates the launch, detects the root, builds the transport, and runs
 // the handshake. The client's read loop runs on the Manager's session context,
 // not the caller's, so a cancelled tool call never tears down the server.

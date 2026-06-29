@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -213,6 +214,74 @@ func TestLSPExecuteCommandAllowListAndRun(t *testing.T) {
 	}
 	if fs.commandCount() != 1 {
 		t.Fatalf("off-list command should not run; count = %d, want 1", fs.commandCount())
+	}
+}
+
+// TestLSPNoServerReturnsStructuredResult pins the user-visible §12 contract at the
+// tool boundary: a file with no configured server resolves to a clean
+// {supported:false, reason:"no LSP server configured ..."} result, NOT an error.
+func TestLSPNoServerReturnsStructuredResult(t *testing.T) {
+	tr, _ := newLSPToolRegistry(t, &recordingHost{}, permission.New(""))
+
+	out := lspToolResult(t, tr, "lsp_diagnostics", map[string]interface{}{"path": "notes.txt"})
+	if out["supported"] != false {
+		t.Fatalf("unrouted extension should report supported:false: %+v", out)
+	}
+	reason, _ := out["reason"].(string)
+	if !strings.Contains(reason, "no LSP server configured") {
+		t.Fatalf("reason = %q, want it to mention no configured server", reason)
+	}
+}
+
+// TestLSPUnsupportedReturnsStructuredResult pins the §12 contract that an operation
+// the server does not advertise (here hover, absent from lspToolCaps) resolves to a
+// clean {supported:false, reason:"not supported ..."} result rather than an error.
+func TestLSPUnsupportedReturnsStructuredResult(t *testing.T) {
+	tr, _ := newLSPToolRegistry(t, &recordingHost{}, permission.New(""))
+
+	out := lspToolResult(t, tr, "lsp_hover", map[string]interface{}{"path": "a.go", "line": 1, "column": 1})
+	if out["supported"] != false {
+		t.Fatalf("unadvertised capability should report supported:false: %+v", out)
+	}
+	reason, _ := out["reason"].(string)
+	if !strings.Contains(reason, "not supported") {
+		t.Fatalf("reason = %q, want it to mention not supported", reason)
+	}
+}
+
+// TestLSPWorkspaceSymbolsRoutesToSoleServer confirms the workspace-symbol query
+// routes to the single configured server without a path hint (no Go-specific
+// default), and that an off-list command short-circuits before prompting.
+func TestLSPWorkspaceSymbolsRoutesToSoleServer(t *testing.T) {
+	tr, _ := newLSPToolRegistry(t, &recordingHost{}, permission.New(""))
+	// workspace/symbol is not advertised by lspToolCaps, so the routed server reports
+	// the clean unsupported result — proving the request reached a server (routing
+	// succeeded) rather than failing to route.
+	out := lspToolResult(t, tr, "lsp_workspace_symbols", map[string]interface{}{"query": "Foo"})
+	if out["supported"] != false {
+		t.Fatalf("workspace symbols should route to the sole server and report unsupported: %+v", out)
+	}
+}
+
+// TestLSPExecuteCommandOffListSkipsPrompt confirms an off-list command is declined
+// up front, with no spurious ActionLSPCommand prompt (gate-ordering fix).
+func TestLSPExecuteCommandOffListSkipsPrompt(t *testing.T) {
+	prompter := &recordingPrompter{decision: permission.DecisionAllow}
+	perm := permission.New("")
+	perm.SetPrompter(prompter)
+	tr, fs := newLSPToolRegistry(t, &recordingHost{}, perm)
+
+	out := lspToolResult(t, tr, "lsp_execute_command", map[string]interface{}{
+		"path": "a.go", "command": "danger.rm",
+	})
+	if out["executed"] != false {
+		t.Fatalf("off-list command should report executed:false: %+v", out)
+	}
+	if len(prompter.seen()) != 0 {
+		t.Fatalf("off-list command must not prompt; prompts = %d", len(prompter.seen()))
+	}
+	if fs.commandCount() != 0 {
+		t.Fatalf("off-list command must not reach the server; count = %d", fs.commandCount())
 	}
 }
 

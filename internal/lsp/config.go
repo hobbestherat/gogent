@@ -87,6 +87,11 @@ var (
 	// ErrCommandNotAllowed is returned when a workspace/executeCommand is requested
 	// for a command absent from the server's AllowedCommands allow-list (§12).
 	ErrCommandNotAllowed = errors.New("command not in the server's allow-list")
+	// ErrAmbiguousServer is returned by WorkspaceClient for a workspace-scoped
+	// request (e.g. workspace symbols) when no path hint is supplied and more than
+	// one server is configured, so the caller cannot silently bias the query to one
+	// language. The caller asks for a path hint instead of guessing.
+	ErrAmbiguousServer = errors.New("multiple LSP servers configured; a path hint is required")
 )
 
 // DefKind selects which "go to" family member a Definition call resolves.
