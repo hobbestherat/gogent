@@ -266,14 +266,14 @@ func (h *lspHost) applyOne(op lsp.DocumentChange, auths map[string]fileops.Autho
 		auth := auths[op.Path]
 		before, _, err := g.fileMutation.PreviewWrite(op.Path, "", auth)
 		if err != nil {
-			return "read " + op.Path, err
+			return "read " + op.Path, fmt.Errorf("preview write %s: %w", op.Path, err)
 		}
 		updated, err := applyTextEdits(before, op.Edits)
 		if err != nil {
 			return "apply edits to " + op.Path, err
 		}
 		if err := g.fileMutation.WriteFile(op.Path, updated, auth); err != nil {
-			return "write " + op.Path, err
+			return "write " + op.Path, fmt.Errorf("write %s: %w", op.Path, err)
 		}
 	case lsp.ChangeCreate:
 		exists, err := fileExists(op.Path)
@@ -287,22 +287,22 @@ func (h *lspHost) applyOne(op lsp.DocumentChange, auths map[string]fileops.Autho
 			return "", nil
 		}
 		if err := g.fileMutation.WriteFile(op.Path, "", auths[op.Path]); err != nil {
-			return "create " + op.Path, err
+			return "create " + op.Path, fmt.Errorf("create %s: %w", op.Path, err)
 		}
 	case lsp.ChangeDelete:
 		if err := g.fileMutation.Remove(op.Path); err != nil {
-			return "delete " + op.Path, err
+			return "delete " + op.Path, fmt.Errorf("delete %s: %w", op.Path, err)
 		}
 	case lsp.ChangeRename:
 		content, _, err := g.fileMutation.PreviewWrite(op.Path, "", auths[op.Path])
 		if err != nil {
-			return "read " + op.Path, err
+			return "read " + op.Path, fmt.Errorf("preview write %s: %w", op.Path, err)
 		}
 		if err := g.fileMutation.WriteFile(op.NewPath, content, auths[op.NewPath]); err != nil {
-			return "write " + op.NewPath, err
+			return "write " + op.NewPath, fmt.Errorf("write %s: %w", op.NewPath, err)
 		}
 		if err := g.fileMutation.Remove(op.Path); err != nil {
-			return "remove " + op.Path, err
+			return "remove " + op.Path, fmt.Errorf("remove %s: %w", op.Path, err)
 		}
 	}
 	return "", nil
@@ -316,7 +316,7 @@ func fileExists(path string) (bool, error) {
 	} else if os.IsNotExist(err) {
 		return false, nil
 	} else {
-		return false, err
+		return false, fmt.Errorf("stat %s: %w", path, err)
 	}
 }
 

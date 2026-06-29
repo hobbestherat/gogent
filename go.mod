@@ -2,6 +2,8 @@ module gogent
 
 go 1.26
 
+toolchain go1.26.4
+
 require (
 	github.com/alecthomas/chroma/v2 v2.27.0
 	github.com/expr-lang/expr v1.17.8

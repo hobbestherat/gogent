@@ -192,7 +192,7 @@ func (c *Client) ensureOpen(ctx context.Context, path string) (sentVersion bool,
 	// computed only on a size/mtime mismatch (or a first open).
 	info, err := os.Stat(path)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("stat %s: %w", path, err)
 	}
 	c.mu.Lock()
 	if d, open := c.docs[path]; open && d.size == info.Size() && d.mtime.Equal(info.ModTime()) {
@@ -203,7 +203,7 @@ func (c *Client) ensureOpen(ctx context.Context, path string) (sentVersion bool,
 
 	content, err := os.ReadFile(path) //nolint:gosec // path resolved from a workspace tool request
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("read %s: %w", path, err)
 	}
 	hash := sha256.Sum256(content)
 
@@ -226,15 +226,17 @@ func (c *Client) ensureOpen(ctx context.Context, path string) (sentVersion bool,
 		// Register the freshness interest before sending didOpen so a fast push for
 		// this version is never dropped (§9). didOpen is a notification.
 		c.diag.expect(path, version)
-		err := c.conn.Notify(ctx, "textDocument/didOpen", &protocol.DidOpenTextDocumentParams{
+		if err := c.conn.Notify(ctx, "textDocument/didOpen", &protocol.DidOpenTextDocumentParams{
 			TextDocument: protocol.TextDocumentItem{
 				URI:        pathToURI(path),
 				LanguageID: protocol.LanguageKind(langID),
 				Version:    version,
 				Text:       string(content),
 			},
-		})
-		return true, err
+		}); err != nil {
+			return true, fmt.Errorf("didOpen notify: %w", err)
+		}
+		return true, nil
 	case d.hash != hash:
 		// Out-of-band change to an open file: re-sync the full document (§11.1).
 		d.version++
@@ -255,7 +257,7 @@ func (c *Client) ensureOpen(ctx context.Context, path string) (sentVersion bool,
 
 // sendDidChange sends a full-document didChange for path at version (§11.1).
 func (c *Client) sendDidChange(ctx context.Context, path string, version int32, text string) error {
-	return c.conn.Notify(ctx, "textDocument/didChange", &protocol.DidChangeTextDocumentParams{
+	if err := c.conn.Notify(ctx, "textDocument/didChange", &protocol.DidChangeTextDocumentParams{
 		TextDocument: protocol.VersionedTextDocumentIdentifier{
 			TextDocumentIdentifier: protocol.TextDocumentIdentifier{URI: pathToURI(path)},
 			Version:                version,
@@ -263,7 +265,10 @@ func (c *Client) sendDidChange(ctx context.Context, path string, version int32, 
 		ContentChanges: []protocol.TextDocumentContentChangeEvent{
 			&protocol.TextDocumentContentChangeWholeDocument{Text: text},
 		},
-	})
+	}); err != nil {
+		return fmt.Errorf("didChange notify: %w", err)
+	}
+	return nil
 }
 
 // supports reports whether the server advertises method (capability gating, §7.2).

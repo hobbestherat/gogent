@@ -242,13 +242,6 @@ func (fs *fakeServer) codeActionDiagCount() int {
 	return fs.lastCodeActionDiags
 }
 
-// pushDiag publishes diagnostics for uriStr at version out-of-band (e.g. before a
-// version is sent, to test the register-before-send race).
-func (fs *fakeServer) pushDiag(uriStr string, version int, diags string) {
-	body := `{"uri":"` + uriStr + `","version":` + itoa(version) + `,"diagnostics":` + diags + `}`
-	_ = fs.conn.Notify(context.Background(), "textDocument/publishDiagnostics", jsonrpc2.RawMessage(body))
-}
-
 // registerCapability sends a client/registerCapability the Client must honor.
 func (fs *fakeServer) registerCapability(method, registerOptions string) {
 	if registerOptions == "" {
