@@ -238,7 +238,7 @@ func TestModelsDialogIssue585VerticalOrderingListHintBlankButton(t *testing.T) {
 		t.Errorf("list bottom %d >= hint row %d (overlap)", listBottom, hintY)
 	}
 	// Ordering sanity.
-	if !(list.Y+list.H-1 < hintY && hintY < blankY && blankY < buttonY && buttonY < b.Y+b.H-1) {
+	if list.Y+list.H-1 >= hintY || hintY >= blankY || blankY >= buttonY || buttonY >= b.Y+b.H-1 {
 		t.Errorf("ordering broken: listBottom=%d hint=%d blank=%d button=%d border=%d",
 			list.Y+list.H-1, hintY, blankY, buttonY, b.Y+b.H-1)
 	}
@@ -313,7 +313,7 @@ func TestModelsDialogIssue585ListBottomAboveHintAcrossCounts(t *testing.T) {
 		if listBottom >= hintY {
 			t.Errorf("models=%d: list bottom %d >= hint row %d", tc.models, listBottom, hintY)
 		}
-		if !(listBottom < hintY && hintY < blankY && blankY < buttonY) {
+		if listBottom >= hintY || hintY >= blankY || blankY >= buttonY {
 			t.Errorf("models=%d: ordering broken listBot=%d hint=%d blank=%d btn=%d",
 				tc.models, listBottom, hintY, blankY, buttonY)
 		}
