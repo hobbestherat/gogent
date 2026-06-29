@@ -257,9 +257,13 @@ func (s *diagnosticsStore) wait(path string) (diags []Diagnostic, settled bool) 
 		// Version correlation (primary): a push reported the version we last sent,
 		// so the findings reflect the latest content rather than a stale-empty set.
 		versioned := e.hasVersion && e.version >= e.awaited
-		// Idle fallback: a server that omits the version field is settled once it
-		// has pushed at least once and reports no in-flight work (§11.4, fallback 2).
-		idleFallback := e.pushSeq > 0 && s.isIdleLocked()
+		// Idle fallback (§11.4, fallback 2): scoped to servers that have NEVER
+		// versioned a push. The design ranks version correlation as primary and the
+		// work-done idle signal only as a fallback "for servers that omit the version
+		// field." Gating on !sawVersioned keeps a versioning server (gopls) on strict
+		// version correlation, so a momentarily-idle server cannot settle a read on a
+		// stale prior version after an edit while the awaited version is still pending.
+		idleFallback := !s.sawVersioned && e.pushSeq > 0 && s.isIdleLocked()
 		if (versioned || idleFallback) && time.Since(e.lastPush) >= debounceWindow {
 			return append([]Diagnostic(nil), e.diags...), true
 		}
