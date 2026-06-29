@@ -297,10 +297,6 @@ func permissionPrompt(req permission.Request) (title, question, alwaysLabel stri
 				alwaysAllow
 		}
 		return "Network access?", "The agent wants to access the network.", alwaysAllow
-	case permission.ActionDiagnostics:
-		return "Run diagnostics?",
-			"The agent wants to run the project's compiler/linter to check for errors.",
-			alwaysAllow
 	default:
 		return "Permission required",
 			fmt.Sprintf("The agent requests %s on %s.", req.Action, req.Resource),

@@ -144,13 +144,6 @@
     "suppress_when_focused": false
   },
   "mcp_servers": [],
-  "diagnostics": {
-    "command": ["go", "vet", "./..."],
-    "warning_pattern": ""
-  },
-  "verify": {
-    "command": ["go", "test", "./..."]
-  },
   "theme": {
     "name": "default",
     "no_color": false,

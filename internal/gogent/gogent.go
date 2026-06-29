@@ -804,26 +804,9 @@ func (g *Gogent) initializeToolRegistry() {
 	g.toolRegistry.RegisterWebFetchTool()
 	g.toolRegistry.RegisterGitTool()
 
-	// Diagnostics tool (issue #42): runs the project's compiler/linter and returns
-	// structured errors. The command is configurable; the zero-value config keeps
-	// the Go default (`go vet ./...`), so it works out of the box.
-	var diagCmd []string
-	var diagWarn string
-	if g.config != nil {
-		diagCmd = g.config.Diagnostics.Command
-		diagWarn = g.config.Diagnostics.WarningPattern
-	}
-	g.toolRegistry.RegisterDiagnosticsTool(diagCmd, diagWarn)
-
-	// Verify tool (issue #44): runs the project's test command and returns
-	// structured pass/fail results plus parsed failures — the tight
-	// edit→test→read-failures loop. The command is configurable; the zero-value
-	// config keeps the Go default (`go test ./...`), so it works out of the box.
-	var verifyCmd []string
-	if g.config != nil {
-		verifyCmd = g.config.Verify.Command
-	}
-	g.toolRegistry.RegisterVerifyTool(verifyCmd)
+	// Per-file semantic checks (diagnostics, navigation) are provided by the lsp_*
+	// tools, registered separately in StartLSPServers; whole-project build/test
+	// stays a shell command (the LSP support design §4).
 
 	// spawn_subagent is deliberately left non-strict (Strict defaults false).
 	// Its "subtasks" items use a union type (object|string), which is outside the
@@ -837,7 +820,7 @@ func (g *Gogent) initializeToolRegistry() {
 			"with a \"subtasks\" array runs every entry CONCURRENTLY and blocks only until the " +
 			"slowest finishes — prefer it over investigating files or running checks one after " +
 			"another yourself. Reach for it to parallelize multi-file/multi-module investigation, " +
-			"to run several checks at once (e.g. diagnostics + verify + grep), or to research a " +
+			"to run several checks at once (e.g. build/tests in the shell + lsp_diagnostics + grep), or to research a " +
 			"topic while you keep working. Batch the independent parts into the one call's " +
 			"\"subtasks\" array; do NOT issue spawns one-per-turn (they then run serially with no " +
 			"speed-up). Use \"name\"/\"task\" only for a single lone task. In one-shot mode (the " +
@@ -881,8 +864,8 @@ func (g *Gogent) initializeToolRegistry() {
 		InputExamples: []map[string]interface{}{
 			{
 				"subtasks": []map[string]interface{}{
-					{"name": "diagnostics", "task": "Run diagnostics on the package and report any errors."},
-					{"name": "tests", "task": "Run the test suite and summarize failures."},
+					{"name": "review", "task": "Run lsp_diagnostics on the changed files and report any errors."},
+					{"name": "tests", "task": "Run the build and test suite in the shell and summarize failures."},
 				},
 			},
 		},
@@ -3203,9 +3186,6 @@ func (g *Gogent) SetTimeouts(t config.TimeoutConfig) {
 	g.toolRegistry.NetworkTimeout = g.toolRegistry.ShellTimeout
 	g.toolRegistry.WorkspaceRoot = g.workspaceRoot
 	g.toolRegistry.Permission = g.permissions
-	diagCmd := g.config.Diagnostics.Command
-	diagWarn := g.config.Diagnostics.WarningPattern
-	verifyCmd := g.config.Verify.Command
 	sessions := make([]*agent.UserSession, 0, len(g.userSessions))
 	for _, s := range g.userSessions {
 		sessions = append(sessions, s)
@@ -3217,8 +3197,6 @@ func (g *Gogent) SetTimeouts(t config.TimeoutConfig) {
 	g.toolRegistry.RegisterShellTool()
 	g.toolRegistry.RegisterWebFetchTool()
 	g.toolRegistry.RegisterGitTool()
-	g.toolRegistry.RegisterDiagnosticsTool(diagCmd, diagWarn)
-	g.toolRegistry.RegisterVerifyTool(verifyCmd)
 	subAgentTO := time.Duration(t.SubAgentSecondsOrDefault()) * time.Second
 	for _, s := range sessions {
 		s.SetSubAgentTimeout(subAgentTO)

@@ -367,7 +367,7 @@ func TestPermissionPromptAlwaysLabelIsConcise(t *testing.T) {
 		{Action: permission.ActionSubagent},
 		{Action: permission.ActionNetwork, Resource: "https://example.invalid"},
 		{Action: permission.ActionNetwork},
-		{Action: permission.ActionDiagnostics},
+		{Action: permission.ActionShell, Detail: "echo ok2"},
 		{Action: permission.Action("future-action"), Resource: "resource"},
 	} {
 		t.Run(string(req.Action), func(t *testing.T) {
@@ -389,7 +389,7 @@ func TestPermissionButtonRowShowsShortAlwaysLabelUnelided(t *testing.T) {
 		{Action: permission.ActionSubagent},
 		{Action: permission.ActionNetwork, Resource: "https://example.invalid"},
 		{Action: permission.ActionNetwork},
-		{Action: permission.ActionDiagnostics},
+		{Action: permission.ActionShell, Detail: "echo ok2"},
 		{Action: permission.Action("future-action"), Resource: "resource"},
 	}
 	for _, width := range []int{permissionMinWidth, 120} {

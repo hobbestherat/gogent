@@ -23,10 +23,8 @@ func TestIssue359ToolPackageStrictConstructors(t *testing.T) {
 	reg := NewToolRegistry()
 	reg.RegisterCalcTool()
 	reg.RegisterGitTool()
-	reg.RegisterVerifyTool(nil)
-	reg.RegisterDiagnosticsTool(nil, "")
 
-	for _, name := range []string{"calc", "git", "verify", "diagnostics"} {
+	for _, name := range []string{"calc", "git"} {
 		t.Run(name, func(t *testing.T) {
 			tl := reg.Get(name)
 			if tl == nil {

@@ -9,8 +9,6 @@ var issue359StrictTools = []string{
 	"calc",
 	"git",
 	"grep",
-	"verify",
-	"diagnostics",
 }
 
 func TestIssue359StrictToolsRegisteredStrictWithClosedSchemas(t *testing.T) {

@@ -458,34 +458,6 @@ const (
 // configured fast_model rather than naming a specific Models[] entry directly.
 const FastModelRef = "fast_model"
 
-// DiagnosticsConfig configures the `diagnostics` tool (issue #42), which runs the
-// project's compiler/linter and returns structured errors. The zero value leaves
-// the tool working out of the box with the Go default (`go vet ./...`), so an
-// older config.json without a "diagnostics" key is unaffected; the fields only
-// customize the command and how its output is classified.
-type DiagnosticsConfig struct {
-	// Command is the argument vector run to produce diagnostics. Empty defaults
-	// to ["go", "vet", "./..."]. Use, e.g. ["go", "build", "./..."] to typecheck
-	// only, or any linter that emits `path:line:col: message` lines.
-	Command []string `json:"command,omitempty"`
-	// WarningPattern, when set, is a regular expression tested against each
-	// parsed message; a match marks the diagnostic a warning rather than an
-	// error. Empty treats every diagnostic as an error.
-	WarningPattern string `json:"warning_pattern,omitempty"`
-}
-
-// VerifyConfig configures the `verify` tool (issue #44), which runs the
-// project's test command and returns structured pass/fail results. The zero
-// value leaves the tool working out of the box with the Go default
-// (`go test ./...`), so an older config.json without a "verify" key is
-// unaffected; the field only customizes the command.
-type VerifyConfig struct {
-	// Command is the argument vector run as the test suite. Empty defaults to
-	// ["go", "test", "./..."]. Use any command whose exit status signals suite
-	// pass/fail; output is parsed for `go test`-style failures.
-	Command []string `json:"command,omitempty"`
-}
-
 // MCPServerConfig declares one Model Context Protocol (MCP) server whose tools
 // gogent surfaces through its own tool registry (issue #36). Transport selects
 // the wire — "stdio" (default, a launched subprocess) or "http"/"streamable-http"
@@ -615,13 +587,6 @@ type Config struct {
 	// to the registry at startup (issue #36). Empty (the default) leaves MCP off,
 	// so an older config.json without the key is unaffected.
 	MCPServers []MCPServerConfig `json:"mcp_servers,omitempty"`
-	// Diagnostics configures the `diagnostics` tool (issue #42). The zero value
-	// keeps the Go default, so an older config.json without the key is unaffected.
-	Diagnostics DiagnosticsConfig `json:"diagnostics,omitempty"`
-	// Verify configures the `verify` tool (issue #44). The zero value keeps the
-	// Go default (`go test ./...`), so an older config.json without the key is
-	// unaffected.
-	Verify VerifyConfig `json:"verify,omitempty"`
 	// Theme selects and customises the TUI colour palette (issue #66). The zero
 	// value is the coloured "default" palette, so an older config.json without the
 	// key is unaffected.

@@ -899,7 +899,7 @@ func (s *UserSession) ExecuteTaskLoop(ctx context.Context, agentID string, initi
 // Keeping spawn_subagent does NOT let plan mode mutate the workspace: a
 // sub-agent's registry is cloned from the parent's (see newSubAgent), which in
 // plan mode is the already-plan-filtered, read-only registry — so a plan-mode
-// child inherits read/grep/glob/list/diagnostics but not write/edit/multi_edit/
+// child inherits read/grep/glob/list/lsp_* but not write/edit/multi_edit/
 // apply_patch/shell. The fan-out stays bounded by the shared SubAgentLimiter and
 // the per-parent max-sub-agents cap, exactly as outside plan mode.
 // ask_user is also retained: asking the user a structured question is a
@@ -958,7 +958,7 @@ will approve before you execute it.`
 You MAY delegate read-only investigation to sub-agents to research the codebase
 in parallel while you plan. Batch the independent lookups into a SINGLE
 spawn_subagent call's "subtasks" array (e.g. one sub-agent per module to
-summarize its structure, or diagnostics + grep together) so they run
+summarize its structure, or lsp_diagnostics + grep together) so they run
 concurrently. The sub-agents are also read-only this turn: they investigate and
 report findings only — they must NOT write, edit, or otherwise change anything.
 The asynchronous launch_agent family is NOT available this turn — use the blocking
@@ -2286,7 +2286,7 @@ func makeToolResultMessage(call tool.ToolCall, result string) model.Message {
 //
 // Strictness is per tool: FunctionDef.Strict mirrors the tool's opt-in
 // Tool.Strict flag (issue #359). Read-only tools with simple closed schemas
-// (read, glob, list, calc, git, grep, verify, diagnostics) opt in, eliminating
+// (read, glob, list, calc, git, grep) opt in, eliminating
 // type-coercion errors and validate-and-retry rounds. spawn_subagent — and any
 // tool whose schema uses a union type or otherwise needs parallel-tool-call
 // freedom — stays non-strict: a strict tool forces parallel_tool_calls:false on
@@ -2359,7 +2359,7 @@ the slowest finishes. Make delegation your default whenever a turn has TWO OR MO
 independent lookups — reserve doing the work inline for trivial single-step
 actions (one read, one grep). Typical triggers:
   - investigating several modules/files at once,
-  - running diagnostics + verify + grep together to validate a change,
+  - running the build/tests in the shell + lsp_diagnostics + grep together to validate a change,
   - researching a topic (or auditing subsystems) while you keep editing.
 ALWAYS batch the independent parts into ONE spawn_subagent call's "subtasks"
 array — one call, not one call per part. Emitting separate spawns across turns
@@ -2368,7 +2368,7 @@ three modules in parallel instead of reading them one after another, in ONE call
   {"tool":"spawn_subagent","args":{"subtasks":[
     {"name":"agent","task":"Map internal/agent: key types and how the loop runs"},
     {"name":"gogent","task":"Map internal/gogent: tool registry and spawn flow"},
-    {"name":"verify","task":"Run diagnostics and the agent tests; report failures"}
+    {"name":"tests","task":"Run the build and the agent tests in the shell; report failures"}
   ]}}
 Each sub-agent runs to completion and returns a result starting with "SUCCESS: "
 or "FAILURE: ". Use a single "name"/"task" pair only for a lone subtask; always
@@ -2421,12 +2421,12 @@ whenever a turn has two or more independent lookups; both styles cut wall-clock
 latency by running work concurrently. Choose the style by what you will do next:
 - BLOCKING (spawn_subagent): use when you need ALL results before you can continue
   — batched independent work you will wait on (investigating several modules at
-  once, or running diagnostics + verify + grep together to validate a change). ONE
+  once, or running the build/tests in the shell + lsp_diagnostics + grep to validate a change). ONE
   spawn_subagent call runs every entry of its "subtasks" array CONCURRENTLY and
   blocks only until the slowest finishes:
     {"tool":"spawn_subagent","args":{"subtasks":[
       {"name":"modules","task":"Map internal/agent and internal/gogent: key types and flow"},
-      {"name":"verify","task":"Run diagnostics and the agent tests; report failures"}
+      {"name":"tests","task":"Run the build and the agent tests in the shell; report failures"}
     ]}}
   Always batch the independent parts into ONE call (never one spawn per part across
   turns). Each child returns "SUCCESS: " or "FAILURE: ".
