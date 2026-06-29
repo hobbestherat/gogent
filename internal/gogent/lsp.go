@@ -2,6 +2,7 @@ package gogent
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -174,46 +175,23 @@ func (h *lspHost) ApplyEdit(_ string, edit lsp.WorkspaceEdit) (bool, string, err
 	rc := permission.RequestContext{}
 
 	// Collect every affected path and authorize it up front; a denial aborts.
+	paths := edit.AffectedPaths()
 	auths := map[string]fileops.Authorization{}
-	authorize := func(path string) (fileops.Authorization, bool, string) {
-		if a, ok := auths[path]; ok {
-			return a, true, ""
-		}
+	for _, path := range paths {
 		auth, err := fileops.CheckFileAccess(g.permissions, g.locationMutation, true, path, rc)
 		if err != nil {
-			return fileops.Authorization{}, false, err.Error()
+			return false, err.Error(), nil
 		}
 		auths[path] = auth
-		return auth, true, ""
-	}
-	for path := range edit.Changes {
-		if _, ok, reason := authorize(path); !ok {
-			return false, reason, nil
-		}
-	}
-	for _, op := range edit.ResourceOps {
-		if _, ok, reason := authorize(op.Path); !ok {
-			return false, reason, nil
-		}
-		if op.NewPath != "" {
-			if _, ok, reason := authorize(op.NewPath); !ok {
-				return false, reason, nil
-			}
-		}
 	}
 
 	// Snapshot every affected path before any op so undo can restore content,
-	// re-create a deleted file, or delete a created one (§12).
+	// re-create a deleted file, or delete a created one — including BOTH ends of a
+	// rename (§12).
 	if g.checkpoints != nil {
 		g.checkpoints.BeginTurn(lspSession)
-		for path := range edit.Changes {
+		for _, path := range paths {
 			g.checkpoints.Snapshot(lspSession, path, auths[path])
-		}
-		for _, op := range edit.ResourceOps {
-			g.checkpoints.Snapshot(lspSession, op.Path, auths[op.Path])
-			if op.NewPath != "" {
-				g.checkpoints.Snapshot(lspSession, op.NewPath, auths[op.NewPath])
-			}
 		}
 	}
 
@@ -229,49 +207,111 @@ func (h *lspHost) ApplyEdit(_ string, edit lsp.WorkspaceEdit) (bool, string, err
 	return true, "", nil
 }
 
-// applyChanges writes the text edits and performs the resource operations of an
-// edit. Text edits are applied first (per the LSP ordering for an edit that both
-// edits and renames), then resource ops in order.
+// applyChanges performs an edit's operations in order. It honors the server's
+// original documentChanges sequence (edit.Ordered) when present — so a create runs
+// before the edits that populate it and a rename runs before edits to the renamed
+// file — and falls back to a synthesized order (creates, then text edits, then
+// renames/deletes) for a legacy `changes`-map edit. A create never truncates a file
+// it was told to leave alone (§12).
 func (h *lspHost) applyChanges(edit lsp.WorkspaceEdit, auths map[string]fileops.Authorization) (string, error) {
-	g := h.g
-	for path, edits := range edit.Changes {
-		auth := auths[path]
-		before, _, err := g.fileMutation.PreviewWrite(path, "", auth)
-		if err != nil {
-			return "read " + path, err
-		}
-		updated, err := applyTextEdits(before, edits)
-		if err != nil {
-			return "apply edits to " + path, err
-		}
-		if err := g.fileMutation.WriteFile(path, updated, auth); err != nil {
-			return "write " + path, err
-		}
-	}
-	for _, op := range edit.ResourceOps {
-		switch op.Kind {
-		case "create":
-			if err := g.fileMutation.WriteFile(op.Path, "", auths[op.Path]); err != nil {
-				return "create " + op.Path, err
-			}
-		case "delete":
-			if err := g.fileMutation.Remove(op.Path); err != nil {
-				return "delete " + op.Path, err
-			}
-		case "rename":
-			content, _, err := g.fileMutation.PreviewWrite(op.Path, "", auths[op.Path])
-			if err != nil {
-				return "read " + op.Path, err
-			}
-			if err := g.fileMutation.WriteFile(op.NewPath, content, auths[op.NewPath]); err != nil {
-				return "write " + op.NewPath, err
-			}
-			if err := g.fileMutation.Remove(op.Path); err != nil {
-				return "remove " + op.Path, err
-			}
+	for _, op := range orderedChanges(edit) {
+		if reason, err := h.applyOne(op, auths); err != nil {
+			return reason, err
 		}
 	}
 	return "", nil
+}
+
+// orderedChanges returns the operations of edit in apply order: edit.Ordered as-is
+// when the server used documentChanges, otherwise a safe synthesized order for a
+// legacy `changes`-map / ResourceOps edit (creates first so a later text edit fills
+// them, then text edits, then renames and deletes).
+func orderedChanges(edit lsp.WorkspaceEdit) []lsp.DocumentChange {
+	if len(edit.Ordered) > 0 {
+		return edit.Ordered
+	}
+	var creates, texts, tail []lsp.DocumentChange
+	for _, op := range edit.ResourceOps {
+		switch op.Kind {
+		case "create":
+			creates = append(creates, lsp.DocumentChange{Kind: lsp.ChangeCreate, Path: op.Path})
+		case "rename":
+			tail = append(tail, lsp.DocumentChange{Kind: lsp.ChangeRename, Path: op.Path, NewPath: op.NewPath})
+		case "delete":
+			tail = append(tail, lsp.DocumentChange{Kind: lsp.ChangeDelete, Path: op.Path})
+		}
+	}
+	for path, edits := range edit.Changes {
+		texts = append(texts, lsp.DocumentChange{Kind: lsp.ChangeText, Path: path, Edits: edits})
+	}
+	out := make([]lsp.DocumentChange, 0, len(creates)+len(texts)+len(tail))
+	out = append(out, creates...)
+	out = append(out, texts...)
+	out = append(out, tail...)
+	return out
+}
+
+// applyOne performs a single ordered operation, returning a short failure tag and
+// the error on failure.
+func (h *lspHost) applyOne(op lsp.DocumentChange, auths map[string]fileops.Authorization) (string, error) {
+	g := h.g
+	switch op.Kind {
+	case lsp.ChangeText:
+		auth := auths[op.Path]
+		before, _, err := g.fileMutation.PreviewWrite(op.Path, "", auth)
+		if err != nil {
+			return "read " + op.Path, err
+		}
+		updated, err := applyTextEdits(before, op.Edits)
+		if err != nil {
+			return "apply edits to " + op.Path, err
+		}
+		if err := g.fileMutation.WriteFile(op.Path, updated, auth); err != nil {
+			return "write " + op.Path, err
+		}
+	case lsp.ChangeCreate:
+		exists, err := fileExists(op.Path)
+		if err != nil {
+			return "create " + op.Path, err
+		}
+		// Never clobber an existing file unless the op explicitly opted into
+		// overwrite; ignoreIfExists and the default both leave existing content
+		// intact so a preceding/following text edit is not truncated (§12).
+		if exists && !op.Overwrite {
+			return "", nil
+		}
+		if err := g.fileMutation.WriteFile(op.Path, "", auths[op.Path]); err != nil {
+			return "create " + op.Path, err
+		}
+	case lsp.ChangeDelete:
+		if err := g.fileMutation.Remove(op.Path); err != nil {
+			return "delete " + op.Path, err
+		}
+	case lsp.ChangeRename:
+		content, _, err := g.fileMutation.PreviewWrite(op.Path, "", auths[op.Path])
+		if err != nil {
+			return "read " + op.Path, err
+		}
+		if err := g.fileMutation.WriteFile(op.NewPath, content, auths[op.NewPath]); err != nil {
+			return "write " + op.NewPath, err
+		}
+		if err := g.fileMutation.Remove(op.Path); err != nil {
+			return "remove " + op.Path, err
+		}
+	}
+	return "", nil
+}
+
+// fileExists reports whether path exists on disk; an unexpected stat error is
+// surfaced so a create does not silently mis-decide.
+func fileExists(path string) (bool, error) {
+	if _, err := os.Stat(path); err == nil {
+		return true, nil
+	} else if os.IsNotExist(err) {
+		return false, nil
+	} else {
+		return false, err
+	}
 }
 
 // applyTextEdits applies a set of LSP text edits (1-based, rune-column ranges at

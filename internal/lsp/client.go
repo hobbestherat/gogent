@@ -33,9 +33,17 @@ type docState struct {
 // in cfg. It owns the jsonrpc2 connection, the live capability table, the
 // versioned open-document table, and the diagnostics cache, each guarded by mu
 // (or, for diagnostics, by the store's own lock). Curated, capability-gated
-// operations are the tool-facing surface; cancellation maps to $/cancelRequest
-// automatically because every outbound request goes through the library's
-// cancel-aware dispatcher.
+// operations are the tool-facing surface.
+//
+// Cancellation (the LSP support design §9) is satisfied per request: every curated
+// op issues exactly one request through the protocol ServerDispatcher, whose Call
+// keeps the in-flight request→id mapping (the library's outgoing-call table) and,
+// when the caller's context is cancelled before the response arrives, emits
+// $/cancelRequest for that exact id over a detached context and unblocks the caller
+// with context.Canceled; the id is cleared on response. The read loop runs on the
+// Manager's long-lived baseCtx, never a tool-call context, so cancelling one tool
+// call never tears down the client. TestCancellationEmitsCancelRequest pins this
+// behavior.
 type Client struct {
 	cfg           ServerConfig
 	rootURI       uri.URI

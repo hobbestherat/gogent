@@ -88,18 +88,40 @@ func (s *diagnosticsStore) setIdle(idle bool) {
 	s.mu.Unlock()
 }
 
+// resetEntry clears an entry's cached push state in place while preserving the
+// awaited version, so an in-flight freshness waiter keeps its correlation target
+// and re-waits for the next push rather than being stranded. The caller holds s.mu.
+func resetEntry(e *diagEntry) {
+	e.diags = nil
+	e.version = 0
+	e.hasVersion = false
+	e.pushSeq = 0
+	e.lastPush = time.Time{}
+}
+
 // invalidate drops the cached push set for path (e.g. on a pull-cache refresh
-// request) so the next read re-pulls or re-waits.
+// request) so the next read re-pulls or re-waits. It resets the entry in place
+// rather than deleting it so a concurrent waiter's pointer stays valid, then wakes
+// any waiter.
 func (s *diagnosticsStore) invalidate(path string) {
 	s.mu.Lock()
-	delete(s.byPath, path)
+	if e := s.byPath[path]; e != nil {
+		resetEntry(e)
+	}
+	s.cond.Broadcast()
 	s.mu.Unlock()
 }
 
 // invalidateAll drops every cached push set (e.g. on workspace/diagnostic/refresh).
+// It resets entries in place (not replacing the map) so an in-flight wait that
+// already holds an entry pointer is not orphaned, and broadcasts so each waiter
+// re-evaluates and re-waits for a fresh push (§11.4).
 func (s *diagnosticsStore) invalidateAll() {
 	s.mu.Lock()
-	s.byPath = map[string]*diagEntry{}
+	for _, e := range s.byPath {
+		resetEntry(e)
+	}
+	s.cond.Broadcast()
 	s.mu.Unlock()
 }
 
@@ -148,8 +170,11 @@ func (s *diagnosticsStore) wait(path string) (diags []Diagnostic, settled bool) 
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	e := s.entry(path)
 	for {
+		// Re-fetch the entry every iteration: an invalidate/refresh resets it in
+		// place (and never replaces the map), but re-fetching keeps the wait correct
+		// even if the entry table is ever rebuilt under us.
+		e := s.entry(path)
 		// Version correlation (primary): a push reported the version we last sent,
 		// so the findings reflect the latest content rather than a stale-empty set.
 		versioned := e.hasVersion && e.version >= e.awaited

@@ -285,51 +285,100 @@ func hoverString(h *protocol.Hover) string {
 	return ""
 }
 
-// workspaceEditFromWire converts a protocol.WorkspaceEdit to the boundary type,
-// flattening both the `changes` map and `documentChanges` (text edits plus
-// create/rename/delete resource operations) so a preview and an apply reproduce
-// every effect, including renames and deletes (§12).
+// workspaceEditFromWire converts a protocol.WorkspaceEdit to the boundary type. It
+// preserves the original documentChanges *order* in Ordered (so an apply runs a
+// create before the edits that fill it and a rename before edits to the renamed
+// file) while also mirroring the effects into the order-independent Changes /
+// ResourceOps preview view. When the server used the modern documentChanges form
+// the legacy `changes` map is ignored (the spec requires a documentChanges-capable
+// client to do so); otherwise the `changes` map is the only source (§12).
 func workspaceEditFromWire(getLine lineProvider, e *protocol.WorkspaceEdit) WorkspaceEdit {
 	out := WorkspaceEdit{}
 	if e == nil {
 		return out
 	}
-	add := func(path string, edits []protocol.TextEdit) {
+	addText := func(path string, edits []TextEdit) {
+		if len(edits) == 0 {
+			return
+		}
 		if out.Changes == nil {
 			out.Changes = map[string][]TextEdit{}
 		}
-		for _, te := range edits {
-			out.Changes[path] = append(out.Changes[path], TextEdit{
-				Range:   fromWireRange(getLine, path, te.Range),
-				NewText: te.NewText,
-			})
+		out.Changes[path] = append(out.Changes[path], edits...)
+	}
+	convert := func(path string, in []protocol.TextEdit) []TextEdit {
+		edits := make([]TextEdit, 0, len(in))
+		for _, te := range in {
+			edits = append(edits, TextEdit{Range: fromWireRange(getLine, path, te.Range), NewText: te.NewText})
 		}
+		return edits
 	}
-	for u, edits := range e.Changes {
-		add(uriToPath(u), edits)
-	}
-	for _, dc := range e.DocumentChanges {
-		switch v := dc.(type) {
-		case *protocol.TextDocumentEdit:
-			path := uriToPath(v.TextDocument.URI)
-			edits := make([]protocol.TextEdit, 0, len(v.Edits))
-			for _, el := range v.Edits {
-				if te := textEditFromElement(el); te != nil {
-					edits = append(edits, *te)
+
+	if len(e.DocumentChanges) > 0 {
+		for _, dc := range e.DocumentChanges {
+			switch v := dc.(type) {
+			case *protocol.TextDocumentEdit:
+				path := uriToPath(v.TextDocument.URI)
+				raw := make([]protocol.TextEdit, 0, len(v.Edits))
+				for _, el := range v.Edits {
+					if te := textEditFromElement(el); te != nil {
+						raw = append(raw, *te)
+					}
 				}
+				edits := convert(path, raw)
+				out.Ordered = append(out.Ordered, DocumentChange{Kind: ChangeText, Path: path, Edits: edits})
+				addText(path, edits)
+			case *protocol.CreateFile:
+				path := uriToPath(v.URI)
+				overwrite, ignore := createOptions(v.Options)
+				out.Ordered = append(out.Ordered, DocumentChange{Kind: ChangeCreate, Path: path, Overwrite: overwrite, IgnoreIfExists: ignore})
+				out.ResourceOps = append(out.ResourceOps, ResourceOp{Kind: "create", Path: path})
+			case *protocol.RenameFile:
+				oldPath, newPath := uriToPath(v.OldURI), uriToPath(v.NewURI)
+				overwrite, ignore := renameOptions(v.Options)
+				out.Ordered = append(out.Ordered, DocumentChange{Kind: ChangeRename, Path: oldPath, NewPath: newPath, Overwrite: overwrite, IgnoreIfExists: ignore})
+				out.ResourceOps = append(out.ResourceOps, ResourceOp{Kind: "rename", Path: oldPath, NewPath: newPath})
+			case *protocol.DeleteFile:
+				path := uriToPath(v.URI)
+				out.Ordered = append(out.Ordered, DocumentChange{Kind: ChangeDelete, Path: path})
+				out.ResourceOps = append(out.ResourceOps, ResourceOp{Kind: "delete", Path: path})
 			}
-			add(path, edits)
-		case *protocol.CreateFile:
-			out.ResourceOps = append(out.ResourceOps, ResourceOp{Kind: "create", Path: uriToPath(v.URI)})
-		case *protocol.RenameFile:
-			out.ResourceOps = append(out.ResourceOps, ResourceOp{
-				Kind: "rename", Path: uriToPath(v.OldURI), NewPath: uriToPath(v.NewURI),
-			})
-		case *protocol.DeleteFile:
-			out.ResourceOps = append(out.ResourceOps, ResourceOp{Kind: "delete", Path: uriToPath(v.URI)})
 		}
+		return out
+	}
+
+	for u, edits := range e.Changes {
+		addText(uriToPath(u), convert(uriToPath(u), edits))
 	}
 	return out
+}
+
+// createOptions reads the CreateFile options, defaulting both flags to false.
+func createOptions(o *protocol.CreateFileOptions) (overwrite, ignoreIfExists bool) {
+	if o == nil {
+		return false, false
+	}
+	if o.Overwrite != nil {
+		overwrite = *o.Overwrite
+	}
+	if o.IgnoreIfExists != nil {
+		ignoreIfExists = *o.IgnoreIfExists
+	}
+	return overwrite, ignoreIfExists
+}
+
+// renameOptions reads the RenameFile options, defaulting both flags to false.
+func renameOptions(o *protocol.RenameFileOptions) (overwrite, ignoreIfExists bool) {
+	if o == nil {
+		return false, false
+	}
+	if o.Overwrite != nil {
+		overwrite = *o.Overwrite
+	}
+	if o.IgnoreIfExists != nil {
+		ignoreIfExists = *o.IgnoreIfExists
+	}
+	return overwrite, ignoreIfExists
 }
 
 // itoa is a tiny strconv.Itoa to keep imports minimal in this conversion file.

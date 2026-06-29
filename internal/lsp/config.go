@@ -165,20 +165,91 @@ type TextEdit struct {
 	NewText string `json:"new_text"`
 }
 
-// WorkspaceEdit is a proposed set of changes, keyed by file path. ResourceOps
-// carries create/rename/delete operations from documentChanges so a preview and
-// an apply can reproduce them.
+// WorkspaceEdit is a proposed set of changes, keyed by file path. Changes and
+// ResourceOps are the order-independent preview view (Changes are text edits per
+// path; ResourceOps the create/rename/delete operations). Ordered preserves the
+// server's original documentChanges sequence so an apply reproduces every effect
+// in the right order — a create precedes the edits that populate it, a rename
+// precedes edits to the renamed file (§12). Ordered is empty when the server used
+// the legacy `changes` map (text edits only, order-independent).
 type WorkspaceEdit struct {
 	Changes     map[string][]TextEdit `json:"changes,omitempty"`
 	ResourceOps []ResourceOp          `json:"resource_ops,omitempty"`
+	// Ordered is the apply-time, in-order representation. It is carried in-process
+	// from preview to apply (never serialized) so the host can honor documentChanges
+	// ordering without the model having to round-trip it.
+	Ordered []DocumentChange `json:"-"`
 }
 
-// ResourceOp is a create/rename/delete file operation within a WorkspaceEdit.
+// ResourceOp is a create/rename/delete file operation within a WorkspaceEdit (the
+// order-independent preview view).
 type ResourceOp struct {
 	Kind    string `json:"kind"` // "create" | "rename" | "delete"
 	Path    string `json:"path"`
 	NewPath string `json:"new_path,omitempty"` // for rename
 }
+
+// DocumentChangeKind classifies one entry of an ordered WorkspaceEdit.
+type DocumentChangeKind string
+
+const (
+	// ChangeText is a set of text edits applied to Path.
+	ChangeText DocumentChangeKind = "text"
+	// ChangeCreate creates Path (honoring Overwrite/IgnoreIfExists).
+	ChangeCreate DocumentChangeKind = "create"
+	// ChangeRename renames Path to NewPath.
+	ChangeRename DocumentChangeKind = "rename"
+	// ChangeDelete deletes Path.
+	ChangeDelete DocumentChangeKind = "delete"
+)
+
+// DocumentChange is one ordered operation of a WorkspaceEdit: a set of text edits
+// for a file, or a create/rename/delete resource operation. The host applies a
+// WorkspaceEdit's Ordered slice in sequence so documentChanges ordering and the
+// create/rename options are honored (§12).
+type DocumentChange struct {
+	Kind DocumentChangeKind
+	Path string
+	// NewPath is the rename target (ChangeRename only).
+	NewPath string
+	// Edits are the text edits for a ChangeText entry.
+	Edits []TextEdit
+	// Overwrite and IgnoreIfExists carry the CreateFile/RenameFile options so an
+	// apply never truncates an existing file it was told to leave alone (§12).
+	Overwrite      bool
+	IgnoreIfExists bool
+}
+
+// affectedPaths returns every filesystem path a WorkspaceEdit touches — text-edit
+// targets and both ends of every resource op — deduplicated and in a stable order.
+// The host snapshots and authorizes exactly this set before applying anything, so
+// undo round-trips even for renames and deletes (§12).
+func (e WorkspaceEdit) affectedPaths() []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(p string) {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	for _, dc := range e.Ordered {
+		add(dc.Path)
+		add(dc.NewPath)
+	}
+	for p := range e.Changes {
+		add(p)
+	}
+	for _, op := range e.ResourceOps {
+		add(op.Path)
+		add(op.NewPath)
+	}
+	return out
+}
+
+// AffectedPaths exposes the affected-path set to the host so it can authorize and
+// snapshot every touched path before applying the edit.
+func (e WorkspaceEdit) AffectedPaths() []string { return e.affectedPaths() }
 
 // CodeAction is a proposed fix/refactor. Edit is the materialized WorkspaceEdit
 // (resolved via codeAction/resolve when the server returned it lazily). Command,

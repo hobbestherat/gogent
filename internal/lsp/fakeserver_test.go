@@ -34,6 +34,19 @@ type fakeServer struct {
 	// correlation.
 	pushOnSync      bool
 	pushDiagnostics string // diagnostics array JSON pushed on sync
+
+	// async, when set, dispatches each inbound request on its own goroutine (like a
+	// real LSP server), so a deliberately blocking method does not wedge the read
+	// loop and a concurrent $/cancelRequest is still observed.
+	async bool
+	// blockMethod, when set, makes that request method block until a $/cancelRequest
+	// (or Close) releases it, recording the in-flight request id so a test can prove
+	// cancellation emits $/cancelRequest for the right id (§9).
+	blockMethod  string
+	inflightID   int64
+	cancelledIDs []int64
+	release      chan struct{}
+	releaseOnce  sync.Once
 }
 
 // defaultCapsJSON advertises every provider the curated ops gate on, with the
@@ -53,6 +66,7 @@ func newFakeServer() *fakeServer {
 		capsJSON:    defaultCapsJSON,
 		results:     map[string]string{},
 		openVersion: map[string]int32{},
+		release:     make(chan struct{}),
 	}
 }
 
@@ -64,7 +78,7 @@ func (fs *fakeServer) connectClient(t *testing.T, cfg ServerConfig, host Host) *
 	c1, c2 := net.Pipe()
 	ctx := context.Background()
 	fs.conn = jsonrpc2.NewConn(jsonrpc2.NewStream(c2))
-	fs.conn.Go(ctx, fs.handle)
+	fs.conn.Go(ctx, fs.handler())
 
 	client, err := newClient(ctx, cfg, uri.File("/ws"), "/ws", host,
 		jsonrpc2.NewStream(c1), func() error { _ = c1.Close(); return nil })
@@ -75,10 +89,57 @@ func (fs *fakeServer) connectClient(t *testing.T, cfg ServerConfig, host Host) *
 	return client
 }
 
+// handler returns the read-loop handler, wrapped for concurrent dispatch when
+// async is set so a blocking method does not wedge the loop (§9).
+func (fs *fakeServer) handler() jsonrpc2.Handler {
+	if fs.async {
+		return jsonrpc2.AsyncHandler(fs.handle)
+	}
+	return fs.handle
+}
+
+// releaseBlocked unblocks any handler waiting on the blockMethod gate (once).
+func (fs *fakeServer) releaseBlocked() {
+	fs.releaseOnce.Do(func() { close(fs.release) })
+}
+
+// inFlight returns the id of the currently blocked request (0 if none).
+func (fs *fakeServer) inFlight() int64 {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return fs.inflightID
+}
+
+// cancelled returns the ids the client asked to cancel via $/cancelRequest.
+func (fs *fakeServer) cancelled() []int64 {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return append([]int64(nil), fs.cancelledIDs...)
+}
+
 // handle answers requests and records notifications. Results are returned as raw
 // JSON (passed through verbatim by the default codec).
 func (fs *fakeServer) handle(ctx context.Context, req *jsonrpc2.Request) (any, error) {
 	method := req.Method()
+	if method == "$/cancelRequest" {
+		var p struct {
+			ID int64 `json:"id"`
+		}
+		_ = json.Unmarshal(req.Params(), &p)
+		fs.mu.Lock()
+		fs.cancelledIDs = append(fs.cancelledIDs, p.ID)
+		fs.mu.Unlock()
+		fs.releaseBlocked()
+		return nil, nil
+	}
+	if fs.blockMethod != "" && method == fs.blockMethod {
+		if n, ok := req.ID().Number(); ok {
+			fs.mu.Lock()
+			fs.inflightID = n
+			fs.mu.Unlock()
+		}
+		<-fs.release
+	}
 	switch method {
 	case "initialize":
 		fs.mu.Lock()

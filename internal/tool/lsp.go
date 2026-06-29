@@ -337,20 +337,23 @@ func (tr *ToolRegistry) registerLSPCallHierarchy(mgr *lsp.Manager) {
 
 func (tr *ToolRegistry) registerLSPCodeActions(mgr *lsp.Manager) {
 	tr.Register(&Tool{
-		Name:     "lsp_code_actions",
-		ReadOnly: true,
+		Name: "lsp_code_actions",
 		Description: "List the available code actions (quick fixes, refactors) for a range, each resolved " +
-			"to a concrete WorkspaceEdit you can preview. Actions that only carry a command are returned as " +
-			"executeCommand candidates (run them with lsp_execute_command, which is separately gated). This " +
-			"tool only previews; apply an edit with lsp_rename/lsp_format or by re-issuing the edit.",
+			"to a concrete WorkspaceEdit you can preview, with a zero-based \"index\". By default this only " +
+			"previews. To apply one, call again with apply:true and action_index set to the action's index; the " +
+			"resolved edit goes through gogent's normal write permission + undo (checkpoint) machinery. Actions " +
+			"that only carry a command are executeCommand candidates — run those with lsp_execute_command, which " +
+			"is separately gated.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"path":       map[string]interface{}{"type": "string", "description": "File path."},
-				"line":       map[string]interface{}{"type": "integer", "description": "1-based line of the range start."},
-				"column":     map[string]interface{}{"type": "integer", "description": "1-based column of the range start."},
-				"end_line":   map[string]interface{}{"type": "integer", "description": "1-based line of the range end (default = line)."},
-				"end_column": map[string]interface{}{"type": "integer", "description": "1-based column of the range end (default = column)."},
+				"path":         map[string]interface{}{"type": "string", "description": "File path."},
+				"line":         map[string]interface{}{"type": "integer", "description": "1-based line of the range start."},
+				"column":       map[string]interface{}{"type": "integer", "description": "1-based column of the range start."},
+				"end_line":     map[string]interface{}{"type": "integer", "description": "1-based line of the range end (default = line)."},
+				"end_column":   map[string]interface{}{"type": "integer", "description": "1-based column of the range end (default = column)."},
+				"apply":        map[string]interface{}{"type": "boolean", "description": "Apply the action at action_index (default false = preview only)."},
+				"action_index": map[string]interface{}{"type": "integer", "description": "Zero-based index of the action to apply (with apply:true)."},
 			},
 			"required": []string{"path", "line", "column"},
 		},
@@ -370,9 +373,52 @@ func (tr *ToolRegistry) registerLSPCodeActions(mgr *lsp.Manager) {
 			if err != nil {
 				return nil, fmt.Errorf("lsp_code_actions: %w", err)
 			}
-			return map[string]interface{}{"actions": actions, "count": len(actions)}, nil
+			if boolArg(args["apply"]) {
+				return tr.applyCodeAction(mgr, client.Name(), actions, args)
+			}
+			return map[string]interface{}{"actions": withActionIndex(actions), "count": len(actions)}, nil
 		},
 	})
+}
+
+// applyCodeAction applies the resolved edit of the action selected by action_index
+// through the Host (ActionWrite + Checkpointer). An action that carries only a
+// command (no edit) is surfaced as an lsp_execute_command candidate rather than run
+// silently (§12).
+func (tr *ToolRegistry) applyCodeAction(mgr *lsp.Manager, server string, actions []lsp.CodeAction, args map[string]interface{}) (interface{}, error) {
+	idx, _ := intArg(args["action_index"])
+	if idx < 0 || idx >= len(actions) {
+		return map[string]interface{}{
+			"applied": false,
+			"reason":  fmt.Sprintf("action_index %d out of range (%d actions available)", idx, len(actions)),
+		}, nil
+	}
+	action := actions[idx]
+	if action.Edit == nil {
+		reason := "selected action has no editable WorkspaceEdit"
+		if action.Command != "" {
+			reason = "selected action runs the command '" + action.Command + "'; run it with lsp_execute_command (separately gated)"
+		}
+		return map[string]interface{}{"applied": false, "reason": reason, "command": action.Command}, nil
+	}
+	return tr.previewOrApply(mgr, server, *action.Edit, true)
+}
+
+// withActionIndex annotates each previewed action with its zero-based index so the
+// model can name one to apply.
+func withActionIndex(actions []lsp.CodeAction) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(actions))
+	for i, a := range actions {
+		out = append(out, map[string]interface{}{
+			"index":     i,
+			"title":     a.Title,
+			"kind":      a.Kind,
+			"edit":      a.Edit,
+			"command":   a.Command,
+			"preferred": a.Preferred,
+		})
+	}
+	return out
 }
 
 func (tr *ToolRegistry) registerLSPRename(mgr *lsp.Manager) {

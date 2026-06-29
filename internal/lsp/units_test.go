@@ -145,6 +145,38 @@ func TestDynamicRegistrationGatesAndWatchers(t *testing.T) {
 	}
 }
 
+// TestWorkspaceEditPreservesOrder confirms the edge keeps the server's
+// documentChanges sequence (so a create precedes the edits that populate it) and
+// carries the create/rename options through the boundary type (§12).
+func TestWorkspaceEditPreservesOrder(t *testing.T) {
+	raw := `{"documentChanges":[
+		{"kind":"create","uri":"file:///ws/new.go","options":{"ignoreIfExists":true}},
+		{"textDocument":{"uri":"file:///ws/new.go","version":1},"edits":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},"newText":"package x\n"}]},
+		{"kind":"rename","oldUri":"file:///ws/a.go","newUri":"file:///ws/b.go","options":{"overwrite":true}},
+		{"kind":"delete","uri":"file:///ws/c.go"}
+	]}`
+	var e protocol.WorkspaceEdit
+	if err := protocol.Unmarshal(json.RawMessage(raw), &e); err != nil {
+		t.Fatalf("unmarshal workspace edit: %v", err)
+	}
+	out := workspaceEditFromWire(func(string, int) string { return "" }, &e)
+	if len(out.Ordered) != 4 {
+		t.Fatalf("ordered len = %d, want 4 (%+v)", len(out.Ordered), out.Ordered)
+	}
+	if out.Ordered[0].Kind != ChangeCreate || !out.Ordered[0].IgnoreIfExists {
+		t.Errorf("first op should be a create with ignoreIfExists: %+v", out.Ordered[0])
+	}
+	if out.Ordered[1].Kind != ChangeText || len(out.Ordered[1].Edits) != 1 {
+		t.Errorf("second op should be the text edit that fills the created file: %+v", out.Ordered[1])
+	}
+	if out.Ordered[2].Kind != ChangeRename || !out.Ordered[2].Overwrite {
+		t.Errorf("third op should be a rename with overwrite: %+v", out.Ordered[2])
+	}
+	if out.Ordered[3].Kind != ChangeDelete {
+		t.Errorf("fourth op should be a delete: %+v", out.Ordered[3])
+	}
+}
+
 // TestServerConfigLanguageID covers the per-extension languageId override that
 // lets one process serve several languageIds (§7.1).
 func TestServerConfigLanguageID(t *testing.T) {

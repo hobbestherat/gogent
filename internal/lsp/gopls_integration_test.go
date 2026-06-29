@@ -73,7 +73,9 @@ func TestGoplsEndToEnd(t *testing.T) {
 	gopls := findGopls(t)
 
 	const broken = "package x\n\nfunc F() int {\n\treturn bogusUndefinedSymbol\n}\n"
-	const fixed = "package x\n\nfunc F() int {\n\treturn 1\n}\n"
+	// The fixed source has F call G so definition/references/rename have real
+	// cross-symbol targets to resolve against the live server (§14).
+	const fixed = "package x\n\nfunc F() int {\n\treturn G()\n}\n\nfunc G() int {\n\treturn 1\n}\n"
 	dir, file := newGoModule(t, broken)
 
 	cfg := ServerConfig{
@@ -117,13 +119,23 @@ func TestGoplsEndToEnd(t *testing.T) {
 		t.Fatalf("expected diagnostics to clear after the fix, got %+v", cleared)
 	}
 
-	// Hover on the function name returns a signature.
-	h, err := c.Hover(context.Background(), file, Position{Line: 3, Character: 6})
-	if err != nil {
-		t.Fatalf("Hover: %v", err)
+	// Hover on the function name returns a signature. gopls answers hover only after
+	// it has indexed the package, so poll briefly, but the contents must ultimately
+	// be non-empty — a t.Log here could not regression-detect a broken hover (§14).
+	var hover Hover
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		hover, err = c.Hover(context.Background(), file, Position{Line: 3, Character: 6})
+		if err != nil {
+			t.Fatalf("Hover: %v", err)
+		}
+		if strings.TrimSpace(hover.Contents) != "" {
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
 	}
-	if strings.TrimSpace(h.Contents) == "" {
-		t.Log("hover returned empty contents (gopls may need more indexing time); not fatal")
+	if strings.TrimSpace(hover.Contents) == "" {
+		t.Fatal("expected non-empty hover contents for func F")
 	}
 
 	// Document symbols return a tree containing F.
@@ -139,5 +151,34 @@ func TestGoplsEndToEnd(t *testing.T) {
 	}
 	if !hasF {
 		t.Fatalf("expected document symbol F, got %+v", syms)
+	}
+
+	// Definition: the G() call inside F (line 4, col 9) resolves to G's declaration.
+	locs, err := c.Definition(context.Background(), file, Position{Line: 4, Character: 9}, DefDefinition)
+	if err != nil {
+		t.Fatalf("Definition: %v", err)
+	}
+	if len(locs) == 0 || filepath.Base(locs[0].Path) != "a.go" {
+		t.Fatalf("definition of G: %+v", locs)
+	}
+
+	// References: G is declared and called once; with the declaration included there
+	// must be at least two locations.
+	refs, err := c.References(context.Background(), file, Position{Line: 7, Character: 6}, true)
+	if err != nil {
+		t.Fatalf("References: %v", err)
+	}
+	if len(refs) < 2 {
+		t.Fatalf("references of G: want >= 2, got %+v", refs)
+	}
+
+	// Tier 3 preview against the real server: renaming G must yield a non-empty
+	// WorkspaceEdit touching this file (declaration + call site).
+	edit, err := c.Rename(context.Background(), file, Position{Line: 7, Character: 6}, "G2")
+	if err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	if len(edit.Changes) == 0 && len(edit.Ordered) == 0 {
+		t.Fatalf("rename produced an empty WorkspaceEdit: %+v", edit)
 	}
 }

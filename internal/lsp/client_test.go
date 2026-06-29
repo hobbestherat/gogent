@@ -2,6 +2,7 @@ package lsp
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -329,6 +330,39 @@ func TestFileChangedEmitsWatchedAndSync(t *testing.T) {
 		change, save, _, watched := fs.counts()
 		return change >= 1 && save >= 1 && watched >= 1
 	})
+}
+
+// TestCancellationEmitsCancelRequest proves the concurrency model's cancellation
+// contract (§9): when a caller's context is cancelled while a request is in flight,
+// the client emits $/cancelRequest for that exact request id and unblocks the
+// caller with context.Canceled. The fake server dispatches asynchronously and
+// blocks the references handler so the cancel races a genuinely outstanding call.
+func TestCancellationEmitsCancelRequest(t *testing.T) {
+	fs := newFakeServer()
+	fs.async = true
+	fs.blockMethod = "textDocument/references"
+	fs.setResult("textDocument/references", "[]")
+	c := fs.connectClient(t, goCfg(), &stubHost{})
+	path := writeFile(t, "package a\n")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() {
+		_, err := c.References(ctx, path, Position{1, 1}, false)
+		errc <- err
+	}()
+
+	waitFor(t, "references in flight on the server", func() bool { return fs.inFlight() != 0 })
+	cancel()
+	waitFor(t, "$/cancelRequest received", func() bool { return len(fs.cancelled()) > 0 })
+
+	wantID := fs.inFlight()
+	if got := fs.cancelled(); got[0] != wantID {
+		t.Fatalf("$/cancelRequest id = %d, want the in-flight request id %d", got[0], wantID)
+	}
+	if err := <-errc; !errors.Is(err, context.Canceled) {
+		t.Fatalf("References after cancel = %v, want context.Canceled", err)
+	}
 }
 
 // TestManagerRoutingAndLazySpawn checks extension routing, ErrNoServer, and that
