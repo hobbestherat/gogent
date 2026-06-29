@@ -299,6 +299,41 @@ func TestCodeActionResolvesLazyEdit(t *testing.T) {
 	}
 }
 
+// TestCodeActionCarriesCachedDiagnostics proves the code-action request forwards
+// the file's cached diagnostics that intersect the requested range, so a server's
+// diagnostic-bound quick fixes (the highest-value Tier 3 "fix this error" actions)
+// are computed instead of omitted (§12). A range that misses every diagnostic
+// carries none.
+func TestCodeActionCarriesCachedDiagnostics(t *testing.T) {
+	fs := newFakeServer()
+	fs.pushOnSync = true
+	fs.pushDiagnostics = `[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":3}},"severity":1,"code":"E1","source":"go","message":"boom","data":{"fix":"add-import"}}]`
+	fs.setResult("textDocument/codeAction", `[]`)
+	c := fs.connectClient(t, goCfg(), &stubHost{})
+	path := writeFile(t, "package a\n\n\n\n\n\n")
+
+	// Settle the diagnostics first so the cache is populated before the code action.
+	if _, err := c.Diagnostics(context.Background(), path); err != nil {
+		t.Fatalf("Diagnostics: %v", err)
+	}
+
+	// A range over the diagnostic (line 1, cols 1-3 at the edge → wire line 0) carries it.
+	if _, err := c.CodeActions(context.Background(), path, Range{Position{1, 1}, Position{1, 3}}); err != nil {
+		t.Fatalf("CodeActions: %v", err)
+	}
+	if got := fs.codeActionDiagCount(); got != 1 {
+		t.Fatalf("code action context diagnostics = %d, want 1 (intersecting diagnostic forwarded)", got)
+	}
+
+	// A range that misses every diagnostic carries none.
+	if _, err := c.CodeActions(context.Background(), path, Range{Position{6, 1}, Position{6, 2}}); err != nil {
+		t.Fatalf("CodeActions (disjoint): %v", err)
+	}
+	if got := fs.codeActionDiagCount(); got != 0 {
+		t.Fatalf("disjoint code action context diagnostics = %d, want 0", got)
+	}
+}
+
 // TestExecuteCommandAllowList enforces the executeCommand allow-list: an off-list
 // command never runs (§12).
 func TestExecuteCommandAllowList(t *testing.T) {
@@ -438,6 +473,105 @@ func TestManagerRoutingAndLazySpawn(t *testing.T) {
 	mu.Unlock()
 	if got != 1 {
 		t.Fatalf("single-flight spawn ran %d times, want 1", got)
+	}
+}
+
+// TestManagerMultiServerRouting is the load-bearing abstraction test (§7/§9): two
+// distinct server configs with disjoint extensions route a .go file to server "a"
+// and a .py file to server "b", each backed by its own process; an unmatched
+// extension is ErrNoServer. A workspace-scoped request with no path hint is
+// ambiguous across two servers but routes cleanly when only one is configured.
+func TestManagerMultiServerRouting(t *testing.T) {
+	fsA, fsB := newFakeServer(), newFakeServer()
+	cfgA := ServerConfig{Name: "a", LanguageID: "go", Extensions: []string{".go"}}
+	cfgB := ServerConfig{Name: "b", LanguageID: "python", Extensions: []string{".py"}}
+
+	servers := map[string]*fakeServer{"a": fsA, "b": fsB}
+	var mu sync.Mutex
+	spawnsByName := map[string]int{}
+	spawn := func(cfg ServerConfig) (jsonrpc2.Stream, func() error, error) {
+		mu.Lock()
+		spawnsByName[cfg.Name]++
+		mu.Unlock()
+		fs := servers[cfg.Name]
+		c1, c2 := net.Pipe()
+		fs.conn = jsonrpc2.NewConn(jsonrpc2.NewStream(c2))
+		fs.conn.Go(context.Background(), fs.handle)
+		return jsonrpc2.NewStream(c1), func() error { _ = c1.Close(); return nil }, nil
+	}
+
+	mgr := NewManager("/ws", []ServerConfig{cfgA, cfgB}, &stubHost{})
+	mgr.Spawn = spawn
+	t.Cleanup(mgr.Shutdown)
+
+	clientGo, err := mgr.ClientForFile(context.Background(), "/ws/pkg/main.go")
+	if err != nil {
+		t.Fatalf("route .go: %v", err)
+	}
+	clientPy, err := mgr.ClientForFile(context.Background(), "/ws/pkg/main.py")
+	if err != nil {
+		t.Fatalf("route .py: %v", err)
+	}
+	if clientGo.Name() != "a" {
+		t.Fatalf(".go routed to %q, want a", clientGo.Name())
+	}
+	if clientPy.Name() != "b" {
+		t.Fatalf(".py routed to %q, want b", clientPy.Name())
+	}
+	if clientGo == clientPy {
+		t.Fatal(".go and .py must resolve to distinct clients")
+	}
+	// One process per config: re-routing the same language reuses its client.
+	if again, err := mgr.ClientForFile(context.Background(), "/ws/other.go"); err != nil || again != clientGo {
+		t.Fatalf("second .go route = (%v, %v), want the cached server-a client", again, err)
+	}
+	mu.Lock()
+	gotA, gotB := spawnsByName["a"], spawnsByName["b"]
+	mu.Unlock()
+	if gotA != 1 || gotB != 1 {
+		t.Fatalf("spawns = a:%d b:%d, want one process per config", gotA, gotB)
+	}
+
+	// An unmatched extension routes nowhere.
+	if _, err := mgr.ClientForFile(context.Background(), "/ws/readme.txt"); err != ErrNoServer {
+		t.Fatalf("unmatched extension = %v, want ErrNoServer", err)
+	}
+
+	// A workspace-scoped request with no path hint cannot pick between two servers.
+	if _, err := mgr.WorkspaceClient(context.Background(), ""); err != ErrAmbiguousServer {
+		t.Fatalf("hintless workspace request across two servers = %v, want ErrAmbiguousServer", err)
+	}
+	// A path hint disambiguates it.
+	if c, err := mgr.WorkspaceClient(context.Background(), "/ws/x.py"); err != nil || c.Name() != "b" {
+		t.Fatalf("hinted workspace request = (%v, %v), want server b", c, err)
+	}
+}
+
+// TestManagerWorkspaceClientSoleServer confirms a hintless workspace request routes
+// cleanly to the only configured server (§12).
+func TestManagerWorkspaceClientSoleServer(t *testing.T) {
+	fs := newFakeServer()
+	mgr := NewManager("/ws", []ServerConfig{goCfg()}, &stubHost{})
+	mgr.Spawn = func(cfg ServerConfig) (jsonrpc2.Stream, func() error, error) {
+		c1, c2 := net.Pipe()
+		fs.conn = jsonrpc2.NewConn(jsonrpc2.NewStream(c2))
+		fs.conn.Go(context.Background(), fs.handle)
+		return jsonrpc2.NewStream(c1), func() error { _ = c1.Close(); return nil }, nil
+	}
+	t.Cleanup(mgr.Shutdown)
+	c, err := mgr.WorkspaceClient(context.Background(), "")
+	if err != nil || c == nil || c.Name() != "fake" {
+		t.Fatalf("sole-server workspace request = (%v, %v), want the lone server", c, err)
+	}
+}
+
+// TestManagerWorkspaceClientNoServers confirms a hintless workspace request with no
+// servers configured is ErrNoServer, distinct from the ambiguous case.
+func TestManagerWorkspaceClientNoServers(t *testing.T) {
+	mgr := NewManager("/ws", nil, &stubHost{})
+	t.Cleanup(mgr.Shutdown)
+	if _, err := mgr.WorkspaceClient(context.Background(), ""); err != ErrNoServer {
+		t.Fatalf("hintless workspace request with no servers = %v, want ErrNoServer", err)
 	}
 }
 

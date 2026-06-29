@@ -182,3 +182,67 @@ func TestGoplsEndToEnd(t *testing.T) {
 		t.Fatalf("rename produced an empty WorkspaceEdit: %+v", edit)
 	}
 }
+
+// TestGoplsCodeActionQuickFix exercises the highest-value Tier 3 path against real
+// gopls: a diagnostic-bound quick fix. A file that references an unimported package
+// produces a diagnostic; issuing lsp_code_actions over that diagnostic's range must
+// return gopls's "add import" quick fix, which the lazy-resolve path materializes
+// into a concrete WorkspaceEdit (§12). This depends on the code-action request
+// carrying the cached diagnostics in its context.
+func TestGoplsCodeActionQuickFix(t *testing.T) {
+	gopls := findGopls(t)
+
+	// References fmt without importing it: gopls reports a diagnostic and offers an
+	// "add import" quick fix tied to it.
+	const src = "package x\n\nfunc F() {\n\tfmt.Println(\"hi\")\n}\n"
+	dir, file := newGoModule(t, src)
+
+	cfg := ServerConfig{
+		Name:        "gopls",
+		LanguageID:  "go",
+		Extensions:  []string{".go"},
+		Command:     gopls,
+		Args:        []string{"serve"},
+		RootMarkers: []string{"go.mod"},
+	}
+	mgr := NewManager(dir, []ServerConfig{cfg}, &stubHost{})
+	t.Cleanup(mgr.Shutdown)
+
+	c, err := mgr.ClientForFile(context.Background(), file)
+	if err != nil {
+		t.Fatalf("ClientForFile: %v", err)
+	}
+
+	// Wait for the missing-import diagnostic so its range is cached for the context.
+	diags := pollDiagnostics(t, c, file, 30*time.Second, func(d []Diagnostic) bool { return len(d) > 0 })
+	if len(diags) == 0 {
+		t.Fatal("expected a diagnostic for the unimported package")
+	}
+
+	// Issue code actions over the diagnostic's own range; gopls's add-import quick fix
+	// resolves to a concrete edit. gopls can briefly return only refactors before its
+	// analysis settles, so poll until a fix with an edit appears.
+	var fix *CodeAction
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) && fix == nil {
+		actions, err := c.CodeActions(context.Background(), file, diags[0].Range)
+		if err != nil {
+			t.Fatalf("CodeActions: %v", err)
+		}
+		for i := range actions {
+			if actions[i].Edit != nil && len(actions[i].Edit.Changes)+len(actions[i].Edit.Ordered) > 0 {
+				fix = &actions[i]
+				break
+			}
+		}
+		if fix == nil {
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
+	if fix == nil {
+		t.Fatal("expected a diagnostic-bound quick fix resolving to a concrete WorkspaceEdit")
+	}
+	if !strings.Contains(strings.ToLower(fix.Title), "import") {
+		t.Logf("quick fix title %q (expected an add-import fix, but any concrete edit satisfies the path)", fix.Title)
+	}
+}

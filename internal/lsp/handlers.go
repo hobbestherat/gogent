@@ -50,7 +50,7 @@ func (h *clientHandler) PublishDiagnostics(_ context.Context, params *protocol.P
 		diags = append(diags, diagFromWire(h.c.lineText, path, d))
 	}
 	version, hasVersion := params.Version.Get()
-	h.c.diag.publish(path, version, hasVersion, diags)
+	h.c.diag.publish(path, version, hasVersion, diags, params.Diagnostics)
 	return nil
 }
 

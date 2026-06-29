@@ -30,6 +30,10 @@ type fakeServer struct {
 	didSave     int
 	didClose    int
 	watched     int
+	// lastCodeActionDiags records the number of diagnostics carried in the most
+	// recent textDocument/codeAction request's context, so a test can prove the
+	// client populates CodeActionContext.Diagnostics from its cache (§12).
+	lastCodeActionDiags int
 	// pushOnSync, when set, makes the server publish diagnostics (with the synced
 	// version) whenever it receives a didOpen/didChange, exercising version
 	// correlation.
@@ -166,6 +170,15 @@ func (fs *fakeServer) handle(ctx context.Context, req *jsonrpc2.Request) (any, e
 	case "workspace/didChangeWatchedFiles":
 		fs.bump(&fs.watched)
 		return nil, nil
+	case "textDocument/codeAction":
+		fs.recordCodeActionContext(req)
+		fs.mu.Lock()
+		res, ok := fs.results[method]
+		fs.mu.Unlock()
+		if ok {
+			return jsonrpc2.RawMessage(res), nil
+		}
+		return jsonrpc2.RawMessage("null"), nil
 	default:
 		fs.mu.Lock()
 		res, ok := fs.results[method]
@@ -205,6 +218,28 @@ func (fs *fakeServer) onSync(ctx context.Context, method string, req *jsonrpc2.R
 		body := `{"uri":"` + uriStr + `","version":` + itoa(int(version)) + `,"diagnostics":` + diags + `}`
 		_ = fs.conn.Notify(ctx, "textDocument/publishDiagnostics", jsonrpc2.RawMessage(body))
 	}
+}
+
+// recordCodeActionContext captures how many diagnostics the codeAction request
+// carried in its context, so a test can assert the client forwards its cached,
+// range-intersecting diagnostics (§12).
+func (fs *fakeServer) recordCodeActionContext(req *jsonrpc2.Request) {
+	var p struct {
+		Context struct {
+			Diagnostics []json.RawMessage `json:"diagnostics"`
+		} `json:"context"`
+	}
+	_ = json.Unmarshal(req.Params(), &p)
+	fs.mu.Lock()
+	fs.lastCodeActionDiags = len(p.Context.Diagnostics)
+	fs.mu.Unlock()
+}
+
+// codeActionDiagCount returns the diagnostic count from the last codeAction request.
+func (fs *fakeServer) codeActionDiagCount() int {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return fs.lastCodeActionDiags
 }
 
 // pushDiag publishes diagnostics for uriStr at version out-of-band (e.g. before a

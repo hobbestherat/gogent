@@ -119,6 +119,23 @@ func fromWireRange(getLine lineProvider, path string, r protocol.Range) Range {
 	}
 }
 
+// rangesIntersect reports whether two wire ranges overlap, treating both as
+// inclusive of their endpoints so a zero-width (cursor) range that touches a
+// diagnostic's edge still counts. Used to pick the cached diagnostics a codeAction
+// request should carry for the requested range (§12).
+func rangesIntersect(a, b protocol.Range) bool {
+	return !wirePosGreater(a.Start, b.End) && !wirePosGreater(b.Start, a.End)
+}
+
+// wirePosGreater reports whether wire position p is strictly after q in document
+// order (line first, then UTF-16 character offset).
+func wirePosGreater(p, q protocol.Position) bool {
+	if p.Line != q.Line {
+		return p.Line > q.Line
+	}
+	return p.Character > q.Character
+}
+
 // fromWireLocation converts a wire Location into a tool-edge Location.
 func fromWireLocation(getLine lineProvider, l protocol.Location) Location {
 	path := uriToPath(l.URI)

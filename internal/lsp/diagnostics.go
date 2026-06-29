@@ -3,6 +3,8 @@ package lsp
 import (
 	"sync"
 	"time"
+
+	"go.lsp.dev/protocol"
 )
 
 // debounceWindow is how long the freshness wait lets a burst of pushes settle
@@ -40,7 +42,13 @@ type diagnosticsStore struct {
 }
 
 type diagEntry struct {
-	diags      []Diagnostic
+	diags []Diagnostic
+	// raw is the most recent push in wire form, retained so a codeAction request can
+	// be issued with a faithful CodeActionContext.Diagnostics — including each
+	// diagnostic's opaque Data field, which servers (gopls) preserve from
+	// publishDiagnostics to codeAction to compute the matching quick fix (§12). The
+	// boundary Diagnostic deliberately drops Data, so it cannot be reconstructed.
+	raw        []protocol.Diagnostic
 	version    int32 // version of the most recent versioned push
 	hasVersion bool  // the most recent push carried a version
 	pushSeq    int   // total pushes received (monotonic), used by the idle fallback
@@ -74,13 +82,15 @@ func (s *diagnosticsStore) expect(path string, version int32) {
 	s.entry(path).awaited = version
 }
 
-// publish records a push for path: the deduped diagnostics and, when present, the
-// version they reflect. It broadcasts so any blocked wait re-evaluates.
-func (s *diagnosticsStore) publish(path string, version int32, hasVersion bool, diags []Diagnostic) {
+// publish records a push for path: the deduped diagnostics, their wire form (for a
+// later codeAction context), and, when present, the version they reflect. It
+// broadcasts so any blocked wait re-evaluates.
+func (s *diagnosticsStore) publish(path string, version int32, hasVersion bool, diags []Diagnostic, raw []protocol.Diagnostic) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e := s.entry(path)
 	e.diags = dedupDiagnostics(diags)
+	e.raw = raw
 	if hasVersion {
 		e.version = version
 		e.hasVersion = true
@@ -121,6 +131,7 @@ func (s *diagnosticsStore) isIdleLocked() bool {
 // and re-waits for the next push rather than being stranded. The caller holds s.mu.
 func resetEntry(e *diagEntry) {
 	e.diags = nil
+	e.raw = nil
 	e.version = 0
 	e.hasVersion = false
 	e.pushSeq = 0
@@ -151,6 +162,26 @@ func (s *diagnosticsStore) invalidateAll() {
 	}
 	s.cond.Broadcast()
 	s.mu.Unlock()
+}
+
+// rawIntersecting returns the cached wire diagnostics for path whose range
+// overlaps rng, so a codeAction request can carry the diagnostics its quick fixes
+// are computed from (§12). The wire form is returned (Data intact) so a server
+// that keys its quick fix off the diagnostic's Data payload still produces it.
+func (s *diagnosticsStore) rawIntersecting(path string, rng protocol.Range) []protocol.Diagnostic {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e := s.byPath[path]
+	if e == nil {
+		return nil
+	}
+	out := make([]protocol.Diagnostic, 0, len(e.raw))
+	for _, d := range e.raw {
+		if rangesIntersect(d.Range, rng) {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // current returns the cached diagnostics for path without waiting.

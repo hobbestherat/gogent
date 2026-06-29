@@ -317,10 +317,20 @@ func (c *Client) CodeActions(ctx context.Context, file string, rng Range) ([]Cod
 	c.mu.Lock()
 	canResolve := c.caps.codeActionResolve
 	c.mu.Unlock()
+	wireRange := toWireRange(c.lineText, path, rng)
+	// Carry the cached diagnostics that intersect the requested range in the request
+	// context: diagnostic-bound quick fixes (gopls add-missing-import, quickfix, …)
+	// are computed by the server from CodeActionContext.Diagnostics, so an empty
+	// context omits exactly the highest-value "fix this error" actions (§12). The wire
+	// diagnostics retain their Data payload, which gopls preserves to match the fix.
+	ctxDiags := c.diag.rawIntersecting(path, wireRange)
+	if ctxDiags == nil {
+		ctxDiags = []protocol.Diagnostic{}
+	}
 	results, err := c.server.CodeAction(ctx, &protocol.CodeActionParams{
 		TextDocument: protocol.TextDocumentIdentifier{URI: pathToURI(path)},
-		Range:        toWireRange(c.lineText, path, rng),
-		Context:      protocol.CodeActionContext{Diagnostics: []protocol.Diagnostic{}},
+		Range:        wireRange,
+		Context:      protocol.CodeActionContext{Diagnostics: ctxDiags},
 	})
 	if err != nil {
 		return nil, err
