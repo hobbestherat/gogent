@@ -2,6 +2,7 @@ package lsp
 
 import (
 	"context"
+	"fmt"
 
 	"go.lsp.dev/protocol"
 )
@@ -54,7 +55,7 @@ func (c *Client) pullDiagnostics(ctx context.Context, path string) ([]Diagnostic
 		TextDocument: protocol.TextDocumentIdentifier{URI: pathToURI(path)},
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("diagnostic pull: %w", err)
 	}
 	full, ok := report.(*protocol.RelatedFullDocumentDiagnosticReport)
 	if !ok || full == nil {
@@ -85,28 +86,41 @@ func (c *Client) Definition(ctx context.Context, file string, pos Position, kind
 // corresponding capability.
 func (c *Client) definitionByKind(ctx context.Context, path string, pos Position, kind DefKind) (any, error) {
 	params := func() protocol.TextDocumentPositionParams { return c.posParams(path, pos) }
+	var (
+		res any
+		err error
+		op  string
+	)
 	switch kind {
 	case DefDeclaration:
 		if !c.supports(methodDeclaration) {
 			return nil, ErrUnsupported
 		}
-		return c.server.Declaration(ctx, &protocol.DeclarationParams{TextDocumentPositionParams: params()})
+		op = "declaration"
+		res, err = c.server.Declaration(ctx, &protocol.DeclarationParams{TextDocumentPositionParams: params()})
 	case DefTypeDefinition:
 		if !c.supports(methodTypeDefinition) {
 			return nil, ErrUnsupported
 		}
-		return c.server.TypeDefinition(ctx, &protocol.TypeDefinitionParams{TextDocumentPositionParams: params()})
+		op = "type definition"
+		res, err = c.server.TypeDefinition(ctx, &protocol.TypeDefinitionParams{TextDocumentPositionParams: params()})
 	case DefImplementation:
 		if !c.supports(methodImplementation) {
 			return nil, ErrUnsupported
 		}
-		return c.server.Implementation(ctx, &protocol.ImplementationParams{TextDocumentPositionParams: params()})
+		op = "implementation"
+		res, err = c.server.Implementation(ctx, &protocol.ImplementationParams{TextDocumentPositionParams: params()})
 	default:
 		if !c.supports(methodDefinition) {
 			return nil, ErrUnsupported
 		}
-		return c.server.Definition(ctx, &protocol.DefinitionParams{TextDocumentPositionParams: params()})
+		op = "definition"
+		res, err = c.server.Definition(ctx, &protocol.DefinitionParams{TextDocumentPositionParams: params()})
 	}
+	if err != nil {
+		return nil, fmt.Errorf("%s request: %w", op, err)
+	}
+	return res, nil
 }
 
 // References returns every reference to the symbol at pos (Tier 2).
@@ -123,7 +137,7 @@ func (c *Client) References(ctx context.Context, file string, pos Position, incl
 		Context:                    protocol.ReferenceContext{IncludeDeclaration: inclDecl},
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("references: %w", err)
 	}
 	out := make([]Location, 0, len(locs))
 	for _, l := range locs {
@@ -143,7 +157,7 @@ func (c *Client) Hover(ctx context.Context, file string, pos Position) (Hover, e
 	}
 	h, err := c.server.Hover(ctx, &protocol.HoverParams{TextDocumentPositionParams: c.posParams(path, pos)})
 	if err != nil {
-		return Hover{}, err
+		return Hover{}, fmt.Errorf("hover: %w", err)
 	}
 	out := Hover{Contents: hoverString(h)}
 	if h != nil && h.Range != nil {
@@ -167,7 +181,7 @@ func (c *Client) DocumentSymbols(ctx context.Context, file string) ([]Symbol, er
 		TextDocument: protocol.TextDocumentIdentifier{URI: pathToURI(path)},
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("document symbols: %w", err)
 	}
 	return symbolsFromResult(c.lineText, path, res), nil
 }
@@ -179,7 +193,7 @@ func (c *Client) WorkspaceSymbols(ctx context.Context, query string) ([]Symbol, 
 	}
 	res, err := c.server.Symbols(ctx, &protocol.WorkspaceSymbolParams{Query: query})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("workspace symbols: %w", err)
 	}
 	return workspaceSymbols(c.lineText, res), nil
 }
@@ -198,7 +212,7 @@ func (c *Client) CallHierarchy(ctx context.Context, file string, pos Position, d
 		TextDocumentPositionParams: c.posParams(path, pos),
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("prepare call hierarchy: %w", err)
 	}
 	if len(items) == 0 {
 		return nil, nil
@@ -208,7 +222,7 @@ func (c *Client) CallHierarchy(ctx context.Context, file string, pos Position, d
 	if dir == Outgoing {
 		calls, err := c.server.OutgoingCalls(ctx, &protocol.CallHierarchyOutgoingCallsParams{Item: item})
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("outgoing calls: %w", err)
 		}
 		for _, call := range calls {
 			out = append(out, callItemFromWire(c.lineText, call.To))
@@ -217,7 +231,7 @@ func (c *Client) CallHierarchy(ctx context.Context, file string, pos Position, d
 	}
 	calls, err := c.server.IncomingCalls(ctx, &protocol.CallHierarchyIncomingCallsParams{Item: item})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("incoming calls: %w", err)
 	}
 	for _, call := range calls {
 		out = append(out, callItemFromWire(c.lineText, call.From))
@@ -258,7 +272,7 @@ func (c *Client) Rename(ctx context.Context, file string, pos Position, newName 
 		if _, err := c.server.PrepareRename(ctx, &protocol.PrepareRenameParams{
 			TextDocumentPositionParams: c.posParams(path, pos),
 		}); err != nil {
-			return WorkspaceEdit{}, err
+			return WorkspaceEdit{}, fmt.Errorf("prepare rename: %w", err)
 		}
 	}
 	edit, err := c.server.Rename(ctx, &protocol.RenameParams{
@@ -266,7 +280,7 @@ func (c *Client) Rename(ctx context.Context, file string, pos Position, newName 
 		NewName:                    newName,
 	})
 	if err != nil {
-		return WorkspaceEdit{}, err
+		return WorkspaceEdit{}, fmt.Errorf("rename: %w", err)
 	}
 	return workspaceEditFromWire(c.lineText, edit), nil
 }
@@ -290,7 +304,7 @@ func (c *Client) Format(ctx context.Context, file string) (WorkspaceEdit, error)
 		Options:      protocol.FormattingOptions{TabSize: 4, InsertSpaces: false},
 	})
 	if err != nil {
-		return WorkspaceEdit{}, err
+		return WorkspaceEdit{}, fmt.Errorf("formatting: %w", err)
 	}
 	out := WorkspaceEdit{Changes: map[string][]TextEdit{}}
 	for _, te := range edits {
@@ -333,7 +347,7 @@ func (c *Client) CodeActions(ctx context.Context, file string, rng Range) ([]Cod
 		Context:      protocol.CodeActionContext{Diagnostics: ctxDiags},
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("code action: %w", err)
 	}
 	out := make([]CodeAction, 0, len(results))
 	for _, r := range results {
@@ -397,7 +411,7 @@ func (c *Client) ExecuteCommand(ctx context.Context, command string, args []any)
 		Arguments: lspArgs,
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("execute command: %w", err)
 	}
 	return rawJSONString(res), nil
 }

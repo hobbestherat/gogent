@@ -43,10 +43,9 @@ jobs:
   lint:
     name: golangci-lint
     runs-on: ubuntu-latest
-    # Advisory until the initial findings are triaged (see issue follow-up):
-    # the linter set is opinionated (gosec/wrapcheck) and we don't want to block
-    # merges on a first pass over an existing codebase.
-    continue-on-error: true
+    # Enforced: the initial findings have been triaged and the tree is clean, so
+    # lint now blocks on regressions like the other jobs (was advisory while the
+    # opinionated gosec/wrapcheck set was first brought up over the codebase).
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6

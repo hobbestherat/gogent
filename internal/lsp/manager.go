@@ -3,6 +3,7 @@ package lsp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -269,7 +270,11 @@ func (m *Manager) ApplyEdit(server string, edit WorkspaceEdit) (applied bool, fa
 	if m.host == nil {
 		return false, "no edit host configured", nil
 	}
-	return m.host.ApplyEdit(server, edit)
+	applied, reason, err := m.host.ApplyEdit(server, edit)
+	if err != nil {
+		return applied, reason, fmt.Errorf("apply edit: %w", err)
+	}
+	return applied, reason, nil
 }
 
 // Shutdown closes every running client (clean LSP shutdown → exit → kill) and
@@ -298,11 +303,14 @@ type stdioReadWriteCloser struct {
 	w io.WriteCloser
 }
 
-func (s stdioReadWriteCloser) Read(p []byte) (int, error)  { return s.r.Read(p) }
-func (s stdioReadWriteCloser) Write(p []byte) (int, error) { return s.w.Write(p) }
+// These three are deliberate io passthroughs: an io.Reader/Writer/Closer must
+// surface sentinel errors (notably io.EOF, which the jsonrpc2 stream relies on to
+// detect a closed server) unwrapped, so they are exempt from wrapcheck.
+func (s stdioReadWriteCloser) Read(p []byte) (int, error)  { return s.r.Read(p) }  //nolint:wrapcheck // io.Reader passthrough; sentinel errors must stay unwrapped
+func (s stdioReadWriteCloser) Write(p []byte) (int, error) { return s.w.Write(p) } //nolint:wrapcheck // io.Writer passthrough; sentinel errors must stay unwrapped
 func (s stdioReadWriteCloser) Close() error {
 	_ = s.w.Close()
-	return s.r.Close()
+	return s.r.Close() //nolint:wrapcheck // io.Closer passthrough
 }
 
 // spawnStdio launches a server subprocess and returns an LSP stream over its
@@ -317,14 +325,14 @@ func spawnStdio(cfg ServerConfig) (jsonrpc2.Stream, func() error, error) {
 	cmd.Stderr = os.Stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("stdin pipe: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("stdout pipe: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("start %s: %w", cfg.Command, err)
 	}
 	closer := func() error {
 		_ = stdin.Close()

@@ -181,12 +181,15 @@ func textEditFromElement(el protocol.TextDocumentEditElement) *protocol.TextEdit
 	return nil
 }
 
-// markedStringText renders a MarkedString union arm as plain text.
-func markedStringText(m protocol.MarkedString) string {
+// markedStringText renders a MarkedString union arm as plain text. MarkedString
+// and MarkedStringWithLanguage are deprecated in the LSP spec (servers should send
+// MarkupContent), but a client must still parse them because older servers keep
+// emitting them — hence the staticcheck SA1019 suppressions here and in hoverString.
+func markedStringText(m protocol.MarkedString) string { //nolint:staticcheck // deprecated MarkedString shape, parsed for back-compat
 	switch v := m.(type) {
 	case protocol.String:
 		return string(v)
-	case *protocol.MarkedStringWithLanguage:
+	case *protocol.MarkedStringWithLanguage: //nolint:staticcheck // deprecated MarkedString shape, parsed for back-compat
 		if v != nil {
 			return v.Value
 		}
@@ -268,7 +271,7 @@ func hoverString(h *protocol.Hover) string {
 		}
 	case protocol.String:
 		return string(v)
-	case *protocol.MarkedStringWithLanguage:
+	case *protocol.MarkedStringWithLanguage: //nolint:staticcheck // deprecated MarkedString shape, parsed for back-compat
 		if v != nil {
 			return v.Value
 		}
