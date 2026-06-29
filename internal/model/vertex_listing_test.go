@@ -65,8 +65,8 @@ func TestVertexScanGoogleCompat(t *testing.T) {
 		return &staticTokenSource{token: "scan-token"}, nil
 	})
 	srv, seen := fakeModelGarden(t, "google", [][]string{
-		{"gemini-2.5-pro", "text-embedding-005", "imagen-3.0"},   // page 0 (mixed catalog)
-		{"gemini-2.5-flash", "gemma-3-27b-it", "veo-2.0"},        // page 1
+		{"gemini-2.5-pro", "text-embedding-005", "imagen-3.0"}, // page 0 (mixed catalog)
+		{"gemini-2.5-flash", "gemma-3-27b-it", "veo-2.0"},      // page 1
 	})
 	withModelGardenBase(t, srv.URL)
 
