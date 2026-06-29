@@ -196,8 +196,14 @@ func (h *lspHost) ApplyEdit(_ string, edit lsp.WorkspaceEdit) (bool, string, err
 	}
 
 	if reason, err := h.applyChanges(edit, auths); err != nil {
+		// A multi-op edit failed partway. Roll the just-applied ops back so the
+		// on-disk state matches the applied:false we report to the server, rather than
+		// leaving a half-applied edit the server believes was rejected (atomicity,
+		// §12). Every affected path was snapshotted up front, so committing then
+		// undoing the turn restores them all (created/renamed targets included).
 		if g.checkpoints != nil {
 			g.checkpoints.CommitTurn(lspSession)
+			_, _ = g.checkpoints.UndoLastTurn(lspSession)
 		}
 		return false, reason, nil
 	}

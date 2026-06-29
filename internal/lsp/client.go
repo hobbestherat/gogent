@@ -180,7 +180,21 @@ func (c *Client) lineText(path string, line int) string {
 // returns whether a new version was sent (so a diagnostics caller knows to wait
 // for a fresh, correlated push).
 func (c *Client) ensureOpen(ctx context.Context, path string) (sentVersion bool, err error) {
-	content, info, err := readFileStat(path)
+	// Fast path (§11.1): stat first and, for an already-open document whose size and
+	// mtime are unchanged, skip the read + hash entirely. The full content hash is
+	// computed only on a size/mtime mismatch (or a first open).
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	c.mu.Lock()
+	if d, open := c.docs[path]; open && d.size == info.Size() && d.mtime.Equal(info.ModTime()) {
+		c.mu.Unlock()
+		return false, nil
+	}
+	c.mu.Unlock()
+
+	content, err := os.ReadFile(path) //nolint:gosec // path resolved from a workspace tool request
 	if err != nil {
 		return false, err
 	}
@@ -333,19 +347,6 @@ func (c *Client) posParams(path string, p Position) protocol.TextDocumentPositio
 		TextDocument: protocol.TextDocumentIdentifier{URI: pathToURI(path)},
 		Position:     toWirePosition(c.lineText, path, p),
 	}
-}
-
-// readFileStat reads a file's content and stat in one step.
-func readFileStat(path string) ([]byte, os.FileInfo, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, nil, err
-	}
-	content, err := os.ReadFile(path) //nolint:gosec // path resolved from a workspace tool request
-	if err != nil {
-		return nil, nil, err
-	}
-	return content, info, nil
 }
 
 // cleanPath returns the cleaned absolute form of path for stable doc-table keys.

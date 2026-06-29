@@ -2,6 +2,7 @@ package lsp
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -41,13 +42,29 @@ type Manager struct {
 	slots map[string]*clientSlot
 }
 
-// clientSlot deduplicates concurrent first-touches of one server: the first
-// caller runs the spawn under once, the rest observe its result.
+// clientSlot deduplicates concurrent first-touches of one server: slot.mu
+// serializes the spawn so concurrent first-touches share one process. A
+// permission-gate denial is cached in gateErr and is sticky for the session
+// (the launch gate fires once per server, §9); a transient spawn/transport
+// failure is NOT cached, so a later tool call retries the launch.
+//
+// slot.mu serializes the spawn only; the client and gateErr fields are guarded by
+// the Manager's mu, so the read loops in FileChanged/Shutdown (which iterate slots
+// under m.mu) never race the writer and never block behind a long-running spawn.
 type clientSlot struct {
-	once   sync.Once
-	client *Client
-	err    error
+	mu      sync.Mutex // serializes the spawn for this server
+	client  *Client    // guarded by Manager.mu
+	gateErr error      // guarded by Manager.mu
 }
+
+// launchGateError wraps a LaunchGate denial so ClientForFile can tell a
+// permission decision (cache it, gate-once) apart from a transient spawn or
+// transport failure (do not cache; allow a retry). It preserves the underlying
+// error for both message and errors.Is/As.
+type launchGateError struct{ err error }
+
+func (e *launchGateError) Error() string { return e.err.Error() }
+func (e *launchGateError) Unwrap() error { return e.err }
 
 // NewManager creates a Manager for workspaceRoot serving configs, with host
 // supplying the server→client callbacks. Disabled or commandless configs are
@@ -96,10 +113,38 @@ func (m *Manager) ClientForFile(ctx context.Context, path string) (*Client, erro
 	}
 	m.mu.Unlock()
 
-	slot.once.Do(func() {
-		slot.client, slot.err = m.spawnClient(cfg, path)
-	})
-	return slot.client, slot.err
+	// slot.mu serializes concurrent first-touches of THIS server (so they share one
+	// process) without blocking other servers behind m.mu. The slot's client/gateErr
+	// fields stay guarded by m.mu so FileChanged/Shutdown never race the writer.
+	slot.mu.Lock()
+	defer slot.mu.Unlock()
+
+	m.mu.Lock()
+	client, gateErr := slot.client, slot.gateErr
+	m.mu.Unlock()
+	if client != nil {
+		return client, nil
+	}
+	if gateErr != nil {
+		// A previous launch was declined by the permission gate; that decision is
+		// sticky for the session (gate-once, §9).
+		return nil, gateErr
+	}
+
+	client, err := m.spawnClient(cfg, path)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err != nil {
+		// Cache only a permission-gate denial. A transient spawn/transport error is
+		// left uncached so a subsequent tool call can retry the launch.
+		var lge *launchGateError
+		if errors.As(err, &lge) {
+			slot.gateErr = err
+		}
+		return nil, err
+	}
+	slot.client = client
+	return client, nil
 }
 
 // spawnClient gates the launch, detects the root, builds the transport, and runs
@@ -108,7 +153,9 @@ func (m *Manager) ClientForFile(ctx context.Context, path string) (*Client, erro
 func (m *Manager) spawnClient(cfg ServerConfig, path string) (*Client, error) {
 	if m.LaunchGate != nil {
 		if err := m.LaunchGate(cfg); err != nil {
-			return nil, err
+			// Tag the gate denial so ClientForFile caches it (gate-once) rather than
+			// treating it as a retryable transient failure.
+			return nil, &launchGateError{err}
 		}
 	}
 	root := m.detectRoot(cfg, path)

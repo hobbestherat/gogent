@@ -60,43 +60,38 @@ func (c *Client) Definition(ctx context.Context, file string, pos Position, kind
 	if _, err := c.ensureOpen(ctx, path); err != nil {
 		return nil, err
 	}
-	method, res, err := c.definitionByKind(ctx, path, pos, kind)
+	res, err := c.definitionByKind(ctx, path, pos, kind)
 	if err != nil {
 		return nil, err
 	}
-	_ = method
 	return locationsFromDefinition(c.lineText, res), nil
 }
 
 // definitionByKind dispatches to the right request for kind, gating on the
 // corresponding capability.
-func (c *Client) definitionByKind(ctx context.Context, path string, pos Position, kind DefKind) (string, any, error) {
+func (c *Client) definitionByKind(ctx context.Context, path string, pos Position, kind DefKind) (any, error) {
 	params := func() protocol.TextDocumentPositionParams { return c.posParams(path, pos) }
 	switch kind {
 	case DefDeclaration:
 		if !c.supports(methodDeclaration) {
-			return methodDeclaration, nil, ErrUnsupported
+			return nil, ErrUnsupported
 		}
-		res, err := c.server.Declaration(ctx, &protocol.DeclarationParams{TextDocumentPositionParams: params()})
-		return methodDeclaration, res, err
+		return c.server.Declaration(ctx, &protocol.DeclarationParams{TextDocumentPositionParams: params()})
 	case DefTypeDefinition:
 		if !c.supports(methodTypeDefinition) {
-			return methodTypeDefinition, nil, ErrUnsupported
+			return nil, ErrUnsupported
 		}
-		res, err := c.server.TypeDefinition(ctx, &protocol.TypeDefinitionParams{TextDocumentPositionParams: params()})
-		return methodTypeDefinition, res, err
+		return c.server.TypeDefinition(ctx, &protocol.TypeDefinitionParams{TextDocumentPositionParams: params()})
 	case DefImplementation:
 		if !c.supports(methodImplementation) {
-			return methodImplementation, nil, ErrUnsupported
+			return nil, ErrUnsupported
 		}
-		res, err := c.server.Implementation(ctx, &protocol.ImplementationParams{TextDocumentPositionParams: params()})
-		return methodImplementation, res, err
+		return c.server.Implementation(ctx, &protocol.ImplementationParams{TextDocumentPositionParams: params()})
 	default:
 		if !c.supports(methodDefinition) {
-			return methodDefinition, nil, ErrUnsupported
+			return nil, ErrUnsupported
 		}
-		res, err := c.server.Definition(ctx, &protocol.DefinitionParams{TextDocumentPositionParams: params()})
-		return methodDefinition, res, err
+		return c.server.Definition(ctx, &protocol.DefinitionParams{TextDocumentPositionParams: params()})
 	}
 }
 
@@ -271,6 +266,11 @@ func (c *Client) Format(ctx context.Context, file string) (WorkspaceEdit, error)
 	if !c.supports(methodFormatting) {
 		return WorkspaceEdit{}, ErrUnsupported
 	}
+	// FormattingOptions are advisory: a server that has its own canonical style
+	// (gopls, rustfmt, ...) ignores them and formats to the language's conventions.
+	// The defaults below (tabs, width 4) match Go; a space-indented language served
+	// by a formatter that honors these would want different values, which is a future
+	// per-server config knob rather than a hardcode to revisit here.
 	edits, err := c.server.Formatting(ctx, &protocol.DocumentFormattingParams{
 		TextDocument: protocol.TextDocumentIdentifier{URI: pathToURI(path)},
 		Options:      protocol.FormattingOptions{TabSize: 4, InsertSpaces: false},

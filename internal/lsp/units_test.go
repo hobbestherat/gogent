@@ -177,6 +177,43 @@ func TestWorkspaceEditPreservesOrder(t *testing.T) {
 	}
 }
 
+// TestProgressIdleTracksConcurrentStreams pins the §11.4 fallback-2 fix: idle is
+// "zero outstanding progress streams", tracked per token, so one stream's "end"
+// cannot mark the server idle while another is still in flight, and a token that is
+// created and then begun is counted once.
+func TestProgressIdleTracksConcurrentStreams(t *testing.T) {
+	s := newDiagnosticsStore()
+	idle := func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.isIdleLocked()
+	}
+	if !idle() {
+		t.Fatal("a fresh store with no progress streams should be idle")
+	}
+	s.progressBegin("t1")
+	s.progressBegin("t2")
+	if idle() {
+		t.Fatal("two streams in flight: server must not be idle")
+	}
+	s.progressEnd("t1")
+	if idle() {
+		t.Fatal("one stream still in flight: ending another must not flip to idle")
+	}
+	s.progressEnd("t2")
+	if !idle() {
+		t.Fatal("all streams ended: server should be idle")
+	}
+	// A token created (WorkDoneProgressCreate) and then begun ($/progress begin) is
+	// the same stream and must be counted once.
+	s.progressBegin("t3")
+	s.progressBegin("t3")
+	s.progressEnd("t3")
+	if !idle() {
+		t.Fatal("a created-then-begun token should be idle after a single end")
+	}
+}
+
 // TestServerConfigLanguageID covers the per-extension languageId override that
 // lets one process serve several languageIds (§7.1).
 func TestServerConfigLanguageID(t *testing.T) {

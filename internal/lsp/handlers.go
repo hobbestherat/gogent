@@ -3,6 +3,7 @@ package lsp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"go.lsp.dev/protocol"
 )
@@ -102,8 +103,11 @@ func (h *clientHandler) ApplyEdit(_ context.Context, params *protocol.ApplyWorks
 	return res, nil
 }
 
-// Progress tracks work-done progress as the diagnostics-readiness fallback: a
-// "begin" marks the server busy, an "end" marks it idle (§11.4, fallback 2).
+// Progress tracks work-done progress per token as the diagnostics-readiness
+// fallback: a "begin" marks that token's stream in flight, an "end" clears it; the
+// server is idle only when no stream is outstanding (§11.4, fallback 2). Tracking
+// by token means one stream's "end" cannot mark the server idle while another
+// concurrent stream is still running.
 func (h *clientHandler) Progress(_ context.Context, params *protocol.ProgressParams) error {
 	var v struct {
 		Kind string `json:"kind"`
@@ -111,20 +115,28 @@ func (h *clientHandler) Progress(_ context.Context, params *protocol.ProgressPar
 	if len(params.Value) > 0 {
 		_ = json.Unmarshal(params.Value, &v)
 	}
+	token := progressTokenKey(params.Token)
 	switch v.Kind {
 	case "begin":
-		h.c.diag.setIdle(false)
+		h.c.diag.progressBegin(token)
 	case "end":
-		h.c.diag.setIdle(true)
+		h.c.diag.progressEnd(token)
 	}
 	return nil
 }
 
-// WorkDoneProgressCreate acknowledges a progress token; work is starting, so the
-// server is no longer idle.
-func (h *clientHandler) WorkDoneProgressCreate(context.Context, *protocol.WorkDoneProgressCreateParams) error {
-	h.c.diag.setIdle(false)
+// WorkDoneProgressCreate reserves a progress token; the work that token will report
+// is starting, so the stream is marked in flight (idempotent with its later
+// "begin").
+func (h *clientHandler) WorkDoneProgressCreate(_ context.Context, params *protocol.WorkDoneProgressCreateParams) error {
+	h.c.diag.progressBegin(progressTokenKey(params.Token))
 	return nil
+}
+
+// progressTokenKey renders an LSP progress token (an int or a string on the wire)
+// as a stable map key.
+func progressTokenKey(token protocol.ProgressToken) string {
+	return fmt.Sprintf("%v", token)
 }
 
 // DiagnosticRefresh invalidates the cached pull diagnostics so the next read

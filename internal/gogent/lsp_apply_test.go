@@ -1,6 +1,7 @@
 package gogent
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -57,6 +58,45 @@ func TestLSPApplyMultiFileEditUndo(t *testing.T) {
 	}
 	if got := ckRead(t, f2); got != "package b\n" {
 		t.Fatalf("f2 after undo = %q, want original", got)
+	}
+}
+
+// TestLSPApplyPartialFailureRollsBack proves the atomicity guarantee (§12): when a
+// multi-op edit fails partway, the host rolls the already-applied ops back so the
+// on-disk state matches the applied:false it reports — no half-applied edit lingers.
+func TestLSPApplyPartialFailureRollsBack(t *testing.T) {
+	h, ws, _ := newLSPHost(t)
+	f1 := filepath.Join(ws, "a.go")
+	f2 := filepath.Join(ws, "b.go")
+	ckWrite(t, f1, "package a\n")
+	ckWrite(t, f2, "package b\n")
+	// A directory standing where op 2 would write: renaming onto it fails the write.
+	dir := filepath.Join(ws, "adir")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Op 1 edits f1 (succeeds); op 2 renames f2 onto a directory path (write fails).
+	edit := lsp.WorkspaceEdit{
+		Changes:     map[string][]lsp.TextEdit{f1: insertAt("// edited a\n")},
+		ResourceOps: []lsp.ResourceOp{{Kind: "rename", Path: f2, NewPath: dir}},
+		Ordered: []lsp.DocumentChange{
+			{Kind: lsp.ChangeText, Path: f1, Edits: insertAt("// edited a\n")},
+			{Kind: lsp.ChangeRename, Path: f2, NewPath: dir},
+		},
+	}
+	applied, reason, err := h.ApplyEdit("fake", edit)
+	if err != nil {
+		t.Fatalf("ApplyEdit unexpected error: %v", err)
+	}
+	if applied {
+		t.Fatalf("a mid-apply failure must report applied:false (reason %q)", reason)
+	}
+	if got := ckRead(t, f1); got != "package a\n" {
+		t.Fatalf("f1 = %q after a rolled-back partial apply, want the original content", got)
+	}
+	if got := ckRead(t, f2); got != "package b\n" {
+		t.Fatalf("f2 = %q, the rename source must be intact after rollback", got)
 	}
 }
 

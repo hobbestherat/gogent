@@ -24,9 +24,10 @@ type diagnosticsStore struct {
 	mu     sync.Mutex
 	cond   *sync.Cond
 	byPath map[string]*diagEntry
-	// idle is the work-done-progress fallback signal: when the server reports no
-	// in-flight work, an unversioned push is treated as settled (§11.4, fallback 2).
-	idle bool
+	// progress tracks in-flight work-done-progress streams by token. The server is
+	// "idle" (the §11.4 fallback-2 signal) only when zero streams are outstanding, so
+	// one stream's "end" cannot mark the server idle while another is still running.
+	progress map[string]struct{}
 }
 
 type diagEntry struct {
@@ -39,7 +40,7 @@ type diagEntry struct {
 }
 
 func newDiagnosticsStore() *diagnosticsStore {
-	s := &diagnosticsStore{byPath: map[string]*diagEntry{}}
+	s := &diagnosticsStore{byPath: map[string]*diagEntry{}, progress: map[string]struct{}{}}
 	s.cond = sync.NewCond(&s.mu)
 	return s
 }
@@ -80,12 +81,29 @@ func (s *diagnosticsStore) publish(path string, version int32, hasVersion bool, 
 	s.cond.Broadcast()
 }
 
-// setIdle updates the work-done-progress idle fallback flag and wakes waiters.
-func (s *diagnosticsStore) setIdle(idle bool) {
+// progressBegin records that a work-done-progress stream identified by token is
+// in flight (server busy). It is idempotent for a token, so a server that both
+// creates a token and then sends a "begin" for it is counted once.
+func (s *diagnosticsStore) progressBegin(token string) {
 	s.mu.Lock()
-	s.idle = idle
+	s.progress[token] = struct{}{}
 	s.cond.Broadcast()
 	s.mu.Unlock()
+}
+
+// progressEnd records that the stream identified by token finished. The server
+// is treated as idle only once every outstanding stream has ended (§11.4).
+func (s *diagnosticsStore) progressEnd(token string) {
+	s.mu.Lock()
+	delete(s.progress, token)
+	s.cond.Broadcast()
+	s.mu.Unlock()
+}
+
+// isIdleLocked reports whether no work-done-progress stream is in flight. The
+// caller holds s.mu.
+func (s *diagnosticsStore) isIdleLocked() bool {
+	return len(s.progress) == 0
 }
 
 // resetEntry clears an entry's cached push state in place while preserving the
@@ -180,7 +198,7 @@ func (s *diagnosticsStore) wait(path string) (diags []Diagnostic, settled bool) 
 		versioned := e.hasVersion && e.version >= e.awaited
 		// Idle fallback: a server that omits the version field is settled once it
 		// has pushed at least once and reports no in-flight work (§11.4, fallback 2).
-		idleFallback := e.pushSeq > 0 && s.idle
+		idleFallback := e.pushSeq > 0 && s.isIdleLocked()
 		if (versioned || idleFallback) && time.Since(e.lastPush) >= debounceWindow {
 			return append([]Diagnostic(nil), e.diags...), true
 		}

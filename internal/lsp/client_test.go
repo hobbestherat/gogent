@@ -114,6 +114,41 @@ func TestDiagnosticsReSyncOnAccess(t *testing.T) {
 	})
 }
 
+// TestEnsureOpenFastPathSkipsResync confirms the §11.1 size+mtime short-circuit:
+// repeated access to an unchanged open document never re-syncs (no didChange),
+// while a real content change still triggers exactly one re-sync.
+func TestEnsureOpenFastPathSkipsResync(t *testing.T) {
+	fs := newFakeServer()
+	c := fs.connectClient(t, goCfg(), &stubHost{})
+	path := writeFile(t, "package a\n")
+
+	// First access opens the document (didOpen, not counted as a didChange).
+	if _, err := c.Hover(context.Background(), path, Position{1, 1}); err != nil {
+		t.Fatalf("first access: %v", err)
+	}
+	// Several accesses to the unchanged file must take the fast path: no didChange.
+	for i := 0; i < 3; i++ {
+		if _, err := c.Hover(context.Background(), path, Position{1, 1}); err != nil {
+			t.Fatalf("repeat access %d: %v", i, err)
+		}
+	}
+	if change, _, _, _ := fs.counts(); change != 0 {
+		t.Fatalf("unchanged document re-synced %d times, want 0 (fast path)", change)
+	}
+
+	// A genuine content change (and the mtime/size it moves) must re-sync once.
+	if err := os.WriteFile(path, []byte("package a\nvar X int\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Hover(context.Background(), path, Position{1, 1}); err != nil {
+		t.Fatalf("post-edit access: %v", err)
+	}
+	waitFor(t, "exactly one re-sync after a real edit", func() bool {
+		change, _, _, _ := fs.counts()
+		return change == 1
+	})
+}
+
 // TestDefinitionKinds covers the definition family and the Location/LocationLink
 // union normalization (§7.2).
 func TestDefinitionKinds(t *testing.T) {
@@ -416,9 +451,61 @@ func TestManagerLaunchGate(t *testing.T) {
 		return nil, nil, nil
 	}
 	t.Cleanup(mgr.Shutdown)
-	if _, err := mgr.ClientForFile(context.Background(), "/ws/a.go"); err != context.Canceled {
+	if _, err := mgr.ClientForFile(context.Background(), "/ws/a.go"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("gated launch = %v, want context.Canceled", err)
 	}
+}
+
+// TestManagerGateDenialIsStickyTransientRetries proves the slot caching policy
+// (§9): a permission-gate denial is cached for the session (the gate fires once
+// per server), while a transient spawn/transport failure is NOT cached, so a later
+// tool call retries the launch.
+func TestManagerGateDenialIsStickyTransientRetries(t *testing.T) {
+	t.Run("gate denial is sticky", func(t *testing.T) {
+		var gateCalls int
+		mgr := NewManager("/ws", []ServerConfig{goCfg()}, &stubHost{})
+		mgr.LaunchGate = func(ServerConfig) error { gateCalls++; return context.Canceled }
+		mgr.Spawn = func(ServerConfig) (jsonrpc2.Stream, func() error, error) {
+			t.Fatal("spawn must not run when the gate denies")
+			return nil, nil, nil
+		}
+		t.Cleanup(mgr.Shutdown)
+		for i := 0; i < 3; i++ {
+			if _, err := mgr.ClientForFile(context.Background(), "/ws/a.go"); !errors.Is(err, context.Canceled) {
+				t.Fatalf("call %d = %v, want context.Canceled", i, err)
+			}
+		}
+		if gateCalls != 1 {
+			t.Fatalf("launch gate consulted %d times, want 1 (cached after denial)", gateCalls)
+		}
+	})
+
+	t.Run("transient spawn error retries", func(t *testing.T) {
+		var spawns int
+		fs := newFakeServer()
+		mgr := NewManager("/ws", []ServerConfig{goCfg()}, &stubHost{})
+		mgr.Spawn = func(cfg ServerConfig) (jsonrpc2.Stream, func() error, error) {
+			spawns++
+			if spawns == 1 {
+				return nil, nil, errors.New("transient: command momentarily unavailable")
+			}
+			c1, c2 := net.Pipe()
+			fs.conn = jsonrpc2.NewConn(jsonrpc2.NewStream(c2))
+			fs.conn.Go(context.Background(), fs.handle)
+			return jsonrpc2.NewStream(c1), func() error { _ = c1.Close(); return nil }, nil
+		}
+		t.Cleanup(mgr.Shutdown)
+		if _, err := mgr.ClientForFile(context.Background(), "/ws/a.go"); err == nil {
+			t.Fatal("first launch should surface the transient spawn error")
+		}
+		c, err := mgr.ClientForFile(context.Background(), "/ws/a.go")
+		if err != nil || c == nil {
+			t.Fatalf("retry after transient error = (%v, %v), want a live client", c, err)
+		}
+		if spawns != 2 {
+			t.Fatalf("spawn attempted %d times, want 2 (transient error not cached)", spawns)
+		}
+	})
 }
 
 // TestConfigurationPull answers a workspace/configuration request from the Host's
