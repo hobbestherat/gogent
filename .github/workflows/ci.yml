@@ -55,6 +55,9 @@ jobs:
       # The repo's .golangci.yml is a v2 config, so the action must install
       # golangci-lint v2. Action v9 does (it dropped v1 support entirely) and runs
       # on node24, clearing the node20 runner deprecation that v8 still carried.
+      # Pin the linter version (rather than "latest") so the now-enforcing job is
+      # reproducible: a new golangci-lint release can add checks that would fail an
+      # unrelated PR. Bump this deliberately.
       - uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: v2.12.2
