@@ -11,8 +11,9 @@ import (
 const debounceWindow = 150 * time.Millisecond
 
 // freshnessCeiling bounds the freshness wait for servers that neither version
-// their pushes nor report progress idle (§11.4, fallback 3).
-const freshnessCeiling = 3 * time.Second
+// their pushes nor report progress idle (§11.4, fallback 3). It is a var, not a
+// const, only so tests can shorten it; production never reassigns it.
+var freshnessCeiling = 3 * time.Second
 
 // diagnosticsStore is the per-file push cache plus the version-keyed freshness
 // machinery (the LSP support design §11.4). Push diagnostics are deduped and
@@ -28,6 +29,14 @@ type diagnosticsStore struct {
 	// "idle" (the §11.4 fallback-2 signal) only when zero streams are outstanding, so
 	// one stream's "end" cannot mark the server idle while another is still running.
 	progress map[string]struct{}
+	// sawVersioned records whether this connection has ever received a versioned
+	// push. A server that pushes versioned diagnostics (gopls) is correlated on via
+	// the freshness wait; one that never does is, once observed, treated as pull-only.
+	sawVersioned bool
+	// pullOnlyMarked is set the first time a pull-capable server exhausts the
+	// freshness ceiling without ever versioning a push, so subsequent reads skip the
+	// ceiling and pull directly (§11.4). It is ignored once sawVersioned flips true.
+	pullOnlyMarked bool
 }
 
 type diagEntry struct {
@@ -75,6 +84,7 @@ func (s *diagnosticsStore) publish(path string, version int32, hasVersion bool, 
 	if hasVersion {
 		e.version = version
 		e.hasVersion = true
+		s.sawVersioned = true
 	}
 	e.pushSeq++
 	e.lastPush = time.Now()
@@ -151,6 +161,26 @@ func (s *diagnosticsStore) current(path string) []Diagnostic {
 		return append([]Diagnostic(nil), e.diags...)
 	}
 	return nil
+}
+
+// pullOnly reports whether this connection should skip the freshness wait and
+// pull synchronously: a pull-capable server that has been observed to exhaust the
+// ceiling without ever versioning a push (§11.4). It self-corrects — should the
+// server ever push a versioned diagnostic, sawVersioned flips and this returns
+// false again, restoring the version-correlated push path.
+func (s *diagnosticsStore) pullOnly() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pullOnlyMarked && !s.sawVersioned
+}
+
+// markPullOnly records that a pull-capable server exhausted the freshness ceiling
+// without versioning a push, so future reads pull directly instead of waiting it
+// out again.
+func (s *diagnosticsStore) markPullOnly() {
+	s.mu.Lock()
+	s.pullOnlyMarked = true
+	s.mu.Unlock()
 }
 
 // wait blocks until the cached diagnostics for path are settled — ranked by

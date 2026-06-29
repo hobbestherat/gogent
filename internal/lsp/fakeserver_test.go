@@ -25,6 +25,7 @@ type fakeServer struct {
 	capsJSON    string
 	results     map[string]string // method -> canned result JSON
 	openVersion map[string]int32  // uri -> last didOpen/didChange version seen
+	methodCalls map[string]int    // method -> number of requests received
 	didChange   int
 	didSave     int
 	didClose    int
@@ -66,6 +67,7 @@ func newFakeServer() *fakeServer {
 		capsJSON:    defaultCapsJSON,
 		results:     map[string]string{},
 		openVersion: map[string]int32{},
+		methodCalls: map[string]int{},
 		release:     make(chan struct{}),
 	}
 }
@@ -121,6 +123,9 @@ func (fs *fakeServer) cancelled() []int64 {
 // JSON (passed through verbatim by the default codec).
 func (fs *fakeServer) handle(ctx context.Context, req *jsonrpc2.Request) (any, error) {
 	method := req.Method()
+	fs.mu.Lock()
+	fs.methodCalls[method]++
+	fs.mu.Unlock()
 	if method == "$/cancelRequest" {
 		var p struct {
 			ID int64 `json:"id"`
@@ -222,6 +227,13 @@ func (fs *fakeServer) bump(p *int) {
 	fs.mu.Lock()
 	*p++
 	fs.mu.Unlock()
+}
+
+// callCount returns how many requests the server received for method.
+func (fs *fakeServer) callCount(method string) int {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return fs.methodCalls[method]
 }
 
 func (fs *fakeServer) setResult(method, json string) {

@@ -133,7 +133,6 @@ func (m *Manager) ClientForFile(ctx context.Context, path string) (*Client, erro
 
 	client, err := m.spawnClient(cfg, path)
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if err != nil {
 		// Cache only a permission-gate denial. A transient spawn/transport error is
 		// left uncached so a subsequent tool call can retry the launch.
@@ -141,9 +140,20 @@ func (m *Manager) ClientForFile(ctx context.Context, path string) (*Client, erro
 		if errors.As(err, &lge) {
 			slot.gateErr = err
 		}
+		m.mu.Unlock()
 		return nil, err
 	}
+	// A Shutdown that landed during this spawn cancels baseCtx and replaces the slot
+	// table, orphaning this slot. Caching the freshly built client there would leak
+	// its subprocess (nothing would ever Close it), so detect the race and close the
+	// client instead of caching it. Closing happens after the lock is released.
+	if m.baseCtx.Err() != nil || m.slots[cfg.Name] != slot {
+		m.mu.Unlock()
+		_ = client.Close()
+		return nil, context.Canceled
+	}
 	slot.client = client
+	m.mu.Unlock()
 	return client, nil
 }
 

@@ -21,10 +21,24 @@ func (c *Client) Diagnostics(ctx context.Context, file string) ([]Diagnostic, er
 	if _, err := c.ensureOpen(ctx, path); err != nil {
 		return nil, err
 	}
+	pullable := c.supports(methodPullDiagnostic)
+	// A pull-capable server already observed to never version its pushes is treated
+	// as pull-only: pull synchronously instead of blocking out the freshness ceiling
+	// on every call (§11.4 — "pull sidesteps the question entirely"). gopls is
+	// unaffected because it pushes versioned diagnostics, so it is never marked.
+	if pullable && c.diag.pullOnly() {
+		if pulled, err := c.pullDiagnostics(ctx, path); err == nil {
+			return pulled, nil
+		}
+		// A pull failure falls through to the freshness wait below.
+	}
 	diags, settled := c.diag.wait(path)
-	if settled || !c.supports(methodPullDiagnostic) {
+	if settled || !pullable {
 		return diags, nil
 	}
+	// The ceiling fired and the server advertises pull: it produced no versioned
+	// push, so remember it as pull-only (future calls skip the ceiling) and pull now.
+	c.diag.markPullOnly()
 	pulled, err := c.pullDiagnostics(ctx, path)
 	if err != nil {
 		// A pull failure falls back to whatever the push wait returned.

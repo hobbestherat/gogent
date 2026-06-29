@@ -30,8 +30,7 @@ inherit the built-in default for that key.
 | `notify` | *NotifyConfig | defaults | Desktop/terminal notification settings. This is a pointer so a missing key yields the full defaults. |
 | `review_edits` | bool | `false` | Gate every write/edit behind interactive diff-review approval. |
 | `mcp_servers` | []MCPServerConfig | `nil` | MCP servers whose tools are added at startup. |
-| `diagnostics` | DiagnosticsConfig | zero (Go default `go vet ./...`) | Diagnostics tool command and warning classification. |
-| `verify` | VerifyConfig | zero (Go default `go test ./...`) | Verify tool test command. |
+| `lsp_servers` | []LSPServerConfig | one `gopls` entry (`DefaultLSPServers`) | Language servers gogent can lazily launch to back the `lsp_*` tools. |
 | `theme` | ThemeConfig | zero (`"default"` palette, color on) | TUI color palette. |
 | `experimental` | ExperimentalConfig | zero (all off) | Opt-in, not-yet-default behaviors. |
 | `supervisor` | SupervisorConfig | zero (defaults via `*OrDefault`) | Harness idle-watchdog tuning; only active when `experimental.supervisor` is on. |
@@ -181,32 +180,39 @@ All fields are integers in **seconds**; default `300` each, and `<=0` ⇒ defaul
 
 ---
 
-## `DiagnosticsConfig`
+## `LSPServerConfig`
+
+Each entry in `lsp_servers[]` declares one Language Server Protocol server gogent can launch and route source files to (see [tools-and-permissions.md](tools-and-permissions.md) for the `lsp_*` tools they back). All per-language knowledge lives here as data: routing is by file extension, the workspace root is found by walking up for `root_markers`, and the wire languageId is resolved per file. A single generic client serves every server. Launching a server is gated through `ActionLSP`, so adding an entry advertises a server but does not silently run it.
+
+When `lsp_servers` is omitted entirely, gogent uses `DefaultLSPServers`: a single `gopls` entry so Go works with zero config when `gopls` is on `PATH`. To disable LSP, set `"lsp_servers": []` (an empty list) or mark the entry `"disabled": true`.
 
 | JSON tag | Type | Default | Description |
 |---|---|---|---|
-| `command,omitempty` | []string | `nil` ⇒ `["go","vet","./..."]` | Argument vector for the diagnostics tool. |
-| `warning_pattern,omitempty` | string | `""` | Regex; matching messages are classified as warnings vs errors. Empty ⇒ all are errors. |
+| `name` | string | — | Server name; also the permission-gate key. |
+| `language,omitempty` | string | `""` | Default LSP languageId (e.g. `"go"`, `"rust"`, `"python"`). |
+| `languages,omitempty` | map[string]string | `nil` | Per-extension languageId override (e.g. `".tsx"` → `"typescriptreact"`) for one process serving several languageIds. |
+| `extensions,omitempty` | []string | `nil` | Routing keys, leading dot included (e.g. `[".go"]`). |
+| `command` | string | — | stdio server executable. |
+| `args,omitempty` | []string | `nil` | Server arguments. |
+| `env,omitempty` | map[string]string | `nil` | Extra environment for the subprocess. |
+| `root_markers,omitempty` | []string | `nil` | Files that mark a project root, searched by walking up from the file (e.g. `["go.work","go.mod"]`). Empty ⇒ the gogent workspace root. |
+| `initialization_options,omitempty` | map[string]any | `nil` | Feeds the `initialize` request's `initializationOptions`. |
+| `settings,omitempty` | map[string]any | `nil` | Answers `workspace/configuration` pulls and seeds `workspace/didChangeConfiguration`. |
+| `allowed_commands,omitempty` | []string | `nil` | Scopes `lsp_execute_command` (`workspace/executeCommand`); an empty list means no command may run. |
+| `disabled,omitempty` | bool | `false` | Skip this server without removing its config. |
 
 ```json
-"diagnostics": {
-  "command": ["go", "vet", "./..."],
-  "warning_pattern": "(^|\s)warning:"
-}
-```
-
----
-
-## `VerifyConfig`
-
-| JSON tag | Type | Default | Description |
-|---|---|---|---|
-| `command,omitempty` | []string | `nil` ⇒ `["go","test","./..."]` | Argument vector for the test suite. |
-
-```json
-"verify": {
-  "command": ["go", "test", "-race", "./..."]
-}
+"lsp_servers": [
+  {
+    "name": "gopls",
+    "language": "go",
+    "extensions": [".go"],
+    "command": "gopls",
+    "args": ["serve"],
+    "root_markers": ["go.work", "go.mod"],
+    "allowed_commands": ["gopls.tidy"]
+  }
+]
 ```
 
 ---
