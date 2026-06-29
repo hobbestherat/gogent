@@ -20,5 +20,9 @@ func requireModel(t *testing.T) {
 		t.Skipf("model endpoint %s not reachable, skipping integration test: %v", model.DefaultModelURL, err)
 		return
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Skipf("model endpoint %s returned status %s, skipping integration test", model.DefaultModelURL, resp.Status)
+		return
+	}
 }

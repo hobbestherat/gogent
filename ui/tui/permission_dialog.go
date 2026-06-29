@@ -297,9 +297,13 @@ func permissionPrompt(req permission.Request) (title, question, alwaysLabel stri
 				alwaysAllow
 		}
 		return "Network access?", "The agent wants to access the network.", alwaysAllow
-	case permission.ActionDiagnostics:
-		return "Run diagnostics?",
-			"The agent wants to run the project's compiler/linter to check for errors.",
+	case permission.ActionLSP:
+		return "Launch language server?",
+			fmt.Sprintf("The agent wants to launch the %q language server for semantic diagnostics and navigation.", req.Resource),
+			alwaysAllow
+	case permission.ActionLSPCommand:
+		return "Run language-server command?",
+			fmt.Sprintf("The agent wants the language server to run a command (%s). Its side effects are NOT checkpointable/undoable.", req.Resource),
 			alwaysAllow
 	default:
 		return "Permission required",

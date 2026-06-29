@@ -28,7 +28,7 @@ import (
 
 // plan281ReadOnlyTools are the read-only investigation tools a plan-mode child
 // must retain.
-var plan281ReadOnlyTools = []string{"read", "grep", "glob", "list", "diagnostics"}
+var plan281ReadOnlyTools = []string{"read", "grep", "glob", "list", "lsp_diagnostics"}
 
 // plan281WriteTools are the side-effecting tools a plan-mode root (and its
 // children) must NOT have.

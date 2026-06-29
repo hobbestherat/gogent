@@ -340,6 +340,7 @@ func runDaemonForeground(p daemon.Paths, opts daemonStartOpts) error {
 	// Connect MCP servers and start free-running watchers, mirroring the headless
 	// startup order so the permission prompter is installed first.
 	g.StartMCPServers()
+	g.StartLSPServers()
 	g.StartWatchers()
 
 	// Block until a shutdown signal or an authorized /exit.
@@ -357,6 +358,7 @@ func runDaemonForeground(p daemon.Paths, opts daemonStartOpts) error {
 	// the lifecycle files (issue #358 shutdown sequence).
 	g.StopWatchers()
 	g.CloseMCPServers()
+	g.CloseLSPServers()
 	g.SyncStore()
 	_ = unixSrv.Close()
 	if tcpSrv != nil {

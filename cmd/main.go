@@ -267,6 +267,11 @@ func main() {
 	// prompt interactively rather than defaulting to deny.
 	g.StartMCPServers()
 
+	// Configure the language servers and register the lsp_* tools (the LSP support
+	// design). Like MCP, launches are lazy and permission-gated, so this only
+	// prepares routing; the first matching-file use spawns a server.
+	g.StartLSPServers()
+
 	// Start the scheduled free-running watchers (issue #329). After StartMCPServers
 	// so the permission prompter is installed for the ActionWatcher gate; a no-op
 	// unless Experimental.Watchers is enabled.
@@ -304,6 +309,9 @@ func main() {
 
 	// Release any MCP servers (terminates stdio subprocesses).
 	g.CloseMCPServers()
+
+	// Release any language servers (clean shutdown → exit → kill, no orphans).
+	g.CloseLSPServers()
 
 	// Cancel TUI if running
 	if wb != nil {

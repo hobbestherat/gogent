@@ -23,16 +23,16 @@ import (
 type Action string
 
 const (
-	ActionRead        Action = "read"        // read a file inside the workspace
-	ActionWrite       Action = "write"       // write/edit a file inside the workspace
-	ActionShell       Action = "shell"       // run a shell command (session-wide gate)
-	ActionExternal    Action = "external"    // touch a path outside the workspace
-	ActionNetwork     Action = "network"     // network access
-	ActionSubagent    Action = "subagent"    // spawn a sub-agent
-	ActionMCP         Action = "mcp"         // launch/connect to an MCP server
-	ActionDiagnostics Action = "diagnostics" // run the configured compiler/linter
-	ActionVerify      Action = "verify"      // run the configured test command
-	ActionWatcher     Action = "watcher"     // start/manage a scheduled watcher (issue #329)
+	ActionRead       Action = "read"        // read a file inside the workspace
+	ActionWrite      Action = "write"       // write/edit a file inside the workspace
+	ActionShell      Action = "shell"       // run a shell command (session-wide gate)
+	ActionExternal   Action = "external"    // touch a path outside the workspace
+	ActionNetwork    Action = "network"     // network access
+	ActionSubagent   Action = "subagent"    // spawn a sub-agent
+	ActionMCP        Action = "mcp"         // launch/connect to an MCP server
+	ActionWatcher    Action = "watcher"     // start/manage a scheduled watcher (issue #329)
+	ActionLSP        Action = "lsp"         // launch/connect to a language server
+	ActionLSPCommand Action = "lsp_command" // run a server-side LSP workspace/executeCommand
 )
 
 // knownActions is the set of Action constants a rule may target. A rule's action
@@ -41,8 +41,8 @@ const (
 // silently loaded (issue #355).
 var knownActions = map[Action]bool{
 	ActionRead: true, ActionWrite: true, ActionShell: true, ActionExternal: true,
-	ActionNetwork: true, ActionSubagent: true, ActionMCP: true, ActionDiagnostics: true,
-	ActionVerify: true, ActionWatcher: true,
+	ActionNetwork: true, ActionSubagent: true, ActionMCP: true, ActionWatcher: true,
+	ActionLSP: true, ActionLSPCommand: true,
 }
 
 // validRuleAction reports whether a is a legal rule action: a known Action

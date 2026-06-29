@@ -21,8 +21,7 @@ cmd/main.go   — flags, signal handling, wires components
          │      ├─► internal/tool (ToolRegistry)              — model-callable tools, each gated by internal/permission
          │      │      ├─► internal/fileops   (read/write/edit + checkpoints/undo)
          │      │      ├─► internal/vcs       (git tool + status)
-         │      │      ├─► internal/diagnostics (compiler/linter tool)
-         │      │      ├─► internal/verify     (test runner tool)
+         │      │      ├─► internal/lsp        (language-server client → lsp_* tools)
          │      │      ├─► internal/web        (HTML→Markdown for web fetch)
          │      │      ├─► internal/shell      (shell command + external-root guard)
          │      │      └─► internal/mcp         (external MCP server tools)
@@ -55,23 +54,22 @@ Every internal package and its purpose:
 - **internal/compression** — Conversation summarization: a stateless `CompressionAgent` turns older turns into a digest.
 - **internal/config** — JSON config loading (models, permissions, notify, sub-agent execution model, etc.).
 - **internal/diag** — Logging (`slog` Logger) + append-only Audit log for permission decisions & tool calls.
-- **internal/diagnostics** — Runs the configured compiler/linter (`go vet ./...`), parses to structured `file:line:col` findings; backs the diagnostics tool.
 - **internal/diff** — Stdlib-only unified-diff generator for write/edit previews.
 - **internal/fileops** — File read/write/edit tools + per-turn Checkpoint snapshots for undo (FIFO bounded).
 - **internal/gogent** — Top-level singleton `Gogent`: assembles model connection, permission service, tool registry, audit, stats, MCP clients; creates UserSessions.
 - **internal/http** — Minimal HTTP client helper (baseURL/timeout, JSON get/post).
+- **internal/lsp** — Language Server Protocol client: one generic capability-driven client over `go.lsp.dev/protocol` + `jsonrpc2`, a per-language Manager that lazily launches servers (gated by `ActionLSP`) and routes files by extension, version-correlated diagnostics (push + pull), document sync, and server→client callbacks; backs the `lsp_*` tools. Carries no app dependencies.
 - **internal/mathexpr** — Safe recursive-descent arithmetic evaluator (`+,-,*,/,`, parens, float64); shared by the `/calc` command & the calc tool.
 - **internal/mcp** — Model Context Protocol client: JSON-RPC over streamable-HTTP & stdio transports; `initialize`/`ListTools`/`CallTool`.
 - **internal/model** — LLM connector: OpenAI-shaped request/response types, provider adapters, streaming, retries/backoff, tool-calls, token usage & stats.
 - **internal/notify** — Desktop/terminal notifications (bell, OSC 9/777, native notifier) gated by Reason + config toggles.
-- **internal/permission** — Path-aware permission service: allow/deny rules, a path-containment predicate, and external/read/write/diagnostics actions.
+- **internal/permission** — Path-aware permission service: allow/deny rules, a path-containment predicate, and external/read/write/lsp actions.
 - **internal/server** — HTTP API server: webapi handlers over Gogent sessions, auth, streaming, session management.
 - **internal/shell** — Best-effort scanner for filesystem paths in shell commands that escape the workspace (guardrail, not sandbox).
 - **internal/skill** — Skill loader: parses YAML frontmatter (`name`/`description`) from `SKILL.md` files into callable skills.
 - **internal/stats** — Usage `Report`/`ModelStat`/`ConnectorStat` aggregation; per-model lookup for the Overall stats panel.
-- **internal/tool** — `ToolRegistry`: registers all model-callable tools (read/write/edit/shell/git/diagnostics/verify/web/...), with permission gating per tool.
+- **internal/tool** — `ToolRegistry`: registers all model-callable tools (read/write/edit/shell/git/lsp/web/...), with permission gating per tool.
 - **internal/vcs** — Safe git wrapper: explicit arg vectors, timeout, no pager/prompts; backs the native git tool + system-prompt git status.
-- **internal/verify** — Runs the configured test command (`go test ./...`), parses to structured per-test/per-package failures; backs the verify tool.
 - **internal/web** — Dependency-free HTML→Markdown extractor (title + body) for the web-fetch tool.
 
 Top-level non-internal packages:

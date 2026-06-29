@@ -13,8 +13,8 @@ A complete reference for every tool the agent can call, the permission Action co
 | `ActionNetwork` | `network` | Network access / `web_fetch`; keyed per host |
 | `ActionSubagent` | `subagent` | Spawn a sub-agent |
 | `ActionMCP` | `mcp` | Launch/connect an MCP server; keyed on server name |
-| `ActionDiagnostics` | `diagnostics` | Run compiler/linter; dedicated so an "always" grant never blesses the shell |
-| `ActionVerify` | `verify` | Run the test command; dedicated, same rationale |
+| `ActionLSP` | `lsp` | Launch/connect a language server; keyed on server name, gated once per server before its first spawn |
+| `ActionLSPCommand` | `lsp_command` | Run a server-side `workspace/executeCommand` (the higher-risk Tier 3 action); dedicated so an "always" LSP launch grant never blesses arbitrary server commands |
 
 Path-style for `read`/`write`/`external` (an ancestor root covers descendants via `pathUnder`); the rest are scalar.
 
@@ -31,8 +31,8 @@ Set up in `Gogent.NewGogentWithWorkspace`: static allow rules for `read`/`write`
 | `network` | per host | ask | |
 | `subagent` | per spawn | ask | |
 | `mcp` | per server name | ask | |
-| `diagnostics` | per call | ask | |
-| `verify` | per call | ask | |
+| `lsp` | per server name | ask | gated once per server before its first lazy launch |
+| `lsp_command` | per server name | ask | only the `lsp_execute_command` tool; the command must also be on the server's `allowed_commands` list |
 
 So, in summary: **workspace allow / outside ask / shell ask / headless deny**.
 
@@ -99,14 +99,30 @@ File access is gated by `fileops.CheckFileAccess`: in-workspace uses `read`/`wri
 | `git` | ❌ mutating / ✅-ish read | `shell` only for mutating ops (`commit`/`create_branch`/`restore`) | Run native git via explicit arg vectors; `status`/`diff`/`log` run free |
 | `web_fetch` | ✅ | `network` (host) | Fetch an http(s) URL, return readability-extracted Markdown; size-capped, short-TTL cached |
 | `calc` | ✅ | none | Evaluate a math expression via the hardened `mathexpr` evaluator (`github.com/expr-lang/expr` + a curated math env): operators `+ - * /`, power (`**`/`^`), unary minus, parentheses (`%` is integer-only modulo — `mod(x,y)` for floats; a comparison is valid only as a ternary condition); functions (sqrt, trig, log, abs/round, factorial/gcd/lcm, …) and constants (`pi`, `e`, physics `c`/`G`/`g`/…). Integer results print cleanly, fractionals at full precision |
-| `diagnostics` | ❌ | `diagnostics` | Run configured compiler/linter (default `go vet ./...`); returns structured `file:line:col` findings |
-| `verify` | ❌ | `verify` | Run configured test command (default `go test ./...`); returns structured pass/fail + parsed failures |
 
 **Shell gating:** the session-wide `ActionShell` is asked once, then `shell.ExternalRoots` best-effort scans for paths escaping the workspace and gates each distinct external root through `ActionExternal`.
 
 **Git gating:** `commit`/`create_branch`/`restore` gate through `ActionShell`; `status`/`diff`/`log` run free.
 
-`diagnostics`/`verify` commands are fixed by config, pinned to the workspace root, but execute build/test code so they are gated through dedicated actions. See [configuration.md](configuration.md) for the `ReviewEdits` toggle and the `diagnostics`/`verify` command settings.
+### Language-server (LSP) tools (`internal/tool/lsp.go`, backed by `internal/lsp`)
+
+Registered only when at least one (non-disabled, launchable) `lsp_servers` entry is configured. Each tool resolves the file's server by extension, lazily launching the server subprocess on first use — that first launch is gated through `ActionLSP` (asked once per server). "No server configured for this extension" and "not supported by this server" are clean, structured results, never errors. Every operation is capability-gated against what the server actually advertised.
+
+| Tool | Read-only | Permission gate | Description |
+| --- | --- | --- | --- |
+| `lsp_diagnostics` | ✅ | `lsp` (launch) | Live, version-correlated diagnostics for a file (push + pull, deduped) — Tier 1 |
+| `lsp_definition` | ✅ | `lsp` | Resolve where the symbol at a position is defined; `kind` selects definition/declaration/type/implementation — Tier 2 |
+| `lsp_references` | ✅ | `lsp` | Every reference to the symbol at a position across the workspace — Tier 2 |
+| `lsp_hover` | ✅ | `lsp` | Type signature + documentation for the symbol at a position — Tier 2 |
+| `lsp_document_symbols` | ✅ | `lsp` | Symbol tree of a file (hierarchical or flat, normalized) — Tier 2 |
+| `lsp_workspace_symbols` | ✅ | `lsp` | Fuzzy symbol search across the workspace — Tier 2 |
+| `lsp_call_hierarchy` | ✅ | `lsp` | Incoming (callers) or outgoing (callees) calls of the function at a position — Tier 2 |
+| `lsp_code_actions` | ❌ | `lsp` | List quick fixes / refactors for a range (lazy edits resolved); preview only — Tier 3 |
+| `lsp_rename` | ❌ | `lsp` | Preview-then-apply a workspace-wide rename of the symbol at a position — Tier 3 |
+| `lsp_format` | ❌ | `lsp` | Preview-then-apply formatting a whole file with the server's formatter — Tier 3 |
+| `lsp_execute_command` | ❌ | `lsp` + `lsp_command` | Run a server-side `workspace/executeCommand`; the command must be on the server's `allowed_commands` list — Tier 3 |
+
+**LSP gating:** the first launch of each server is gated through `ActionLSP` (a denial is sticky for the session; a transient spawn/transport failure is not cached, so a later call retries). Tier 3 mutations (`lsp_rename`/`lsp_format`/applied code actions) are preview-then-apply and route their edits through the Host's write/checkpoint machinery, so the normal `write`/`external` file gating and edit-review still apply on apply. `lsp_execute_command` additionally gates through `ActionLSPCommand` and is bounded by the server's `allowed_commands` list (an off-list command never runs). See [configuration.md](configuration.md) for the `lsp_servers` schema.
 
 ### Sub-agent & coordination tools (registered in `internal/gogent`)
 

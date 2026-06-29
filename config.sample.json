@@ -144,13 +144,16 @@
     "suppress_when_focused": false
   },
   "mcp_servers": [],
-  "diagnostics": {
-    "command": ["go", "vet", "./..."],
-    "warning_pattern": ""
-  },
-  "verify": {
-    "command": ["go", "test", "./..."]
-  },
+  "lsp_servers": [
+    {
+      "name": "gopls",
+      "language": "go",
+      "extensions": [".go"],
+      "command": "gopls",
+      "args": ["serve"],
+      "root_markers": ["go.work", "go.mod"]
+    }
+  ],
   "theme": {
     "name": "default",
     "no_color": false,

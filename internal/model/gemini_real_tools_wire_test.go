@@ -114,12 +114,6 @@ func realBuiltinToolSchemas() map[string]map[string]interface{} {
 			},
 			"required": []string{"operation", "message", "branch", "paths", "staged", "all", "max_count"},
 		},
-		// diagnostics / verify — empty object + additionalProperties:false
-		"diagnostics": {
-			"type":                 "object",
-			"properties":           map[string]interface{}{},
-			"additionalProperties": false,
-		},
 	}
 }
 

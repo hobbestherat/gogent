@@ -701,8 +701,9 @@ func (tr *ToolRegistry) RegisterShellTool() {
 			"Use it for tasks the dedicated tools do not cover — running build scripts, package managers, " +
 			"git porcelain beyond the git tool, or arbitrary CLIs. Prefer the purpose-built tools over shell " +
 			"whenever one fits: grep for searching file contents, glob/list for finding files, git for version " +
-			"control, diagnostics for compiling/linting and verify for running tests — they need no permission " +
-			"prompt, no shell quoting, and return structured results. Commands run with a timeout (5 minutes by " +
+			"control, and the lsp_* tools for per-file semantic diagnostics and navigation — they need no " +
+			"permission prompt, no shell quoting, and return structured results. Use the shell for whole-project " +
+			"build/test (e.g. `go build ./...`, `go test ./...`). Commands run with a timeout (5 minutes by " +
 			"default) and a 1 MB output cap, are permission-gated (a command touching paths outside the workspace " +
 			"is additionally gated per external root), and cannot be interactive.",
 		InputSchema: map[string]interface{}{

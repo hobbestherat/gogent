@@ -258,6 +258,7 @@ func (dc *daemonController) Start() error {
 	//    serves the TUI over the socket from here on). §6's "shut down source".
 	g.StopWatchers()
 	g.CloseMCPServers()
+	g.CloseLSPServers()
 	dc.stopEmbeddedHTTP()
 
 	// 5. Commit the new attached-local state.
@@ -390,6 +391,7 @@ func (dc *daemonController) Stop() error {
 	g.GetPermissionService().SetPrompter(dc.wb)
 	g.SetReviewer(dc.wb)
 	g.StartMCPServers()
+	g.StartLSPServers()
 	g.StartWatchers()
 	dc.startEmbeddedHTTP(g)
 

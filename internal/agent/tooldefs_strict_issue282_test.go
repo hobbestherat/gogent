@@ -30,7 +30,7 @@ func TestToolDefsFromRegistryMirrorsToolStrictFlag(t *testing.T) {
 		Description: "Delegate work to sub-agents.",
 		InputSchema: closedSchema(),
 	})
-	strictIssue359Tools := []string{"read", "glob", "list", "calc", "git", "grep", "verify", "diagnostics"}
+	strictIssue359Tools := []string{"read", "glob", "list", "calc", "git", "grep"}
 	for _, name := range strictIssue359Tools {
 		reg.Register(&tool.Tool{
 			Name:        name,
