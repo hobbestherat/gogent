@@ -1,6 +1,6 @@
 module gogent
 
-go 1.25.11
+go 1.26
 
 require (
 	github.com/alecthomas/chroma/v2 v2.27.0
@@ -16,5 +16,9 @@ require (
 require (
 	cloud.google.com/go/compute/metadata v0.3.0 // indirect
 	github.com/dlclark/regexp2/v2 v2.2.1 // indirect
+	github.com/go-json-experiment/json v0.0.0-20260623181947-01eb4420fa68 // indirect
+	go.lsp.dev/jsonrpc2 v1.0.1 // indirect
+	go.lsp.dev/protocol v1.0.1 // indirect
+	go.lsp.dev/uri v1.0.1 // indirect
 	golang.org/x/sys v0.46.0 // indirect
 )

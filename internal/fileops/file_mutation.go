@@ -33,6 +33,16 @@ func (e *StaleContentError) Error() string {
 type FileMutation struct {
 	fileSys  *FileSystem
 	location *LocationMutation
+	// OnMutation, when set, is invoked after a successful write with the file's
+	// path and whether it was newly created. It is the single seam the LSP Manager
+	// subscribes to so a language server's view tracks gogent's own writes (the LSP
+	// support design §11.2). Every edit/multi-edit/patch write funnels through
+	// Write, so one hook covers them all. nil disables it; it must not block or
+	// panic (it runs on the write path).
+	OnMutation func(path string, created bool)
+	// OnRemove mirrors OnMutation for deletions, so a watched file gogent deletes
+	// emits a didChangeWatchedFiles(deleted). nil disables it.
+	OnRemove func(path string)
 }
 
 // NewFileMutation creates a new file mutation service
@@ -60,6 +70,13 @@ func (fm *FileMutation) Write(path string, content []byte, auth Authorization) (
 		return nil, err
 	}
 
+	// Notify any subscriber (the LSP Manager) after the write succeeds, so the
+	// server's view tracks gogent's own edits (§11.2). Best-effort; never blocks
+	// or fails the write.
+	if fm.OnMutation != nil {
+		fm.OnMutation(path, !existed)
+	}
+
 	return &WriteResult{
 		Operation: "write",
 		Path:      path,
@@ -85,7 +102,13 @@ func (fm *FileMutation) WriteIfUnchanged(path string, expected []byte, content [
 
 // Remove removes a file
 func (fm *FileMutation) Remove(path string) error {
-	return fm.fileSys.Remove(path)
+	if err := fm.fileSys.Remove(path); err != nil {
+		return err
+	}
+	if fm.OnRemove != nil {
+		fm.OnRemove(path)
+	}
+	return nil
 }
 
 // WriteTextPreservingBOM writes text while preserving UTF-8 BOM. The

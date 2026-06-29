@@ -16,6 +16,7 @@ import (
 	"gogent/internal/config"
 	"gogent/internal/diag"
 	"gogent/internal/fileops"
+	"gogent/internal/lsp"
 	"gogent/internal/mcp"
 	"gogent/internal/model"
 	"gogent/internal/notify"
@@ -95,6 +96,10 @@ type Gogent struct {
 	// mcpClients holds the connected MCP servers (issue #36) so their transports
 	// (e.g. stdio subprocesses) can be released on shutdown.
 	mcpClients []*mcp.Client
+	// lspManager owns the per-language language servers and the lsp_* tools (the
+	// LSP support design §8). It is nil until StartLSPServers builds it and is torn
+	// down by CloseLSPServers, releasing every stdio subprocess. Guarded by g.mu.
+	lspManager *lsp.Manager
 	// subAgentLimiter bounds the number of sub-agent loops running concurrently
 	// across every session, so the multiplicative fan-out (MaxSubAgents^MaxDepth)
 	// cannot spawn an unbounded goroutine herd against the backend (issue #23). It

@@ -458,6 +458,60 @@ const (
 // configured fast_model rather than naming a specific Models[] entry directly.
 const FastModelRef = "fast_model"
 
+// LSPServerConfig declares one Language Server Protocol (LSP) server gogent can
+// launch and route source files to (the LSP support design). All per-language
+// knowledge lives here as data: routing is by file extension, the workspace root
+// is found by walking up for RootMarkers, and the wire languageId is resolved per
+// file from Languages/Language. A single generic client serves every server; the
+// client never learns which language it is talking to. Launching a server is
+// gated through the permission service (ActionLSP), so adding an entry advertises
+// a server but does not silently run it.
+type LSPServerConfig struct {
+	Name string `json:"name"`
+	// Language is the default LSP languageId (e.g. "go", "rust", "python").
+	Language string `json:"language,omitempty"`
+	// Languages optionally overrides the languageId per file extension (leading dot
+	// included), e.g. ".tsx" -> "typescriptreact", for one process that serves
+	// several languageIds.
+	Languages map[string]string `json:"languages,omitempty"`
+	// Extensions is the routing key (leading dot included).
+	Extensions []string `json:"extensions,omitempty"`
+	// Command/Args/Env launch the stdio server subprocess.
+	Command string            `json:"command"`
+	Args    []string          `json:"args,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+	// RootMarkers name files that mark a project root, searched for by walking up
+	// from the file (e.g. ["go.work", "go.mod"]). Empty falls back to the gogent
+	// workspace root.
+	RootMarkers []string `json:"root_markers,omitempty"`
+	// InitOptions feeds the initialize request's initializationOptions.
+	InitOptions map[string]any `json:"initialization_options,omitempty"`
+	// Settings answers workspace/configuration pulls and seeds
+	// workspace/didChangeConfiguration.
+	Settings map[string]any `json:"settings,omitempty"`
+	// AllowedCommands scopes the higher-risk workspace/executeCommand action; an
+	// empty list means no command may run.
+	AllowedCommands []string `json:"allowed_commands,omitempty"`
+	// Disabled skips this server entirely without removing its configuration.
+	Disabled bool `json:"disabled,omitempty"`
+}
+
+// DefaultLSPServers returns the built-in LSP server configuration: a single
+// `gopls` entry so Go works with zero config when gopls is on PATH. Adding
+// another language (rust-analyzer, pyright, ...) is a config entry, not code.
+func DefaultLSPServers() []LSPServerConfig {
+	return []LSPServerConfig{
+		{
+			Name:        "gopls",
+			Language:    "go",
+			Extensions:  []string{".go"},
+			Command:     "gopls",
+			Args:        []string{"serve"},
+			RootMarkers: []string{"go.work", "go.mod"},
+		},
+	}
+}
+
 // MCPServerConfig declares one Model Context Protocol (MCP) server whose tools
 // gogent surfaces through its own tool registry (issue #36). Transport selects
 // the wire — "stdio" (default, a launched subprocess) or "http"/"streamable-http"
@@ -587,6 +641,12 @@ type Config struct {
 	// to the registry at startup (issue #36). Empty (the default) leaves MCP off,
 	// so an older config.json without the key is unaffected.
 	MCPServers []MCPServerConfig `json:"mcp_servers,omitempty"`
+	// LSPServers lists the Language Server Protocol servers gogent can launch to
+	// answer the lsp_* tools (the LSP support design). The default ships a single
+	// `gopls` entry so Go works with zero config when gopls is on PATH; a missing
+	// server command is skipped with a warning. Servers are launched lazily and
+	// permission-gated (ActionLSP), so listing one does not silently run it.
+	LSPServers []LSPServerConfig `json:"lsp_servers,omitempty"`
 	// Theme selects and customises the TUI colour palette (issue #66). The zero
 	// value is the coloured "default" palette, so an older config.json without the
 	// key is unaffected.
@@ -1063,6 +1123,9 @@ func GetDefaultConfig() *Config {
 		// Show the welcome/onboarding dialog by default (issue #339); the "Don't show
 		// again" checkbox persists false to opt out.
 		ShowWelcome: &showWelcome,
+		// Ship Go support out of the box: when gopls is on PATH the lsp_* tools work
+		// with zero config; a missing gopls is skipped with a warning.
+		LSPServers: DefaultLSPServers(),
 		Window: WindowConfig{
 			Resizable:   true,
 			Minimizable: true,

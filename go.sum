@@ -10,6 +10,8 @@ github.com/dlclark/regexp2/v2 v2.2.1 h1:mf4KkFUj0gJuarK8P+LgiS+Lit7m9N1yAwEfPbee
 github.com/dlclark/regexp2/v2 v2.2.1/go.mod h1:avUrQvPaLz2DrFNHJF0taWAFFX2C1GMSSoeiqFjcBmU=
 github.com/expr-lang/expr v1.17.8 h1:W1loDTT+0PQf5YteHSTpju2qfUfNoBt4yw9+wOEU9VM=
 github.com/expr-lang/expr v1.17.8/go.mod h1:8/vRC7+7HBzESEqt5kKpYXxrxkr31SaO8r40VO/1IT4=
+github.com/go-json-experiment/json v0.0.0-20260623181947-01eb4420fa68 h1:KZaTBSyshWX3MP5jukJcNSuXDQTO+rNpt0J564dX/eg=
+github.com/go-json-experiment/json v0.0.0-20260623181947-01eb4420fa68/go.mod h1:tphK2c80bpPhMOI4v6bIc2xWywPfbqi1Z06+RcrMkDg=
 github.com/hexops/gotextdiff v1.0.3 h1:gitA9+qJrrTCsiCl7+kh75nPqQt1cx4ZkudSTLoUqJM=
 github.com/hexops/gotextdiff v1.0.3/go.mod h1:pSWU5MAI3yDq+fZBTazCSJysOMbxWL1BSow5/V2vxeg=
 github.com/hobbestherat/turbotui v0.3.1-0.20260628112027-4151a29defc4 h1:zYaL62fp8owjc8T9EdFmIvHS/SRDSiPIxnFdcSxeA1U=
@@ -18,6 +20,12 @@ github.com/hobbestherat/webapi v0.1.0 h1:ggk03gfw7dgS+7zIog/eRctkKL6qBa9KE3arTsS
 github.com/hobbestherat/webapi v0.1.0/go.mod h1:XG9XQ/Jw1iDAyuZnzZFKYeE911Fa1hPd/v30/ZNQj4c=
 github.com/yuin/goldmark v1.8.2 h1:kEGpgqJXdgbkhcOgBxkC0X0PmoPG1ZyoZ117rDVp4zE=
 github.com/yuin/goldmark v1.8.2/go.mod h1:ip/1k0VRfGynBgxOz0yCqHrbZXhcjxyuS66Brc7iBKg=
+go.lsp.dev/jsonrpc2 v1.0.1 h1:JZAchpm6RcOuwEOnZ7kF3kA1EpEjdJZ/6rMSfOF3+F4=
+go.lsp.dev/jsonrpc2 v1.0.1/go.mod h1:WN+TesqrPumBmUdsuWyn9DHq3zl4i85L/qG0NLdj8qg=
+go.lsp.dev/protocol v1.0.1 h1:kLWUIk1v/deXxo1D0VO4avjZnfeuZ82mouJgJd/NbdU=
+go.lsp.dev/protocol v1.0.1/go.mod h1:e//i41aEqc9ml32xiNuneUwbjOjuvTA4+uv+AkssJgk=
+go.lsp.dev/uri v1.0.1 h1:ywxJN1UXoQ+v0I9lkoQNMmsm7lub5G9ZG7KXT8YTx30=
+go.lsp.dev/uri v1.0.1/go.mod h1:06a0ghafs4PuqkLsJGUmlgPHw6+kH79edRXjOT/rA8s=
 golang.org/x/crypto v0.53.0 h1:QZ4Muo8THX6CizN2vPPd5fBGHyogrdK9fG4wLPFUsto=
 golang.org/x/crypto v0.53.0/go.mod h1:DNLU434OwVakk9PzuwV8w62mAJpRJL3vsgcfp4Qnsio=
 golang.org/x/oauth2 v0.36.0 h1:peZ/1z27fi9hUOFCAZaHyrpWG5lwe0RJEEEeH0ThlIs=
