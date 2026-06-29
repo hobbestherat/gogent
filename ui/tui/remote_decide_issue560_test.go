@@ -25,14 +25,18 @@ import (
 	"gogent/internal/permission"
 )
 
-// withFastRetries swaps the package-level decideRetryBackoff for a near-zero
-// schedule and restores it at the end of the test. Tests in this package run
-// sequentially (none call t.Parallel), so mutating the shared var is safe.
+// withFastRetries swaps the package-level decideRetryBackoffDefault for a near-zero
+// schedule and restores it at the end of the test. Each RemoteClient snapshots the
+// default at construction (into rc.decideBackoff), so this must be called BEFORE
+// NewRemoteClient for the client under test to pick it up. Tests in this package run
+// sequentially (none call t.Parallel) and the default is read only on the test
+// goroutine at construction, so mutating it here is safe — a background poll/handler
+// goroutine that outlives an earlier test reads its own client's snapshot, not this.
 func withFastRetries(t *testing.T) {
 	t.Helper()
-	old := decideRetryBackoff
-	decideRetryBackoff = []time.Duration{time.Millisecond, time.Millisecond}
-	t.Cleanup(func() { decideRetryBackoff = old })
+	old := decideRetryBackoffDefault
+	decideRetryBackoffDefault = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { decideRetryBackoffDefault = old })
 }
 
 // stubDaemon wraps an httptest.Server whose handler consults a per-request hook,
@@ -180,9 +184,9 @@ func TestDecideExhaustsRetriesAndReturnsError(t *testing.T) {
 
 func TestDecideStopsRetryingOnContextCancel(t *testing.T) {
 	// A long backoff so the cancel lands inside the retry wait, not after it.
-	old := decideRetryBackoff
-	decideRetryBackoff = []time.Duration{400 * time.Millisecond}
-	t.Cleanup(func() { decideRetryBackoff = old })
+	old := decideRetryBackoffDefault
+	decideRetryBackoffDefault = []time.Duration{400 * time.Millisecond}
+	t.Cleanup(func() { decideRetryBackoffDefault = old })
 
 	d := newStubDaemon(t, func(call int, _ []byte, w http.ResponseWriter) {
 		http.Error(w, "down", http.StatusServiceUnavailable)

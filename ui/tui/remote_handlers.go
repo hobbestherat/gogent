@@ -97,6 +97,14 @@ type RemoteClient struct {
 
 	pollEvery time.Duration
 
+	// decideBackoff is this client's retry schedule for a failed decision POST,
+	// snapshotted from decideRetryBackoffDefault at construction (issue #560). It is
+	// per-instance and never mutated after construction, so the background
+	// handleApproval workers that read it in decide() — which Close() does not join,
+	// and which APIClient.DecideApproval does not bind to rc.ctx, so they can outlive
+	// the RemoteClient — never race a test swapping the schedule for a later client.
+	decideBackoff []time.Duration
+
 	// reconnector, when set, is notified on disconnect/reconnect so the TUI shows
 	// the blocking modal and re-fetches state (issue #358 §7). nil keeps the old
 	// silent best-effort reconnect (used by narrow tests).
@@ -205,6 +213,7 @@ func NewRemoteClient(client *APIClient, sink EventSink, approver Approver) *Remo
 		ctx:           ctx,
 		cancel:        cancel,
 		pollEvery:     approvalPollInterval,
+		decideBackoff: append([]time.Duration(nil), decideRetryBackoffDefault...),
 		retryNow:      make(chan struct{}, 1),
 		approvalKick:  make(chan struct{}, 1),
 		backoff:       backoffFor,
@@ -762,11 +771,17 @@ func (rc *RemoteClient) handleApproval(ap ApprovalDTO) {
 	}
 }
 
-// decideRetryBackoff is the wait before each retry of a failed decision POST. The
-// endpoint is idempotent (issue #560), so a blind retry can never double-apply a
-// decision; it just rides out a transient network blip or 5xx. The length of the
-// slice is the number of retries after the first attempt.
-var decideRetryBackoff = []time.Duration{200 * time.Millisecond, 500 * time.Millisecond}
+// decideRetryBackoffDefault is the wait before each retry of a failed decision
+// POST. The endpoint is idempotent (issue #560), so a blind retry can never
+// double-apply a decision; it just rides out a transient network blip or 5xx. The
+// length of the slice is the number of retries after the first attempt.
+//
+// Each RemoteClient snapshots this into rc.decideBackoff at construction and
+// decide() reads only that per-instance copy, so this default is touched solely
+// on the constructing goroutine (production: once at attach; tests: the sequential
+// test goroutine via withFastRetries). A background handleApproval worker that
+// outlives its RemoteClient therefore cannot race a test swapping the schedule.
+var decideRetryBackoffDefault = []time.Duration{200 * time.Millisecond, 500 * time.Millisecond}
 
 // decide POSTs a resolved decision to the daemon, retrying a transient failure a
 // couple of times before giving up. It returns the daemon's status ("resolved"
@@ -781,14 +796,14 @@ func (rc *RemoteClient) decide(aid, decision string) (status string, err error) 
 			select {
 			case <-rc.ctx.Done():
 				return "", fmt.Errorf("remote approval %s: %w", aid, rc.ctx.Err())
-			case <-time.After(decideRetryBackoff[attempt-1]):
+			case <-time.After(rc.decideBackoff[attempt-1]):
 			}
 		}
 		status, err = rc.client.DecideApproval(aid, decision)
 		if err == nil {
 			return status, nil
 		}
-		if attempt >= len(decideRetryBackoff) {
+		if attempt >= len(rc.decideBackoff) {
 			break
 		}
 	}
