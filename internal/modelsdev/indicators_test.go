@@ -39,10 +39,27 @@ func TestReasoningCapable(t *testing.T) {
 // order, only the flags the model has, and the bare-model empty case.
 func TestCapabilityLabels(t *testing.T) {
 	t.Run("full model in stable order", func(t *testing.T) {
-		m := Model{Reasoning: true, ToolCall: true, Attachment: true, Temperature: true}
-		want := []string{"reasoning", "tool calling", "vision", "custom temperature"}
+		m := Model{Reasoning: true, ToolCall: true, Attachment: true, StructuredOutput: true, Temperature: true, OpenWeights: true}
+		want := []string{"reasoning", "tool calling", "vision", "structured output", "custom temperature", "open weights"}
 		if got := CapabilityLabels(m); !reflect.DeepEqual(got, want) {
 			t.Errorf("CapabilityLabels = %v, want %v", got, want)
+		}
+	})
+	t.Run("structured output and open weights appear only when flagged", func(t *testing.T) {
+		// Neither flag set: neither label present, even on an otherwise-capable model.
+		bare := Model{ToolCall: true}
+		if got := CapabilityLabels(bare); reflect.DeepEqual(got, []string{"tool calling"}) != true {
+			t.Errorf("CapabilityLabels(no structured/open) = %v, want [tool calling] only", got)
+		}
+		// structured_output alone surfaces just that label.
+		so := CapabilityLabels(Model{StructuredOutput: true})
+		if !reflect.DeepEqual(so, []string{"structured output"}) {
+			t.Errorf("CapabilityLabels(structured only) = %v, want [structured output]", so)
+		}
+		// open_weights alone surfaces just that label.
+		ow := CapabilityLabels(Model{OpenWeights: true})
+		if !reflect.DeepEqual(ow, []string{"open weights"}) {
+			t.Errorf("CapabilityLabels(open weights only) = %v, want [open weights]", ow)
 		}
 	})
 	t.Run("reasoning inferred from toggle only", func(t *testing.T) {
@@ -66,6 +83,31 @@ func TestCapabilityLabels(t *testing.T) {
 			t.Errorf("CapabilityLabels(bare) = %v, want empty", got)
 		}
 	})
+}
+
+// TestThinkingBudgetMin covers the informational thinking-budget hint: the parsed
+// reasoning_options[type=budget_tokens].Min is returned when present (so it is no
+// longer silently dropped), 0 otherwise. It is display-only — gogent has no
+// thinking-budget input — so this just feeds the review-form hint.
+func TestThinkingBudgetMin(t *testing.T) {
+	cases := []struct {
+		name string
+		m    Model
+		want int
+	}{
+		{"budget_tokens with min", Model{ReasoningOptions: []ReasoningOption{{Type: "budget_tokens", Min: 1024}}}, 1024},
+		{"budget_tokens type is case-insensitive", Model{ReasoningOptions: []ReasoningOption{{Type: "Budget_Tokens", Min: 2048}}}, 2048},
+		{"no budget option", Model{ReasoningOptions: []ReasoningOption{{Type: "effort", Values: []string{"low"}}}}, 0},
+		{"toggle only, no min", Model{ReasoningOptions: []ReasoningOption{{Type: "toggle"}}}, 0},
+		{"bare model", Model{}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ThinkingBudgetMin(tc.m); got != tc.want {
+				t.Errorf("ThinkingBudgetMin = %d, want %d", got, tc.want)
+			}
+		})
+	}
 }
 
 // TestCostSummary covers the Cost row (aspect D): free detection, integer pricing,

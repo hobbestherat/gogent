@@ -19,12 +19,16 @@ func sampleProviderModel() (string, Provider, Model) {
 		API:  "https://openrouter.ai/api/v1",
 	}
 	m := Model{
-		ID:          "anthropic/claude-opus-4-6",
-		Name:        "Claude Opus 4.6",
-		Reasoning:   true,
-		Temperature: true,
-		Limit:       Limit{Context: 1000000, Output: 128000},
-		Cost:        Cost{Input: 5, Output: 25},
+		ID:               "anthropic/claude-opus-4-6",
+		Name:             "Claude Opus 4.6",
+		Reasoning:        true,
+		Temperature:      true,
+		StructuredOutput: true,
+		OpenWeights:      true, // catalog-only: must NOT leak into Caps (no Caps field)
+		Knowledge:        "2025-01",
+		ReleaseDate:      "2025-02-01",
+		Limit:            Limit{Context: 1000000, Output: 128000},
+		Cost:             Cost{Input: 5, Output: 25},
 		ReasoningOptions: []ReasoningOption{
 			{Type: "effort", Values: []string{"low", "medium", "high"}},
 		},
@@ -87,13 +91,19 @@ func TestToModelConfigFields(t *testing.T) {
 		Temperature:     0.7,
 		ReasoningEffort: "low",
 		Caps: config.ModelCapabilities{
-			ContextWindow: 1000000,
-			MaxOutput:     128000,
-			Reasoning:     true,
-			CustomTemp:    true,
-			EffortOptions: []string{"low", "medium", "high"},
-			InputCostPerM: 5, OutputCostPerM: 25,
+			ContextWindow:    1000000,
+			MaxOutput:        128000,
+			Reasoning:        true,
+			CustomTemp:       true,
+			StructuredOutput: true,
+			Knowledge:        "2025-01",
+			ReleaseDate:      "2025-02-01",
+			EffortOptions:    []string{"low", "medium", "high"},
+			InputCostPerM:    5, OutputCostPerM: 25,
 			Source: "catalog",
+			// OpenWeights is intentionally NOT here: by design it has no
+			// config.ModelCapabilities field and is surfaced only as a catalog-only
+			// display label (CapabilityLabels), so it never reaches the Caps snapshot.
 		},
 	}
 	if !reflect.DeepEqual(got, want) {

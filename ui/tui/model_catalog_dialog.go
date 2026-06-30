@@ -549,6 +549,9 @@ func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, mod
 	thinkingHint := "(no effect for this model)"
 	if model.SupportsThinking(apiType) && modelsdev.HasThinkingToggle(cm) {
 		thinkingHint = "(supported)"
+		if min := modelsdev.ThinkingBudgetMin(cm); min > 0 {
+			thinkingHint = "(supported · min budget " + tokensShort(min) + ")"
+		}
 	}
 	dialog.Window.AddContent(dialogLabel("Thinking:", tv.Rect{X: 2, Y: row, W: labelW, H: 1}))
 	thinking := newSelect(w.desktop, []string{"default", "on", "off"}, tv.Rect{X: boxX, Y: row, W: 12, H: 1})
@@ -571,6 +574,19 @@ func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, mod
 
 	if caps := modelsdev.CapabilityLabels(cm); len(caps) > 0 {
 		infoRow("Capabilities: "+strings.Join(caps, " · "), row)
+		row++
+	}
+	// Catalog metadata read from the persisted snapshot (so Caps.Knowledge /
+	// Caps.ReleaseDate are genuinely consumed, not dead fields).
+	var meta []string
+	if k := strings.TrimSpace(draft.Caps.Knowledge); k != "" {
+		meta = append(meta, "Knowledge cutoff "+k)
+	}
+	if r := strings.TrimSpace(draft.Caps.ReleaseDate); r != "" {
+		meta = append(meta, "Released "+r)
+	}
+	if len(meta) > 0 {
+		infoRow(strings.Join(meta, " · "), row)
 		row++
 	}
 	if doc := strings.TrimSpace(p.Doc); doc != "" {
