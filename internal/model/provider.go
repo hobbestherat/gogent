@@ -555,29 +555,67 @@ func appendPath(base, path string) string {
 type openAILister struct {
 	chatPath   string
 	modelsPath string
+	// tagsPath, when non-empty, is a bare-Ollama fallback path (e.g. "/api/tags").
+	// A local OpenAI-compatible server (Ollama, LM Studio) may not implement
+	// /v1/models — it 404s there but still advertises its models at /api/tags
+	// ({"models":[{"name":"llama3:latest","model":"llama3:latest",...}]}). When the
+	// primary /models probe fails or returns nothing parseable, the lister retries
+	// this path so a plain local endpoint is still scannable. It is set ONLY for the
+	// generic OpenAI api_type; hosted gateways (Z.AI, OpenRouter) and Anthropic,
+	// which always serve /models, leave it empty and are unaffected.
+	tagsPath string
 }
 
 func (l openAILister) list(ctx context.Context, c *ModelConnection) ([]ModelInfo, error) {
 	base := stripChatPath(c.URL, l.chatPath)
 	body, err := c.doJSON(ctx, http.MethodGet, appendPath(base, l.modelsPath), nil)
+	if err == nil {
+		if models := parseOpenAIModelList(body); len(models) > 0 {
+			return models, nil
+		}
+	}
+	// Bare-Ollama fallback: /models either failed (e.g. 404 on a server that only
+	// speaks the native API) or answered with nothing we could parse. Try /api/tags
+	// before giving up. Ollama keys each entry on "name"/"model" (the model tag),
+	// which ModelInfo.UnmarshalJSON resolves to the id. Only the generic OpenAI
+	// provider sets tagsPath, so other api_types skip this entirely.
+	if l.tagsPath != "" {
+		if tagsBody, tagsErr := c.doJSON(ctx, http.MethodGet, appendPath(base, l.tagsPath), nil); tagsErr == nil {
+			if models := parseOpenAIModelList(tagsBody); len(models) > 0 {
+				return models, nil
+			}
+		}
+	}
+	// Prefer surfacing the original /models error (auth, connection, non-200) over a
+	// generic message; only when /models itself succeeded but advertised no models
+	// do we report the empty listing.
 	if err != nil {
 		return nil, err
 	}
+	return nil, &ModelError{Type: ErrorGeneric, Message: "no models found in response"}
+}
+
+// parseOpenAIModelList parses an OpenAI-style listing body — {"data":[...]},
+// {"models":[...]} (the latter also covers Ollama's /api/tags), or a bare array —
+// returning nil when the body is unparseable or advertises no models. Keeping the
+// parse in one place lets both the /models probe and the /api/tags fallback share
+// identical shape handling.
+func parseOpenAIModelList(body []byte) []ModelInfo {
 	var wrapped struct {
 		Data   []ModelInfo `json:"data"`
 		Models []ModelInfo `json:"models"`
 	}
 	if err := json.Unmarshal(body, &wrapped); err == nil {
 		if len(wrapped.Data) > 0 {
-			return wrapped.Data, nil
+			return wrapped.Data
 		}
 		if len(wrapped.Models) > 0 {
-			return wrapped.Models, nil
+			return wrapped.Models
 		}
 	}
 	var bare []ModelInfo
 	if err := json.Unmarshal(body, &bare); err == nil && len(bare) > 0 {
-		return bare, nil
+		return bare
 	}
-	return nil, &ModelError{Type: ErrorGeneric, Message: "no models found in response"}
+	return nil
 }

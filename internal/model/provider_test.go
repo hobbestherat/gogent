@@ -162,6 +162,157 @@ func TestZAIModelsListing(t *testing.T) {
 	}
 }
 
+func TestOpenAIListingFallsBackToOllamaTags(t *testing.T) {
+	// A bare Ollama server 404s on /v1/models (it never implements the OpenAI
+	// listing route) but advertises its models at /api/tags. The generic OpenAI
+	// lister must fall back to /api/tags and surface the model tags as ids.
+	var modelsHit, tagsHit bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/models":
+			modelsHit = true
+			http.Error(w, "404 page not found", http.StatusNotFound)
+		case "/api/tags":
+			tagsHit = true
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"models":[` +
+				`{"name":"llama3:latest","model":"llama3:latest","size":4661224676},` +
+				`{"name":"mistral:7b","model":"mistral:7b","size":4109865159}]}`))
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "openai", Endpoint: server.URL},
+		&config.ModelConfig{Model: "llama3"},
+	)
+	models, err := conn.ListModels()
+	if err != nil {
+		t.Fatalf("ListModels failed: %v", err)
+	}
+	if !modelsHit || !tagsHit {
+		t.Fatalf("expected both /models and /api/tags to be probed; modelsHit=%v tagsHit=%v", modelsHit, tagsHit)
+	}
+	if len(models) != 2 || models[0].ID != "llama3:latest" || models[1].ID != "mistral:7b" {
+		t.Errorf("unexpected models from /api/tags fallback: %+v", models)
+	}
+}
+
+func TestOpenAIListingFallsBackWhenModelsEmpty(t *testing.T) {
+	// Some local shims answer /models with HTTP 200 but an empty list rather than a
+	// 404. The "OR returns no parseable models" half of the fallback must still kick
+	// in and probe /api/tags.
+	var modelsHit, tagsHit bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/models":
+			modelsHit = true
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
+		case "/api/tags":
+			tagsHit = true
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"models":[{"name":"llama3:latest","model":"llama3:latest"}]}`))
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "openai", Endpoint: server.URL},
+		&config.ModelConfig{Model: "llama3"},
+	)
+	models, err := conn.ListModels()
+	if err != nil {
+		t.Fatalf("ListModels failed: %v", err)
+	}
+	if !modelsHit || !tagsHit {
+		t.Fatalf("expected both endpoints probed; modelsHit=%v tagsHit=%v", modelsHit, tagsHit)
+	}
+	if len(models) != 1 || models[0].ID != "llama3:latest" {
+		t.Errorf("unexpected models from empty-200 fallback: %+v", models)
+	}
+}
+
+func TestOpenAIListingNoTagsFallbackWhenModelsServed(t *testing.T) {
+	// When /models answers normally the lister must NOT probe /api/tags — the
+	// fallback is strictly a last resort for servers that lack the OpenAI route.
+	var tagsHit bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gpt-4o","owned_by":"openai"}]}`))
+		case "/api/tags":
+			tagsHit = true
+			http.Error(w, "should not be called", http.StatusInternalServerError)
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "openai", Endpoint: server.URL},
+		&config.ModelConfig{Model: "gpt-4o"},
+	)
+	models, err := conn.ListModels()
+	if err != nil {
+		t.Fatalf("ListModels failed: %v", err)
+	}
+	if tagsHit {
+		t.Error("/api/tags probed even though /models served a list")
+	}
+	if len(models) != 1 || models[0].ID != "gpt-4o" {
+		t.Errorf("unexpected models: %+v", models)
+	}
+}
+
+func TestNonOpenAIListingSkipsTagsFallback(t *testing.T) {
+	// Hosted gateways (here Z.AI) leave tagsPath empty: a /models failure must NOT
+	// trigger an /api/tags probe, and the original error is surfaced.
+	var tagsHit bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/tags" {
+			tagsHit = true
+		}
+		http.Error(w, "nope", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "zai", Endpoint: server.URL},
+		&config.ModelConfig{Model: "glm-4.6"},
+	)
+	if _, err := conn.ListModels(); err == nil {
+		t.Fatal("expected ListModels to fail when /models 404s and no fallback applies")
+	}
+	if tagsHit {
+		t.Error("zai listing probed /api/tags; fallback must be OpenAI-only")
+	}
+}
+
+func TestOpenAIListingFallbackBothEndpointsFail(t *testing.T) {
+	// Neither /models nor /api/tags works (not an Ollama server at all): the
+	// operator must get the original /models error, not a misleading generic one.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "404 page not found", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "openai", Endpoint: server.URL},
+		&config.ModelConfig{Model: "llama3"},
+	)
+	_, err := conn.ListModels()
+	if err == nil {
+		t.Fatal("expected an error when both /models and /api/tags fail")
+	}
+}
+
 func TestListModelsNameKeyedShape(t *testing.T) {
 	// Non-OpenAI listings key the identifier on "name" rather than "id" and wrap
 	// the list under "models" (Ollama's /api/tags, Gemini's /v1beta/models). The
