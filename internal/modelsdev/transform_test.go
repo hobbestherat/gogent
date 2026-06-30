@@ -76,29 +76,32 @@ func TestProviderAPIType(t *testing.T) {
 
 func TestToModelConfigFields(t *testing.T) {
 	providerID, p, m := sampleProviderModel()
-	got := ToModelConfig(providerID, p, m)
+	conn := ToConnection(p)
+	got := ToModelConfig(providerID, conn.Name, m)
 
 	want := config.ModelConfig{
 		Name:            "openrouter-anthropic-claude-opus-4-6",
 		DisplayName:     "Claude Opus 4.6",
-		APIType:         "openrouter",
-		Endpoint:        "", // openrouter derives its base from the adapter
+		Connection:      "openrouter",
 		Model:           "anthropic/claude-opus-4-6",
-		APIKey:          "", // never supplied by the catalog
 		Temperature:     0.7,
-		MaxTokens:       128000,
-		ContextWindow:   1000000,
 		ReasoningEffort: "low",
-		EffortOptions:   []string{"low", "medium", "high"},
-		Thinking:        nil, // v1 never pre-commits the toggle
-		Free:            false,
+		Caps: config.ModelCapabilities{
+			ContextWindow: 1000000,
+			MaxOutput:     128000,
+			Reasoning:     true,
+			CustomTemp:    true,
+			EffortOptions: []string{"low", "medium", "high"},
+			InputCostPerM: 5, OutputCostPerM: 25,
+			Source: "catalog",
+		},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ToModelConfig =\n %+v\nwant\n %+v", got, want)
 	}
 }
 
-func TestToModelConfigFreeDerivation(t *testing.T) {
+func TestModelCapabilitiesFreeDerivation(t *testing.T) {
 	cases := []struct {
 		name string
 		cost Cost
@@ -109,13 +112,11 @@ func TestToModelConfigFreeDerivation(t *testing.T) {
 		{"output only not free", Cost{Input: 0, Output: 0.5}, false},
 		{"both nonzero not free", Cost{Input: 3, Output: 15}, false},
 	}
-	p := Provider{ID: "groq", API: "https://api.groq.com/openai/v1"}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m := Model{ID: "m", Name: "M", Cost: tc.cost}
-			got := ToModelConfig("groq", p, m)
-			if got.Free != tc.want {
-				t.Errorf("Free = %v, want %v (cost %+v)", got.Free, tc.want, tc.cost)
+			caps := ToModelCapabilities(Model{ID: "m", Name: "M", Cost: tc.cost})
+			if caps.Free() != tc.want {
+				t.Errorf("Free = %v, want %v (cost %+v)", caps.Free(), tc.want, tc.cost)
 			}
 		})
 	}
@@ -123,23 +124,22 @@ func TestToModelConfigFreeDerivation(t *testing.T) {
 
 func TestToModelConfigNoEffortOptions(t *testing.T) {
 	// A model with reasoning but no effort reasoning_options leaves the effort
-	// controls empty (IsReasoningModel() is then false — not inferred from m.Reasoning).
-	p := Provider{ID: "openai"}
+	// controls empty.
 	m := Model{ID: "gpt-x", Name: "GPT X", Reasoning: true}
-	got := ToModelConfig("openai", p, m)
+	got := ToModelConfig("openai", "openai", m)
 	if got.ReasoningEffort != "" {
 		t.Errorf("ReasoningEffort = %q, want empty", got.ReasoningEffort)
 	}
-	if got.EffortOptions != nil {
-		t.Errorf("EffortOptions = %v, want nil", got.EffortOptions)
+	if got.Caps.EffortOptions != nil {
+		t.Errorf("EffortOptions = %v, want nil", got.Caps.EffortOptions)
 	}
 }
 
-// TestToModelConfigEndpointResolverAware is the core goal-match guarantee: the
-// Endpoint field must be blank for adapters that embed their own base/version
-// (anthropic, zai, openrouter, vertex*), and p.API for the generic openai
-// adapter whose built-in base is a useless localhost default.
-func TestToModelConfigEndpointResolverAware(t *testing.T) {
+// TestToConnectionEndpointResolverAware is the core goal-match guarantee: a
+// connection's Endpoint must be blank for adapters that embed their own
+// base/version (anthropic, zai, openrouter, vertex*), and p.API for the generic
+// openai adapter whose built-in base is a useless localhost default.
+func TestToConnectionEndpointResolverAware(t *testing.T) {
 	cases := []struct {
 		name      string
 		p         Provider
@@ -153,10 +153,9 @@ func TestToModelConfigEndpointResolverAware(t *testing.T) {
 		{"vertex-anthropic", Provider{ID: "google-vertex-anthropic", API: "ignored"}, "vertex-anthropic", ""},
 		{"groq keeps p.API", Provider{ID: "groq", API: "https://api.groq.com/openai/v1"}, "openai", "https://api.groq.com/openai/v1"},
 	}
-	m := Model{ID: "m", Name: "M"}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ToModelConfig(tc.p.ID, tc.p, m)
+			got := ToConnection(tc.p)
 			if got.APIType != tc.wantAPI {
 				t.Errorf("APIType = %q, want %q", got.APIType, tc.wantAPI)
 			}
@@ -167,37 +166,36 @@ func TestToModelConfigEndpointResolverAware(t *testing.T) {
 	}
 }
 
-// TestToModelConfigAnthropicEndpointResolvesCorrectly is the regression guard for
-// the round-1 design defect: feeding models.dev's anthropic base
-// ("https://api.anthropic.com/v1") would resolve to a double-/v1 chat URL
-// (404). The transform must leave Endpoint blank so the adapter's hardcoded base
-// applies, yielding a single /v1.
-func TestToModelConfigAnthropicEndpointResolvesCorrectly(t *testing.T) {
+// TestAnthropicConnectionResolvesCorrectly guards the round-1 design defect:
+// feeding models.dev's anthropic base ("https://api.anthropic.com/v1") would
+// resolve to a double-/v1 chat URL (404). ToConnection must leave Endpoint blank so
+// the adapter's hardcoded base applies, yielding a single /v1.
+func TestAnthropicConnectionResolvesCorrectly(t *testing.T) {
 	p := Provider{ID: "anthropic", API: "https://api.anthropic.com/v1"}
 	m := Model{ID: "claude-opus-4-6", Name: "Claude Opus 4.6"}
-	cfg := ToModelConfig("anthropic", p, m)
-
-	if cfg.Endpoint != "" {
-		t.Fatalf("anthropic Endpoint = %q, want blank (adapter owns the base)", cfg.Endpoint)
+	conn := ToConnection(p)
+	cfg := ToModelConfig("anthropic", conn.Name, m)
+	if conn.Endpoint != "" {
+		t.Fatalf("anthropic Endpoint = %q, want blank (adapter owns the base)", conn.Endpoint)
 	}
-	conn := model.NewModelConnectionFromConfig(&cfg)
-	if got, want := conn.URL, "https://api.anthropic.com/v1/messages"; got != want {
+	mc := model.NewModelConnection(&conn, &cfg)
+	if got, want := mc.URL, "https://api.anthropic.com/v1/messages"; got != want {
 		t.Fatalf("anthropic chat URL = %q, want %q (single /v1 — a double-/v1 means the transform leaked the base)", got, want)
 	}
 }
 
 // And the counterpart: a generic openai gateway keeps p.API and resolves through
 // the openai chatPath.
-func TestToModelConfigOpenAIGatewayEndpointResolvesCorrectly(t *testing.T) {
+func TestOpenAIGatewayConnectionResolvesCorrectly(t *testing.T) {
 	p := Provider{ID: "groq", API: "https://api.groq.com/openai/v1"}
 	m := Model{ID: "llama-3.3-70b", Name: "Llama 3.3 70B"}
-	cfg := ToModelConfig("groq", p, m)
-
-	if cfg.Endpoint != "https://api.groq.com/openai/v1" {
-		t.Fatalf("groq Endpoint = %q, want p.API", cfg.Endpoint)
+	conn := ToConnection(p)
+	cfg := ToModelConfig("groq", conn.Name, m)
+	if conn.Endpoint != "https://api.groq.com/openai/v1" {
+		t.Fatalf("groq Endpoint = %q, want p.API", conn.Endpoint)
 	}
-	conn := model.NewModelConnectionFromConfig(&cfg)
-	if got, want := conn.URL, "https://api.groq.com/openai/v1/chat/completions"; got != want {
+	mc := model.NewModelConnection(&conn, &cfg)
+	if got, want := mc.URL, "https://api.groq.com/openai/v1/chat/completions"; got != want {
 		t.Fatalf("groq chat URL = %q, want %q", got, want)
 	}
 }
@@ -262,9 +260,9 @@ func TestHasThinkingToggle(t *testing.T) {
 func TestEffortOptionsCaseInsensitive(t *testing.T) {
 	// models.dev uses "effort"; the parser tolerates case/whitespace variation.
 	m := Model{ReasoningOptions: []ReasoningOption{{Type: " Effort ", Values: []string{"low", "high"}}}}
-	got := ToModelConfig("openai", Provider{ID: "openai"}, m)
-	if !reflect.DeepEqual(got.EffortOptions, []string{"low", "high"}) {
-		t.Errorf("EffortOptions = %v, want [low high]", got.EffortOptions)
+	got := ToModelConfig("openai", "openai", m)
+	if !reflect.DeepEqual(got.Caps.EffortOptions, []string{"low", "high"}) {
+		t.Errorf("EffortOptions = %v, want [low high]", got.Caps.EffortOptions)
 	}
 	if got.ReasoningEffort != "low" {
 		t.Errorf("ReasoningEffort = %q, want low", got.ReasoningEffort)
@@ -274,8 +272,8 @@ func TestEffortOptionsCaseInsensitive(t *testing.T) {
 		{Type: "effort", Values: []string{"low", "medium"}},
 		{Type: "effort", Values: []string{"should-be-ignored"}},
 	}}
-	got2 := ToModelConfig("openai", Provider{ID: "openai"}, m2)
-	if !reflect.DeepEqual(got2.EffortOptions, []string{"low", "medium"}) {
-		t.Errorf("second effort group leaked: %v", got2.EffortOptions)
+	got2 := ToModelConfig("openai", "openai", m2)
+	if !reflect.DeepEqual(got2.Caps.EffortOptions, []string{"low", "medium"}) {
+		t.Errorf("second effort group leaked: %v", got2.Caps.EffortOptions)
 	}
 }

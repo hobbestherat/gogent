@@ -14,12 +14,12 @@ func TestDefaultConfigEffortOptions(t *testing.T) {
 		t.Fatal("expected zai-glm-5.2 model config")
 	}
 	want := []string{"high", "max"}
-	if got := glm52.EffortOptions; len(got) != len(want) {
+	if got := glm52.Caps.EffortOptions; len(got) != len(want) {
 		t.Fatalf("zai-glm-5.2 EffortOptions = %v, want %v", got, want)
 	}
 	for i, v := range want {
-		if glm52.EffortOptions[i] != v {
-			t.Errorf("zai-glm-5.2 EffortOptions[%d] = %q, want %q", i, glm52.EffortOptions[i], v)
+		if glm52.Caps.EffortOptions[i] != v {
+			t.Errorf("zai-glm-5.2 EffortOptions[%d] = %q, want %q", i, glm52.Caps.EffortOptions[i], v)
 		}
 	}
 
@@ -28,8 +28,8 @@ func TestDefaultConfigEffortOptions(t *testing.T) {
 		if m == nil {
 			t.Fatalf("expected %s model config", name)
 		}
-		if len(m.EffortOptions) != 0 {
-			t.Errorf("%s EffortOptions = %v, want empty", name, m.EffortOptions)
+		if len(m.Caps.EffortOptions) != 0 {
+			t.Errorf("%s EffortOptions = %v, want empty", name, m.Caps.EffortOptions)
 		}
 	}
 }
