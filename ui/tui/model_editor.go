@@ -162,6 +162,29 @@ func (w *Workbench) showModelForm(title string, initial config.ModelConfig, name
 	thinking.SetSelected(thinkingIndex(initial.Thinking))
 	dialog.Window.AddContent(thinking)
 
+	// Capabilities: edited via a sub-form for catalog-less / local models (or to tweak
+	// a discovered snapshot). manualCaps holds the override once the user opens the
+	// form; otherwise discovery / the carried-through initial caps win (see save).
+	var manualCaps config.ModelCapabilities
+	manualCapsEdited := false
+	bestCaps := func() config.ModelCapabilities {
+		if c, ok := capsByID[currentModelID()]; ok {
+			return c
+		}
+		return initial.Caps
+	}
+	dialog.Window.AddContent(dialogLabel("Capabilities:", tv.Rect{X: 2, Y: 11, W: labelW, H: 1}))
+	dialog.Window.AddContent(newButton("Edit…", tv.Rect{X: boxX, Y: 11, W: 9, H: 1}, func() {
+		seed := manualCaps
+		if !manualCapsEdited {
+			seed = bestCaps()
+		}
+		w.showCapsForm(seed, func(c config.ModelCapabilities) {
+			manualCaps = c
+			manualCapsEdited = true
+		})
+	}))
+
 	// Discover: merge the selected connection's live listing with the catalog off the
 	// UI thread so a slow backend can't freeze the dialog. On success swap the model
 	// text box for a dropdown of advertised models, flagged ✓ available / ⚠
@@ -216,10 +239,15 @@ func (w *Workbench) showModelForm(title string, initial config.ModelConfig, name
 		cfg.DisplayName = display.GetText()
 		cfg.Connection = currentConnection()
 		cfg.Model = strings.TrimSpace(currentModelID())
-		// Apply the discovered capability snapshot when the user picked a discovered
-		// model; otherwise cfg.Caps is carried through from initial.
-		if caps, ok := capsByID[cfg.Model]; ok {
-			cfg.Caps = caps
+		// Capability precedence: a manual edit wins; else a discovered snapshot for the
+		// chosen model; else the caps carried through from initial.
+		switch {
+		case manualCapsEdited:
+			cfg.Caps = manualCaps
+		default:
+			if caps, ok := capsByID[cfg.Model]; ok {
+				cfg.Caps = caps
+			}
 		}
 		if v, err := strconv.ParseFloat(temp.GetText(), 32); err == nil {
 			cfg.Temperature = float32(v)
