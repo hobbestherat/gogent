@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -174,6 +175,86 @@ func TestContextWindowDistinctFromMaxTokens(t *testing.T) {
 	threshold := window * 4 / 5
 	if threshold <= m.MaxTokens {
 		t.Errorf("compaction threshold %d should exceed max_tokens %d", threshold, m.MaxTokens)
+	}
+}
+
+// TestContextWindowJSONRoundTrip locks the issue #589 / #4 persistence contract for
+// the context_window model setting: a config that PREDATES the field still loads
+// (zero value, accessor supplies the default — backward compatible), and a config
+// that sets it preserves the exact value across a save/load cycle. The accessor
+// never persisted a value; only the raw field round-trips, so the default is
+// applied only on read.
+func TestContextWindowJSONRoundTrip(t *testing.T) {
+	// (1) Old config predating context_window: field absent ⇒ zero value, and the
+	// accessor supplies the conservative default (back-compat — no regression for
+	// configs written before the field existed).
+	const oldJSON = `{"name":"legacy","model":"legacy-1","max_tokens":4096}`
+	var legacy ModelConfig
+	if err := json.Unmarshal([]byte(oldJSON), &legacy); err != nil {
+		t.Fatalf("unmarshal old config: %v", err)
+	}
+	if legacy.ContextWindow != 0 {
+		t.Errorf("old config ContextWindow = %d, want 0 (field absent)", legacy.ContextWindow)
+	}
+	if got := legacy.ContextWindowOrDefault(); got != defaultContextWindow {
+		t.Errorf("old config ContextWindowOrDefault = %d, want default %d", got, defaultContextWindow)
+	}
+
+	// (2) A config that sets context_window preserves the exact value across a
+	// marshal/unmarshal round-trip, and the serialized form carries the documented
+	// JSON key.
+	in := &ModelConfig{Name: "big", Model: "big-1", ContextWindow: 200000}
+	data, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"context_window":200000`) {
+		t.Errorf("expected serialized context_window key, got %s", data)
+	}
+	var out ModelConfig
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.ContextWindow != 200000 {
+		t.Errorf("round-trip ContextWindow = %d, want 200000", out.ContextWindow)
+	}
+	if got := out.ContextWindowOrDefault(); got != 200000 {
+		t.Errorf("round-trip ContextWindowOrDefault = %d, want 200000", got)
+	}
+
+	// (3) A full Config round-trip preserves the field per-model: an explicit value
+	// survives, while an unset sibling stays zero and reads back as the default.
+	cfg := &Config{
+		DefaultModel: "big",
+		ModelConfigs: []*ModelConfig{
+			{Name: "big", Model: "big-1", ContextWindow: 200000},
+			{Name: "legacy", Model: "legacy-1"}, // no context_window
+		},
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	var reloaded Config
+	if err := json.Unmarshal(raw, &reloaded); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	big := reloaded.GetModelConfig("big")
+	if big == nil {
+		t.Fatal("reloaded config missing model big")
+	}
+	if big.ContextWindow != 200000 {
+		t.Errorf("big round-trip ContextWindow = %d, want 200000", big.ContextWindow)
+	}
+	leg := reloaded.GetModelConfig("legacy")
+	if leg == nil {
+		t.Fatal("reloaded config missing model legacy")
+	}
+	if leg.ContextWindow != 0 {
+		t.Errorf("legacy round-trip ContextWindow = %d, want 0", leg.ContextWindow)
+	}
+	if got := leg.ContextWindowOrDefault(); got != defaultContextWindow {
+		t.Errorf("legacy round-trip ContextWindowOrDefault = %d, want default %d", got, defaultContextWindow)
 	}
 }
 
