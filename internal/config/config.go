@@ -45,6 +45,13 @@ type ModelConfig struct {
 	// for the context window. Leave unset (0) to fall back to
 	// ContextWindowOrDefault's conservative default.
 	ContextWindow int `json:"context_window,omitempty"`
+	// ModelTimeoutSeconds, when > 0, overrides the global timeouts.model_seconds
+	// for THIS model only — the bound on a single model HTTP request. It lets a
+	// slow local model (e.g. a large quantized model on modest hardware) be given a
+	// longer leash without raising the timeout for every other backend. Leave unset
+	// (0) to fall back to the global model timeout, exactly as before. Resolve it
+	// with ModelTimeoutSecondsOrDefault.
+	ModelTimeoutSeconds int `json:"model_timeout_seconds,omitempty"`
 	// ReasoningEffort, when set, is forwarded as the reasoning_effort request
 	// parameter for providers that support it (OpenAI o-series / GPT-5, Z.AI
 	// GLM). Recognized values are provider-specific — commonly
@@ -145,6 +152,18 @@ func (m *ModelConfig) ContextWindowOrDefault() int {
 		return defaultContextWindow
 	}
 	return m.ContextWindow
+}
+
+// ModelTimeoutSecondsOrDefault resolves the effective model-request timeout (in
+// seconds) for this model: the per-model ModelTimeoutSeconds override when set
+// (> 0), otherwise the supplied globalSeconds (the global
+// timeouts.model_seconds). Callers pass TimeoutConfig.ModelSecondsOrDefault() as
+// globalSeconds so an unset override falls back to today's behavior exactly.
+func (m *ModelConfig) ModelTimeoutSecondsOrDefault(globalSeconds int) int {
+	if m == nil || m.ModelTimeoutSeconds <= 0 {
+		return globalSeconds
+	}
+	return m.ModelTimeoutSeconds
 }
 
 // SubAgentExecutionModel selects how sub-agents are run.

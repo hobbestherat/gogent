@@ -361,22 +361,23 @@ type reviewEditsView struct {
 
 // modelView is a redacted model config (api_key never echoed in GET responses).
 type modelView struct {
-	Name            string   `json:"name"`
-	DisplayName     string   `json:"display_name"`
-	APIType         string   `json:"api_type,omitempty"`
-	Endpoint        string   `json:"endpoint"`
-	Project         string   `json:"project,omitempty"`
-	Location        string   `json:"location,omitempty"`
-	Model           string   `json:"model"`
-	HasAPIKey       bool     `json:"has_api_key"`
-	Temperature     float32  `json:"temperature"`
-	TopP            float32  `json:"top_p,omitempty"`
-	MaxTokens       int      `json:"max_tokens"`
-	ContextWindow   int      `json:"context_window,omitempty"`
-	ReasoningEffort string   `json:"reasoning_effort,omitempty"`
-	EffortOptions   []string `json:"effort_options,omitempty"`
-	Thinking        *bool    `json:"thinking,omitempty"`
-	Free            bool     `json:"free"`
+	Name                string   `json:"name"`
+	DisplayName         string   `json:"display_name"`
+	APIType             string   `json:"api_type,omitempty"`
+	Endpoint            string   `json:"endpoint"`
+	Project             string   `json:"project,omitempty"`
+	Location            string   `json:"location,omitempty"`
+	Model               string   `json:"model"`
+	HasAPIKey           bool     `json:"has_api_key"`
+	Temperature         float32  `json:"temperature"`
+	TopP                float32  `json:"top_p,omitempty"`
+	MaxTokens           int      `json:"max_tokens"`
+	ContextWindow       int      `json:"context_window,omitempty"`
+	ModelTimeoutSeconds int      `json:"model_timeout_seconds,omitempty"`
+	ReasoningEffort     string   `json:"reasoning_effort,omitempty"`
+	EffortOptions       []string `json:"effort_options,omitempty"`
+	Thinking            *bool    `json:"thinking,omitempty"`
+	Free                bool     `json:"free"`
 }
 
 // updateModelRequest is the body of PUT /models/:name. APIKey is optional: an
@@ -473,22 +474,23 @@ func modelToView(m *config.ModelConfig) modelView {
 		return modelView{}
 	}
 	return modelView{
-		Name:            m.Name,
-		DisplayName:     m.DisplayName,
-		APIType:         m.APIType,
-		Endpoint:        m.Endpoint,
-		Project:         m.Project,
-		Location:        m.Location,
-		Model:           m.Model,
-		HasAPIKey:       m.APIKey != "",
-		Temperature:     m.Temperature,
-		TopP:            m.TopP,
-		MaxTokens:       m.MaxTokens,
-		ContextWindow:   m.ContextWindow,
-		ReasoningEffort: m.ReasoningEffort,
-		EffortOptions:   m.EffortOptions,
-		Thinking:        m.Thinking,
-		Free:            m.Free,
+		Name:                m.Name,
+		DisplayName:         m.DisplayName,
+		APIType:             m.APIType,
+		Endpoint:            m.Endpoint,
+		Project:             m.Project,
+		Location:            m.Location,
+		Model:               m.Model,
+		HasAPIKey:           m.APIKey != "",
+		Temperature:         m.Temperature,
+		TopP:                m.TopP,
+		MaxTokens:           m.MaxTokens,
+		ContextWindow:       m.ContextWindow,
+		ModelTimeoutSeconds: m.ModelTimeoutSeconds,
+		ReasoningEffort:     m.ReasoningEffort,
+		EffortOptions:       m.EffortOptions,
+		Thinking:            m.Thinking,
+		Free:                m.Free,
 	}
 }
 

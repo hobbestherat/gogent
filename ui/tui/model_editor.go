@@ -21,10 +21,11 @@ const (
 	// modelEditorMinWidth is the comfort floor when the widest option is short.
 	modelEditorMinWidth = 64
 	// modelEditorHeight is the model form's fixed footprint: the field rows (Name
-	// down to Location) plus the button row at height-3. The layout never grows
-	// vertically, so the height is pinned here rather than inflating to the 85%
-	// vertical default (issue #309). The Vertex AI rows (Project, Location) are
-	// always shown, so the form is 20 rows tall.
+	// down to the optional per-model Model timeout) plus the button row at
+	// height-3. The layout never grows vertically, so the height is pinned here
+	// rather than inflating to the 85% vertical default (issue #309). The Vertex AI
+	// rows (Project, Location) and the model-timeout row (issue #590) are always
+	// shown, so the form is 20 rows tall.
 	modelEditorHeight = 20
 	// modelFormScanW is the width of the model-id Scan button (edit mode only).
 	modelFormScanW = 8
@@ -151,6 +152,14 @@ func (w *Workbench) showModelForm(title string, initial config.ModelConfig, name
 	location := field("Location:", 12)
 	location.SetText(initial.Location)
 
+	// Model timeout (issue #590): an optional per-model override of the global
+	// model-request timeout, for slow local models. Blank/0 means "use the global
+	// timeout" — shown blank (not "0") so it reads as unset.
+	modelTimeout := field("Model timeout:", 13)
+	if initial.ModelTimeoutSeconds > 0 {
+		modelTimeout.SetText(strconv.Itoa(initial.ModelTimeoutSeconds))
+	}
+
 	// Scan (edit mode only): assemble a draft from the live fields and query the
 	// backend off the UI thread so a slow backend can't freeze the dialog.
 	if scanEnabled {
@@ -201,6 +210,13 @@ func (w *Workbench) showModelForm(title string, initial config.ModelConfig, name
 		cfg.Thinking = thinkingValue(thinking.Value())
 		cfg.Project = strings.TrimSpace(project.GetText())
 		cfg.Location = strings.TrimSpace(location.GetText())
+		// Blank clears the override (0 = use global); a valid non-negative value
+		// sets it; garbage leaves the prior value untouched.
+		if txt := strings.TrimSpace(modelTimeout.GetText()); txt == "" {
+			cfg.ModelTimeoutSeconds = 0
+		} else if v, err := strconv.Atoi(txt); err == nil && v >= 0 {
+			cfg.ModelTimeoutSeconds = v
+		}
 
 		if cfg.Name == "" {
 			w.showConfirm("Model", "A unique model name is required.", nil)

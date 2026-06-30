@@ -417,22 +417,23 @@ type EditReviewDetail struct {
 // ModelDTO mirrors the server's (redacted) modelView. The api_key is never sent
 // back by the server; HasAPIKey reports whether one is configured.
 type ModelDTO struct {
-	Name            string   `json:"name"`
-	DisplayName     string   `json:"display_name"`
-	APIType         string   `json:"api_type"`
-	Endpoint        string   `json:"endpoint"`
-	Project         string   `json:"project"`
-	Location        string   `json:"location"`
-	Model           string   `json:"model"`
-	HasAPIKey       bool     `json:"has_api_key"`
-	Temperature     float32  `json:"temperature"`
-	TopP            float32  `json:"top_p"`
-	MaxTokens       int      `json:"max_tokens"`
-	ContextWindow   int      `json:"context_window"`
-	ReasoningEffort string   `json:"reasoning_effort"`
-	EffortOptions   []string `json:"effort_options"`
-	Thinking        *bool    `json:"thinking"`
-	Free            bool     `json:"free"`
+	Name                string   `json:"name"`
+	DisplayName         string   `json:"display_name"`
+	APIType             string   `json:"api_type"`
+	Endpoint            string   `json:"endpoint"`
+	Project             string   `json:"project"`
+	Location            string   `json:"location"`
+	Model               string   `json:"model"`
+	HasAPIKey           bool     `json:"has_api_key"`
+	Temperature         float32  `json:"temperature"`
+	TopP                float32  `json:"top_p"`
+	MaxTokens           int      `json:"max_tokens"`
+	ContextWindow       int      `json:"context_window"`
+	ModelTimeoutSeconds int      `json:"model_timeout_seconds"`
+	ReasoningEffort     string   `json:"reasoning_effort"`
+	EffortOptions       []string `json:"effort_options"`
+	Thinking            *bool    `json:"thinking"`
+	Free                bool     `json:"free"`
 }
 
 // ToModelConfig projects a redacted ModelDTO back into a config.ModelConfig for
@@ -441,21 +442,22 @@ type ModelDTO struct {
 // daemon's stored key, so a view→edit→save round-trip never wipes it.
 func (m ModelDTO) ToModelConfig() config.ModelConfig {
 	return config.ModelConfig{
-		Name:            m.Name,
-		DisplayName:     m.DisplayName,
-		APIType:         m.APIType,
-		Endpoint:        m.Endpoint,
-		Project:         m.Project,
-		Location:        m.Location,
-		Model:           m.Model,
-		Temperature:     m.Temperature,
-		TopP:            m.TopP,
-		MaxTokens:       m.MaxTokens,
-		ContextWindow:   m.ContextWindow,
-		ReasoningEffort: m.ReasoningEffort,
-		EffortOptions:   m.EffortOptions,
-		Thinking:        m.Thinking,
-		Free:            m.Free,
+		Name:                m.Name,
+		DisplayName:         m.DisplayName,
+		APIType:             m.APIType,
+		Endpoint:            m.Endpoint,
+		Project:             m.Project,
+		Location:            m.Location,
+		Model:               m.Model,
+		Temperature:         m.Temperature,
+		TopP:                m.TopP,
+		MaxTokens:           m.MaxTokens,
+		ContextWindow:       m.ContextWindow,
+		ModelTimeoutSeconds: m.ModelTimeoutSeconds,
+		ReasoningEffort:     m.ReasoningEffort,
+		EffortOptions:       m.EffortOptions,
+		Thinking:            m.Thinking,
+		Free:                m.Free,
 	}
 }
 
