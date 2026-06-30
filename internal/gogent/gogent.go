@@ -1549,11 +1549,15 @@ func (g *Gogent) CreateUserSession(id string, rootAgent *agent.Agent) *agent.Use
 }
 
 // buildConnection builds a model connection from a model config and applies the
-// configured global model timeout so every connection honors the user setting.
+// effective model timeout so every connection honors the user setting: the
+// per-model ModelTimeoutSeconds override when set, otherwise the global
+// timeouts.model_seconds (issue #590). This is the single point every model
+// connection is built, so the override is resolved here once.
 func (g *Gogent) buildConnection(cfg *config.ModelConfig) *model.ModelConnection {
 	conn := model.NewModelConnectionFromConfig(cfg)
 	if g.config != nil {
-		conn.SetTimeout(time.Duration(g.config.Timeouts.ModelSecondsOrDefault()) * time.Second)
+		seconds := cfg.ModelTimeoutSecondsOrDefault(g.config.Timeouts.ModelSecondsOrDefault())
+		conn.SetTimeout(time.Duration(seconds) * time.Second)
 	}
 	return conn
 }
