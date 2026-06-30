@@ -55,8 +55,10 @@ func notificationsHandlers() Handlers {
 
 // TestSettingsDialogPinnedToContent opens the real Sub-agent Settings dialog and
 // asserts it resolves to its fixed-form footprint (spec MinW64/MaxW76/PreferredW72,
-// MinH20/MaxH20) rather than the 160×42 box: 72×20 on a roomy terminal, 64×20 floored
+// MinH16/MaxH16) rather than the 160×42 box: 72×16 on a roomy terminal, 64×16 floored
 // on an 80-column one, and capped — never wider than 72 — even on an ultrawide one.
+// The height dropped 20→16 in #590: the model/tool/sub-agent timeouts relocated to
+// their own discoverable Timeouts dialog, so the Sub-agent dialog lost four rows.
 func TestSettingsDialogPinnedToContent(t *testing.T) {
 	t.Run("roomy terminal sizes to content, not the 160x42 balloon", func(t *testing.T) {
 		w := newTestWorkbench(t)
@@ -67,8 +69,8 @@ func TestSettingsDialogPinnedToContent(t *testing.T) {
 		if b.W == issue317DefW && b.H == issue317DefH {
 			t.Fatalf("settings is still the regressed %dx%d balloon", issue317DefW, issue317DefH)
 		}
-		if b.W != 72 || b.H != 20 {
-			t.Errorf("settings size = %dx%d, want pinned 72x20", b.W, b.H)
+		if b.W != 72 || b.H != 16 {
+			t.Errorf("settings size = %dx%d, want pinned 72x16", b.W, b.H)
 		}
 		if b.X != (200-b.W)/2 || b.Y != (50-b.H)/2 {
 			t.Errorf("settings origin = (%d,%d), want centered", b.X, b.Y)
@@ -81,8 +83,8 @@ func TestSettingsDialogPinnedToContent(t *testing.T) {
 		w.app.Resize(300, 80)
 		w.showSettingsDialog()
 		b := dialogBounds(w)
-		if b.W != 72 || b.H != 20 {
-			t.Errorf("settings on 300x80 = %dx%d, want capped 72x20 (MaxW/MaxH must hold)", b.W, b.H)
+		if b.W != 72 || b.H != 16 {
+			t.Errorf("settings on 300x80 = %dx%d, want capped 72x16 (MaxW/MaxH must hold)", b.W, b.H)
 		}
 	})
 
@@ -92,8 +94,8 @@ func TestSettingsDialogPinnedToContent(t *testing.T) {
 		w.app.Resize(80, 24)
 		w.showSettingsDialog()
 		b := dialogBounds(w)
-		if b.W != 64 || b.H != 20 {
-			t.Errorf("settings on 80x24 = %dx%d, want 64x20 (MinW floor, MaxH cap)", b.W, b.H)
+		if b.W != 64 || b.H != 16 {
+			t.Errorf("settings on 80x24 = %dx%d, want 64x16 (MinW floor, MaxH cap)", b.W, b.H)
 		}
 	})
 }
