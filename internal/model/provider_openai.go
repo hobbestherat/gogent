@@ -25,7 +25,10 @@ func init() {
 		// (config.DefaultEndpoint) and pass a full endpoint in.
 		endpoints: staticBaseEndpoints{defaultBaseURL: "http://localhost:8080/v1", chatPath: "/chat/completions"},
 		auth:      keyAuth{mode: authBearer},
-		lister:    openAILister{chatPath: "/chat/completions", modelsPath: "/models"},
+		// tagsPath enables the bare-Ollama /api/tags fallback: a local server that
+		// only speaks the native Ollama API (no /v1/models) is still scannable. Only
+		// the generic OpenAI api_type sets it; the hosted gateways below do not.
+		lister: openAILister{chatPath: "/chat/completions", modelsPath: "/models", tagsPath: "/api/tags"},
 	})
 
 	registerProvider(&provider{

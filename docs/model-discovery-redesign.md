@@ -292,10 +292,9 @@ hosted-gateway "model is empty" rule wrongly blocking the discovery probe (new
 `model.NewProbeConnection`). vertex-native now draws caps from the catalog's
 google-vertex provider.
 
-### Deferred refinements (noted, not yet wired)
-- Live self-describe caps parsing in the OpenRouter/Anthropic listers (framework in place via `ModelInfo.Caps`; catalog currently fills caps for all providers).
-- Cost-weighting from `Caps` cache pricing (still uses provider-cap/`ModelQuirks` multipliers; catalog data now captured).
-- `/api/tags` fallback for bare Ollama in the OpenAI lister.
+### Deferred refinements
+The core redesign is complete and merged (PR #593). The items intentionally left for
+follow-up are listed in full in **§12 Deferred work** below.
 
 ## 9. Risk / attention sites
 - `ModelConnection` embeds `*config.ModelConfig` as `Config`; the rebind threads a `*ProviderConnection` too.
@@ -319,5 +318,59 @@ google-vertex provider.
 - Vision/modalities: **warn on mismatch** (non-blocking; images still sent).
 - Rename `model.ModelCaps` → **`ModelQuirks`**.
 
-## 12. Open items / to confirm
-- (all initial design questions resolved — see §11)
+## 12. Deferred work
+
+The redesign shipped (PR #593) with the items below intentionally **not** implemented.
+Each is independent and additive — none blocks the shipped flow. Grouped by area, with
+the rationale and the seam where the work would land.
+
+### A. Discovery & capabilities
+1. **Live self-describe caps parsing.** `ModelInfo.Caps` exists, but no lister populates
+   it — the catalog fills capabilities for every provider today. OpenRouter's `/models`
+   self-describes *fully* (context, pricing incl. cache, modalities, params, reasoning
+   efforts) and Anthropic's gives limits + capability flags; parsing those would make
+   discovery work richly even for providers/models the catalog doesn't cover, and let
+   live values override a stale catalog (the `MergeCaps` precedence is already live ▸ catalog).
+   *Seam:* the per-provider `list()` in `provider_openai.go` / the Anthropic lister.
+2. **Family-match for dated/preview model ids.** `FamilyKey` is coarse, so a live id like
+   `gemini-2.0-flash-001` does not match the catalog's `gemini-2.0-flash` and falls back to
+   `Source:"manual"` (no caps). Current-generation models match fine; dated snapshots/previews
+   don't. *Seam:* `FamilyKey` / `MergeDiscovery` in `internal/model/discover.go`.
+3. ✅ **DONE.** **Bare-Ollama listing (`/api/tags`).** `openAILister.list` now falls back to
+   `GET {base}/api/tags` (gated on a `tagsPath` set only on the generic OpenAI provider) when
+   `/models` fails or returns nothing, so a local Ollama/LM Studio is scannable. The original
+   `/models` error is preserved when both fail.
+
+### B. Cost & budget
+4. **Cost-weighting from catalog cache pricing.** `Caps.CacheReadPerM`/`CacheWritePerM` are
+   captured by discovery but **not consumed**: the cost-weighted budget still derives cache
+   multipliers from the per-provider `Capabilities` + the curated `ModelQuirks` table —
+   including the hardcoded DeepSeek discount in `model_overrides.go`. Wiring `Caps` pricing
+   into `CostWeightedInput` would make discovered pricing authoritative and retire that
+   hardcode. *Seam:* `caps.go` / `connection.go` `CostWeightedInput`.
+
+### C. UX & display
+5. **Vision warn-on-mismatch (decided in §11, not wired).** `Caps.Vision`/modalities are
+   captured and shown, but there is **no** warning when a turn sends images to a model whose
+   `Caps.Vision` is false — images are still sent unconditionally (today's behaviour). The
+   decided UX was a non-blocking warning. *Seam:* a new consumer at the turn / message-
+   serialization seam (`connection.go` `MarshalJSON` or the agent turn).
+6. **Overall-stats "api" row shows the connection *name*, not the host.** `buildOverallStats`
+   sets `o.APIEndpoint = model.Connection`; it lacks the connections list to resolve the
+   connection's endpoint host / api_type, so the former host display (`formatEndpoint`, now
+   unused dead code in `overall_stats.go`) is gone. Threading connections into the builder
+   would restore it. *Seam:* `ui/tui/overall_stats.go` + its callers.
+7. **First-run onboarding nudge.** The welcome dialog and the empty-list placeholders
+   (Models…/Connections…) don't point a brand-new user at "create your first connection".
+   *Seam:* `welcome_dialog.go`, `model_dialog.go`, `connections_dialog.go`.
+8. **Connection *picker* on first model-add.** The model editor's Connection field is a
+   dropdown only when connections already exist; with none it's a free-text field. Minor.
+
+### D. Catalog data not yet consumed
+9. **`reasoning_options[type=budget_tokens].Min`** is now parsed into the catalog struct but
+   not surfaced/used (only `effort` feeds the selector). Likewise `Caps.OpenWeights` /
+   `StructuredOutput` are captured but not yet shown or acted on.
+
+### Notes
+- These are tracked here rather than as code TODOs so the doc stays the single source of truth.
+- Nothing here changes the on-disk schema; each is a localized, additive change.
