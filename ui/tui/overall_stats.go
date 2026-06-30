@@ -446,7 +446,7 @@ func mergeModelLifetime(models []stats.ModelStat, extra map[string]stats.Connect
 // every metric below the selector is scoped to that model from the report's
 // per-model breakdown — tokens, requests, errors and cache-hit from its connector
 // stats, and the session / sub-agent counts attributed to it.
-func buildOverallStats(report stats.Report, sessions, subAgents int, model *config.ModelConfig, selectedModel string) overallStats {
+func buildOverallStats(report stats.Report, sessions, subAgents int, model *config.ModelConfig, selectedModel string, connections []config.ProviderConnection) overallStats {
 	// The headline traffic figures come from the primary model backend's
 	// connector snapshot so tokens / requests / errors / cache-hit are all drawn
 	// from one consistent source. The auxiliary (fast/compression) backend is
@@ -494,11 +494,36 @@ func buildOverallStats(report stats.Report, sessions, subAgents int, model *conf
 		if o.Model == "" {
 			o.Model = model.Name
 		}
-		// Credentials/endpoint live on the connection now; show which connection this
-		// model routes through (stage 5b can resolve the connection's host/api_type).
-		o.APIEndpoint = model.Connection
+		// Credentials/endpoint live on the connection now (the discovery redesign). Show
+		// the model's backend by resolving its provider connection to a short host /
+		// provider label rather than the bare connection name, so the narrow "api" row
+		// is as informative as it was pre-redesign (deferred item 6 / §12 C6).
+		o.APIEndpoint = resolveConnectionEndpoint(model.Connection, connections)
 	}
 	return o
+}
+
+// resolveConnectionEndpoint returns the Overall "api" row label for the model's
+// provider connection: it looks the connection up by name in the connections list and
+// renders it through formatEndpoint (host[:port] for an explicit endpoint, otherwise
+// the api_type provider label). It is the join that lets the panel show the backend
+// HOST, not just the connection name (deferred item 6).
+//
+// It degrades gracefully so the row never crashes or shows garbage: a model that names
+// no connection yields blank; a connection name that cannot be resolved (not in the
+// list, e.g. connections unavailable) falls back to the bare name so the row still
+// says something. Only the model-scoped view reaches here — the aggregate "All models"
+// view is gated out upstream and keeps the row blank (issue #534).
+func resolveConnectionEndpoint(connName string, connections []config.ProviderConnection) string {
+	if connName == "" {
+		return ""
+	}
+	for _, c := range connections {
+		if c.Name == connName {
+			return formatEndpoint(c.Endpoint, c.APIType)
+		}
+	}
+	return connName
 }
 
 // formatEndpoint renders a short label for the Overall panel's "api" row (issue

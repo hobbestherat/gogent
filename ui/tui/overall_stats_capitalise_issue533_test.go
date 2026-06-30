@@ -222,19 +222,19 @@ func TestIssue533_BuildOverallStatsDetectsAggregateViaEmptyKeyNotLabel(t *testin
 	rep := reportForSelectorTests()
 
 	// The empty key selects the aggregate grand total.
-	agg := buildOverallStats(rep, 4, 6, nil, "")
+	agg := buildOverallStats(rep, 4, 6, nil, "", nil)
 	if agg.Requests != 100 || agg.TokensIn != 1000 {
 		t.Errorf("aggregate (key %q) = %+v, want grand total {Req:100 In:1000}", "", agg)
 	}
 	// Passing the DISPLAY LABEL as the selection must not yield the grand total —
 	// the aggregate is detected via the empty key, not the label string.
-	byLabel := buildOverallStats(rep, 4, 6, nil, "All models")
+	byLabel := buildOverallStats(rep, 4, 6, nil, "All models", nil)
 	if byLabel.Requests == 100 && byLabel.TokensIn == 1000 {
 		t.Errorf("passing the label %q as the selection yielded the grand total — "+
 			"aggregate must be detected via the empty key, never the label string", "All models")
 	}
 	// A real model still scopes correctly (the branch still works for model keys).
-	glm := buildOverallStats(rep, 4, 6, nil, "glm")
+	glm := buildOverallStats(rep, 4, 6, nil, "glm", nil)
 	if glm.Requests != 70 || glm.TokensIn != 700 {
 		t.Errorf("scoped(glm) = %+v, want glm's {Req:70 In:700}", glm)
 	}

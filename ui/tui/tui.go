@@ -3128,7 +3128,16 @@ func (w *Workbench) refreshOverall() {
 	// user sees (issue #278). The Statistics dialog consumes the same folded report
 	// (issue #277).
 	report := w.overallLifetime.fold(filterPhantomSessions(w.handlers.GetStatistics()))
-	w.sidebar.refreshOverallStats(report, modelCfg, selected)
+	// Resolve the selected model's backend HOST (not just the connection name) by
+	// threading the configured provider connections through to buildOverallStats
+	// (deferred item 6). GetConnections returns redacted copies — APIType/Endpoint
+	// survive redaction, only the API key is stripped — so no network call is needed.
+	// nil (no handler / aggregate view) leaves the "api" row blank or name-fallback.
+	var conns []config.ProviderConnection
+	if w.handlers.GetConnections != nil {
+		conns = w.handlers.GetConnections()
+	}
+	w.sidebar.refreshOverallStats(report, modelCfg, selected, conns)
 }
 
 // modelByName returns the model config with the given config Name, or nil. Unlike

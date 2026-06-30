@@ -807,11 +807,13 @@ func (s *sidebar) syncBackground(bgIDs map[string]bool) bool {
 
 // refreshOverallStats rebuilds the Overall panel's data from a Statistics report
 // joined with the sidebar's own session / sub-agent node counts and the focused
-// session's active model config (issue #107's model / endpoint rows). It only
+// session's active model config (issue #107's model / endpoint rows). connections
+// resolves that model's provider connection to a backend host/provider label for the
+// "api" row (deferred item 6); it may be nil (row falls back to blank/name). It only
 // updates the stored struct; the caller owns the redraw (mirrors SessionWindow's
 // refreshStatus contract). Runs on the UI thread.
-func (s *sidebar) refreshOverallStats(report stats.Report, model *config.ModelConfig, selectedModel string) {
-	s.overall = buildOverallStats(report, len(s.sessions), len(s.agents), model, selectedModel)
+func (s *sidebar) refreshOverallStats(report stats.Report, model *config.ModelConfig, selectedModel string, connections []config.ProviderConnection) {
+	s.overall = buildOverallStats(report, len(s.sessions), len(s.agents), model, selectedModel, connections)
 }
 
 // rebuildModelOptions resyncs the Overall band's model-selector options with the

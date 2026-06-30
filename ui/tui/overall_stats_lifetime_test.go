@@ -91,7 +91,7 @@ func buildReport(specs ...sessSpec) stats.Report {
 // node counts are passed as 0 here because the lifetime tests focus on the
 // report-derived traffic figures, which is what #232 is about.
 func agg(report stats.Report) overallStats {
-	return buildOverallStats(report, 0, 0, nil, "")
+	return buildOverallStats(report, 0, 0, nil, "", nil)
 }
 
 // conn is a terse connector constructor to keep the specs readable.
@@ -349,8 +349,8 @@ func TestLifetimeFold_SelectedModelPersistsOnClose(t *testing.T) {
 	ls.fold(buildReport(spec))
 	after := ls.fold(buildReport()) // close
 
-	want := buildOverallStats(buildReport(spec), 0, 0, nil, "glm")
-	got := buildOverallStats(after, 0, 0, nil, "glm")
+	want := buildOverallStats(buildReport(spec), 0, 0, nil, "glm", nil)
+	got := buildOverallStats(after, 0, 0, nil, "glm", nil)
 	if got.Requests != want.Requests || got.TokensIn != want.TokensIn ||
 		got.TokensOut != want.TokensOut || got.Errors != want.Errors ||
 		got.CacheHitPct != want.CacheHitPct {

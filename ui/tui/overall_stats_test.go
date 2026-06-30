@@ -25,7 +25,7 @@ func TestBuildOverallStats(t *testing.T) {
 	// Issue #534: the aggregate view (selectedModel == "") leaves the model/api
 	// rows empty even though a focused-session model config is threaded through.
 	got := buildOverallStats(report, 3, 5,
-		&config.ModelConfig{Name: "groq-free", DisplayName: "Groq", Connection: "groq"}, "")
+		&config.ModelConfig{Name: "groq-free", DisplayName: "Groq", Connection: "groq"}, "", nil)
 	// CacheReadTokens mirrors prim.CachedTokensIn (250 here); the write fields are 0
 	// because this report records no cache writes (#546 aggregate populate path).
 	want := overallStats{Sessions: 3, SubAgents: 5, TokensIn: 1000, TokensOut: 500,
@@ -39,19 +39,24 @@ func TestBuildOverallStats(t *testing.T) {
 // safe zero view (the panel's first frame before any traffic / session, and the
 // "no statistics handler" path).
 func TestBuildOverallStatsEmpty(t *testing.T) {
-	got := buildOverallStats(stats.Report{}, 0, 0, nil, "")
+	got := buildOverallStats(stats.Report{}, 0, 0, nil, "", nil)
 	if got != (overallStats{}) {
 		t.Fatalf("empty report should yield zero view, got %+v", got)
 	}
 }
 
-// TestBuildOverallStatsModel covers the model / endpoint derivation (issue #107):
-// the display name falls back to the config Name, and the "api" row now names the
-// connection the model routes through (credentials/endpoint moved onto the
-// connection). Issue #534 gates the populate block on a non-empty selectedModel,
+// TestBuildOverallStatsModel covers the model / endpoint derivation (issue #107,
+// deferred item 6): the display name falls back to the config Name, and the "api" row
+// resolves the model's provider connection to a short backend label — the endpoint
+// HOST when one is set, otherwise the api_type provider label — rather than the bare
+// connection name. Issue #534 gates the populate block on a non-empty selectedModel,
 // so the model's own Name is passed as the selection to keep the derivation path
 // under test (otherwise the aggregate would blank the rows and stop exercising it).
 func TestBuildOverallStatsModel(t *testing.T) {
+	conns := []config.ProviderConnection{
+		{Name: "local-lan", APIType: "openai", Endpoint: "http://10.0.0.5:8080/v1/chat/completions"},
+		{Name: "zai", APIType: "zai"}, // base-URL-deriving: blank endpoint -> provider label
+	}
 	for _, tc := range []struct {
 		name  string
 		model *config.ModelConfig
@@ -60,20 +65,26 @@ func TestBuildOverallStatsModel(t *testing.T) {
 		wantAPI   string
 	}{
 		{
-			name:      "display name preferred",
+			name:      "display name preferred, explicit endpoint shows host",
 			model:     &config.ModelConfig{Name: "local-lan", DisplayName: "Local LAN", Connection: "local-lan"},
 			wantModel: "Local LAN",
-			wantAPI:   "local-lan",
+			wantAPI:   "10.0.0.5:8080",
 		},
 		{
-			name:      "falls back to config name",
+			name:      "falls back to config name, derive-base shows provider label",
 			model:     &config.ModelConfig{Name: "zai-glm", Connection: "zai"},
 			wantModel: "zai-glm",
 			wantAPI:   "zai",
 		},
+		{
+			name:      "unresolved connection falls back to its name",
+			model:     &config.ModelConfig{Name: "ghost", DisplayName: "Ghost", Connection: "not-configured"},
+			wantModel: "Ghost",
+			wantAPI:   "not-configured",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildOverallStats(stats.Report{}, 0, 0, tc.model, tc.model.Name)
+			got := buildOverallStats(stats.Report{}, 0, 0, tc.model, tc.model.Name, conns)
 			if got.Model != tc.wantModel {
 				t.Errorf("Model = %q, want %q", got.Model, tc.wantModel)
 			}
@@ -201,7 +212,7 @@ func TestSidebarRefreshOverallStats(t *testing.T) {
 	report := stats.Report{Totals: stats.Totals{Primary: stats.ConnectorStat{
 		Requests: 10, Errors: 1, TokensIn: 500, TokensOut: 50, CachedTokensIn: 100,
 	}}}
-	s.refreshOverallStats(report, &config.ModelConfig{Name: "groq-free", DisplayName: "Groq", Connection: "groq"}, "")
+	s.refreshOverallStats(report, &config.ModelConfig{Name: "groq-free", DisplayName: "Groq", Connection: "groq"}, "", nil)
 
 	if s.overall.Sessions != 2 {
 		t.Errorf("Sessions = %d, want 2", s.overall.Sessions)
@@ -405,7 +416,7 @@ func TestSidebarOverallCountExcludesTodos(t *testing.T) {
 	})
 	s.applyTodo("s1", threeTodos())
 
-	s.refreshOverallStats(stats.Report{}, nil, "")
+	s.refreshOverallStats(stats.Report{}, nil, "", nil)
 
 	if s.overall.Sessions != 1 {
 		t.Errorf("Sessions = %d, want 1", s.overall.Sessions)
@@ -423,7 +434,7 @@ func TestSidebarOverallCountExcludesTodos(t *testing.T) {
 	// A second session with its own todos must not move the sub-agent count.
 	s.addSession("s2", "Session 2", false)
 	s.applyTodo("s2", threeTodos())
-	s.refreshOverallStats(stats.Report{}, nil, "")
+	s.refreshOverallStats(stats.Report{}, nil, "", nil)
 	if s.overall.Sessions != 2 {
 		t.Errorf("Sessions = %d, want 2", s.overall.Sessions)
 	}
