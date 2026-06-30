@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -452,5 +453,212 @@ func TestExecuteTaskLoopWithModelMigratesBeforeLoop(t *testing.T) {
 	// ran, so the backend was never called.
 	if stub.calls != 0 {
 		t.Errorf("backend called %d times, want 0 (no compression, loop not reached)", stub.calls)
+	}
+}
+
+// TestCompactIfNeededKeepsToolCallsTogether is the contrast to
+// TestMigratePreservesToolCallPairing: the in-loop compaction summarizes the
+// WHOLE older slice in one call (no internal split), so it cannot strand a
+// tool_call from its result the way firstChunk can. This pinpoints the stranding
+// regression to the migration chunker, not the shared compression helper.
+func TestCompactIfNeededKeepsToolCallsTogether(t *testing.T) {
+	conn := model.NewModelConnection()
+	sess := model.NewModelSession("compacttool", conn)
+	sess.SetMaxContextLength(120)
+	msgs := []model.Message{
+		{Role: model.RoleUser, Content: strings.Repeat("q", 100)},
+		{Role: model.RoleAssistant, Content: strings.Repeat("a", 100), ToolCalls: []model.ToolCall{
+			{ID: "call_1", Type: "function", Function: model.FunctionCall{Name: "f", Arguments: "{}"}},
+		}},
+		{Role: model.RoleTool, ToolCallID: "call_1", Content: strings.Repeat("r", 200)},
+		{Role: model.RoleAssistant, Content: strings.Repeat("a", 8)},
+		{Role: model.RoleUser, Content: "q1"},
+		{Role: model.RoleAssistant, Content: "a1"},
+		{Role: model.RoleUser, Content: "q2"},
+		{Role: model.RoleAssistant, Content: "a2"},
+		{Role: model.RoleUser, Content: "q3"},
+		{Role: model.RoleAssistant, Content: "a3"},
+	}
+	sess.ReplaceTranscript(msgs)
+	sess.CurrentTokenCount = 99999 // force NeedsCompression
+	ag := NewAgent("root", sess)
+	us := NewUserSession("compacttool", ag)
+	us.SetCompressionCompleter(&stubCompleter{content: "D"})
+
+	us.compactIfNeeded(sess, func(SessionEvent) {})
+
+	// compactIfNeeded folds the entire older slice (tool_call AND its result
+	// together) into the digest, so no role:tool message is left stranded.
+	got := sess.GetTranscript()
+	for i, m := range got {
+		if m.Role != model.RoleTool {
+			continue
+		}
+		var prev model.Role
+		if i > 0 {
+			prev = got[i-1].Role
+		}
+		if i == 0 || prev != model.RoleAssistant || len(got[i-1].ToolCalls) == 0 {
+			t.Errorf("tool result (tool_call_id=%q) at index %d stranded after compactIfNeeded (preceded by %q) — "+
+				"compactIfNeeded must keep a tool_call with its result", m.ToolCallID, i, prev)
+		}
+	}
+}
+
+// sizeCappedCompleter simulates a compression backend that rejects any summarize
+// request whose rendered prompt exceeds maxChars — i.e. a model whose OWN window
+// is smaller than the slice it is asked to summarize (the issue #589 "transcript
+// exceeds the target window" case, when no separate fast model is wired in). It
+// counts how many calls overflowed, so a test can tell whether every summarize
+// input was kept within the backend's budget.
+type sizeCappedCompleter struct {
+	calls    int
+	oversize int
+	maxChars int
+}
+
+func (s *sizeCappedCompleter) Complete(messages []model.Message) (*model.CompletionResponse, error) {
+	s.calls++
+	n := 0
+	for _, m := range messages {
+		n += len(m.Content)
+	}
+	if n > s.maxChars {
+		s.oversize++
+		return nil, fmt.Errorf("context length exceeded: prompt %d chars > %d", n, s.maxChars)
+	}
+	return &model.CompletionResponse{Content: "### digest\n- summary", Role: model.RoleAssistant}, nil
+}
+
+// TestMigrateCancelledStopsPromptly (issue #589 cancellation): the chunked
+// fallback honors a cancelled context between rounds, so a Stop / client
+// disconnect does not run all rounds to completion. The model.Completer.Complete
+// call itself is not cancellable, but no FURTHER round is spawned once the turn
+// is cancelled. The cancelled turn surfaces as SessionEventError (the daemon path
+// discards the returned error) — never silent.
+func TestMigrateCancelledStopsPromptly(t *testing.T) {
+	us, sess := makeMigrationSession("cancel", 6, 100, 0)
+	stub := &stubCompleter{content: "D"}
+	us.SetCompressionCompleter(stub)
+	sess.CurrentTokenCount = 99999 // over budget ⇒ the loop would run absent cancellation
+
+	ctx, cancel := context.WithCancel(WithTurnID(context.Background(), "turn-cancel"))
+	cancel() // pre-cancel: simulate Stop arriving before the first round
+
+	var events []SessionEvent
+	us.SetObserver(func(ev SessionEvent) { events = append(events, ev) })
+
+	cfg := &config.ModelConfig{Name: "m", ContextWindow: 200} // fit=160 ≪ 99999
+	err := us.MigrateToContextWindow(ctx, sess, cfg)
+	if err == nil {
+		t.Fatal("cancelled migration returned nil, want a cancellation error")
+	}
+	if !strings.Contains(err.Error(), "cancel") {
+		t.Errorf("err = %q, want a cancellation error", err.Error())
+	}
+	if stub.calls != 0 {
+		t.Errorf("cancelled migration ran %d compression round(s), want 0 (no round after cancel)", stub.calls)
+	}
+	var n int
+	for _, ev := range events {
+		if ev.Type == SessionEventError {
+			n++
+			if ev.TurnID != "turn-cancel" {
+				t.Errorf("cancel event TurnID = %q, want turn-cancel", ev.TurnID)
+			}
+		}
+	}
+	if n != 1 {
+		t.Errorf("got %d SessionEventError events on cancel, want exactly 1 (not silent)", n)
+	}
+}
+
+// TestMigrateSummarizeInputBounded (issue #589 chunking): when the compression
+// backend IS the smaller-window target model, each summarize round-trip must
+// carry only a bounded oldest chunk — never the whole older slice, which would
+// overflow the backend's own window. A backend that rejects oversized prompts
+// must therefore see ZERO overflowed calls.
+func TestMigrateSummarizeInputBounded(t *testing.T) {
+	// Each message is far larger than the chunk budget, so the WHOLE older slice
+	// would overflow the backend; only an oldest-chunk-first split keeps each
+	// summarize call's input within the cap.
+	us, sess := makeMigrationSession("bounded-input", 6, 30000, 0)
+	// Cap is comfortably above one message + the summarize prompt template, and
+	// far below the whole older slice (6 messages ≈ 180k chars).
+	stub := &sizeCappedCompleter{maxChars: 50000}
+	us.SetCompressionCompleter(stub)
+	beforeTokens := sess.GetCurrentTokenCount()
+
+	cfg := &config.ModelConfig{Name: "m", ContextWindow: 200} // budget=100, fit=160
+	_ = us.MigrateToContextWindow(context.Background(), sess, cfg)
+
+	if stub.calls < 1 {
+		t.Fatalf("migration made %d compression calls, want >= 1", stub.calls)
+	}
+	if stub.oversize != 0 {
+		t.Errorf("%d of %d summarize calls overflowed the backend window (maxChars=%d) — "+
+			"chunking failed to bound each call's input to an oldest chunk",
+			stub.oversize, stub.calls, stub.maxChars)
+	}
+	// Progress was made (the oldest chunk was folded into a digest).
+	if got := sess.GetCurrentTokenCount(); got >= beforeTokens {
+		t.Errorf("transcript did not shrink: %d -> %d", beforeTokens, got)
+	}
+}
+
+// TestMigratePreservesToolCallPairing guards the SafeSplit invariant: a
+// role:tool result message must never be separated from the assistant tool_calls
+// message it answers, or the next provider request is malformed (a tool result
+// with no preceding matching tool_call). The chunked compression splits the older
+// slice internally by token budget (firstChunk); this asserts it does not cut
+// between a tool_call and its result.
+func TestMigratePreservesToolCallPairing(t *testing.T) {
+	conn := model.NewModelConnection()
+	sess := model.NewModelSession("toolpair", conn)
+	msgs := []model.Message{
+		{Role: model.RoleUser, Content: strings.Repeat("q", 100)}, // m0 (~25 tok)
+		{Role: model.RoleAssistant, Content: strings.Repeat("a", 100), ToolCalls: []model.ToolCall{ // m1 (~25 tok)
+			{ID: "call_1", Type: "function", Function: model.FunctionCall{Name: "f", Arguments: "{}"}},
+		}},
+		{Role: model.RoleTool, ToolCallID: "call_1", Content: strings.Repeat("r", 200)}, // m2 (~50 tok) — the result
+		{Role: model.RoleAssistant, Content: strings.Repeat("a", 8)},                    // m3
+		{Role: model.RoleUser, Content: "q1"},
+		{Role: model.RoleAssistant, Content: "a1"},
+		{Role: model.RoleUser, Content: "q2"},
+		{Role: model.RoleAssistant, Content: "a2"},
+		{Role: model.RoleUser, Content: "q3"},
+		{Role: model.RoleAssistant, Content: "a3"},
+	}
+	sess.ReplaceTranscript(msgs)
+	sess.SetLastMigrationWindow(0)
+	sess.CurrentTokenCount = model.EstimateTokens(msgs)
+	ag := NewAgent("root", sess)
+	us := NewUserSession("toolpair", ag)
+	us.SetCompressionCompleter(&stubCompleter{content: "D"})
+
+	// target=120 ⇒ chunkBudget=60, fit=96. firstChunk cuts older after m1
+	// (25+25=50 ≤ 60, 50+50 > 60): m1 (the tool_call) is summarized into the
+	// digest while m2 (its result) is kept verbatim — stranded after the digest
+	// unless the chunker respects tool-call boundaries.
+	cfg := &config.ModelConfig{Name: "m", ContextWindow: 120}
+	if err := us.MigrateToContextWindow(context.Background(), sess, cfg); err != nil {
+		t.Fatalf("migration failed: %v (expected to fit after one round)", err)
+	}
+
+	got := sess.GetTranscript()
+	for i, m := range got {
+		if m.Role != model.RoleTool {
+			continue
+		}
+		var prev model.Role
+		if i > 0 {
+			prev = got[i-1].Role
+		}
+		if i == 0 || prev != model.RoleAssistant || len(got[i-1].ToolCalls) == 0 {
+			t.Errorf("tool result (tool_call_id=%q) at transcript index %d is stranded — preceded by role %q, "+
+				"not an assistant tool_call. The chunked compression (firstChunk) split a tool_call from its result, "+
+				"breaking the SafeSplit invariant and leaving a transcript the next provider request would reject.",
+				m.ToolCallID, i, prev)
+		}
 	}
 }
