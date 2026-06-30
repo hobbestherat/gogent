@@ -1260,6 +1260,9 @@ func (w *Workbench) settingsItems() []*tv.MenuItem {
 		// inside the dialog.
 		tv.NewMenuItem("&Models…", func() { w.showModelsDialog() }),
 	}
+	if w.connectionsReady() {
+		items = append(items, tv.NewMenuItem("&Connections…", func() { w.showConnectionsDialog() }))
+	}
 	items = append(items, tv.NewMenuItem("&Resources…", func() { w.showResourcesDialog() }))
 	// Logs window (issue #562): a persistent, non-modal viewer for tool/daemon
 	// diagnostics. Always available — with no captured logs it simply opens empty.
