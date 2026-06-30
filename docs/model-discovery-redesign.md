@@ -369,9 +369,12 @@ the rationale and the seam where the work would land.
    dropdown only when connections already exist; with none it's a free-text field. Minor.
 
 ### D. Catalog data not yet consumed
-9. **`reasoning_options[type=budget_tokens].Min`** is now parsed into the catalog struct but
-   not surfaced/used (only `effort` feeds the selector). Likewise `Caps.OpenWeights` /
-   `StructuredOutput` are captured but not yet shown or acted on.
+9. ✅ **DONE.** **Surface parsed-but-unused catalog data.** `CapabilityLabels` now shows
+   "structured output" and "open weights"; the manual-caps form gained a "Structured output"
+   toggle (de-deading `Caps.StructuredOutput`); `Knowledge`/`ReleaseDate` show as a catalog
+   review metadata row; and `reasoning_options[budget_tokens].Min` is surfaced as a thinking
+   hint ("min budget N") via a new `ThinkingBudgetMin` helper. `OpenWeights` is read directly
+   from the catalog `Model` (no dead `Caps` field added).
 
 ### Notes
 - These are tracked here rather than as code TODOs so the doc stays the single source of truth.
