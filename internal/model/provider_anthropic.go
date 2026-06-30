@@ -22,8 +22,10 @@ func init() {
 		endpoints: staticBaseEndpoints{defaultBaseURL: "https://api.anthropic.com", chatPath: "/v1/messages"},
 		// x-api-key + the required anthropic-version header on every request.
 		auth: keyAuth{mode: authXAPIKey, extraHeaders: map[string]string{"anthropic-version": anthropicVersion}},
-		// Anthropic's GET /v1/models returns the OpenAI {"data":[...]} shape.
-		lister:      openAILister{chatPath: "/v1/messages", modelsPath: "/v1/models"},
+		// Anthropic's GET /v1/models returns the OpenAI {"data":[...]} shape and
+		// self-describes token limits + capability flags (effort, thinking, vision,
+		// pdf, structured outputs) — parse them onto Caps; the catalog fills pricing.
+		lister:      openAILister{chatPath: "/v1/messages", modelsPath: "/v1/models", parseCaps: parseAnthropicModels},
 		derivesBase: true, // base URL is api.anthropic.com; an empty endpoint is routable
 	})
 

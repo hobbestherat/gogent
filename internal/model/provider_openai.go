@@ -66,7 +66,10 @@ func init() {
 			"HTTP-Referer": openRouterReferer,
 			"X-Title":      openRouterTitle,
 		}},
-		lister:      openAILister{chatPath: "/chat/completions", modelsPath: "/models"},
+		// OpenRouter's /models self-describes context, pricing (incl. cache read/write),
+		// modalities, supported params and reasoning efforts — parse them onto Caps so
+		// discovery prefers the live values over the catalog.
+		lister:      openAILister{chatPath: "/chat/completions", modelsPath: "/models", parseCaps: parseOpenRouterModels},
 		derivesBase: true, // base URL is the OpenRouter default; an empty endpoint is routable
 	})
 }
