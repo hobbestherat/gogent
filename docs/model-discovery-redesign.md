@@ -325,13 +325,15 @@ Each is independent and additive — none blocks the shipped flow. Grouped by ar
 the rationale and the seam where the work would land.
 
 ### A. Discovery & capabilities
-1. **Live self-describe caps parsing.** `ModelInfo.Caps` exists, but no lister populates
-   it — the catalog fills capabilities for every provider today. OpenRouter's `/models`
-   self-describes *fully* (context, pricing incl. cache, modalities, params, reasoning
-   efforts) and Anthropic's gives limits + capability flags; parsing those would make
-   discovery work richly even for providers/models the catalog doesn't cover, and let
-   live values override a stale catalog (the `MergeCaps` precedence is already live ▸ catalog).
-   *Seam:* the per-provider `list()` in `provider_openai.go` / the Anthropic lister.
+1. ✅ **DONE.** **Live self-describe caps parsing.** An optional `parseCaps` strategy on
+   `openAILister` now parses OpenRouter's rich `/models` (context, pricing incl. cache,
+   modalities, supported params, reasoning efforts) and Anthropic's (`max_input_tokens`,
+   `max_tokens`, capability flags) into `ModelInfo.Caps` (`Source:"live"`), so discovery
+   yields capabilities even without a catalog entry and live values win via `MergeCaps`.
+   Generic openai/zai stay id-only; a parse failure degrades to ids (never errors).
+   *(Follow-up noted by UX: `Caps.Free()` conflates "zero price" with "price unknown" for
+   live-only models, and OpenRouter `:free` variants can show the paid base price — both
+   latent today since `Free` isn't rendered and budget uses ratio multipliers.)*
 2. **Family-match for dated/preview model ids.** `FamilyKey` is coarse, so a live id like
    `gemini-2.0-flash-001` does not match the catalog's `gemini-2.0-flash` and falls back to
    `Source:"manual"` (no caps). Current-generation models match fine; dated snapshots/previews
