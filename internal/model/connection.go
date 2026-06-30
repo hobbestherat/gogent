@@ -871,6 +871,39 @@ func NewUnroutableConnection(message string) *ModelConnection {
 	return conn
 }
 
+// NewProbeConnection builds a connection for DISCOVERY/LISTING only: it has no
+// selected model, so it validates the connection's routability (and the provider's
+// own check, e.g. Vertex project/location) but NOT the model-level rules (a hosted
+// gateway needing a model name, a Vertex model-id shape) — those would wrongly block
+// the very listing meant to find a model, and are enforced at save time instead.
+func NewProbeConnection(pc *config.ProviderConnection) *ModelConnection {
+	if pc == nil {
+		pc = &config.ProviderConnection{}
+	}
+	p := providerFor(StringToAPIType(pc.APIType))
+	eps := p.endpoints.endpoints(pc, "")
+	conn := &ModelConnection{
+		URL:            eps.ChatURL,
+		StreamURL:      eps.StreamURL,
+		APIType:        p.apiType,
+		Conn:           pc,
+		Config:         &config.ModelConfig{},
+		Stats:          &ModelStats{},
+		Timeout:        5 * time.Minute,
+		provider:       p,
+		maxAttempts:    defaultMaxAttempts,
+		retryBaseDelay: defaultRetryBaseDelay,
+		retryMaxDelay:  defaultRetryMaxDelay,
+	}
+	if err := validateRoutableConnection(pc, nil); err != nil {
+		conn.configErr = err
+	} else if err := p.validateConfig(pc); err != nil {
+		conn.configErr = err
+	}
+	conn.client = newClient(30*time.Second, p.auth.roundTripper(pc))
+	return conn
+}
+
 // NewModelConnection creates a model connection from a provider connection and a
 // selected model. The connection's APIType selects the provider conventions; its
 // endpoint may be a full chat-completions URL or just a base URL (or empty, to use

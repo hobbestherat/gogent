@@ -60,12 +60,13 @@ func newCatalogLookup(cat modelsdev.Catalog, apiType string) *catalogLookup {
 		return nil
 	}
 	at := model.StringToAPIType(apiType)
+	want := catalogAPITypeFor(apiType)
 	l := &catalogLookup{
 		exact:  map[string]config.ModelCapabilities{},
 		family: map[string]config.ModelCapabilities{},
 	}
 	for _, p := range cat {
-		if modelsdev.ProviderAPIType(p) != apiType {
+		if modelsdev.ProviderAPIType(p) != want {
 			continue
 		}
 		for _, m := range p.Models {
@@ -96,6 +97,17 @@ func newCatalogLookup(cat modelsdev.Catalog, apiType string) *catalogLookup {
 	return l
 }
 
+// catalogAPITypeFor maps a connection's api_type to the api_type its catalog
+// models are filed under (models.dev catalog providers). The native Gemini route
+// (vertex-native) and the OpenAI-compat shim (vertex) both draw Gemini caps from
+// the catalog's google-vertex provider, which ProviderAPIType files under "vertex".
+func catalogAPITypeFor(connAPIType string) string {
+	if connAPIType == "vertex-native" {
+		return "vertex"
+	}
+	return connAPIType
+}
+
 // DiscoverModels merges the named connection's live model listing with the
 // models.dev catalog into a capability-rich, availability-aware list. Live ids are
 // flagged Available; catalog-only models (not returned by the listing) are included
@@ -112,11 +124,16 @@ func (g *Gogent) DiscoverModels(ctx context.Context, connName string) ([]model.D
 
 	// Live listing: probe with a model-less connection (only api_type/endpoint/auth
 	// matter). A listing failure is captured, not fatal — the catalog may still fill in.
-	conn := model.NewModelConnection(pc, &config.ModelConfig{})
+	conn := model.NewProbeConnection(pc)
 	live, listErr := conn.ListModels()
 
 	cat, _ := g.ModelCatalog(ctx, false) // catalog errors are non-fatal for discovery
-	lookup := newCatalogLookup(cat, strings.TrimSpace(pc.APIType))
+	// Assign through an interface var only when non-nil: a typed-nil *catalogLookup
+	// stored in a model.CatalogLookup interface is NOT == nil and would panic on use.
+	var lookup model.CatalogLookup
+	if l := newCatalogLookup(cat, strings.TrimSpace(pc.APIType)); l != nil {
+		lookup = l
+	}
 
 	merged := model.MergeDiscovery(model.StringToAPIType(pc.APIType), live, lookup)
 	if len(merged) == 0 {
@@ -138,7 +155,7 @@ func (g *Gogent) ProbeConnection(connName string) ([]string, error) {
 	if pc == nil {
 		return nil, fmt.Errorf("unknown connection %q", connName)
 	}
-	conn := model.NewModelConnection(pc, &config.ModelConfig{})
+	conn := model.NewProbeConnection(pc)
 	infos, err := conn.ListModels()
 	if err != nil {
 		return nil, fmt.Errorf("list models: %w", err)
