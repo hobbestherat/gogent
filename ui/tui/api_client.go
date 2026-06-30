@@ -462,35 +462,37 @@ func (c CapsDTO) toConfig() config.ModelCapabilities {
 // ModelDTO mirrors the server's modelView (references a connection by name; caps
 // nested; no credentials).
 type ModelDTO struct {
-	Name            string  `json:"name"`
-	DisplayName     string  `json:"display_name"`
-	Connection      string  `json:"connection"`
-	Model           string  `json:"model"`
-	Caps            CapsDTO `json:"caps"`
-	Free            bool    `json:"free"`
-	Temperature     float32 `json:"temperature"`
-	TopP            float32 `json:"top_p"`
-	MaxTokens       int     `json:"max_tokens"`
-	ReasoningEffort string  `json:"reasoning_effort"`
-	Thinking        *bool   `json:"thinking"`
-	CacheTTL        string  `json:"cache_ttl"`
+	Name                string  `json:"name"`
+	DisplayName         string  `json:"display_name"`
+	Connection          string  `json:"connection"`
+	Model               string  `json:"model"`
+	Caps                CapsDTO `json:"caps"`
+	Free                bool    `json:"free"`
+	Temperature         float32 `json:"temperature"`
+	TopP                float32 `json:"top_p"`
+	MaxTokens           int     `json:"max_tokens"`
+	ModelTimeoutSeconds int     `json:"model_timeout_seconds"`
+	ReasoningEffort     string  `json:"reasoning_effort"`
+	Thinking            *bool   `json:"thinking"`
+	CacheTTL            string  `json:"cache_ttl"`
 }
 
 // ToModelConfig projects a ModelDTO back into a config.ModelConfig for the TUI's
 // model dropdown and editor.
 func (m ModelDTO) ToModelConfig() config.ModelConfig {
 	return config.ModelConfig{
-		Name:            m.Name,
-		DisplayName:     m.DisplayName,
-		Connection:      m.Connection,
-		Model:           m.Model,
-		Caps:            m.Caps.toConfig(),
-		Temperature:     m.Temperature,
-		TopP:            m.TopP,
-		MaxTokens:       m.MaxTokens,
-		ReasoningEffort: m.ReasoningEffort,
-		Thinking:        m.Thinking,
-		CacheTTL:        m.CacheTTL,
+		Name:                m.Name,
+		DisplayName:         m.DisplayName,
+		Connection:          m.Connection,
+		Model:               m.Model,
+		Caps:                m.Caps.toConfig(),
+		Temperature:         m.Temperature,
+		TopP:                m.TopP,
+		MaxTokens:           m.MaxTokens,
+		ModelTimeoutSeconds: m.ModelTimeoutSeconds,
+		ReasoningEffort:     m.ReasoningEffort,
+		Thinking:            m.Thinking,
+		CacheTTL:            m.CacheTTL,
 	}
 }
 

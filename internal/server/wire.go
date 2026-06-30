@@ -385,18 +385,19 @@ type capsView struct {
 // modelView is a model config on the wire (references a connection by name; caps
 // nested; no credentials — those live on the connection).
 type modelView struct {
-	Name            string   `json:"name"`
-	DisplayName     string   `json:"display_name"`
-	Connection      string   `json:"connection"`
-	Model           string   `json:"model"`
-	Caps            capsView `json:"caps"`
-	Free            bool     `json:"free"`
-	Temperature     float32  `json:"temperature,omitempty"`
-	TopP            float32  `json:"top_p,omitempty"`
-	MaxTokens       int      `json:"max_tokens,omitempty"`
-	ReasoningEffort string   `json:"reasoning_effort,omitempty"`
-	Thinking        *bool    `json:"thinking,omitempty"`
-	CacheTTL        string   `json:"cache_ttl,omitempty"`
+	Name                string   `json:"name"`
+	DisplayName         string   `json:"display_name"`
+	Connection          string   `json:"connection"`
+	Model               string   `json:"model"`
+	Caps                capsView `json:"caps"`
+	Free                bool     `json:"free"`
+	Temperature         float32  `json:"temperature,omitempty"`
+	TopP                float32  `json:"top_p,omitempty"`
+	MaxTokens           int      `json:"max_tokens,omitempty"`
+	ModelTimeoutSeconds int      `json:"model_timeout_seconds,omitempty"`
+	ReasoningEffort     string   `json:"reasoning_effort,omitempty"`
+	Thinking            *bool    `json:"thinking,omitempty"`
+	CacheTTL            string   `json:"cache_ttl,omitempty"`
 }
 
 // connectionView is a redacted provider connection (api_key never echoed in GET
@@ -542,18 +543,19 @@ func modelToView(m *config.ModelConfig) modelView {
 		return modelView{}
 	}
 	return modelView{
-		Name:            m.Name,
-		DisplayName:     m.DisplayName,
-		Connection:      m.Connection,
-		Model:           m.Model,
-		Caps:            capsToView(m.Caps),
-		Free:            m.Caps.Free(),
-		Temperature:     m.Temperature,
-		TopP:            m.TopP,
-		MaxTokens:       m.MaxTokens,
-		ReasoningEffort: m.ReasoningEffort,
-		Thinking:        m.Thinking,
-		CacheTTL:        m.CacheTTL,
+		Name:                m.Name,
+		DisplayName:         m.DisplayName,
+		Connection:          m.Connection,
+		Model:               m.Model,
+		Caps:                capsToView(m.Caps),
+		Free:                m.Caps.Free(),
+		Temperature:         m.Temperature,
+		TopP:                m.TopP,
+		MaxTokens:           m.MaxTokens,
+		ModelTimeoutSeconds: m.ModelTimeoutSeconds,
+		ReasoningEffort:     m.ReasoningEffort,
+		Thinking:            m.Thinking,
+		CacheTTL:            m.CacheTTL,
 	}
 }
 

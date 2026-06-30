@@ -107,7 +107,15 @@ type ModelConfig struct {
 	TopP        float32 `json:"top_p,omitempty"`
 	// MaxTokens is the user's chosen per-request output cap (sent as max_tokens).
 	// 0 falls back to Caps.MaxOutput. It bounds only the response, never the context.
+	// (The model's input context window now lives on Caps.ContextWindow.)
 	MaxTokens int `json:"max_tokens,omitempty"`
+	// ModelTimeoutSeconds, when > 0, overrides the global timeouts.model_seconds
+	// for THIS model only — the bound on a single model HTTP request. It lets a
+	// slow local model (e.g. a large quantized model on modest hardware) be given a
+	// longer leash without raising the timeout for every other backend. Leave unset
+	// (0) to fall back to the global model timeout, exactly as before. Resolve it
+	// with ModelTimeoutSecondsOrDefault.
+	ModelTimeoutSeconds int `json:"model_timeout_seconds,omitempty"`
 	// ReasoningEffort, when set, is forwarded as the reasoning_effort request
 	// parameter for providers that support it. Empty omits it. Setting it (or
 	// Thinking) marks the model as a reasoning model.
@@ -202,6 +210,18 @@ func (m *ModelConfig) OutputCap() int {
 		return m.MaxTokens
 	}
 	return m.Caps.MaxOutput
+}
+
+// ModelTimeoutSecondsOrDefault resolves the effective model-request timeout (in
+// seconds) for this model: the per-model ModelTimeoutSeconds override when set
+// (> 0), otherwise the supplied globalSeconds (the global
+// timeouts.model_seconds). Callers pass TimeoutConfig.ModelSecondsOrDefault() as
+// globalSeconds so an unset override falls back to today's behavior exactly.
+func (m *ModelConfig) ModelTimeoutSecondsOrDefault(globalSeconds int) int {
+	if m == nil || m.ModelTimeoutSeconds <= 0 {
+		return globalSeconds
+	}
+	return m.ModelTimeoutSeconds
 }
 
 // SubAgentExecutionModel selects how sub-agents are run.
@@ -668,7 +688,7 @@ type Config struct {
 	Connections  []*ProviderConnection `json:"connections"`
 	ModelConfigs []*ModelConfig        `json:"models"`
 	SubAgents    SubAgentConfig        `json:"sub_agents"`
-	Timeouts     TimeoutConfig     `json:"timeouts"`
+	Timeouts     TimeoutConfig         `json:"timeouts"`
 	// UnattendedApprovalTimeout bounds how long a pending interactive approval
 	// (permission/edit-review) waits when NO client is connected to answer it,
 	// before the approval bridge denies/rejects it as a safe default. It applies

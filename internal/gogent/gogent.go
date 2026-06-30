@@ -1553,9 +1553,11 @@ func (g *Gogent) CreateUserSession(id string, rootAgent *agent.Agent) *agent.Use
 }
 
 // buildConnection builds a model connection from a model config — resolving the
-// ProviderConnection the model references — and applies the configured global model
-// timeout so every connection honors the user setting. A model that references an
-// unknown connection yields a connection that fails clearly on first use.
+// ProviderConnection the model references — and applies the effective model timeout
+// so every connection honors the user setting: the per-model ModelTimeoutSeconds
+// override when set, otherwise the global timeouts.model_seconds (issue #590). A
+// model that references an unknown connection yields a connection that fails clearly
+// on first use. This is the single point every model connection is built.
 func (g *Gogent) buildConnection(cfg *config.ModelConfig) *model.ModelConnection {
 	var pc *config.ProviderConnection
 	if g.config != nil {
@@ -1563,7 +1565,8 @@ func (g *Gogent) buildConnection(cfg *config.ModelConfig) *model.ModelConnection
 	}
 	conn := model.NewModelConnection(pc, cfg)
 	if g.config != nil {
-		conn.SetTimeout(time.Duration(g.config.Timeouts.ModelSecondsOrDefault()) * time.Second)
+		seconds := cfg.ModelTimeoutSecondsOrDefault(g.config.Timeouts.ModelSecondsOrDefault())
+		conn.SetTimeout(time.Duration(seconds) * time.Second)
 	}
 	return conn
 }

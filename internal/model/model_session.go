@@ -37,6 +37,12 @@ type ModelSession struct {
 	// low-water mark, preventing a summarization round-trip every turn. Its zero
 	// value (false) means "armed", so freshly created sessions compact normally.
 	compressSuppressed bool
+	// lastMigrationWindow is the raw target context window the migration guard last
+	// evaluated for this session (issue #589). It lets a switch to an equal-or-larger
+	// window skip the chunked-compression fallback, leaving ordinary growth to the
+	// in-loop compaction. Its zero value means "no migration evaluated yet". See the
+	// agent layer's MigrateToContextWindow.
+	lastMigrationWindow int
 
 	// SystemPrompt is prepended (as a system message) to every request.
 	SystemPrompt string
@@ -197,6 +203,29 @@ func (s *ModelSession) SetMaxContextLength(length int) {
 		s.compressSuppressed = false
 	}
 	s.MaxContextLength = length
+}
+
+// LastMigrationWindow returns the raw target context window the migration guard
+// last evaluated for this session — 0 before any migration check, or when the
+// last target model left its context window unset. See the agent layer's
+// MigrateToContextWindow (issue #589).
+func (s *ModelSession) LastMigrationWindow() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastMigrationWindow
+}
+
+// SetLastMigrationWindow records the raw target context window most recently
+// evaluated by the migration guard, so a later switch to an equal-or-larger
+// window can skip the chunked-compression fallback. It is independent of
+// MaxContextLength (which is the effective, defaulted window the live transcript
+// is sized against), because the guard needs the raw configured value — including
+// the unset (0) sentinel — to decide whether a migration actually shrank the
+// window.
+func (s *ModelSession) SetLastMigrationWindow(window int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastMigrationWindow = window
 }
 
 // AddTurn adds a turn to the session history

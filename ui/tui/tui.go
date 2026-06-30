@@ -1268,6 +1268,12 @@ func (w *Workbench) settingsItems() []*tv.MenuItem {
 	if w.connectionsReady() {
 		items = append(items, tv.NewMenuItem("&Connections…", func() { w.showConnectionsDialog() }))
 	}
+	// Timeouts is its own discoverable settings page (issue #590) rather than being
+	// buried in the Sub-agent dialog. Gated on its own GetTimeouts/SetTimeouts
+	// handlers, mirroring how Notifications/Theme are gated on theirs.
+	if w.handlers.GetTimeouts != nil && w.handlers.SetTimeouts != nil {
+		items = append(items, tv.NewMenuItem("&Timeouts…", func() { w.showTimeoutsDialog() }))
+	}
 	items = append(items, tv.NewMenuItem("&Resources…", func() { w.showResourcesDialog() }))
 	// Logs window (issue #562): a persistent, non-modal viewer for tool/daemon
 	// diagnostics. Always available — with no captured logs it simply opens empty.
