@@ -191,6 +191,19 @@ func (m *ModelConfig) ContextWindowOrDefault() int {
 	return m.Caps.ContextWindow
 }
 
+// OutputCap returns the per-request output-token cap: the user's MaxTokens tuning
+// when set, otherwise the model's capability ceiling (Caps.MaxOutput). 0 means "no
+// configured cap" (the connection falls back to DefaultMaxTokens).
+func (m *ModelConfig) OutputCap() int {
+	if m == nil {
+		return 0
+	}
+	if m.MaxTokens > 0 {
+		return m.MaxTokens
+	}
+	return m.Caps.MaxOutput
+}
+
 // SubAgentExecutionModel selects how sub-agents are run.
 type SubAgentExecutionModel string
 

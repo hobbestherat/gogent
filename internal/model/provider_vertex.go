@@ -74,14 +74,14 @@ func init() {
 // vertexValidate defers a clear config error when a Vertex base URL would be
 // derived from a missing project/location (which would otherwise fail as an
 // opaque DNS/HTTP error). Skipped when an explicit endpoint overrides the base.
-func vertexValidate(cfg *config.ModelConfig) error {
-	if strings.TrimSpace(cfg.Endpoint) != "" {
+func vertexValidate(conn *config.ProviderConnection) error {
+	if strings.TrimSpace(conn.Endpoint) != "" {
 		return nil
 	}
-	if strings.TrimSpace(cfg.Project) == "" || strings.TrimSpace(cfg.Location) == "" {
+	if strings.TrimSpace(conn.Project) == "" || strings.TrimSpace(conn.Location) == "" {
 		return &ModelError{
 			Type:    ErrorGeneric,
-			Message: "vertex: project and location are required (set them on the model, or supply an explicit endpoint)",
+			Message: "vertex: project and location are required (set them on the connection, or supply an explicit endpoint)",
 		}
 	}
 	return nil
@@ -104,7 +104,7 @@ func vertexAIHost(location string) string {
 // vertexOpenAIBaseURL builds the Vertex OpenAI-compatible base URL (v1beta1) from
 // a config's project/location. Location is lower-cased so the host/path are robust
 // to a mixed-case region (and the "global" special case stays correct).
-func vertexOpenAIBaseURL(c *config.ModelConfig) string {
+func vertexOpenAIBaseURL(c *config.ProviderConnection) string {
 	loc := strings.ToLower(strings.TrimSpace(c.Location))
 	return fmt.Sprintf("https://%s/v1beta1/projects/%s/locations/%s",
 		vertexAIHost(loc), strings.TrimSpace(c.Project), loc)
@@ -113,7 +113,7 @@ func vertexOpenAIBaseURL(c *config.ModelConfig) string {
 // vertexNativeBaseURL builds the Vertex base URL for the native Gemini and Claude
 // routes (v1, GA). The model name is interpolated into the path by the chat/stream
 // URL builders, not the base.
-func vertexNativeBaseURL(c *config.ModelConfig) string {
+func vertexNativeBaseURL(c *config.ProviderConnection) string {
 	loc := strings.ToLower(strings.TrimSpace(c.Location))
 	return fmt.Sprintf("https://%s/v1/projects/%s/locations/%s",
 		vertexAIHost(loc), strings.TrimSpace(c.Project), loc)
@@ -164,16 +164,25 @@ type vertexPublisherLister struct {
 }
 
 func (l vertexPublisherLister) list(ctx context.Context, c *ModelConnection) ([]ModelInfo, error) {
-	proj := strings.TrimSpace(c.Config.Project)
+	proj := ""
+	gardenBase := vertexModelGardenBase
+	if c.Conn != nil {
+		proj = strings.TrimSpace(c.Conn.Project)
+		// A connection may override the Model Garden host (private/proxied Vertex);
+		// otherwise the global public catalog host is used.
+		if d := strings.TrimSpace(c.Conn.DiscoveryEndpoint); d != "" {
+			gardenBase = d
+		}
+	}
 	if proj == "" {
 		return nil, &ModelError{
 			Type:    ErrorGeneric,
-			Message: "vertex: project is required to list models (set it on the model)",
+			Message: "vertex: project is required to list models (set it on the connection)",
 		}
 	}
 	headers := http.Header{}
 	headers.Set("X-Goog-User-Project", proj)
-	listURL := strings.TrimRight(vertexModelGardenBase, "/") + "/publishers/" + l.publisher + "/models"
+	listURL := strings.TrimRight(gardenBase, "/") + "/publishers/" + l.publisher + "/models"
 
 	var out []ModelInfo
 	seen := map[string]bool{}

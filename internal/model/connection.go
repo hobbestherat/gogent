@@ -735,9 +735,12 @@ type ModelConnection struct {
 	StreamURL string
 	ModelName string
 	APIType   APIType
-	Config    *config.ModelConfig
-	Stats     *ModelStats
-	Timeout   time.Duration
+	// Conn is the credentialed provider connection (api_type, endpoint, auth) this
+	// connection talks to. Config is the selected model (id + caps + tuning).
+	Conn    *config.ProviderConnection
+	Config  *config.ModelConfig
+	Stats   *ModelStats
+	Timeout time.Duration
 	// provider carries all backend-specific behaviour (endpoints, auth, wire
 	// adapter, capabilities, optional operations like model listing). It is set by
 	// the constructors from the provider registry; methods delegate to it.
@@ -835,11 +838,16 @@ func newClient(timeout time.Duration, rt http.RoundTripper) *http.Client {
 // the URL themselves and pass it in via NewModelConnectionFromConfig or SetURL.
 const DefaultModelURL = "http://localhost:8080/v1/chat/completions"
 
-// NewModelConnection creates a new model connection pointed at DefaultModelURL.
-func NewModelConnection() *ModelConnection {
+// newPlaceholderConnection creates a bare model connection pointed at
+// DefaultModelURL (the localhost placeholder, no auth). It exists only for the
+// NewUnroutableConnection fallback; real connections are built with
+// NewModelConnection(conn, model). Callers that want a working default should
+// resolve a ProviderConnection + ModelConfig instead.
+func newPlaceholderConnection() *ModelConnection {
 	return &ModelConnection{
 		URL:            DefaultModelURL,
 		APIType:        APITypeOpenAI,
+		Conn:           &config.ProviderConnection{APIType: "openai", Endpoint: DefaultModelURL},
 		provider:       providerFor(APITypeOpenAI),
 		Stats:          &ModelStats{},
 		Timeout:        5 * time.Minute,
@@ -858,24 +866,33 @@ func NewModelConnection() *ModelConnection {
 // bare NewModelConnection() has configErr == nil and would target localhost, so it must
 // not be used as the no-model fallback.
 func NewUnroutableConnection(message string) *ModelConnection {
-	conn := NewModelConnection()
+	conn := newPlaceholderConnection()
 	conn.configErr = &ModelError{Type: ErrorGeneric, Message: message}
 	return conn
 }
 
-// NewModelConnectionFromConfig creates a model connection from config. The
-// configured APIType selects the provider conventions; the endpoint may be a
-// full chat-completions URL or just a base URL (or empty, to use the provider
-// default), which is normalized into the concrete endpoints automatically.
-func NewModelConnectionFromConfig(modelConfig *config.ModelConfig) *ModelConnection {
-	p := providerFor(StringToAPIType(modelConfig.APIType))
-	eps := p.endpoints.endpoints(modelConfig)
+// NewModelConnection creates a model connection from a provider connection and a
+// selected model. The connection's APIType selects the provider conventions; its
+// endpoint may be a full chat-completions URL or just a base URL (or empty, to use
+// the provider default), normalized into the concrete endpoints automatically. The
+// model supplies the backend model id (which some providers embed in the URL path)
+// and the per-turn tuning read at request-build time.
+func NewModelConnection(pc *config.ProviderConnection, modelConfig *config.ModelConfig) *ModelConnection {
+	if pc == nil {
+		pc = &config.ProviderConnection{}
+	}
+	if modelConfig == nil {
+		modelConfig = &config.ModelConfig{}
+	}
+	p := providerFor(StringToAPIType(pc.APIType))
+	eps := p.endpoints.endpoints(pc, modelConfig.Model)
 
 	conn := &ModelConnection{
 		URL:            eps.ChatURL,
 		StreamURL:      eps.StreamURL,
 		ModelName:      modelConfig.Model,
 		APIType:        p.apiType,
+		Conn:           pc,
 		Config:         modelConfig,
 		Stats:          &ModelStats{},
 		Timeout:        5 * time.Minute,
@@ -888,13 +905,13 @@ func NewModelConnectionFromConfig(modelConfig *config.ModelConfig) *ModelConnect
 	// Deferred config validation, surfaced clearly on the first completion/scan call
 	// instead of here (the constructor has no error result) and instead of as an
 	// opaque HTTP failure. Two layers: a generic routability check (an unroutable
-	// entry — e.g. empty api_type AND endpoint — would otherwise silently target the
-	// localhost placeholder and 404), then the provider's own check (e.g. a Vertex
-	// model missing project/location). The routability check runs first so the
+	// connection — e.g. empty api_type AND endpoint — would otherwise silently target
+	// the localhost placeholder and 404), then the provider's own check (e.g. a Vertex
+	// connection missing project/location). The routability check runs first so the
 	// clearest, most actionable message wins.
-	if err := validateRoutableConfig(modelConfig); err != nil {
+	if err := validateRoutableConnection(pc, modelConfig); err != nil {
 		conn.configErr = err
-	} else if err := p.validateConfig(modelConfig); err != nil {
+	} else if err := p.validateConfig(pc); err != nil {
 		conn.configErr = err
 	}
 
@@ -902,7 +919,7 @@ func NewModelConnectionFromConfig(modelConfig *config.ModelConfig) *ModelConnect
 	// Azure api-key / Gemini query param / Google ADC), wrapping the shared pooled
 	// transport so keep-alive conns persist; a nil round-tripper means no auth is
 	// injected and the shared transport is used directly (issue #19).
-	conn.client = newClient(30*time.Second, p.auth.roundTripper(modelConfig))
+	conn.client = newClient(30*time.Second, p.auth.roundTripper(pc))
 
 	return conn
 }
@@ -927,42 +944,69 @@ func NewModelConnectionFromConfig(modelConfig *config.ModelConfig) *ModelConnect
 //     legitimately omit the model (some local servers auto-select it), and Vertex is
 //     left to its own validation.
 //
-// Returns nil for every valid config, including base-URL-deriving providers and local
-// "openai" servers with an explicit endpoint, so existing configs are unaffected.
-// ValidateModelConfig is the exported wrapper over validateRoutableConfig so callers
+// Returns nil for every valid connection/model, including base-URL-deriving providers
+// and local "openai" servers with an explicit endpoint.
+//
+// ValidateConnection and ValidateModelConfig are the exported wrappers so callers
 // outside this package (gogent's save/load/use paths, issue #532) can reject an
-// unroutable config at the source — at save time, at load time, and when resolving a
-// default — instead of only lazily at connection-build time. It returns the same
-// model-named, field-naming *ModelError (or nil for a valid config), so there is a
-// single routability rule with no duplicated logic.
-func ValidateModelConfig(cfg *config.ModelConfig) error {
-	return validateRoutableConfig(cfg)
+// unroutable connection or a mismatched model id at the source — at save time, at
+// load time, and when resolving a default — instead of only lazily at connection-build
+// time. There is a single routability rule with no duplicated logic.
+
+// ValidateConnection rejects a provider connection that cannot be routed
+// (empty endpoint with no base-URL-deriving api_type, or Vertex without
+// project/location/endpoint). Returns nil for a valid connection.
+func ValidateConnection(pc *config.ProviderConnection) error {
+	if err := validateRoutableConnection(pc, nil); err != nil {
+		return err
+	}
+	return providerFor(StringToAPIType(pc.APIType)).validateConfig(pc)
 }
 
-func validateRoutableConfig(cfg *config.ModelConfig) error {
-	if cfg == nil {
-		return nil
+// ValidateModelConfig validates a model against its connection: routability of the
+// connection plus the model-id shape rules (hosted-gateway empty model, Vertex
+// publisher-qualified vs bare ids). pc may be nil only when the model carries no
+// connection (treated as an error by callers that require routability).
+func ValidateModelConfig(pc *config.ProviderConnection, cfg *config.ModelConfig) error {
+	return validateRoutableConnection(pc, cfg)
+}
+
+func validateRoutableConnection(pc *config.ProviderConnection, cfg *config.ModelConfig) error {
+	if pc == nil {
+		if cfg == nil {
+			return nil
+		}
+		return &ModelError{
+			Type: ErrorGeneric,
+			Message: fmt.Sprintf(
+				"model %q is misconfigured: it references no provider connection",
+				configModelName(cfg)),
+		}
 	}
-	rawType := strings.ToLower(strings.TrimSpace(cfg.APIType))
-	resolved := StringToAPIType(cfg.APIType)
+	rawType := strings.ToLower(strings.TrimSpace(pc.APIType))
+	resolved := StringToAPIType(pc.APIType)
 
 	// 1. Routability: empty endpoint with no way to determine the base URL.
-	if strings.TrimSpace(cfg.Endpoint) == "" &&
+	if strings.TrimSpace(pc.Endpoint) == "" &&
 		!providerFor(resolved).derivesBase && rawType != "openai" {
 		if rawType == "" {
 			return &ModelError{
 				Type: ErrorGeneric,
 				Message: fmt.Sprintf(
-					"model %q is misconfigured: api_type and endpoint are both empty (cannot determine where to send requests)",
-					configModelName(cfg)),
+					"connection %q is misconfigured: api_type and endpoint are both empty (cannot determine where to send requests)",
+					connectionName(pc)),
 			}
 		}
 		return &ModelError{
 			Type: ErrorGeneric,
 			Message: fmt.Sprintf(
-				"model %q is misconfigured: endpoint is empty and api_type %q is unrecognized (set an explicit endpoint or use a known api_type)",
-				configModelName(cfg), cfg.APIType),
+				"connection %q is misconfigured: endpoint is empty and api_type %q is unrecognized (set an explicit endpoint or use a known api_type)",
+				connectionName(pc), pc.APIType),
 		}
+	}
+
+	if cfg == nil {
+		return nil
 	}
 
 	// 2. Hosted gateway with no model name.
@@ -972,7 +1016,7 @@ func validateRoutableConfig(cfg *config.ModelConfig) error {
 			Type: ErrorGeneric,
 			Message: fmt.Sprintf(
 				"model %q is misconfigured: model is empty (api_type %q requires a model name)",
-				configModelName(cfg), cfg.APIType),
+				configModelName(cfg), pc.APIType),
 		}
 	}
 
@@ -992,7 +1036,7 @@ func validateRoutableConfig(cfg *config.ModelConfig) error {
 					"model %q is misconfigured: api_type %q requires a publisher-qualified "+
 						"model id like \"google/gemini-3.5-flash\" (got %q). Use api_type "+
 						"\"vertex-native\" (alias \"gemini\") for bare Gemini model names.",
-					configModelName(cfg), cfg.APIType, m),
+					configModelName(cfg), pc.APIType, m),
 			}
 		}
 	case APITypeVertexNative:
@@ -1003,12 +1047,24 @@ func validateRoutableConfig(cfg *config.ModelConfig) error {
 					"model %q is misconfigured: api_type %q requires a bare model id like "+
 						"\"gemini-3.5-flash\" (got %q). Use api_type \"vertex\" for "+
 						"publisher-qualified model ids.",
-					configModelName(cfg), cfg.APIType, m),
+					configModelName(cfg), pc.APIType, m),
 			}
 		}
 	}
 
 	return nil
+}
+
+// connectionName identifies a connection in user-facing errors, falling back to
+// "<unnamed>" so a message always names something.
+func connectionName(pc *config.ProviderConnection) string {
+	if pc == nil {
+		return "<unnamed>"
+	}
+	if n := strings.TrimSpace(pc.Name); n != "" {
+		return n
+	}
+	return "<unnamed>"
 }
 
 // APIKeyRoundTripper injects a provider's auth into every request. headers holds
@@ -1344,7 +1400,7 @@ type MaxTokensReporter interface {
 // MaxTokensReporter.
 func (c *ModelConnection) MaxTokensConfig() (configured, limit int) {
 	if c.Config != nil {
-		configured = c.Config.MaxTokens
+		configured = c.Config.OutputCap()
 	}
 	return configured, c.caps().MaxTokensLimit
 }
@@ -1425,8 +1481,8 @@ func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []
 	var reasoningEffort string
 	var thinking *bool
 	if c.Config != nil {
-		if c.Config.MaxTokens > 0 {
-			maxTokens = c.Config.MaxTokens
+		if outCap := c.Config.OutputCap(); outCap > 0 {
+			maxTokens = outCap
 		}
 		temperature = c.Config.Temperature
 		topP = c.Config.TopP
