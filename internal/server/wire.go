@@ -66,10 +66,11 @@ type sessionStatsView struct {
 
 // sendMessageRequest is the body of POST /sessions/:id/messages[?stream=true].
 type sendMessageRequest struct {
-	Message string `json:"message"`
-	Model   string `json:"model,omitempty"`
-	Effort  string `json:"effort,omitempty"`
-	Mode    string `json:"mode,omitempty"` // "normal" (default) | "plan"
+	Message  string `json:"message"`
+	Model    string `json:"model,omitempty"`
+	Effort   string `json:"effort,omitempty"`
+	Thinking string `json:"thinking,omitempty"` // "on" | "off" | "" (model default)
+	Mode     string `json:"mode,omitempty"`     // "normal" (default) | "plan"
 	// Agent/Subtask carry a custom command's per-invocation overrides (issue #403):
 	// a non-empty Agent or Subtask=true routes the prompt through a daemon-side
 	// one-shot sub-agent (Agent names it) whose result is surfaced as the turn's

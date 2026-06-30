@@ -54,7 +54,7 @@ func mintTurnID() string {
 // in a daemon-owned goroutine. The final answer and any error reach clients as
 // SessionEventFinal/SessionEventError via the session observer, so there is no HTTP
 // response to write — this is fire-and-forget from the caller's perspective.
-func (g *Gogent) DispatchMessage(sessionID, agentID, message, modelName, effort string, onDone func()) (turnID string, err error) {
+func (g *Gogent) DispatchMessage(sessionID, agentID, message, modelName, effort, thinking string, onDone func()) (turnID string, err error) {
 	us := g.GetUserSession(sessionID)
 	if us == nil {
 		return "", &SessionNotFoundError{ID: sessionID}
@@ -78,7 +78,7 @@ func (g *Gogent) DispatchMessage(sessionID, agentID, message, modelName, effort 
 		// above; a session destroyed in the tiny window after that has no client
 		// left to receive an event anyway. (recoverTurn still covers a panic in the
 		// synchronous entrypoint, before runLoop's own recovery is armed.)
-		_, _ = g.SendMessageToSessionWithModelAndEffort(ctx, sessionID, agentID, message, modelName, effort)
+		_, _ = g.SendMessageToSessionFull(ctx, sessionID, agentID, message, modelName, effort, thinking)
 	}()
 	return turnID, nil
 }

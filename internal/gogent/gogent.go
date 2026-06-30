@@ -2607,13 +2607,20 @@ func (g *Gogent) SendMessageToSessionWithModel(ctx context.Context, sessionID, a
 }
 
 // SendMessageToSessionWithModelAndEffort is SendMessageToSessionWithModel plus a
-// per-request reasoning-effort override (issue #177). A non-empty effort takes
-// precedence over the selected model config's ReasoningEffort for this turn only;
-// an empty effort falls back to the model config default. The override is applied
-// to a shallow copy of the model config (never the shared g.config), and the
-// existing provider gate still drops the parameter where unsupported — so an
-// effort sent to a model without supportsReasoningEffort is silently ignored.
+// per-request reasoning-effort override (issue #177); thinking is left at the model
+// default.
 func (g *Gogent) SendMessageToSessionWithModelAndEffort(ctx context.Context, sessionID, agentID, message, modelName, effort string) (*model.CompletionResponse, error) {
+	return g.SendMessageToSessionFull(ctx, sessionID, agentID, message, modelName, effort, "")
+}
+
+// SendMessageToSessionFull is the full per-turn send: a model selection plus
+// reasoning-effort and thinking overrides. A non-empty effort/thinking takes
+// precedence over the selected model config for this turn only; empty falls back to
+// the model default. thinking is "on"/"off" (anything else = no override). Overrides
+// are applied to a shallow copy of the model config (never the shared g.config), and
+// the provider gates in buildRequest still drop a parameter where unsupported — so an
+// override sent to a model that doesn't support it is silently ignored.
+func (g *Gogent) SendMessageToSessionFull(ctx context.Context, sessionID, agentID, message, modelName, effort, thinking string) (*model.CompletionResponse, error) {
 	g.mu.RLock()
 	userSession, exists := g.userSessions[sessionID]
 	cfg := g.config
@@ -2674,9 +2681,19 @@ func (g *Gogent) SendMessageToSessionWithModelAndEffort(ctx context.Context, ses
 	// copy of the model config so the shared g.config is never mutated. The
 	// provider gate in buildRequest still drops reasoning_effort where unsupported,
 	// so overriding a model without supportsReasoningEffort is a safe no-op.
-	if effort != "" && selectedConfig != nil {
+	if selectedConfig != nil && (effort != "" || thinking == "on" || thinking == "off") {
 		override := *selectedConfig
-		override.ReasoningEffort = effort
+		if effort != "" {
+			override.ReasoningEffort = effort
+		}
+		switch thinking {
+		case "on":
+			on := true
+			override.Thinking = &on
+		case "off":
+			off := false
+			override.Thinking = &off
+		}
 		selectedConfig = &override
 	}
 

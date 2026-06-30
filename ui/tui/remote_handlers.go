@@ -1061,13 +1061,13 @@ func (rc *RemoteClient) Handlers() Handlers {
 		// OnSend fires the turn on the daemon in the background; progress streams
 		// back over the global SSE consumer into this session's window, exactly as
 		// the embedded observer delivers it.
-		OnSend: func(sessionID, message, modelName, effort string) {
+		OnSend: func(sessionID, message, modelName, effort, thinking string) {
 			// The turn's lifetime belongs to the daemon: use a background context
 			// (not rc.ctx) so detaching the TUI does not proactively cancel the
 			// request. Cancellation comes from the session's own controls (OnStop →
 			// POST /stop). Progress streams back over the global SSE consumer.
 			go func() {
-				if _, err := c.SendMessage(context.Background(), sessionID, message, modelName, effort); err != nil {
+				if _, err := c.SendMessage(context.Background(), sessionID, message, modelName, effort, thinking); err != nil {
 					rc.emitSendErr(sessionID, err)
 				}
 			}()

@@ -41,9 +41,10 @@ type Handlers struct {
 	OnCreate func(sessionID, title string)
 	// OnSend processes a user message for a session. It is called on a background
 	// goroutine; progress is reported through EmitSessionEvent. effort is the
-	// per-session reasoning-effort override (issue #177): empty means "no override
-	// — use the selected model config's reasoning_effort".
-	OnSend func(sessionID, message, modelName, effort string)
+	// per-session reasoning-effort override (issue #177); thinking is the per-session
+	// extended-thinking override ("on"/"off"/""). Empty means "no override — use the
+	// selected model config's value".
+	OnSend func(sessionID, message, modelName, effort, thinking string)
 	// OnFork is invoked (on the UI thread) when a /fork creates a new session
 	// window that should continue from a copy of an existing session's full
 	// conversation history (issue #349). The backend forks parentSessionID into a

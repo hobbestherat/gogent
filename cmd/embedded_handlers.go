@@ -44,7 +44,7 @@ func embeddedHandlersFor(g *gogent.Gogent, wb *tuipkg.Workbench, noColor bool) t
 		},
 		// OnSend runs the task loop in the background; progress (thoughts,
 		// tool calls, final answer) flows back through the observer above.
-		OnSend: func(sessionID, message, modelName, effort string) {
+		OnSend: func(sessionID, message, modelName, effort, thinking string) {
 			// This is a fire-and-forget background goroutine: contain any
 			// panic so a single session's crash surfaces as an error in its
 			// window instead of taking down the whole TUI process (issue #8).
@@ -59,7 +59,7 @@ func embeddedHandlersFor(g *gogent.Gogent, wb *tuipkg.Workbench, noColor bool) t
 			// The TUI loop runs in the background; cancellation comes from the
 			// session's own controls (Stop / window close), which cancel the
 			// agent loop directly, so a plain background context is correct here.
-			_, err := g.SendMessageToSessionWithModelAndEffort(context.Background(), sessionID, "root", message, modelName, effort)
+			_, err := g.SendMessageToSessionFull(context.Background(), sessionID, "root", message, modelName, effort, thinking)
 			if err != nil {
 				wb.EmitSessionEvent(sessionID, agent.SessionEvent{
 					Type: agent.SessionEventError,

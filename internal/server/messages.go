@@ -56,7 +56,7 @@ func (svc messagesSvc) Send(r *http.Request, req sendMessageRequest, id string) 
 		// dispatch goroutine (no server-side shim needed).
 		turnID, err = svc.s.g.DispatchCommandSubtask(id, req.Agent, req.Message, onDone)
 	} else {
-		turnID, err = svc.s.g.DispatchMessage(id, "root", req.Message, req.Model, req.Effort, onDone)
+		turnID, err = svc.s.g.DispatchMessage(id, "root", req.Message, req.Model, req.Effort, req.Thinking, onDone)
 	}
 	if err != nil {
 		onDone() // dispatch failed before the goroutine started; release the gate
@@ -114,7 +114,7 @@ func (svc messagesSvc) Stream(r *http.Request, req sendMessageRequest, id string
 	if req.Subtask || req.Agent != "" {
 		_, err = svc.s.g.DispatchCommandSubtask(id, req.Agent, req.Message, onDone)
 	} else {
-		_, err = svc.s.g.DispatchMessage(id, "root", req.Message, req.Model, req.Effort, onDone)
+		_, err = svc.s.g.DispatchMessage(id, "root", req.Message, req.Model, req.Effort, req.Thinking, onDone)
 	}
 	if err != nil {
 		onDone() // releases the gate (and closes turnDone, harmless — no producer)

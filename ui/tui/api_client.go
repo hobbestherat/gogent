@@ -755,8 +755,8 @@ func (c *APIClient) GetTranscript(id, agentID string) ([]MessageDTO, error) {
 // TurnID (used for correlation) and the call is used mainly to detect an outright
 // dispatch failure. The turn then runs on the daemon independently of this
 // connection. ctx (a background context) is NOT bounded by quickTimeout.
-func (c *APIClient) SendMessage(ctx context.Context, id, message, modelName, effort string) (MessageDTO, error) {
-	return c.SendMessageWithOverrides(ctx, id, message, modelName, "", false, effort)
+func (c *APIClient) SendMessage(ctx context.Context, id, message, modelName, effort, thinking string) (MessageDTO, error) {
+	return c.sendMessageFull(ctx, id, message, modelName, "", false, effort, thinking)
 }
 
 // SendMessageWithOverrides sends a turn carrying a custom command's per-invocation
@@ -765,7 +765,13 @@ func (c *APIClient) SendMessage(ctx context.Context, id, message, modelName, eff
 // equivalent of OnSendCommand), so an attached TUI applies the overrides exactly as
 // embedded. SendMessage delegates here with no overrides.
 func (c *APIClient) SendMessageWithOverrides(ctx context.Context, id, message, modelName, agentName string, subtask bool, effort string) (MessageDTO, error) {
-	body := sendMessageBody{Message: message, Model: modelName, Effort: effort, Agent: agentName, Subtask: subtask}
+	return c.sendMessageFull(ctx, id, message, modelName, agentName, subtask, effort, "")
+}
+
+// sendMessageFull is the full send carrying effort + thinking + agent/subtask
+// overrides; the exported helpers delegate here.
+func (c *APIClient) sendMessageFull(ctx context.Context, id, message, modelName, agentName string, subtask bool, effort, thinking string) (MessageDTO, error) {
+	body := sendMessageBody{Message: message, Model: modelName, Effort: effort, Thinking: thinking, Agent: agentName, Subtask: subtask}
 	req, err := c.newRequest(ctx, http.MethodPost, "/sessions/"+url.PathEscape(id)+"/messages", body)
 	if err != nil {
 		return MessageDTO{}, err
@@ -788,12 +794,13 @@ func (c *APIClient) SendMessageWithOverrides(ctx context.Context, id, message, m
 
 // sendMessageBody mirrors the server's sendMessageRequest.
 type sendMessageBody struct {
-	Message string `json:"message"`
-	Model   string `json:"model,omitempty"`
-	Effort  string `json:"effort,omitempty"`
-	Mode    string `json:"mode,omitempty"`
-	Agent   string `json:"agent,omitempty"`
-	Subtask bool   `json:"subtask,omitempty"`
+	Message  string `json:"message"`
+	Model    string `json:"model,omitempty"`
+	Effort   string `json:"effort,omitempty"`
+	Thinking string `json:"thinking,omitempty"`
+	Mode     string `json:"mode,omitempty"`
+	Agent    string `json:"agent,omitempty"`
+	Subtask  bool   `json:"subtask,omitempty"`
 }
 
 // StopSession cancels a session's in-flight turn.
