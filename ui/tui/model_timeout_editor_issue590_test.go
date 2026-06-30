@@ -23,10 +23,12 @@ import (
 // network is contacted.
 
 // openModelTimeoutForm opens the model form in edit mode over initial and returns a
-// pointer to the cfg onSave receives (nil until Save is clicked).
-func openModelTimeoutForm(t *testing.T, w *Workbench, initial config.ModelConfig) *config.ModelConfig {
+// HANDLE to the cfg onSave receives. The handle (a **config.ModelConfig) is read
+// AFTER the Save click — dereference it then. Returning the captured pointer by value
+// here would snapshot nil, since onSave only fires later when Save is clicked.
+func openModelTimeoutForm(t *testing.T, w *Workbench, initial config.ModelConfig) **config.ModelConfig {
 	t.Helper()
-	var captured *config.ModelConfig
+	captured := new(*config.ModelConfig)
 	// No app.Resize: clickModelFormSave locates the Save button by its dialog-relative
 	// bounds (root.Bounds.W-24), and an explicit resize changes the resolved width so
 	// that helper can click the wrong widget. The default workbench size (cf. the
@@ -34,7 +36,7 @@ func openModelTimeoutForm(t *testing.T, w *Workbench, initial config.ModelConfig
 	w.showModelForm("Edit model — "+initial.Name, initial, false, /* nameEditable */
 		func(cfg config.ModelConfig) error {
 			c := cfg
-			captured = &c
+			*captured = &c
 			return nil
 		},
 		nil) // onSaved: not needed; onSave capture is the assertion surface
@@ -44,8 +46,9 @@ func openModelTimeoutForm(t *testing.T, w *Workbench, initial config.ModelConfig
 func TestModelTimeoutFieldSeedsAndPreservesOverrideOnSave(t *testing.T) {
 	w := NewWorkbench([]*config.ModelConfig{{Name: "slow", Model: "m"}})
 	initial := config.ModelConfig{Name: "slow", Model: "m", ModelTimeoutSeconds: 600}
-	captured := openModelTimeoutForm(t, w, initial)
+	capturedH := openModelTimeoutForm(t, w, initial)
 	clickModelFormSave(t, w)
+	captured := *capturedH
 	if captured == nil {
 		t.Fatal("Save did not invoke onSave (validation rejected a named model?)")
 	}
@@ -57,8 +60,9 @@ func TestModelTimeoutFieldSeedsAndPreservesOverrideOnSave(t *testing.T) {
 func TestModelTimeoutFieldUnsetSeedsBlankAndSavesZero(t *testing.T) {
 	w := NewWorkbench([]*config.ModelConfig{{Name: "fast", Model: "m"}})
 	initial := config.ModelConfig{Name: "fast", Model: "m"} // ModelTimeoutSeconds == 0
-	captured := openModelTimeoutForm(t, w, initial)
+	capturedH := openModelTimeoutForm(t, w, initial)
 	clickModelFormSave(t, w)
+	captured := *capturedH
 	if captured == nil {
 		t.Fatal("Save did not invoke onSave")
 	}
@@ -70,9 +74,10 @@ func TestModelTimeoutFieldUnsetSeedsBlankAndSavesZero(t *testing.T) {
 func TestModelTimeoutFieldTypingANewValueSetsTheOverride(t *testing.T) {
 	w := NewWorkbench([]*config.ModelConfig{{Name: "m", Model: "m"}})
 	initial := config.ModelConfig{Name: "m", Model: "m"} // blank field
-	captured := openModelTimeoutForm(t, w, initial)
+	capturedH := openModelTimeoutForm(t, w, initial)
 	typeCatalogField(t, w, "Model timeout:", "999")
 	clickModelFormSave(t, w)
+	captured := *capturedH
 	if captured == nil {
 		t.Fatal("Save did not invoke onSave")
 	}
@@ -86,9 +91,10 @@ func TestModelTimeoutFieldTypingZeroExplicitlyClearsToGlobal(t *testing.T) {
 	// so a user who explicitly enters 0 is not surprised.
 	w := NewWorkbench([]*config.ModelConfig{{Name: "m", Model: "m"}})
 	initial := config.ModelConfig{Name: "m", Model: "m"}
-	captured := openModelTimeoutForm(t, w, initial)
+	capturedH := openModelTimeoutForm(t, w, initial)
 	typeCatalogField(t, w, "Model timeout:", "0")
 	clickModelFormSave(t, w)
+	captured := *capturedH
 	if captured == nil {
 		t.Fatal("Save did not invoke onSave")
 	}
@@ -103,9 +109,10 @@ func TestModelTimeoutFieldGarbageLeavesPriorValueUntouched(t *testing.T) {
 	// can neither wipe nor corrupt the override.
 	w := NewWorkbench([]*config.ModelConfig{{Name: "m", Model: "m"}})
 	initial := config.ModelConfig{Name: "m", Model: "m", ModelTimeoutSeconds: 600}
-	captured := openModelTimeoutForm(t, w, initial)
+	capturedH := openModelTimeoutForm(t, w, initial)
 	typeCatalogField(t, w, "Model timeout:", "abc") // box now reads "600abc"
 	clickModelFormSave(t, w)
+	captured := *capturedH
 	if captured == nil {
 		t.Fatal("Save did not invoke onSave")
 	}
