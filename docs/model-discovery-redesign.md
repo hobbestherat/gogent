@@ -284,6 +284,14 @@ Branch `redesign/model-discovery`.
 5. ✅ **DONE** UI (ui/tui), in 5 sub-commits: (5a) compile on new schema — api_client DTOs, Handlers, editor/catalog adapted; (5b.1) Connections-manager dialog + Config-menu/palette; (5b.2) connection picker + capability-rich discovery (✓/⚠ flags, caps auto-fill) in the model editor; (5b.3) manual-capabilities form; (5b.4) per-session extended-thinking toggle threaded through the send path. `go build ./...` green. *(First-run nudge + overall_stats host resolution left as small polish.)*
 6. ⬜ **TODO** Tests: rework the model/config/server/ui test files to the new schema; add table tests for NormalizeModelID/MergeCaps/FamilyKey/MergeDiscovery; `go test ./...` green; golangci-lint clean.
 
+### Live verification (smoke test)
+Discovery was verified end-to-end against real connections (Z.AI, OpenRouter,
+Anthropic, Vertex): live availability ∪ catalog, caps merged. It surfaced and fixed
+two bugs — a typed-nil `CatalogLookup` interface panic (Vertex), and the
+hosted-gateway "model is empty" rule wrongly blocking the discovery probe (new
+`model.NewProbeConnection`). vertex-native now draws caps from the catalog's
+google-vertex provider.
+
 ### Deferred refinements (noted, not yet wired)
 - Live self-describe caps parsing in the OpenRouter/Anthropic listers (framework in place via `ModelInfo.Caps`; catalog currently fills caps for all providers).
 - Cost-weighting from `Caps` cache pricing (still uses provider-cap/`ModelQuirks` multipliers; catalog data now captured).
