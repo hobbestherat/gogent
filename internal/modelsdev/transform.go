@@ -164,10 +164,30 @@ func CapabilityLabels(m Model) []string {
 	if m.Attachment {
 		labels = append(labels, "vision")
 	}
+	if m.StructuredOutput {
+		labels = append(labels, "structured output")
+	}
 	if m.Temperature {
 		labels = append(labels, "custom temperature")
 	}
+	if m.OpenWeights {
+		labels = append(labels, "open weights")
+	}
 	return labels
+}
+
+// ThinkingBudgetMin returns the minimum thinking-token budget a model's
+// reasoning_options[type=budget_tokens] advertises, or 0 when it exposes none.
+// It is INFORMATIONAL ONLY: gogent has no thinking-budget input field, so this
+// floor validates/bounds nothing — it is surfaced purely as a review-form hint
+// so the parsed Min value is no longer silently dropped.
+func ThinkingBudgetMin(m Model) int {
+	for _, ro := range m.ReasoningOptions {
+		if strings.EqualFold(strings.TrimSpace(ro.Type), "budget_tokens") {
+			return ro.Min
+		}
+	}
+	return 0
 }
 
 // CostSummary renders a model's per-million-token pricing for the review form's

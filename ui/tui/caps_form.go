@@ -13,12 +13,13 @@ import (
 // showCapsForm edits a ModelCapabilities snapshot by hand — the manual fallback for
 // catalog-less / local models (and for tweaking a discovered snapshot). It covers
 // the fields that drive behaviour and the selectors: context window, output cap,
-// reasoning/thinking/vision/tool-call flags, and the effort options. Pricing and
-// modalities are left to discovery (the catalog) and are preserved unchanged.
+// reasoning/thinking/vision/tool-call/structured-output flags, and the effort
+// options. Pricing and modalities are left to discovery (the catalog) and are
+// preserved unchanged.
 func (w *Workbench) showCapsForm(initial config.ModelCapabilities, onSave func(config.ModelCapabilities)) {
 	const labelW = 18
 	const boxX = 2 + labelW
-	const formHeight = 13
+	const formHeight = 14
 
 	spec := tv.DialogSpec{MinW: 64, MinH: formHeight, MaxH: formHeight, PreferredW: 72}
 	x, y, width, height := w.dialogRect(spec)
@@ -54,9 +55,10 @@ func (w *Workbench) showCapsForm(initial config.ModelCapabilities, onSave func(c
 	thinkingToggle := yesNo("Thinking toggle:", 5, initial.ThinkingToggle)
 	vision := yesNo("Vision:", 6, initial.Vision)
 	toolCall := yesNo("Tool calling:", 7, initial.ToolCall)
+	structuredOut := yesNo("Structured output:", 8, initial.StructuredOutput)
 
 	dialog.Window.AddContent(dialogLabel("Effort options: comma-separated (e.g. low, medium, high).",
-		tv.Rect{X: 2, Y: 9, W: width - 4, H: 1}))
+		tv.Rect{X: 2, Y: 10, W: width - 4, H: 1}))
 
 	var layer *tv.Layer
 	cancel := func() { w.desktop.RemoveLayer(layer) }
@@ -69,6 +71,7 @@ func (w *Workbench) showCapsForm(initial config.ModelCapabilities, onSave func(c
 		caps.ThinkingToggle = thinkingToggle.Value() == "yes"
 		caps.Vision = vision.Value() == "yes"
 		caps.ToolCall = toolCall.Value() == "yes"
+		caps.StructuredOutput = structuredOut.Value() == "yes"
 		caps.Source = "manual"
 		w.desktop.RemoveLayer(layer)
 		if onSave != nil {
