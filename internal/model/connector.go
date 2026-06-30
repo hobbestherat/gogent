@@ -117,6 +117,21 @@ func (m *ModelInfo) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// VisionReporter is an optional capability: a connector that can report whether
+// its selected model advertises image (vision) input, plus a name for it. The
+// agent loop type-asserts the connector to it to decide whether to surface a
+// non-blocking warning when an outgoing turn carries images to a model that lacks
+// vision (the images are still sent). A connector that does not implement it (a
+// mock, a future backend) is treated as "capability unknown", so no warning fires.
+// *ModelConnection implements it from its config.ModelConfig.Caps snapshot.
+type VisionReporter interface {
+	// SupportsVision reports whether the model's capability snapshot advertises
+	// image input.
+	SupportsVision() bool
+	// VisionModelName names the model for a user-facing notice.
+	VisionModelName() string
+}
+
 // ModelLister is an optional capability: a backend that can report which models
 // it serves (the OpenAI/OpenRouter "GET /v1/models" convention). It is kept out
 // of the core Connector because not every backend supports it; callers should
@@ -130,6 +145,7 @@ type ModelLister interface {
 var (
 	_ Connector              = (*ModelConnection)(nil)
 	_ ModelLister            = (*ModelConnection)(nil)
+	_ VisionReporter         = (*ModelConnection)(nil)
 	_ StructuredCompleter    = (*ModelConnection)(nil)
 	_ StreamingToolCompleter = (*ModelConnection)(nil)
 )
