@@ -1786,6 +1786,12 @@ func (s *UserSession) summarizeOlder(sess *model.ModelSession, older []model.Mes
 	return digest, true
 }
 
+// digestPrefix marks a message whose body is a compression digest (the summary of
+// older turns) rather than original conversation. It lets the migration chunker
+// recognize an already-summarized prefix so it does not pointlessly re-summarize it
+// (see firstChunk).
+const digestPrefix = "[Earlier conversation summarized to save context]\n\n"
+
 // digestMessage wraps a compression digest as the user-role marker message that
 // replaces the summarized older turns in a transcript. Both the in-loop compaction
 // and the migration fallback build it here so the two paths splice byte-identical
@@ -1793,8 +1799,14 @@ func (s *UserSession) summarizeOlder(sess *model.ModelSession, older []model.Mes
 func digestMessage(digest string) model.Message {
 	return model.Message{
 		Role:    model.RoleUser,
-		Content: "[Earlier conversation summarized to save context]\n\n" + digest,
+		Content: digestPrefix + digest,
 	}
+}
+
+// isDigestMessage reports whether m is a compression digest produced by
+// digestMessage (as opposed to original conversation content).
+func isDigestMessage(m model.Message) bool {
+	return m.Role == model.RoleUser && strings.HasPrefix(m.Content, digestPrefix)
 }
 
 // incCompactionCount bumps the per-session compaction counter that feeds the
@@ -1946,25 +1958,63 @@ func migrationChunkBudget(targetWindow int) int {
 	return 1
 }
 
-// firstChunk returns the oldest run of messages whose combined estimated size stays
-// within budget, plus the remainder. It always returns at least one message (even
-// when that message alone exceeds budget — an indivisible unit), so callers always
-// make progress. It lets migration summarize an over-window transcript one bounded
-// chunk at a time (oldest first) instead of sending the whole older slice — which
-// could itself exceed the backend's context window — in a single call.
+// firstChunk returns the oldest run of messages to summarize this round, plus the
+// verbatim remainder. It greedily packs messages whose combined estimated size
+// stays within budget (always at least one message, even when that message alone
+// exceeds budget — an indivisible unit), then adjusts the cut for two invariants:
+//
+//   - Tool pairing: the cut is moved forward past any role:tool result messages so
+//     it never separates a tool result from the assistant tool_call it answers
+//     (which would leave the remainder beginning with an orphaned result that a
+//     provider rejects). This mirrors SafeSplit's no-strand guarantee.
+//   - Progress: if the budget-bounded chunk is nothing but a leading digest from a
+//     previous round, the next message is folded in too (accepting a one-message
+//     overflow), so real old content is actually compressed instead of the digest
+//     being re-summarized round after round.
+//
+// It lets migration summarize an over-window transcript one bounded chunk at a time
+// (oldest first) instead of sending the whole older slice — which could itself
+// exceed the backend's context window — in a single call.
 func firstChunk(msgs []model.Message, budget int) (chunk, rest []model.Message) {
 	if len(msgs) == 0 {
 		return nil, nil
 	}
+	cut := len(msgs)
 	total := 0
 	for i := range msgs {
 		size := model.EstimateTokens(msgs[i : i+1])
 		if i > 0 && total+size > budget {
-			return msgs[:i], msgs[i:]
+			cut = i
+			break
 		}
 		total += size
 	}
-	return msgs, nil
+	// Progress guard: never let a round summarize only a leading digest.
+	if cut < len(msgs) && allDigests(msgs[:cut]) {
+		cut++
+	}
+	// Tool pairing: keep tool results with their tool_call in the chunk.
+	for cut < len(msgs) && msgs[cut].Role == model.RoleTool {
+		cut++
+	}
+	if cut >= len(msgs) {
+		return msgs, nil
+	}
+	return msgs[:cut], msgs[cut:]
+}
+
+// allDigests reports whether every message in msgs is a compression digest. An
+// empty slice is not "all digests".
+func allDigests(msgs []model.Message) bool {
+	if len(msgs) == 0 {
+		return false
+	}
+	for i := range msgs {
+		if !isDigestMessage(msgs[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // migrationModelName is the user-facing label for a model config: its display
