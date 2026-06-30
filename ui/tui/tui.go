@@ -137,6 +137,13 @@ type Handlers struct {
 	// returns an error the dialog surfaces; removing the last model is allowed and
 	// yields the empty-list state. May be nil (Remove then hidden/disabled).
 	RemoveModel func(name string) error
+	// Provider-connection CRUD (credentials live on connections; models reference
+	// them by name). GetConnections returns redacted copies; AddConnection /
+	// UpdateConnection / RemoveConnection persist changes. May be nil.
+	GetConnections   func() []config.ProviderConnection
+	AddConnection    func(config.ProviderConnection) error
+	UpdateConnection func(config.ProviderConnection) error
+	RemoveConnection func(name string) error
 	// GetModelCatalog returns the models.dev catalog (cached on disk with a TTL).
 	// force=true revalidates/refreshes. May be nil (catalog affordance hidden). It
 	// may perform a live network fetch, so callers MUST invoke it off the UI thread

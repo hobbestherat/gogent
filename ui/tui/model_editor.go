@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"gogent/internal/config"
-	"gogent/internal/model"
 
 	tui "github.com/hobbestherat/turbotui"
 	tv "github.com/hobbestherat/turbotui/turbotv"
@@ -94,18 +93,14 @@ func (w *Workbench) showModelForm(title string, initial config.ModelConfig, name
 	display := field("Display name:", 2)
 	display.SetText(initial.DisplayName)
 
-	dialog.Window.AddContent(dialogLabel("API type:", tv.Rect{X: 2, Y: 3, W: labelW, H: 1}))
-	apiTypeOpts := model.APITypeIDs()
-	apiType := newSelect(w.desktop, apiTypeOpts, tv.Rect{X: boxX, Y: 3, W: boxW, H: 1})
-	apiType.SetSelected(indexOrZero(apiTypeOpts, initial.APIType))
-	dialog.Window.AddContent(apiType)
+	// Connection: the credentialed provider connection this model talks through
+	// (credentials/api_type/endpoint live there now, edited in the Connections…
+	// dialog). A text field for now; stage 5b turns this into a picker.
+	connection := field("Connection:", 3)
+	connection.SetText(initial.Connection)
 
-	endpoint := field("Endpoint:", 4)
-	endpoint.SetText(initial.Endpoint)
-
-	// Model id: a text field, with a Scan button (edit mode only) that queries the
-	// backend and, on success, swaps the text field for a dropdown of advertised
-	// model ids.
+	// Model id: a text field, with a Scan button (edit mode only) that discovers the
+	// connection's models and, on success, swaps the text field for a dropdown.
 	dialog.Window.AddContent(dialogLabel("Model id:", tv.Rect{X: 2, Y: 5, W: labelW, H: 1}))
 	scanEnabled := !nameEditable && w.handlers.ScanModels != nil
 	modelBoxW := boxW
@@ -126,8 +121,6 @@ func (w *Workbench) showModelForm(title string, initial config.ModelConfig, name
 		return modelID.GetText()
 	}
 
-	apiKey := field("API key:", 6)
-	apiKey.SetText(initial.APIKey)
 	temp := field("Temperature:", 7)
 	temp.SetText(strconv.FormatFloat(float64(initial.Temperature), 'g', -1, 32))
 	maxTokens := field("Max tokens:", 8)
@@ -143,25 +136,13 @@ func (w *Workbench) showModelForm(title string, initial config.ModelConfig, name
 	thinking.SetSelected(thinkingIndex(initial.Thinking))
 	dialog.Window.AddContent(thinking)
 
-	// Project and Location target a Google Vertex AI deployment (api_type
-	// "vertex"); they build the endpoint URL when Endpoint is empty and are ignored
-	// by every other provider, so — like Thinking — they are safe to show always.
-	project := field("Project:", 11)
-	project.SetText(initial.Project)
-	location := field("Location:", 12)
-	location.SetText(initial.Location)
-
-	// Scan (edit mode only): assemble a draft from the live fields and query the
-	// backend off the UI thread so a slow backend can't freeze the dialog.
+	// Scan (edit mode only): discover the connection's models off the UI thread so a
+	// slow backend can't freeze the dialog.
 	if scanEnabled {
 		scanModels := func() {
 			draft := initial
-			draft.APIType = apiType.Value()
-			draft.Endpoint = endpoint.GetText()
+			draft.Connection = strings.TrimSpace(connection.GetText())
 			draft.Model = currentModelID()
-			draft.APIKey = apiKey.GetText()
-			draft.Project = strings.TrimSpace(project.GetText())
-			draft.Location = strings.TrimSpace(location.GetText())
 			go func() {
 				ids, err := w.handlers.ScanModels(draft)
 				w.desktop.Post(func() {
@@ -189,18 +170,15 @@ func (w *Workbench) showModelForm(title string, initial config.ModelConfig, name
 			cfg.Name = strings.TrimSpace(nameBox.GetText())
 		}
 		cfg.DisplayName = display.GetText()
-		cfg.APIType = apiType.Value()
-		cfg.Endpoint = strings.TrimSpace(endpoint.GetText())
+		cfg.Connection = strings.TrimSpace(connection.GetText())
 		cfg.Model = strings.TrimSpace(currentModelID())
-		cfg.APIKey = apiKey.GetText()
 		if v, err := strconv.ParseFloat(temp.GetText(), 32); err == nil {
 			cfg.Temperature = float32(v)
 		}
 		cfg.MaxTokens = atoiOr(maxTokens.GetText(), cfg.MaxTokens)
 		cfg.ReasoningEffort = strings.TrimSpace(reasoningEffort.GetText())
 		cfg.Thinking = thinkingValue(thinking.Value())
-		cfg.Project = strings.TrimSpace(project.GetText())
-		cfg.Location = strings.TrimSpace(location.GetText())
+		// cfg.Caps is carried through from initial (set by discovery / catalog).
 
 		if cfg.Name == "" {
 			w.showConfirm("Model", "A unique model name is required.", nil)

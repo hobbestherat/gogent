@@ -197,13 +197,40 @@ func embeddedHandlersFor(g *gogent.Gogent, wb *tuipkg.Workbench, noColor bool) t
 			return g.UpdateModel(m)
 		},
 		ScanModels: func(m config.ModelConfig) ([]string, error) {
-			return g.ScanModels(m)
+			ds, err := g.DiscoverModels(context.Background(), m.Connection)
+			if err != nil {
+				return nil, err
+			}
+			ids := make([]string, 0, len(ds))
+			for _, d := range ds {
+				if d.Available && d.ID != "" {
+					ids = append(ids, d.ID)
+				}
+			}
+			return ids, nil
 		},
 		AddModel: func(m config.ModelConfig) error {
 			return g.AddModel(m)
 		},
 		RemoveModel: func(name string) error {
 			return g.RemoveModel(name)
+		},
+		GetConnections: func() []config.ProviderConnection {
+			conns := g.Connections()
+			out := make([]config.ProviderConnection, 0, len(conns))
+			for _, c := range conns {
+				out = append(out, *c)
+			}
+			return out
+		},
+		AddConnection: func(pc config.ProviderConnection) error {
+			return g.AddConnection(pc)
+		},
+		UpdateConnection: func(pc config.ProviderConnection) error {
+			return g.UpdateConnection(pc)
+		},
+		RemoveConnection: func(name string) error {
+			return g.RemoveConnection(name)
 		},
 		GetModelCatalog: func(ctx context.Context, force bool) (modelsdev.Catalog, error) {
 			return mdc.Catalog(ctx, force)

@@ -383,10 +383,15 @@ func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, mod
 	p := cat[providerID]
 	cm := p.Models[modelID]
 
-	draft := modelsdev.ToModelConfig(providerID, p, cm)
+	// Build the connection draft (credentials/api_type/endpoint) and the model draft
+	// referencing it. The catalog add creates BOTH: a connection (reused if one with
+	// the same name already exists) plus the model that points at it.
+	connDraft := modelsdev.ToConnection(p)
+	connDraft.Name = w.uniqueConnectionName(connDraft.Name)
+	draft := modelsdev.ToModelConfig(providerID, connDraft.Name, cm)
 	draft.Name = modelsdev.UniqueName(providerID, modelID, w.takenModelNames())
-	apiType := model.StringToAPIType(draft.APIType)
-	isVertex := strings.HasPrefix(draft.APIType, "vertex")
+	apiType := model.StringToAPIType(connDraft.APIType)
+	isVertex := strings.HasPrefix(connDraft.APIType, "vertex")
 
 	// Endpoint provenance: a provider that derives its own base (the registry's
 	// derivesBase flag — the SAME source of truth ToModelConfig leaves Endpoint blank
@@ -443,7 +448,7 @@ func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, mod
 	// state, so render the derived type as a static label rather than a control the
 	// user can't meaningfully change. The value travels in the draft.
 	dialog.Window.AddContent(dialogLabel("API type:", tv.Rect{X: 2, Y: row, W: labelW, H: 1}))
-	dialog.Window.AddContent(dialogLabel(draft.APIType+"  (from catalog)", tv.Rect{X: boxX, Y: row, W: boxW, H: 1}))
+	dialog.Window.AddContent(dialogLabel(connDraft.APIType+"  (from catalog)", tv.Rect{X: boxX, Y: row, W: boxW, H: 1}))
 	row++
 
 	display := field("Display name:", row)
@@ -468,7 +473,7 @@ func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, mod
 		endpoint = fieldHint("Endpoint:", row, 8, hint) // box left blank on purpose
 	} else {
 		endpoint = field("Endpoint:", row)
-		endpoint.SetText(draft.Endpoint)
+		endpoint.SetText(connDraft.Endpoint)
 	}
 	row++
 
@@ -488,10 +493,10 @@ func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, mod
 	var apiKey, project, location *tv.TextBox
 	if isVertex {
 		project = field("Project:", row)
-		project.SetText(draft.Project)
+		project.SetText(connDraft.Project)
 		row++
 		location = field("Location:", row)
-		location.SetText(draft.Location)
+		location.SetText(connDraft.Location)
 		row++
 	} else if len(p.Env) > 0 {
 		apiKey = fieldHint("API key:", row, boxW-28, "(env: "+strings.Join(p.Env, ", ")+")")
@@ -518,8 +523,8 @@ func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, mod
 	// the opt-out the old free-text box allowed); the free-text fallback otherwise.
 	var effortSelect *tv.Select
 	var effortBox *tv.TextBox
-	if len(draft.EffortOptions) > 0 {
-		opts := append([]string{effortNone}, draft.EffortOptions...)
+	if len(draft.Caps.EffortOptions) > 0 {
+		opts := append([]string{effortNone}, draft.Caps.EffortOptions...)
 		dialog.Window.AddContent(dialogLabel("Reasoning:", tv.Rect{X: 2, Y: row, W: labelW, H: 1}))
 		effortSelect = newSelect(w.desktop, opts, tv.Rect{X: boxX, Y: row, W: boxW - 16, H: 1})
 		effortSelect.SetSelected(effortIndex(opts, draft.ReasoningEffort))
@@ -577,10 +582,10 @@ func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, mod
 	save := func() {
 		draft.Name = strings.TrimSpace(name.GetText())
 		draft.DisplayName = display.GetText()
-		draft.Endpoint = strings.TrimSpace(endpoint.GetText())
+		connDraft.Endpoint = strings.TrimSpace(endpoint.GetText())
 		draft.Model = strings.TrimSpace(modelIDBox.GetText())
 		if apiKey != nil {
-			draft.APIKey = apiKey.GetText()
+			connDraft.APIKey = apiKey.GetText()
 		}
 		if v, err := strconv.ParseFloat(temp.GetText(), 32); err == nil {
 			draft.Temperature = float32(v)
@@ -598,10 +603,10 @@ func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, mod
 		}
 		draft.Thinking = thinkingValue(thinking.Value())
 		if project != nil {
-			draft.Project = strings.TrimSpace(project.GetText())
+			connDraft.Project = strings.TrimSpace(project.GetText())
 		}
 		if location != nil {
-			draft.Location = strings.TrimSpace(location.GetText())
+			connDraft.Location = strings.TrimSpace(location.GetText())
 		}
 
 		if draft.Name == "" {
@@ -613,11 +618,11 @@ func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, mod
 			return
 		}
 		if isVertex {
-			if draft.Project == "" || draft.Location == "" {
+			if connDraft.Project == "" || connDraft.Location == "" {
 				w.showConfirm("Add model", "Vertex models need a GCP project and location.", nil)
 				return
 			}
-		} else if draft.APIKey == "" {
+		} else if connDraft.APIKey == "" {
 			w.showConfirm("Add model", "An API key is required.", nil)
 			return
 		}
@@ -631,6 +636,15 @@ func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, mod
 			draft.Name = fmt.Sprintf("%s-%d", base, i)
 		}
 
+		// Create the connection first (idempotent: a pre-existing same-name connection
+		// is reused), then the model that references it.
+		if w.handlers.AddConnection != nil {
+			if err := w.handlers.AddConnection(connDraft); err != nil &&
+				!strings.Contains(err.Error(), "already exists") {
+				w.showConfirm("Add model", "Could not add connection:\n"+err.Error(), nil)
+				return
+			}
+		}
 		if err := w.handlers.AddModel(draft); err != nil {
 			w.showConfirm("Add model", "Could not add model:\n"+err.Error(), nil)
 			return
@@ -712,6 +726,40 @@ func (w *Workbench) takenModelNames() map[string]bool {
 		taken[m.Name] = true
 	}
 	return taken
+}
+
+// connectionNames returns the configured provider-connection names.
+func (w *Workbench) connectionNames() []string {
+	if w.handlers.GetConnections == nil {
+		return nil
+	}
+	conns := w.handlers.GetConnections()
+	names := make([]string, 0, len(conns))
+	for _, c := range conns {
+		names = append(names, c.Name)
+	}
+	return names
+}
+
+// uniqueConnectionName suffixes -2/-3/… when base collides with an existing
+// connection name, so a catalog add can synthesize a fresh connection.
+func (w *Workbench) uniqueConnectionName(base string) string {
+	if strings.TrimSpace(base) == "" {
+		base = "connection"
+	}
+	taken := map[string]bool{}
+	for _, n := range w.connectionNames() {
+		taken[n] = true
+	}
+	if !taken[base] {
+		return base
+	}
+	for i := 2; ; i++ {
+		cand := fmt.Sprintf("%s-%d", base, i)
+		if !taken[cand] {
+			return cand
+		}
+	}
 }
 
 // refreshModelsAfterSave re-fetches the authoritative model list and pushes it

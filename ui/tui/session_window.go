@@ -865,7 +865,7 @@ func (sw *SessionWindow) rebuildEffortOptions() {
 	cfg := sw.selectedModelConfig()
 	options := []string{effortDefaultOption}
 	if cfg != nil {
-		options = append(options, cfg.EffortOptions...)
+		options = append(options, cfg.Caps.EffortOptions...)
 	}
 	sw.effortSelect.Options = options
 	sw.effortEnabled = len(options) > 1
