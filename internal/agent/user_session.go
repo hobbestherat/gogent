@@ -1860,8 +1860,28 @@ func (s *UserSession) MigrateToContextWindow(ctx context.Context, sess *model.Mo
 		return nil // already fits with headroom: no compression needed
 	}
 
+	// chunkBudget bounds how much conversation a single summarize round-trip may
+	// carry, so no compression call overflows the backend's own window — which,
+	// when no separate fast/compression model is wired in, IS the smaller target
+	// model. Each round folds only the oldest chunk within this budget ("compress
+	// oldest chunks first", issue #589) and leaves the rest of the older slice
+	// verbatim for subsequent rounds, so a transcript that exceeds the target window
+	// as a whole is still compressible piece by piece.
+	chunkBudget := migrationChunkBudget(target)
+
 	keep := compression.DefaultKeepRecentTurns
 	for round := 0; round < maxMigrationRounds; round++ {
+		// Honor a Stop / client disconnect between rounds: each round is a blocking
+		// model round-trip (model.Completer.Complete is not itself cancellable), so
+		// stop spawning further rounds once the turn is cancelled rather than running
+		// all of them to completion. Surface it the way runLoop surfaces a cancelled
+		// turn (emit + wrapped error) so the daemon/SSE path is not left silent; the
+		// partially compressed transcript is left intact (never an over-budget send).
+		if cerr := ctx.Err(); cerr != nil {
+			err := fmt.Errorf("session migration cancelled: %w", cerr)
+			s.emit(SessionEvent{Type: SessionEventError, Err: err, TurnID: turnIDFrom(ctx)})
+			return err
+		}
 		if sess.GetCurrentTokenCount() <= fit {
 			return nil
 		}
@@ -1876,11 +1896,18 @@ func (s *UserSession) MigrateToContextWindow(ctx context.Context, sess *model.Mo
 			continue
 		}
 
-		digest, ok := s.summarizeOlder(sess, older)
+		// Compress only the oldest chunk that fits the budget; the remaining older
+		// messages stay verbatim this round and are folded in over subsequent rounds.
+		// This keeps every summarize call's input bounded (so it cannot overflow the
+		// backend window) while leaving exactly one backend call per round.
+		chunk, restOlder := firstChunk(older, chunkBudget)
+		digest, ok := s.summarizeOlder(sess, chunk)
 		if !ok {
 			break // compression backend failed/empty: stop and report the shortfall below
 		}
-		sess.ApplyCompressedTranscript(append([]model.Message{digestMessage(digest)}, recent...))
+		newTranscript := append([]model.Message{digestMessage(digest)}, restOlder...)
+		newTranscript = append(newTranscript, recent...)
+		sess.ApplyCompressedTranscript(newTranscript)
 		s.incCompactionCount()
 		s.emit(SessionEvent{Type: SessionEventCompaction, Step: sess.GetTokenCount(), Text: digest, TurnID: turnIDFrom(ctx)})
 
@@ -1904,6 +1931,40 @@ func (s *UserSession) MigrateToContextWindow(ctx context.Context, sess *model.Mo
 		migrationModelName(cfg), target, sess.GetCurrentTokenCount())
 	s.emit(SessionEvent{Type: SessionEventError, Err: err, TurnID: turnIDFrom(ctx)})
 	return err
+}
+
+// migrationChunkBudget bounds, in estimated tokens, how much conversation a single
+// migration compression call may carry. Half the target window leaves ample room
+// within that window for the summary-prompt scaffolding and the model's own output,
+// so a round-trip stays safe even when the compression backend is the (smaller)
+// target model itself. It is always at least 1 so chunking still makes progress on
+// pathologically tiny windows.
+func migrationChunkBudget(targetWindow int) int {
+	if b := targetWindow / 2; b >= 1 {
+		return b
+	}
+	return 1
+}
+
+// firstChunk returns the oldest run of messages whose combined estimated size stays
+// within budget, plus the remainder. It always returns at least one message (even
+// when that message alone exceeds budget — an indivisible unit), so callers always
+// make progress. It lets migration summarize an over-window transcript one bounded
+// chunk at a time (oldest first) instead of sending the whole older slice — which
+// could itself exceed the backend's context window — in a single call.
+func firstChunk(msgs []model.Message, budget int) (chunk, rest []model.Message) {
+	if len(msgs) == 0 {
+		return nil, nil
+	}
+	total := 0
+	for i := range msgs {
+		size := model.EstimateTokens(msgs[i : i+1])
+		if i > 0 && total+size > budget {
+			return msgs[:i], msgs[i:]
+		}
+		total += size
+	}
+	return msgs, nil
 }
 
 // migrationModelName is the user-facing label for a model config: its display
