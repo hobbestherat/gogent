@@ -48,7 +48,7 @@ func TestToolCallingFlow(t *testing.T) {
 	})
 
 	// Create model connection and session pointed at the configured endpoint
-	m := model.NewModelConnection()
+	m := testConn()
 	m.SetURL(config.DefaultEndpoint())
 	s := model.NewModelSession("session_test", m)
 	agentObj := agent.NewAgent("agent_test", s)

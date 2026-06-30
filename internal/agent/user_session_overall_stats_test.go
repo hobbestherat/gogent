@@ -363,7 +363,7 @@ func TestRecordConnectorUsage_NilIsNoOp(t *testing.T) {
 // sub-agents to its primary model: it is every agent in the tree except the root,
 // recursing through nested sub-agents.
 func TestSubAgentCount(t *testing.T) {
-	sess := model.NewModelSession("t", model.NewModelConnection())
+	sess := model.NewModelSession("t", newTestModelConnection())
 	root := NewAgent("root", sess)
 	us := NewUserSession("s", root)
 

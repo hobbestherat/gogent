@@ -65,9 +65,21 @@ type Model struct {
 	ToolCall         bool              `json:"tool_call"`
 	Attachment       bool              `json:"attachment"`
 	Temperature      bool              `json:"temperature"`
+	StructuredOutput bool              `json:"structured_output"`
+	OpenWeights      bool              `json:"open_weights"`
+	Knowledge        string            `json:"knowledge"`
+	ReleaseDate      string            `json:"release_date"`
+	Modalities       Modalities        `json:"modalities"`
 	Limit            Limit             `json:"limit"`
 	Cost             Cost              `json:"cost"`
 	ReasoningOptions []ReasoningOption `json:"reasoning_options"`
+}
+
+// Modalities lists the media a model accepts/produces, e.g. input ["text","image",
+// "pdf"], output ["text"].
+type Modalities struct {
+	Input  []string `json:"input"`
+	Output []string `json:"output"`
 }
 
 // Limit is a model's token budget: Context is the input window (drives
@@ -77,17 +89,23 @@ type Limit struct {
 	Output  int `json:"output"`
 }
 
-// Cost is per-million-token pricing; both zero marks a free model.
+// Cost is per-million-token pricing; both input/output zero marks a free model.
+// CacheRead/CacheWrite price prompt-cache reads (discounted) and writes, feeding
+// the cost-weighted budget.
 type Cost struct {
-	Input  float64 `json:"input"`
-	Output float64 `json:"output"`
+	Input      float64 `json:"input"`
+	Output     float64 `json:"output"`
+	CacheRead  float64 `json:"cache_read"`
+	CacheWrite float64 `json:"cache_write"`
 }
 
 // ReasoningOption is one reasoning control a model exposes: Type "effort" with
-// Values like ["low","medium","high"], or Type "toggle" for an on/off switch.
+// Values like ["low","medium","high"], Type "toggle" for an on/off switch, or
+// Type "budget_tokens" with a Min token floor.
 type ReasoningOption struct {
 	Type   string   `json:"type"`
 	Values []string `json:"values"`
+	Min    int      `json:"min"`
 }
 
 // Fetcher abstracts the catalog HTTP GET so tests inject a fake without the
@@ -159,13 +177,21 @@ func NewClient(homeDir string) *Client {
 	}
 }
 
+// cacheSchemaVersion is bumped whenever the decoded Catalog struct gains fields
+// (the on-disk cache is a lossy projection of the structs, so an older cache lacks
+// new fields). A mismatch makes loadCache treat the cache as absent, forcing one
+// re-fetch that repopulates the richer shape. v2 added cache pricing, modalities,
+// knowledge/release_date, structured_output, open_weights, budget_tokens.min.
+const cacheSchemaVersion = 2
+
 // cacheFile is the on-disk shape of the cached catalog plus its revalidation
 // metadata.
 type cacheFile struct {
-	FetchedAt    time.Time `json:"fetched_at"`
-	ETag         string    `json:"etag,omitempty"`
-	LastModified string    `json:"last_modified,omitempty"`
-	Data         Catalog   `json:"data"`
+	SchemaVersion int       `json:"schema_version,omitempty"`
+	FetchedAt     time.Time `json:"fetched_at"`
+	ETag          string    `json:"etag,omitempty"`
+	LastModified  string    `json:"last_modified,omitempty"`
+	Data          Catalog   `json:"data"`
 }
 
 // Catalog returns the models.dev catalog. When force is false and the cache is
@@ -215,7 +241,7 @@ func (c *Client) Catalog(ctx context.Context, force bool) (Catalog, error) {
 		return nil, fmt.Errorf("models.dev returned an empty catalog")
 	}
 
-	c.saveCache(&cacheFile{FetchedAt: c.now(), ETag: newETag, LastModified: newLastMod, Data: cat})
+	c.saveCache(&cacheFile{SchemaVersion: cacheSchemaVersion, FetchedAt: c.now(), ETag: newETag, LastModified: newLastMod, Data: cat})
 	return cat, nil
 }
 
@@ -230,6 +256,11 @@ func (c *Client) loadCache() (*cacheFile, bool) {
 	}
 	var cf cacheFile
 	if err := json.Unmarshal(data, &cf); err != nil || len(cf.Data) == 0 {
+		return nil, false
+	}
+	// An older-schema cache lacks the fields added since it was written; treat it
+	// as absent so the next Catalog() re-fetches and repopulates the richer shape.
+	if cf.SchemaVersion != cacheSchemaVersion {
 		return nil, false
 	}
 	return &cf, true

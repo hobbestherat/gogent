@@ -156,7 +156,7 @@ func TestStatisticsEmpty(t *testing.T) {
 // makeStatsSession builds and registers a user session backed by a fresh model
 // session, mirroring how gogent.CreateUserSession wires one.
 func makeStatsSession(g *Gogent, id string) *agent.UserSession {
-	conn := model.NewModelConnection()
+	conn := testConn()
 	sess := model.NewModelSession(id, conn)
 	root := agent.NewAgent("root", sess)
 	root.SetState(agent.StateIdle)

@@ -57,7 +57,7 @@ func openModelsDialogCount(t *testing.T, n int) *Workbench {
 	for i := range models {
 		models[i] = config.ModelConfig{
 			Name: fmt.Sprintf("m%d", i), DisplayName: fmt.Sprintf("M%d", i),
-			Model: "x", APIType: "openai",
+			Model: "x", Connection: "openai",
 		}
 	}
 	def := ""
@@ -107,7 +107,7 @@ func TestModelsDialogAllSixFooterButtonsAreOneRowTall(t *testing.T) {
 	w := newTestWorkbench(t)
 	w.SetHandlers(Handlers{
 		GetModels: func() []config.ModelConfig {
-			return []config.ModelConfig{{Name: "x", DisplayName: "X", Model: "m", APIType: "openai"}}
+			return []config.ModelConfig{{Name: "x", DisplayName: "X", Model: "m", Connection: "openai"}}
 		},
 		GetDefaultModel: func() string { return "x" },
 		UpdateModel:     func(config.ModelConfig) error { return nil },
@@ -322,7 +322,7 @@ func TestModelsDialogOneRowFooterOnTinyTerminal(t *testing.T) {
 		w := newTestWorkbench(t)
 		w.SetHandlers(Handlers{
 			GetModels: func() []config.ModelConfig {
-				return []config.ModelConfig{{Name: "x", DisplayName: "X", Model: "m", APIType: "openai"}}
+				return []config.ModelConfig{{Name: "x", DisplayName: "X", Model: "m", Connection: "openai"}}
 			},
 			GetDefaultModel: func() string { return "x" },
 			UpdateModel:     func(config.ModelConfig) error { return nil },

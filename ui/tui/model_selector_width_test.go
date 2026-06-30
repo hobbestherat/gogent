@@ -73,7 +73,7 @@ func openModelsDialog(t *testing.T, displayCells, screenW, screenH int) tv.Rect 
 	w := newTestWorkbench(t)
 	w.SetHandlers(Handlers{
 		GetModels: func() []config.ModelConfig {
-			return []config.ModelConfig{{Name: "x", DisplayName: disp, Model: "m", APIType: "openai"}}
+			return []config.ModelConfig{{Name: "x", DisplayName: disp, Model: "m", Connection: "openai"}}
 		},
 		GetDefaultModel: func() string { return "x" },
 		UpdateModel:     func(config.ModelConfig) error { return nil },

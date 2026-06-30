@@ -46,7 +46,7 @@ func baseTransport(c *ModelConnection) http.RoundTripper {
 // shares the process-wide pooled transport rather than carrying a nil Transport
 // (which would fall back to http.DefaultTransport's MaxIdleConnsPerHost of 2).
 func TestNewModelConnectionUsesSharedTransport(t *testing.T) {
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 	if baseTransport(c) != sharedHTTPTransport {
 		t.Errorf("NewModelConnection transport = %p, want shared transport %p", baseTransport(c), sharedHTTPTransport)
 	}
@@ -57,7 +57,7 @@ func TestNewModelConnectionUsesSharedTransport(t *testing.T) {
 // the key only adds a cheap auth round-tripper wrapping it, never a fresh pool.
 func TestNewModelConnectionFromConfigUsesSharedTransport(t *testing.T) {
 	t.Run("without_key", func(t *testing.T) {
-		c := NewModelConnectionFromConfig(&config.ModelConfig{APIType: "openai", Model: "gpt-x"})
+		c := NewModelConnection(&config.ProviderConnection{APIType: "openai"}, &config.ModelConfig{Model: "gpt-x"})
 		if _, wrapped := c.client.Transport.(*APIKeyRoundTripper); wrapped {
 			t.Fatal("no API key should not wrap the transport in an auth round-tripper")
 		}
@@ -67,7 +67,7 @@ func TestNewModelConnectionFromConfigUsesSharedTransport(t *testing.T) {
 	})
 
 	t.Run("with_key", func(t *testing.T) {
-		c := NewModelConnectionFromConfig(&config.ModelConfig{APIType: "openai", Model: "gpt-x", APIKey: "k"})
+		c := NewModelConnection(&config.ProviderConnection{APIType: "openai", APIKey: "k"}, &config.ModelConfig{Model: "gpt-x"})
 		rt, ok := c.client.Transport.(*APIKeyRoundTripper)
 		if !ok {
 			t.Fatalf("transport = %T, want *APIKeyRoundTripper", c.client.Transport)
@@ -122,7 +122,7 @@ func TestModelConnectionReusesKeepAliveAcrossClients(t *testing.T) {
 	for i := 0; i < turns; i++ {
 		// A fresh client per turn — exactly the per-message rebuild in
 		// production — all sharing one pooled transport.
-		c := NewModelConnection()
+		c := newPlaceholderConnection()
 		c.SetURL(url)
 		c.SetTimeout(10 * time.Second)
 		resp, err := c.Complete([]Message{{Role: RoleUser, Content: "hi"}})

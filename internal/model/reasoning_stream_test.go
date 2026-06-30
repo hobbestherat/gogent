@@ -204,7 +204,7 @@ func reasoningServer(t *testing.T, body string, capture func(reqBody []byte)) *h
 // are assembled into the returned response exactly like the blocking path.
 func TestCompleteWithToolsStreamCtxReasoning(t *testing.T) {
 	server := reasoningServer(t, reasoningContentSSE, nil)
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 	c.SetURL(server.URL)
 
 	var sink []string
@@ -249,7 +249,7 @@ data: [DONE]
 
 `
 	server := reasoningServer(t, sse, nil)
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 	c.SetURL(server.URL)
 
 	var sinkCalls int
@@ -284,7 +284,7 @@ data: [DONE]
 // panic.
 func TestCompleteWithToolsStreamCtxNilSinkDiscardsReasoning(t *testing.T) {
 	server := reasoningServer(t, reasoningContentSSE, nil)
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 	c.SetURL(server.URL)
 
 	resp, err := c.CompleteWithToolsStreamCtx(context.Background(),
@@ -301,7 +301,7 @@ func TestCompleteWithToolsStreamCtxNilSinkDiscardsReasoning(t *testing.T) {
 // streams no reasoning never invokes the sink, yet the answer is correct.
 func TestCompleteWithToolsStreamCtxNoReasoningModelUnaffected(t *testing.T) {
 	server := sseServer(t, contentSSE)
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 	c.SetURL(server.URL)
 
 	called := false
@@ -328,7 +328,7 @@ func TestCompleteWithToolsStreamCtxHTTPError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 	c.SetURL(server.URL)
 
 	called := false
@@ -362,7 +362,7 @@ func TestCompleteWithToolsStreamCtxCancelledContext(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 	c.SetURL(server.URL)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -389,7 +389,7 @@ func TestCompleteWithToolsStreamCtxCancelledContext(t *testing.T) {
 // it (issue #217).
 func TestStreamingToolCompleterImplemented(t *testing.T) {
 	var _ StreamingToolCompleter = (*ModelConnection)(nil)
-	if _, ok := any(NewModelConnection()).(StreamingToolCompleter); !ok {
+	if _, ok := any(newPlaceholderConnection()).(StreamingToolCompleter); !ok {
 		t.Error("*ModelConnection does not implement StreamingToolCompleter")
 	}
 }
@@ -405,7 +405,7 @@ func TestCompleteWithToolsStreamCtxContentParity(t *testing.T) {
 		"data: {\"choices\":[{\"delta\":{\"content\":\"" + big + "\"},\"index\":0,\"finish_reason\":\"stop\"}]}\n\n" +
 		"data: [DONE]\n\n"
 	server := reasoningServer(t, body, nil)
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 	c.SetURL(server.URL)
 
 	resp, err := c.CompleteWithToolsStreamCtx(context.Background(),
@@ -439,7 +439,7 @@ func TestCompleteWithToolsStreamCtxDoesNotRetry(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 	c.SetURL(server.URL)
 	// Keep any backoff negligible so the test does not wait on retry delays even
 	// if a retry were (incorrectly) attempted.
@@ -497,12 +497,10 @@ data: {"type":"message_stop"}
 // streaming path.
 func TestAnthropicStreamThinkingDelta(t *testing.T) {
 	server := sseServer(t, anthropicThinkingSSE)
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType:  "anthropic",
-		Endpoint: server.URL,
-		Model:    "claude-sonnet-4-6",
-		APIKey:   "k",
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "anthropic", Endpoint: server.URL, APIKey: "k"},
+		&config.ModelConfig{Model: "claude-sonnet-4-6"},
+	)
 
 	streamCh, errCh := conn.CompleteStream([]Message{{Role: RoleUser, Content: "hi"}})
 	reasoning, content, terminal, err := reasoningEvent(t, streamCh, errCh)
@@ -530,12 +528,10 @@ func TestAnthropicStreamThinkingDelta(t *testing.T) {
 // the sink and content reaches the response.
 func TestAnthropicCompleteWithToolsStreamCtxThinkingDelta(t *testing.T) {
 	server := sseServer(t, anthropicThinkingSSE)
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType:  "anthropic",
-		Endpoint: server.URL,
-		Model:    "claude-sonnet-4-6",
-		APIKey:   "k",
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "anthropic", Endpoint: server.URL, APIKey: "k"},
+		&config.ModelConfig{Model: "claude-sonnet-4-6"},
+	)
 
 	var sink []string
 	resp, err := conn.CompleteWithToolsStreamCtx(context.Background(),
@@ -562,7 +558,7 @@ func TestAnthropicCompleteWithToolsStreamCtxThinkingDelta(t *testing.T) {
 func TestCompleteWithToolsStreamCtxRequestShape(t *testing.T) {
 	var captured []byte
 	server := reasoningServer(t, reasoningContentSSE, func(b []byte) { captured = b })
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 	c.SetURL(server.URL)
 
 	if _, err := c.CompleteWithToolsStreamCtx(context.Background(),
@@ -590,7 +586,7 @@ func TestCompleteWithToolsStreamCtxRequestShape(t *testing.T) {
 // completeStream (at Stats.Mutex.Lock), exercising the recover path.
 func TestCompleteWithToolsStreamCtxRecoversPanic(t *testing.T) {
 	server := sseServer(t, contentSSE)
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 	c.SetURL(server.URL)
 	c.Stats = nil // forces a panic inside completeStream
 
@@ -616,7 +612,7 @@ func TestCompleteWithToolsStreamCtxRecoversPanic(t *testing.T) {
 // second reader terminates — the regression the close guards against.
 func TestCompleteWithToolsStreamCtxErrChClosedNoHang(t *testing.T) {
 	server := sseServer(t, contentSSE)
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 	c.SetURL(server.URL)
 
 	done := make(chan struct{})
@@ -654,7 +650,7 @@ func TestCompleteWithToolsStreamCtxPartialStreamDeliversDeltas(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 	c.SetURL(server.URL)
 
 	var sink []string

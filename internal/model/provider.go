@@ -189,7 +189,7 @@ type Capabilities struct {
 	// prices all input at 1x — identical to before cache cost-weighting. Reads are
 	// discounted (<1); writes are an Anthropic-only premium (>1). A discount that
 	// varies by model WITHIN a provider (e.g. DeepSeek riding api_type "openai")
-	// is expressed per-model via ModelCaps, which overrides these.
+	// is expressed per-model via ModelQuirks, which overrides these.
 	CacheReadMultiplier  float64
 	CacheWriteMultiplier float64
 }
@@ -198,16 +198,18 @@ type Capabilities struct {
 // Strategy interfaces — one axis of provider behaviour each
 // ---------------------------------------------------------------------------
 
-// endpointResolver builds the chat (blocking) and stream URLs for a model config.
+// endpointResolver builds the chat (blocking) and stream URLs for a connection.
+// modelID is the backend model id, needed by resolvers that embed the model in
+// the URL path (Vertex native/anthropic); body-model providers ignore it.
 type endpointResolver interface {
-	endpoints(cfg *config.ModelConfig) Endpoints
+	endpoints(conn *config.ProviderConnection, modelID string) Endpoints
 }
 
-// authScheme builds the auth/transport for a model config. It wraps the shared
+// authScheme builds the auth/transport for a connection. It wraps the shared
 // pooled transport so keep-alive connections persist; returning nil means no
 // auth is injected and the shared transport is used directly.
 type authScheme interface {
-	roundTripper(cfg *config.ModelConfig) http.RoundTripper
+	roundTripper(conn *config.ProviderConnection) http.RoundTripper
 }
 
 // modelLister enumerates the models a provider serves (the Scan button). It is an
@@ -234,9 +236,9 @@ type provider struct {
 	auth      authScheme
 	// lister enumerates models for the Scan button; nil = listing unsupported.
 	lister modelLister
-	// validate returns a deferred config error (e.g. Vertex missing
+	// validate returns a deferred connection error (e.g. Vertex missing
 	// project/location); nil = always valid.
-	validate func(cfg *config.ModelConfig) error
+	validate func(conn *config.ProviderConnection) error
 	// normalizeModelID, when non-nil, rewrites the outgoing request's model id at the
 	// send seam (buildRequest), as a last-line defense in depth. It is the request-build
 	// counterpart of the lister's format func: the Vertex OpenAI-compat shim uses it to
@@ -257,11 +259,11 @@ type provider struct {
 	derivesBase bool
 }
 
-func (p *provider) validateConfig(cfg *config.ModelConfig) error {
+func (p *provider) validateConfig(conn *config.ProviderConnection) error {
 	if p.validate == nil {
 		return nil
 	}
-	return p.validate(cfg)
+	return p.validate(conn)
 }
 
 // providerRegistry holds every registered backend keyed by api_type. Per-provider
@@ -383,14 +385,14 @@ func (c *ModelConnection) doJSONBody(ctx context.Context, method, rawURL string,
 // default or a derived base (baseURLFunc, used by Vertex's OpenAI-compat shim).
 type staticBaseEndpoints struct {
 	defaultBaseURL string
-	baseURLFunc    func(cfg *config.ModelConfig) string // optional; only when Endpoint is empty
+	baseURLFunc    func(conn *config.ProviderConnection) string // optional; only when Endpoint is empty
 	chatPath       string
 }
 
-func (e staticBaseEndpoints) endpoints(cfg *config.ModelConfig) Endpoints {
-	base := normalizeBaseURL(cfg.Endpoint, e.defaultBaseURL, e.chatPath)
-	if e.baseURLFunc != nil && strings.TrimSpace(cfg.Endpoint) == "" {
-		base = e.baseURLFunc(cfg)
+func (e staticBaseEndpoints) endpoints(conn *config.ProviderConnection, _ string) Endpoints {
+	base := normalizeBaseURL(conn.Endpoint, e.defaultBaseURL, e.chatPath)
+	if e.baseURLFunc != nil && strings.TrimSpace(conn.Endpoint) == "" {
+		base = e.baseURLFunc(conn)
 	}
 	return Endpoints{ChatURL: appendPath(base, e.chatPath)}
 }
@@ -400,19 +402,19 @@ func (e staticBaseEndpoints) endpoints(cfg *config.ModelConfig) Endpoints {
 // a distinct URL. The base is derived from project/location unless an explicit
 // endpoint overrides it.
 type modelURLEndpoints struct {
-	baseURLFunc   func(cfg *config.ModelConfig) string
+	baseURLFunc   func(conn *config.ProviderConnection) string
 	chatURLFunc   func(base, model string) string
 	streamURLFunc func(base, model string) string
 }
 
-func (e modelURLEndpoints) endpoints(cfg *config.ModelConfig) Endpoints {
-	base := strings.TrimRight(strings.TrimSpace(cfg.Endpoint), "/")
+func (e modelURLEndpoints) endpoints(conn *config.ProviderConnection, modelID string) Endpoints {
+	base := strings.TrimRight(strings.TrimSpace(conn.Endpoint), "/")
 	if base == "" {
-		base = e.baseURLFunc(cfg)
+		base = e.baseURLFunc(conn)
 	}
 	return Endpoints{
-		ChatURL:   e.chatURLFunc(base, cfg.Model),
-		StreamURL: e.streamURLFunc(base, cfg.Model),
+		ChatURL:   e.chatURLFunc(base, modelID),
+		StreamURL: e.streamURLFunc(base, modelID),
 	}
 }
 
@@ -468,15 +470,15 @@ func (a keyAuth) query() string {
 	return ""
 }
 
-func (a keyAuth) roundTripper(cfg *config.ModelConfig) http.RoundTripper {
+func (a keyAuth) roundTripper(conn *config.ProviderConnection) http.RoundTripper {
 	// With static extra headers but no key (e.g. OpenRouter attribution on a
 	// free tier), still attach them; with neither, use the shared transport.
-	if cfg.APIKey == "" && len(a.extraHeaders) == 0 {
+	if conn.APIKey == "" && len(a.extraHeaders) == 0 {
 		return nil
 	}
 	return &APIKeyRoundTripper{
-		apiKey:     cfg.APIKey,
-		headers:    a.headers(cfg.APIKey),
+		apiKey:     conn.APIKey,
+		headers:    a.headers(conn.APIKey),
 		queryParam: a.query(),
 		transport:  sharedHTTPTransport,
 	}
@@ -488,7 +490,7 @@ func (a keyAuth) roundTripper(cfg *config.ModelConfig) http.RoundTripper {
 // an ADC-misconfiguration error surfaces on the first request instead.
 type adcAuth struct{}
 
-func (adcAuth) roundTripper(cfg *config.ModelConfig) http.RoundTripper {
+func (adcAuth) roundTripper(_ *config.ProviderConnection) http.RoundTripper {
 	return &ADCRoundTripper{
 		tokenSource: &lazyTokenSource{newTS: func() (oauth2.TokenSource, error) {
 			return adcTokenSourceFunc(context.Background(), adcScope)

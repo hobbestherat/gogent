@@ -11,7 +11,7 @@ import (
 // reasoning-effort options (mirroring GLM-5.2) and one with none (greyed out).
 func effortTestModels() []*config.ModelConfig {
 	return []*config.ModelConfig{
-		{Name: "glm", DisplayName: "GLM", Model: "glm-5.2", EffortOptions: []string{"high", "max"}},
+		{Name: "glm", DisplayName: "GLM", Model: "glm-5.2", Caps: config.ModelCapabilities{EffortOptions: []string{"high", "max"}}},
 		{Name: "plain", DisplayName: "Plain", Model: "plain"},
 	}
 }

@@ -18,7 +18,7 @@ type commandSendIssue403 struct {
 
 func recordCommandSendsIssue403(w *Workbench) <-chan commandSendIssue403 {
 	sent := make(chan commandSendIssue403, 8)
-	w.handlers.OnSend = func(sessionID, message, model, effort string) {
+	w.handlers.OnSend = func(sessionID, message, model, effort, thinking string) {
 		sent <- commandSendIssue403{sessionID: sessionID, message: message, model: model, effort: effort}
 	}
 	return sent
@@ -201,7 +201,7 @@ func TestIssue403HandleSlashCommandUsesOverrideAwareSend(t *testing.T) {
 		effort    string
 	}
 	sent := make(chan commandOverrideSend, 1)
-	w.handlers.OnSend = func(_, _, _, _ string) {
+	w.handlers.OnSend = func(_, _, _, _, _ string) {
 		t.Error("custom command with OnSendCommand wired must not fall back to plain OnSend")
 	}
 	w.handlers.OnSendCommand = func(sessionID, message, model, agent string, subtask bool, effort string) {

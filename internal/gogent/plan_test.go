@@ -77,8 +77,11 @@ func newPlanGogent(t *testing.T, url string) *Gogent {
 	g.store = nil
 	g.config = &config.Config{
 		DefaultModel: "m",
+		Connections: []*config.ProviderConnection{
+			{Name: "m-conn", APIType: "openai", Endpoint: url},
+		},
 		ModelConfigs: []*config.ModelConfig{
-			{Name: "m", Model: "m", Endpoint: url, ContextWindow: 8192},
+			{Name: "m", Model: "m", Connection: "m-conn", Caps: config.ModelCapabilities{ContextWindow: 8192}},
 		},
 		SubAgents: config.DefaultSubAgentConfig(),
 	}

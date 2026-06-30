@@ -548,11 +548,13 @@ func TestBuildRequestCacheTTLFromConfig(t *testing.T) {
 		{"2h", ""}, // typo → default
 	}
 	for _, tc := range cases {
-		conn := NewModelConnectionFromConfig(&config.ModelConfig{
-			APIType:  "anthropic",
-			Model:    "claude-x",
-			CacheTTL: tc.cfg,
-		})
+		conn := NewModelConnection(
+			&config.ProviderConnection{APIType: "anthropic"},
+			&config.ModelConfig{
+				Model:    "claude-x",
+				CacheTTL: tc.cfg,
+			},
+		)
 		req := conn.buildRequest([]Message{{Role: RoleUser, Content: "hi"}}, false, nil, nil)
 		if req.CacheTTL != tc.want {
 			t.Errorf("anthropic config CacheTTL=%q → req.CacheTTL=%q, want %q", tc.cfg, req.CacheTTL, tc.want)
@@ -568,12 +570,16 @@ func TestBuildRequestCacheTTLFromConfig(t *testing.T) {
 // to document the capability gate.)
 func TestBuildRequestCacheTTLOffForNonBreakpointProviders(t *testing.T) {
 	for _, apiType := range []string{"openai", "zai", "openrouter"} {
-		conn := NewModelConnectionFromConfig(&config.ModelConfig{
-			APIType:  apiType,
-			Endpoint: "https://example.test/v1/chat/completions",
-			Model:    "m",
-			CacheTTL: "1h",
-		})
+		conn := NewModelConnection(
+			&config.ProviderConnection{
+				APIType:  apiType,
+				Endpoint: "https://example.test/v1/chat/completions",
+			},
+			&config.ModelConfig{
+				Model:    "m",
+				CacheTTL: "1h",
+			},
+		)
 		req := conn.buildRequest([]Message{{Role: RoleUser, Content: "hi"}}, false, nil, nil)
 		if req.CacheTTL != "off" {
 			t.Errorf("%s provider with config 1h → req.CacheTTL=%q, want \"off\" (no CacheControlBreakpoints capability)", apiType, req.CacheTTL)
@@ -584,13 +590,17 @@ func TestBuildRequestCacheTTLOffForNonBreakpointProviders(t *testing.T) {
 // TestBuildRequestCacheTTLHonoredOnVertexAnthropic: Claude-on-Vertex advertises
 // CacheControlBreakpoints, so the config TTL is honored (not forced off).
 func TestBuildRequestCacheTTLHonoredOnVertexAnthropic(t *testing.T) {
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType:  "vertex-anthropic",
-		Project:  "p",
-		Location: "us-central1",
-		Model:    "claude-x",
-		CacheTTL: "1h",
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{
+			APIType:  "vertex-anthropic",
+			Project:  "p",
+			Location: "us-central1",
+		},
+		&config.ModelConfig{
+			Model:    "claude-x",
+			CacheTTL: "1h",
+		},
+	)
 	req := conn.buildRequest([]Message{{Role: RoleUser, Content: "hi"}}, false, nil, nil)
 	if req.CacheTTL != "1h" {
 		t.Errorf("vertex-anthropic config 1h → req.CacheTTL=%q, want \"1h\"", req.CacheTTL)
@@ -601,7 +611,7 @@ func TestBuildRequestCacheTTLHonoredOnVertexAnthropic(t *testing.T) {
 // panic in buildRequest (AnthropicCacheTTL is nil-safe) and must resolve to the
 // default.
 func TestBuildRequestCacheTTLNilConfig(t *testing.T) {
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{APIType: "anthropic", Model: "claude-x"})
+	conn := NewModelConnection(&config.ProviderConnection{APIType: "anthropic"}, &config.ModelConfig{Model: "claude-x"})
 	conn.Config = nil // simulate a nil config
 	req := conn.buildRequest([]Message{{Role: RoleUser, Content: "hi"}}, false, nil, nil)
 	if req.CacheTTL != "" {

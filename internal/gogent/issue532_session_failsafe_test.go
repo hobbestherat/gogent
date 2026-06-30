@@ -24,9 +24,12 @@ func TestDefaultConnection_UnroutableDefault_FallsToRoutable(t *testing.T) {
 	g := NewGogentWithWorkspace(t.TempDir(), t.TempDir())
 	g.config = &config.Config{
 		DefaultModel: "bad",
+		Connections: []*config.ProviderConnection{
+			{Name: "good-conn", APIType: "openai", Endpoint: "https://good.example.com/v1"},
+		},
 		ModelConfigs: []*config.ModelConfig{
 			badEntry("bad"),
-			{Name: "good", APIType: "openai", Model: "good-model", Endpoint: "https://good.example.com/v1"},
+			{Name: "good", Connection: "good-conn", Model: "good-model"},
 		},
 	}
 	conn := g.defaultConnection()
@@ -46,9 +49,13 @@ func TestDefaultConnection_AllRoutable_UsesNamedDefault(t *testing.T) {
 	g := NewGogentWithWorkspace(t.TempDir(), t.TempDir())
 	g.config = &config.Config{
 		DefaultModel: "second",
+		Connections: []*config.ProviderConnection{
+			{Name: "first-conn", APIType: "openai", Endpoint: "https://first.example.com/v1"},
+			{Name: "second-conn", APIType: "openai", Endpoint: "https://second.example.com/v1"},
+		},
 		ModelConfigs: []*config.ModelConfig{
-			{Name: "first", APIType: "openai", Model: "first-model", Endpoint: "https://first.example.com/v1"},
-			{Name: "second", APIType: "openai", Model: "second-model", Endpoint: "https://second.example.com/v1"},
+			{Name: "first", Connection: "first-conn", Model: "first-model"},
+			{Name: "second", Connection: "second-conn", Model: "second-model"},
 		},
 	}
 	conn := g.defaultConnection()
@@ -70,9 +77,12 @@ func TestSendMessage_NarrowedGuard_MatchedUnroutableDefault_Redirects(t *testing
 	g := NewGogentWithWorkspace(t.TempDir(), t.TempDir())
 	g.config = &config.Config{
 		DefaultModel: "bad",
+		Connections: []*config.ProviderConnection{
+			{Name: "good-conn", APIType: "openai", Endpoint: server.URL + "/v1/chat/completions"},
+		},
 		ModelConfigs: []*config.ModelConfig{
 			badEntry("bad"), // the configured default, but unroutable
-			{Name: "good", APIType: "openai", Model: "good-model", Endpoint: server.URL + "/v1/chat/completions"},
+			{Name: "good", Connection: "good-conn", Model: "good-model"},
 		},
 	}
 	g.NewSession("s1")
@@ -103,8 +113,11 @@ func TestSendMessage_NarrowedGuard_UnmatchedDefault_KeepsExisting(t *testing.T) 
 	g := NewGogentWithWorkspace(t.TempDir(), t.TempDir())
 	g.config = &config.Config{
 		DefaultModel: "", // unmatched — the narrowed guard must NOT fire
+		Connections: []*config.ProviderConnection{
+			{Name: "good-conn", APIType: "openai", Endpoint: server.URL + "/v1/chat/completions"},
+		},
 		ModelConfigs: []*config.ModelConfig{
-			{Name: "good", APIType: "openai", Model: "good-model", Endpoint: server.URL + "/v1/chat/completions"},
+			{Name: "good", Connection: "good-conn", Model: "good-model"},
 		},
 	}
 	g.NewSession("s1") // connection resolves to the only (routable) model
@@ -126,6 +139,7 @@ func TestRestore_DroppedModelName_NotResolvable(t *testing.T) {
 	home := t.TempDir()
 	seedConfigOnDisk(t, home, &config.Config{
 		DefaultModel: "good",
+		Connections:  goodConns(),
 		ModelConfigs: []*config.ModelConfig{badEntry("dropped"), goodEntry("good")},
 	})
 	g := NewGogent(home) // sweep drops "dropped"

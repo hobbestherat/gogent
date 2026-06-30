@@ -49,11 +49,13 @@ func newEffortGogent(t *testing.T, endpoint, apiType, defaultEffort string) *Gog
 	g := NewGogentWithWorkspace(t.TempDir(), t.TempDir())
 	g.config = &config.Config{
 		DefaultModel: "test",
+		Connections: []*config.ProviderConnection{
+			{Name: "test-conn", APIType: apiType, Endpoint: endpoint},
+		},
 		ModelConfigs: []*config.ModelConfig{{
 			Name:            "test",
 			Model:           "glm-5.2",
-			APIType:         apiType,
-			Endpoint:        endpoint,
+			Connection:      "test-conn",
 			ReasoningEffort: defaultEffort,
 		}},
 	}

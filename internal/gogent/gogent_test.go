@@ -98,7 +98,7 @@ func TestBudgetRoundTrip(t *testing.T) {
 
 func TestGogentCreateUserSession(t *testing.T) {
 	g := NewGogent(t.TempDir())
-	m := model.NewModelConnection()
+	m := testConn()
 	s := model.NewModelSession("session1", m)
 	agent := agent.NewAgent("agent1", s)
 
@@ -111,7 +111,7 @@ func TestGogentCreateUserSession(t *testing.T) {
 
 func TestGogentGetUserSession(t *testing.T) {
 	g := NewGogent(t.TempDir())
-	m := model.NewModelConnection()
+	m := testConn()
 	s := model.NewModelSession("session2", m)
 	agent := agent.NewAgent("agent2", s)
 
@@ -125,7 +125,7 @@ func TestGogentGetUserSession(t *testing.T) {
 
 func TestGogentSessionIDs(t *testing.T) {
 	g := NewGogent(t.TempDir())
-	m := model.NewModelConnection()
+	m := testConn()
 
 	// Create first session
 	s1 := model.NewModelSession("s1", m)
@@ -147,7 +147,7 @@ func TestGogentSendMessage(t *testing.T) {
 	requireModel(t)
 
 	g := NewGogent(t.TempDir())
-	m := model.NewModelConnection()
+	m := testConn()
 	m.SetURL(config.DefaultEndpoint())
 	s := model.NewModelSession("session3", m)
 	agent := agent.NewAgent("agent3", s)
@@ -178,7 +178,7 @@ func TestGogentSendMessageNotFound(t *testing.T) {
 
 func TestGogentCountMessages(t *testing.T) {
 	g := NewGogent(t.TempDir())
-	m := model.NewModelConnection()
+	m := testConn()
 	s := model.NewModelSession("session4", m)
 	agent := agent.NewAgent("agent4", s)
 	_ = g.CreateUserSession("session4", agent)

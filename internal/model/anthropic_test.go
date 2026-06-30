@@ -20,10 +20,10 @@ func TestStringToAPITypeAnthropic(t *testing.T) {
 }
 
 func TestAnthropicEndpoints(t *testing.T) {
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType: "anthropic",
-		Model:   "claude-sonnet-4-6",
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "anthropic"},
+		&config.ModelConfig{Model: "claude-sonnet-4-6"},
+	)
 	if want := "https://api.anthropic.com/v1/messages"; conn.URL != want {
 		t.Errorf("chat URL = %q, want %q", conn.URL, want)
 	}
@@ -243,12 +243,10 @@ func TestAnthropicCompleteRoundTrip(t *testing.T) {
 	}))
 	defer server.Close()
 
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType:  "anthropic",
-		Endpoint: server.URL,
-		Model:    "claude-sonnet-4-6",
-		APIKey:   "secret-key",
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "anthropic", Endpoint: server.URL, APIKey: "secret-key"},
+		&config.ModelConfig{Model: "claude-sonnet-4-6"},
+	)
 
 	resp, err := conn.CompleteWithTools(
 		[]Message{{Role: RoleUser, Content: "hello"}},
@@ -321,12 +319,10 @@ data: {"type":"message_stop"}
 
 func TestAnthropicParseStream(t *testing.T) {
 	server := sseServer(t, anthropicSSE)
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType:  "anthropic",
-		Endpoint: server.URL,
-		Model:    "claude-sonnet-4-6",
-		APIKey:   "k",
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "anthropic", Endpoint: server.URL, APIKey: "k"},
+		&config.ModelConfig{Model: "claude-sonnet-4-6"},
+	)
 
 	streamCh, errCh := conn.CompleteStream([]Message{{Role: RoleUser, Content: "hi"}})
 	deltas, terminal, err := drain(t, streamCh, errCh)

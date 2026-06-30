@@ -45,9 +45,10 @@ func TestBudgetUsesCostWeightedInput_Issue544(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(fs.handler))
 		defer server.Close()
 
-		conn := model.NewModelConnectionFromConfig(&config.ModelConfig{
-			APIType: apiType, Model: modelName, Endpoint: server.URL,
-		})
+		conn := model.NewModelConnection(
+			&config.ProviderConnection{APIType: apiType, Endpoint: server.URL},
+			&config.ModelConfig{Model: modelName},
+		)
 		sess := model.NewModelSession("test", conn)
 		reg := tool.NewToolRegistry()
 		reg.RegisterCalcTool()
@@ -104,9 +105,10 @@ func TestBudgetUsesCostWeightedInput_Issue544(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(fs.handler))
 		defer server.Close()
 
-		conn := model.NewModelConnectionFromConfig(&config.ModelConfig{
-			APIType: "openai", Model: "gpt-4o", Endpoint: server.URL,
-		})
+		conn := model.NewModelConnection(
+			&config.ProviderConnection{APIType: "openai", Endpoint: server.URL},
+			&config.ModelConfig{Model: "gpt-4o"},
+		)
 		sess := model.NewModelSession("test", conn)
 		reg := tool.NewToolRegistry()
 		reg.RegisterCalcTool()

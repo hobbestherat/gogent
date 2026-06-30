@@ -19,6 +19,7 @@ import (
 	"gogent/internal/lsp"
 	"gogent/internal/mcp"
 	"gogent/internal/model"
+	"gogent/internal/modelsdev"
 	"gogent/internal/notify"
 	"gogent/internal/permission"
 	"gogent/internal/skill"
@@ -53,8 +54,11 @@ type Gogent struct {
 	configWarnings []string
 	workspaceRoot  string
 	homeDir        string
-	store          *SessionStore
-	skills         *skill.SkillRegistry
+	// catalog is the lazily-built models.dev client used by model discovery
+	// (see discover.go). Nil until first use.
+	catalog *modelsdev.Client
+	store   *SessionStore
+	skills  *skill.SkillRegistry
 	// log routes diagnostics (warnings, errors) to a sink that never corrupts
 	// the TUI's alternate screen: a file in TUI mode, stderr when headless
 	// (issue #17). Defaults to stderr; the TUI entry point redirects it via
@@ -1548,13 +1552,18 @@ func (g *Gogent) CreateUserSession(id string, rootAgent *agent.Agent) *agent.Use
 	return userSession
 }
 
-// buildConnection builds a model connection from a model config and applies the
-// effective model timeout so every connection honors the user setting: the
-// per-model ModelTimeoutSeconds override when set, otherwise the global
-// timeouts.model_seconds (issue #590). This is the single point every model
-// connection is built, so the override is resolved here once.
+// buildConnection builds a model connection from a model config — resolving the
+// ProviderConnection the model references — and applies the effective model timeout
+// so every connection honors the user setting: the per-model ModelTimeoutSeconds
+// override when set, otherwise the global timeouts.model_seconds (issue #590). A
+// model that references an unknown connection yields a connection that fails clearly
+// on first use. This is the single point every model connection is built.
 func (g *Gogent) buildConnection(cfg *config.ModelConfig) *model.ModelConnection {
-	conn := model.NewModelConnectionFromConfig(cfg)
+	var pc *config.ProviderConnection
+	if g.config != nil {
+		pc = g.config.ConnectionForModel(cfg)
+	}
+	conn := model.NewModelConnection(pc, cfg)
 	if g.config != nil {
 		seconds := cfg.ModelTimeoutSecondsOrDefault(g.config.Timeouts.ModelSecondsOrDefault())
 		conn.SetTimeout(time.Duration(seconds) * time.Second)
@@ -1995,7 +2004,7 @@ func sweepUnroutableModels(cfg *config.Config, log *diag.Logger) []string {
 		if m == nil {
 			continue
 		}
-		if verr := model.ValidateModelConfig(m); verr != nil {
+		if verr := model.ValidateModelConfig(cfg.ConnectionForModel(m), m); verr != nil {
 			warnings = append(warnings, verr.Error())
 			if log != nil {
 				log.Warnf("ignoring unroutable model config: %v", verr)
@@ -2034,7 +2043,7 @@ func routableDefaultConfig(cfg *config.Config) *config.ModelConfig {
 	}
 	var def, first *config.ModelConfig
 	for _, m := range cfg.ModelConfigs {
-		if m == nil || model.ValidateModelConfig(m) != nil {
+		if m == nil || model.ValidateModelConfig(cfg.ConnectionForModel(m), m) != nil {
 			continue
 		}
 		if first == nil {
@@ -2060,6 +2069,13 @@ func (g *Gogent) defaultConnection() *model.ModelConnection {
 	}
 	return model.NewUnroutableConnection(
 		"no routable model is configured — add a model with an api_type or endpoint in the Models… dialog (or fix ~/.gogent/config.json)")
+}
+
+// DefaultConnection is the exported entry point the binaries use to bootstrap the
+// initial session's connection (resolving the routable default model + its provider
+// connection, or a clear deferred error when none is configured).
+func (g *Gogent) DefaultConnection() *model.ModelConnection {
+	return g.defaultConnection()
 }
 
 // GetFileSystem returns the file system service
@@ -2594,13 +2610,20 @@ func (g *Gogent) SendMessageToSessionWithModel(ctx context.Context, sessionID, a
 }
 
 // SendMessageToSessionWithModelAndEffort is SendMessageToSessionWithModel plus a
-// per-request reasoning-effort override (issue #177). A non-empty effort takes
-// precedence over the selected model config's ReasoningEffort for this turn only;
-// an empty effort falls back to the model config default. The override is applied
-// to a shallow copy of the model config (never the shared g.config), and the
-// existing provider gate still drops the parameter where unsupported — so an
-// effort sent to a model without supportsReasoningEffort is silently ignored.
+// per-request reasoning-effort override (issue #177); thinking is left at the model
+// default.
 func (g *Gogent) SendMessageToSessionWithModelAndEffort(ctx context.Context, sessionID, agentID, message, modelName, effort string) (*model.CompletionResponse, error) {
+	return g.SendMessageToSessionFull(ctx, sessionID, agentID, message, modelName, effort, "")
+}
+
+// SendMessageToSessionFull is the full per-turn send: a model selection plus
+// reasoning-effort and thinking overrides. A non-empty effort/thinking takes
+// precedence over the selected model config for this turn only; empty falls back to
+// the model default. thinking is "on"/"off" (anything else = no override). Overrides
+// are applied to a shallow copy of the model config (never the shared g.config), and
+// the provider gates in buildRequest still drop a parameter where unsupported — so an
+// override sent to a model that doesn't support it is silently ignored.
+func (g *Gogent) SendMessageToSessionFull(ctx context.Context, sessionID, agentID, message, modelName, effort, thinking string) (*model.CompletionResponse, error) {
 	g.mu.RLock()
 	userSession, exists := g.userSessions[sessionID]
 	cfg := g.config
@@ -2652,7 +2675,7 @@ func (g *Gogent) SendMessageToSessionWithModelAndEffort(ctx context.Context, ses
 		// `if selectedConfig != nil` rebuild below); only a matched-but-unroutable
 		// default is redirected. The load sweep already removes unroutable entries from
 		// memory, so this is defense-in-depth.
-		if selectedConfig != nil && model.ValidateModelConfig(selectedConfig) != nil {
+		if selectedConfig != nil && model.ValidateModelConfig(cfg.ConnectionForModel(selectedConfig), selectedConfig) != nil {
 			selectedConfig = routableDefaultConfig(cfg)
 		}
 	}
@@ -2661,9 +2684,19 @@ func (g *Gogent) SendMessageToSessionWithModelAndEffort(ctx context.Context, ses
 	// copy of the model config so the shared g.config is never mutated. The
 	// provider gate in buildRequest still drops reasoning_effort where unsupported,
 	// so overriding a model without supportsReasoningEffort is a safe no-op.
-	if effort != "" && selectedConfig != nil {
+	if selectedConfig != nil && (effort != "" || thinking == "on" || thinking == "off") {
 		override := *selectedConfig
-		override.ReasoningEffort = effort
+		if effort != "" {
+			override.ReasoningEffort = effort
+		}
+		switch thinking {
+		case "on":
+			on := true
+			override.Thinking = &on
+		case "off":
+			off := false
+			override.Thinking = &off
+		}
 		selectedConfig = &override
 	}
 
@@ -3413,7 +3446,7 @@ func (g *Gogent) AddModel(cfg config.ModelConfig) error {
 	// rejected save leaves g.config.ModelConfigs untouched and writes nothing to disk.
 	// The wrapped detail is model-named and actionable; the TUI editor surfaces it
 	// via showConfirm and the HTTP seam maps the ErrModelInvalid sentinel to 400.
-	if err := model.ValidateModelConfig(&cfg); err != nil {
+	if err := model.ValidateModelConfig(g.config.GetConnection(cfg.Connection), &cfg); err != nil {
 		g.mu.Unlock()
 		return fmt.Errorf("%w: %w", ErrModelInvalid, err)
 	}
@@ -3543,7 +3576,7 @@ func (g *Gogent) UpdateModel(updated config.ModelConfig) error {
 	// a config that cannot be routed. Validate before the in-place overwrite and
 	// SaveConfig so a rejected update leaves the existing entry intact and writes
 	// nothing to disk.
-	if err := model.ValidateModelConfig(&updated); err != nil {
+	if err := model.ValidateModelConfig(g.config.GetConnection(updated.Connection), &updated); err != nil {
 		g.mu.Unlock()
 		return fmt.Errorf("%w: %w", ErrModelInvalid, err)
 	}
@@ -3613,26 +3646,92 @@ func (g *Gogent) DefaultModelName() string {
 	return g.config.DefaultModel
 }
 
-// ScanModels queries the given backend's model-listing endpoint and returns the
-// advertised model ids, so the model editor can offer a pick-list instead of a
-// free-text model id. The draft config need not be saved first; only its
-// api_type, endpoint and api_key are used to reach the backend.
-func (g *Gogent) ScanModels(cfg config.ModelConfig) ([]string, error) {
-	conn := model.NewModelConnectionFromConfig(&cfg)
-	infos, err := conn.ListModels()
-	if err != nil {
-		return nil, fmt.Errorf("list models: %w", err)
+// --- Provider connection CRUD (credentials live here; models reference them) ---
+
+// Connections returns a copy of the configured provider connections.
+func (g *Gogent) Connections() []*config.ProviderConnection {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if g.config == nil {
+		return nil
 	}
-	ids := make([]string, 0, len(infos))
-	for _, info := range infos {
-		if info.ID != "" {
-			ids = append(ids, info.ID)
+	out := make([]*config.ProviderConnection, 0, len(g.config.Connections))
+	out = append(out, g.config.Connections...)
+	return out
+}
+
+// AddConnection adds a new provider connection, rejecting a duplicate name or an
+// unroutable connection before persisting.
+func (g *Gogent) AddConnection(pc config.ProviderConnection) error {
+	g.mu.Lock()
+	if g.config.GetConnection(pc.Name) != nil {
+		g.mu.Unlock()
+		return fmt.Errorf("connection %q already exists", pc.Name)
+	}
+	if err := model.ValidateConnection(&pc); err != nil {
+		g.mu.Unlock()
+		return fmt.Errorf("%w: %w", ErrModelInvalid, err)
+	}
+	added := pc
+	g.config.Connections = append(g.config.Connections, &added)
+	g.mu.Unlock()
+	if err := g.SaveConfig(); err != nil {
+		g.warnf("Failed to persist config: %v", err)
+	}
+	return nil
+}
+
+// UpdateConnection replaces a connection by name. A blank APIKey preserves the
+// existing credential (the UI never round-trips secrets).
+func (g *Gogent) UpdateConnection(updated config.ProviderConnection) error {
+	g.mu.Lock()
+	found := g.config.GetConnection(updated.Name)
+	if found == nil {
+		g.mu.Unlock()
+		return fmt.Errorf("connection %q not found", updated.Name)
+	}
+	if strings.TrimSpace(updated.APIKey) == "" {
+		updated.APIKey = found.APIKey // preserve existing secret on a blank submit
+	}
+	if err := model.ValidateConnection(&updated); err != nil {
+		g.mu.Unlock()
+		return fmt.Errorf("%w: %w", ErrModelInvalid, err)
+	}
+	*found = updated
+	g.mu.Unlock()
+	if err := g.SaveConfig(); err != nil {
+		g.warnf("Failed to persist config: %v", err)
+	}
+	return nil
+}
+
+// RemoveConnection deletes a connection by name, refusing while any model still
+// references it (so a model is never orphaned).
+func (g *Gogent) RemoveConnection(name string) error {
+	g.mu.Lock()
+	idx := -1
+	for i, c := range g.config.Connections {
+		if c != nil && c.Name == name {
+			idx = i
+			break
 		}
 	}
-	if len(ids) == 0 {
-		return nil, fmt.Errorf("backend returned no models")
+	if idx < 0 {
+		g.mu.Unlock()
+		return fmt.Errorf("connection %q not found", name)
 	}
-	return ids, nil
+	for _, m := range g.config.ModelConfigs {
+		if m != nil && m.Connection == name {
+			g.mu.Unlock()
+			return fmt.Errorf("connection %q is in use by model %q", name, m.Name)
+		}
+	}
+	g.config.Connections = append(g.config.Connections[:idx], g.config.Connections[idx+1:]...)
+	g.mu.Unlock()
+	if err := g.SaveConfig(); err != nil {
+		g.warnf("Failed to persist config: %v", err)
+	}
+	return nil
 }
 
 // SetSubAgentOneShot switches sub-agent mode.

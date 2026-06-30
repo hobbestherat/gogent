@@ -10,8 +10,8 @@ import (
 func newForkWorkbench(t *testing.T) *Workbench {
 	t.Helper()
 	return NewWorkbench([]*config.ModelConfig{
-		{Name: "base", DisplayName: "Base", Model: "base", EffortOptions: []string{"low"}},
-		{Name: "alt", DisplayName: "Alt", Model: "alt", EffortOptions: []string{"high", "max"}},
+		{Name: "base", DisplayName: "Base", Model: "base", Caps: config.ModelCapabilities{EffortOptions: []string{"low"}}},
+		{Name: "alt", DisplayName: "Alt", Model: "alt", Caps: config.ModelCapabilities{EffortOptions: []string{"high", "max"}}},
 	})
 }
 

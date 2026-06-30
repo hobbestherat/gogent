@@ -131,7 +131,7 @@ func truncate(s string, n int) string {
 // tools, and attaches an event recorder as the observer.
 func newLifecycleSession(t *testing.T, url string, tools ...*tool.Tool) (*UserSession, *eventRecorder) {
 	t.Helper()
-	conn := model.NewModelConnection()
+	conn := newTestModelConnection()
 	conn.SetURL(url)
 	sess := model.NewModelSession("test", conn)
 
@@ -378,7 +378,7 @@ func TestMultiStepTurnPairsAcrossSteps(t *testing.T) {
 
 	reg := tool.NewToolRegistry()
 	reg.RegisterCalcTool()
-	conn := model.NewModelConnection()
+	conn := newTestModelConnection()
 	conn.SetURL(server.URL)
 	sess := model.NewModelSession("test", conn)
 	ag := NewAgent("root", sess)
@@ -508,7 +508,7 @@ func TestStructuredOutputFinalDoesNotAnnounceCall(t *testing.T) {
 
 	reg := tool.NewToolRegistry()
 	reg.RegisterCalcTool()
-	conn := model.NewModelConnection()
+	conn := newTestModelConnection()
 	conn.SetURL(server.URL)
 	sess := model.NewModelSession("test", conn)
 	ag := NewAgent("root", sess)
@@ -554,7 +554,7 @@ func TestStructuredOutputFinalDoesNotAnnounceCall(t *testing.T) {
 // which must still emit exactly one terminal result carrying the call's id, so the
 // started tool is never left "running" (issue #187).
 func TestRunAndEmitResultRecoversPanic(t *testing.T) {
-	conn := model.NewModelConnection()
+	conn := newTestModelConnection()
 	sess := model.NewModelSession("t", conn)
 	ag := NewAgent("root", sess)
 	ag.SetToolRegistry(nil) // -> runToolCall panics before the registry recover

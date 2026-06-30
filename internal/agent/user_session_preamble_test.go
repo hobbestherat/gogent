@@ -239,7 +239,7 @@ func newLoopHarness(t *testing.T, b *scriptedBackend) (*UserSession, string, fun
 	server := httptest.NewServer(b)
 	t.Cleanup(server.Close)
 
-	conn := model.NewModelConnection()
+	conn := newTestModelConnection()
 	conn.SetURL(server.URL)
 	sess := model.NewModelSession("m", conn)
 	agent := NewAgent("root", sess)

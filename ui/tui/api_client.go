@@ -414,50 +414,136 @@ type EditReviewDetail struct {
 	Diff string `json:"diff"`
 }
 
-// ModelDTO mirrors the server's (redacted) modelView. The api_key is never sent
-// back by the server; HasAPIKey reports whether one is configured.
-type ModelDTO struct {
-	Name                string   `json:"name"`
-	DisplayName         string   `json:"display_name"`
-	APIType             string   `json:"api_type"`
-	Endpoint            string   `json:"endpoint"`
-	Project             string   `json:"project"`
-	Location            string   `json:"location"`
-	Model               string   `json:"model"`
-	HasAPIKey           bool     `json:"has_api_key"`
-	Temperature         float32  `json:"temperature"`
-	TopP                float32  `json:"top_p"`
-	MaxTokens           int      `json:"max_tokens"`
-	ContextWindow       int      `json:"context_window"`
-	ModelTimeoutSeconds int      `json:"model_timeout_seconds"`
-	ReasoningEffort     string   `json:"reasoning_effort"`
-	EffortOptions       []string `json:"effort_options"`
-	Thinking            *bool    `json:"thinking"`
-	Free                bool     `json:"free"`
+// CapsDTO mirrors the server's capsView (config.ModelCapabilities on the wire).
+type CapsDTO struct {
+	ContextWindow    int      `json:"context_window"`
+	MaxOutput        int      `json:"max_output"`
+	Reasoning        bool     `json:"reasoning"`
+	ThinkingToggle   bool     `json:"thinking_toggle"`
+	EffortOptions    []string `json:"effort_options"`
+	Vision           bool     `json:"vision"`
+	ToolCall         bool     `json:"tool_call"`
+	StructuredOutput bool     `json:"structured_output"`
+	CustomTemp       bool     `json:"custom_temperature"`
+	InputModalities  []string `json:"input_modalities"`
+	OutputModalities []string `json:"output_modalities"`
+	InputCostPerM    float64  `json:"input_cost_per_m"`
+	OutputCostPerM   float64  `json:"output_cost_per_m"`
+	CacheReadPerM    float64  `json:"cache_read_per_m"`
+	CacheWritePerM   float64  `json:"cache_write_per_m"`
+	Knowledge        string   `json:"knowledge"`
+	ReleaseDate      string   `json:"release_date"`
+	Source           string   `json:"source"`
 }
 
-// ToModelConfig projects a redacted ModelDTO back into a config.ModelConfig for
-// the TUI's model dropdown and editor. The api_key is intentionally left empty
-// (the server redacts it); an empty key in a later PUT /models preserves the
-// daemon's stored key, so a view→edit→save round-trip never wipes it.
+func (c CapsDTO) toConfig() config.ModelCapabilities {
+	return config.ModelCapabilities{
+		ContextWindow:    c.ContextWindow,
+		MaxOutput:        c.MaxOutput,
+		Reasoning:        c.Reasoning,
+		ThinkingToggle:   c.ThinkingToggle,
+		EffortOptions:    c.EffortOptions,
+		Vision:           c.Vision,
+		ToolCall:         c.ToolCall,
+		StructuredOutput: c.StructuredOutput,
+		CustomTemp:       c.CustomTemp,
+		InputModalities:  c.InputModalities,
+		OutputModalities: c.OutputModalities,
+		InputCostPerM:    c.InputCostPerM,
+		OutputCostPerM:   c.OutputCostPerM,
+		CacheReadPerM:    c.CacheReadPerM,
+		CacheWritePerM:   c.CacheWritePerM,
+		Knowledge:        c.Knowledge,
+		ReleaseDate:      c.ReleaseDate,
+		Source:           c.Source,
+	}
+}
+
+// ModelDTO mirrors the server's modelView (references a connection by name; caps
+// nested; no credentials).
+type ModelDTO struct {
+	Name                string  `json:"name"`
+	DisplayName         string  `json:"display_name"`
+	Connection          string  `json:"connection"`
+	Model               string  `json:"model"`
+	Caps                CapsDTO `json:"caps"`
+	Free                bool    `json:"free"`
+	Temperature         float32 `json:"temperature"`
+	TopP                float32 `json:"top_p"`
+	MaxTokens           int     `json:"max_tokens"`
+	ModelTimeoutSeconds int     `json:"model_timeout_seconds"`
+	ReasoningEffort     string  `json:"reasoning_effort"`
+	Thinking            *bool   `json:"thinking"`
+	CacheTTL            string  `json:"cache_ttl"`
+}
+
+// ToModelConfig projects a ModelDTO back into a config.ModelConfig for the TUI's
+// model dropdown and editor.
 func (m ModelDTO) ToModelConfig() config.ModelConfig {
 	return config.ModelConfig{
 		Name:                m.Name,
 		DisplayName:         m.DisplayName,
-		APIType:             m.APIType,
-		Endpoint:            m.Endpoint,
-		Project:             m.Project,
-		Location:            m.Location,
+		Connection:          m.Connection,
 		Model:               m.Model,
+		Caps:                m.Caps.toConfig(),
 		Temperature:         m.Temperature,
 		TopP:                m.TopP,
 		MaxTokens:           m.MaxTokens,
-		ContextWindow:       m.ContextWindow,
 		ModelTimeoutSeconds: m.ModelTimeoutSeconds,
 		ReasoningEffort:     m.ReasoningEffort,
-		EffortOptions:       m.EffortOptions,
 		Thinking:            m.Thinking,
-		Free:                m.Free,
+		CacheTTL:            m.CacheTTL,
+	}
+}
+
+// ConnectionDTO mirrors the server's (redacted) connectionView.
+type ConnectionDTO struct {
+	Name              string `json:"name"`
+	APIType           string `json:"api_type"`
+	Endpoint          string `json:"endpoint"`
+	DiscoveryEndpoint string `json:"discovery_endpoint"`
+	Project           string `json:"project"`
+	Location          string `json:"location"`
+	HasAPIKey         bool   `json:"has_api_key"`
+}
+
+func (c ConnectionDTO) ToConnection() config.ProviderConnection {
+	return config.ProviderConnection{
+		Name:              c.Name,
+		APIType:           c.APIType,
+		Endpoint:          c.Endpoint,
+		DiscoveryEndpoint: c.DiscoveryEndpoint,
+		Project:           c.Project,
+		Location:          c.Location,
+	}
+}
+
+// DiscoveredModelDTO mirrors the server's discoveredModelView.
+type DiscoveredModelDTO struct {
+	ID          string  `json:"id"`
+	DisplayName string  `json:"display_name"`
+	Available   bool    `json:"available"`
+	InCatalog   bool    `json:"in_catalog"`
+	Caps        CapsDTO `json:"caps"`
+}
+
+// DiscoveredModelInfo is the UI-facing form of a merged discovery result (the
+// handler return type, identical in embedded and remote modes).
+type DiscoveredModelInfo struct {
+	ID          string
+	DisplayName string
+	Available   bool
+	InCatalog   bool
+	Caps        config.ModelCapabilities
+}
+
+func (d DiscoveredModelDTO) toInfo() DiscoveredModelInfo {
+	return DiscoveredModelInfo{
+		ID:          d.ID,
+		DisplayName: d.DisplayName,
+		Available:   d.Available,
+		InCatalog:   d.InCatalog,
+		Caps:        d.Caps.toConfig(),
 	}
 }
 
@@ -671,8 +757,8 @@ func (c *APIClient) GetTranscript(id, agentID string) ([]MessageDTO, error) {
 // TurnID (used for correlation) and the call is used mainly to detect an outright
 // dispatch failure. The turn then runs on the daemon independently of this
 // connection. ctx (a background context) is NOT bounded by quickTimeout.
-func (c *APIClient) SendMessage(ctx context.Context, id, message, modelName, effort string) (MessageDTO, error) {
-	return c.SendMessageWithOverrides(ctx, id, message, modelName, "", false, effort)
+func (c *APIClient) SendMessage(ctx context.Context, id, message, modelName, effort, thinking string) (MessageDTO, error) {
+	return c.sendMessageFull(ctx, id, message, modelName, "", false, effort, thinking)
 }
 
 // SendMessageWithOverrides sends a turn carrying a custom command's per-invocation
@@ -681,7 +767,13 @@ func (c *APIClient) SendMessage(ctx context.Context, id, message, modelName, eff
 // equivalent of OnSendCommand), so an attached TUI applies the overrides exactly as
 // embedded. SendMessage delegates here with no overrides.
 func (c *APIClient) SendMessageWithOverrides(ctx context.Context, id, message, modelName, agentName string, subtask bool, effort string) (MessageDTO, error) {
-	body := sendMessageBody{Message: message, Model: modelName, Effort: effort, Agent: agentName, Subtask: subtask}
+	return c.sendMessageFull(ctx, id, message, modelName, agentName, subtask, effort, "")
+}
+
+// sendMessageFull is the full send carrying effort + thinking + agent/subtask
+// overrides; the exported helpers delegate here.
+func (c *APIClient) sendMessageFull(ctx context.Context, id, message, modelName, agentName string, subtask bool, effort, thinking string) (MessageDTO, error) {
+	body := sendMessageBody{Message: message, Model: modelName, Effort: effort, Thinking: thinking, Agent: agentName, Subtask: subtask}
 	req, err := c.newRequest(ctx, http.MethodPost, "/sessions/"+url.PathEscape(id)+"/messages", body)
 	if err != nil {
 		return MessageDTO{}, err
@@ -704,12 +796,13 @@ func (c *APIClient) SendMessageWithOverrides(ctx context.Context, id, message, m
 
 // sendMessageBody mirrors the server's sendMessageRequest.
 type sendMessageBody struct {
-	Message string `json:"message"`
-	Model   string `json:"model,omitempty"`
-	Effort  string `json:"effort,omitempty"`
-	Mode    string `json:"mode,omitempty"`
-	Agent   string `json:"agent,omitempty"`
-	Subtask bool   `json:"subtask,omitempty"`
+	Message  string `json:"message"`
+	Model    string `json:"model,omitempty"`
+	Effort   string `json:"effort,omitempty"`
+	Thinking string `json:"thinking,omitempty"`
+	Mode     string `json:"mode,omitempty"`
+	Agent    string `json:"agent,omitempty"`
+	Subtask  bool   `json:"subtask,omitempty"`
 }
 
 // StopSession cancels a session's in-flight turn.
@@ -817,12 +910,58 @@ func (c *APIClient) RemoveModel(name string) error {
 	return c.do(http.MethodDelete, "/models/"+url.PathEscape(name), nil, nil)
 }
 
-// ScanModels probes a model backend on the daemon for the model ids it serves.
+// ScanModels discovers the models available on the connection a model references,
+// returning the available model ids (the editor's pick-list). It calls the same
+// merged-discovery endpoint as DiscoverConnection.
 func (c *APIClient) ScanModels(name string) ([]string, error) {
 	var out struct {
-		Models []string `json:"models"`
+		Models []DiscoveredModelDTO `json:"models"`
 	}
 	if err := c.do(http.MethodPost, "/models/"+url.PathEscape(name)+"/scan", nil, &out); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(out.Models))
+	for _, d := range out.Models {
+		if d.ID != "" {
+			ids = append(ids, d.ID)
+		}
+	}
+	return ids, nil
+}
+
+// --- Provider connections ---------------------------------------------------
+
+// ListConnections returns the daemon's provider connections (api_key redacted).
+func (c *APIClient) ListConnections() ([]ConnectionDTO, error) {
+	var out []ConnectionDTO
+	if err := c.do(http.MethodGet, "/connections", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// AddConnection creates a new provider connection (POST /connections).
+func (c *APIClient) AddConnection(pc config.ProviderConnection) error {
+	return c.do(http.MethodPost, "/connections", pc, nil)
+}
+
+// UpdateConnection updates a connection (PUT /connections/:name). A blank api_key
+// preserves the daemon's stored secret.
+func (c *APIClient) UpdateConnection(pc config.ProviderConnection) error {
+	return c.do(http.MethodPut, "/connections/"+url.PathEscape(pc.Name), pc, nil)
+}
+
+// RemoveConnection deletes a connection (DELETE /connections/:name).
+func (c *APIClient) RemoveConnection(name string) error {
+	return c.do(http.MethodDelete, "/connections/"+url.PathEscape(name), nil, nil)
+}
+
+// DiscoverConnection returns the merged (live + catalog) model list for a connection.
+func (c *APIClient) DiscoverConnection(name string) ([]DiscoveredModelDTO, error) {
+	var out struct {
+		Models []DiscoveredModelDTO `json:"models"`
+	}
+	if err := c.do(http.MethodPost, "/connections/"+url.PathEscape(name)+"/discover", nil, &out); err != nil {
 		return nil, err
 	}
 	return out.Models, nil

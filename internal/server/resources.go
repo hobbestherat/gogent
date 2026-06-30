@@ -66,15 +66,8 @@ func (svc modelsSvc) Update(r *http.Request, req updateModelRequest, name string
 	}
 	updated := req.ModelConfig
 	updated.Name = name
-	// Preserve an existing api_key when the request omits one.
-	if updated.APIKey == "" {
-		for _, m := range svc.s.g.Models() {
-			if m.Name == name {
-				updated.APIKey = m.APIKey
-				break
-			}
-		}
-	}
+	// Credentials live on the connection now, not the model, so there is nothing to
+	// preserve here (cf. connectionsSvc.Update, which preserves a blank api_key).
 	if err := svc.s.g.UpdateModel(updated); err != nil {
 		// An unroutable config is a client error (400, issue #532); an unknown name
 		// is 404. UpdateModel wraps the validation failure with gogent.ErrModelInvalid;
@@ -108,26 +101,104 @@ func (svc modelsSvc) Delete(r *http.Request, name string) (interface{}, error) {
 	return map[string]any{"removed": name}, nil
 }
 
-// Scan handles POST /models/:name/scan — probe the backend's model list.
+// Scan handles POST /models/:name/scan — discover the models available on the
+// connection the named model references (live listing merged with the catalog).
 func (svc modelsSvc) Scan(r *http.Request, name string) (interface{}, error) {
 	if err := requireHuman(r, svc.s.provider); err != nil {
 		return nil, err
 	}
-	var cfg config.ModelConfig
+	connName := ""
 	for _, m := range svc.s.g.Models() {
 		if m.Name == name {
-			cfg = m
+			connName = m.Connection
 			break
 		}
 	}
-	if cfg.Name == "" {
+	if connName == "" {
 		return nil, webapi.NewHTTPError(http.StatusNotFound, "model not found")
 	}
-	ids, err := svc.s.g.ScanModels(cfg)
+	return svc.discover(r, connName)
+}
+
+// discover runs DiscoverModels for a connection and returns the merged views.
+func (svc modelsSvc) discover(r *http.Request, connName string) (interface{}, error) {
+	ds, err := svc.s.g.DiscoverModels(r.Context(), connName)
 	if err != nil {
 		return nil, webapi.NewHTTPError(http.StatusBadGateway, err.Error())
 	}
-	return map[string]any{"models": ids}, nil
+	out := make([]discoveredModelView, 0, len(ds))
+	for _, d := range ds {
+		out = append(out, discoveredToView(d))
+	}
+	return map[string]any{"models": out}, nil
+}
+
+// --- connections ------------------------------------------------------------
+
+// connectionsSvc handles provider-connection CRUD + discovery.
+type connectionsSvc struct{ s *Server }
+
+// List handles GET /connections — all connections, api_key redacted.
+func (svc connectionsSvc) List(r *http.Request) (interface{}, error) {
+	if err := requireHuman(r, svc.s.provider); err != nil {
+		return nil, err
+	}
+	conns := svc.s.g.Connections()
+	out := make([]connectionView, 0, len(conns))
+	for _, c := range conns {
+		out = append(out, connectionToView(c))
+	}
+	return out, nil
+}
+
+// Create handles POST /connections.
+func (svc connectionsSvc) Create(r *http.Request, req updateConnectionRequest) (interface{}, error) {
+	if err := requireHuman(r, svc.s.provider); err != nil {
+		return nil, err
+	}
+	pc := req.ProviderConnection
+	if err := svc.s.g.AddConnection(pc); err != nil {
+		if errors.Is(err, gogent.ErrModelInvalid) {
+			return nil, webapi.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
+		return nil, webapi.NewHTTPError(http.StatusConflict, err.Error())
+	}
+	return connectionToView(&pc), nil
+}
+
+// Update handles PUT /connections/:name. A blank api_key preserves the existing key.
+func (svc connectionsSvc) Update(r *http.Request, req updateConnectionRequest, name string) (interface{}, error) {
+	if err := requireHuman(r, svc.s.provider); err != nil {
+		return nil, err
+	}
+	updated := req.ProviderConnection
+	updated.Name = name
+	if err := svc.s.g.UpdateConnection(updated); err != nil {
+		if errors.Is(err, gogent.ErrModelInvalid) {
+			return nil, webapi.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
+		return nil, webapi.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+	return connectionToView(&updated), nil
+}
+
+// Delete handles DELETE /connections/:name.
+func (svc connectionsSvc) Delete(r *http.Request, name string) (interface{}, error) {
+	if err := requireHuman(r, svc.s.provider); err != nil {
+		return nil, err
+	}
+	if err := svc.s.g.RemoveConnection(name); err != nil {
+		return nil, webapi.NewHTTPError(http.StatusConflict, err.Error())
+	}
+	return map[string]any{"removed": name}, nil
+}
+
+// Discover handles POST /connections/:name/discover — the merged model list.
+func (svc connectionsSvc) Discover(r *http.Request, name string) (interface{}, error) {
+	if err := requireHuman(r, svc.s.provider); err != nil {
+		return nil, err
+	}
+	return modelsSvc(svc).discover(r, name)
 }
 
 // --- tools ------------------------------------------------------------------

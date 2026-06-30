@@ -13,7 +13,7 @@ import (
 // TestSessionSnapshot verifies Snapshot reads the session counters and the root
 // agent's context figures into a mutex-free copy.
 func TestSessionSnapshot(t *testing.T) {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	sess := model.NewModelSession("snap", m)
 	ag := NewAgent("root", sess)
 	us := NewUserSession("s", ag)

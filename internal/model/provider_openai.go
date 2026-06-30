@@ -18,7 +18,7 @@ func init() {
 			SupportsResponseFormat:      true,
 			// Cached input is ~0.5x; caching is automatic (no client directive), no
 			// write count. DeepSeek rides this api_type but caches deeper — it
-			// overrides the read multiplier per-model via ModelCaps (model_overrides.go).
+			// overrides the read multiplier per-model via ModelQuirks (model_overrides.go).
 			CacheReadMultiplier: 0.50,
 		},
 		// Neutral local default; apps with their own default resolve it upstream
@@ -56,7 +56,7 @@ func init() {
 		// underlying model (e.g. Anthropic ~0.1x), which is not knowable from the
 		// api_type, and it exposes no cache-write count. So cache reads are priced at
 		// 1.0 (no multiplier set) — a deliberate, documented known-inaccuracy that
-		// never UNDER-counts the budget. Per-model ModelCaps rows can refine it later.
+		// never UNDER-counts the budget. Per-model ModelQuirks rows can refine it later.
 		caps:      Capabilities{SupportsResponseFormat: true},
 		endpoints: staticBaseEndpoints{defaultBaseURL: "https://openrouter.ai/api/v1", chatPath: "/chat/completions"},
 		auth: keyAuth{mode: authBearer, extraHeaders: map[string]string{

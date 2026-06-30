@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"gogent/internal/config"
-	"gogent/internal/model"
 
 	tui "github.com/hobbestherat/turbotui"
 	tv "github.com/hobbestherat/turbotui/turbotv"
@@ -95,20 +94,37 @@ func (w *Workbench) showModelForm(title string, initial config.ModelConfig, name
 	display := field("Display name:", 2)
 	display.SetText(initial.DisplayName)
 
-	dialog.Window.AddContent(dialogLabel("API type:", tv.Rect{X: 2, Y: 3, W: labelW, H: 1}))
-	apiTypeOpts := model.APITypeIDs()
-	apiType := newSelect(w.desktop, apiTypeOpts, tv.Rect{X: boxX, Y: 3, W: boxW, H: 1})
-	apiType.SetSelected(indexOrZero(apiTypeOpts, initial.APIType))
-	dialog.Window.AddContent(apiType)
+	// Connection: the credentialed provider connection this model talks through
+	// (credentials/api_type/endpoint live there now, edited in the Connections…
+	// dialog). A dropdown of configured connections, falling back to a text field
+	// when none are wired/known.
+	connNames := w.connectionNames()
+	dialog.Window.AddContent(dialogLabel("Connection:", tv.Rect{X: 2, Y: 3, W: labelW, H: 1}))
+	var connectionSel *tv.Select
+	var connectionBox *tv.TextBox
+	if len(connNames) > 0 {
+		connectionSel = newSelect(w.desktop, connNames, tv.Rect{X: boxX, Y: 3, W: boxW, H: 1})
+		connectionSel.SetSelected(indexOrZero(connNames, initial.Connection))
+		dialog.Window.AddContent(connectionSel)
+	} else {
+		connectionBox = tv.NewTextBox("", tv.Rect{X: boxX, Y: 3, W: boxW, H: 1})
+		connectionBox.SetText(initial.Connection)
+		dialog.Window.AddContent(connectionBox)
+	}
+	currentConnection := func() string {
+		if connectionSel != nil {
+			return connectionSel.Value()
+		}
+		return strings.TrimSpace(connectionBox.GetText())
+	}
 
-	endpoint := field("Endpoint:", 4)
-	endpoint.SetText(initial.Endpoint)
-
-	// Model id: a text field, with a Scan button (edit mode only) that queries the
-	// backend and, on success, swaps the text field for a dropdown of advertised
-	// model ids.
+	// Model id: a text field, with a Discover button that merges the connection's
+	// live listing with the catalog and, on success, swaps the text field for a
+	// dropdown of advertised models (✓ available / ⚠ catalog-only); picking one
+	// also auto-fills its capability snapshot. Discovery works on both add and edit
+	// since it is keyed by the connection, not a saved model name.
 	dialog.Window.AddContent(dialogLabel("Model id:", tv.Rect{X: 2, Y: 5, W: labelW, H: 1}))
-	scanEnabled := !nameEditable && w.handlers.ScanModels != nil
+	scanEnabled := w.handlers.DiscoverModels != nil
 	modelBoxW := boxW
 	if scanEnabled {
 		modelBoxW = boxW - modelFormScanW - 1
@@ -120,15 +136,18 @@ func (w *Workbench) showModelForm(title string, initial config.ModelConfig, name
 	modelSelect := newSelect(w.desktop, nil, modelRect)
 	modelSelect.Root().Visible = false
 	dialog.Window.AddContent(modelSelect)
+	// capsByID carries the discovered capability snapshot for each model id, applied
+	// to the saved config when the user picks a discovered model. The "⚠ " prefix on
+	// catalog-only rows is stripped here.
+	capsByID := map[string]config.ModelCapabilities{}
+	stripFlag := func(s string) string { return strings.TrimPrefix(strings.TrimPrefix(s, "⚠ "), "✓ ") }
 	currentModelID := func() string {
 		if modelSelect.Root().Visible {
-			return modelSelect.Value()
+			return stripFlag(modelSelect.Value())
 		}
 		return modelID.GetText()
 	}
 
-	apiKey := field("API key:", 6)
-	apiKey.SetText(initial.APIKey)
 	temp := field("Temperature:", 7)
 	temp.SetText(strconv.FormatFloat(float64(initial.Temperature), 'g', -1, 32))
 	maxTokens := field("Max tokens:", 8)
@@ -144,13 +163,28 @@ func (w *Workbench) showModelForm(title string, initial config.ModelConfig, name
 	thinking.SetSelected(thinkingIndex(initial.Thinking))
 	dialog.Window.AddContent(thinking)
 
-	// Project and Location target a Google Vertex AI deployment (api_type
-	// "vertex"); they build the endpoint URL when Endpoint is empty and are ignored
-	// by every other provider, so — like Thinking — they are safe to show always.
-	project := field("Project:", 11)
-	project.SetText(initial.Project)
-	location := field("Location:", 12)
-	location.SetText(initial.Location)
+	// Capabilities: edited via a sub-form for catalog-less / local models (or to tweak
+	// a discovered snapshot). manualCaps holds the override once the user opens the
+	// form; otherwise discovery / the carried-through initial caps win (see save).
+	var manualCaps config.ModelCapabilities
+	manualCapsEdited := false
+	bestCaps := func() config.ModelCapabilities {
+		if c, ok := capsByID[currentModelID()]; ok {
+			return c
+		}
+		return initial.Caps
+	}
+	dialog.Window.AddContent(dialogLabel("Capabilities:", tv.Rect{X: 2, Y: 11, W: labelW, H: 1}))
+	dialog.Window.AddContent(newButton("Edit…", tv.Rect{X: boxX, Y: 11, W: 9, H: 1}, func() {
+		seed := manualCaps
+		if !manualCapsEdited {
+			seed = bestCaps()
+		}
+		w.showCapsForm(seed, func(c config.ModelCapabilities) {
+			manualCaps = c
+			manualCapsEdited = true
+		})
+	}))
 
 	// Model timeout (issue #590): an optional per-model override of the global
 	// model-request timeout, for slow local models. Blank/0 means "use the global
@@ -160,26 +194,40 @@ func (w *Workbench) showModelForm(title string, initial config.ModelConfig, name
 		modelTimeout.SetText(strconv.Itoa(initial.ModelTimeoutSeconds))
 	}
 
-	// Scan (edit mode only): assemble a draft from the live fields and query the
-	// backend off the UI thread so a slow backend can't freeze the dialog.
+	// Discover: merge the selected connection's live listing with the catalog off the
+	// UI thread so a slow backend can't freeze the dialog. On success swap the model
+	// text box for a dropdown of advertised models, flagged ✓ available / ⚠
+	// catalog-only, and remember each model's caps for auto-fill on save.
 	if scanEnabled {
-		scanModels := func() {
-			draft := initial
-			draft.APIType = apiType.Value()
-			draft.Endpoint = endpoint.GetText()
-			draft.Model = currentModelID()
-			draft.APIKey = apiKey.GetText()
-			draft.Project = strings.TrimSpace(project.GetText())
-			draft.Location = strings.TrimSpace(location.GetText())
+		discover := func() {
+			connName := currentConnection()
+			if connName == "" {
+				w.showConfirm("Discover", "Choose a connection first.", nil)
+				return
+			}
 			go func() {
-				ids, err := w.handlers.ScanModels(draft)
+				ds, err := w.handlers.DiscoverModels(connName)
 				w.desktop.Post(func() {
 					if err != nil {
-						w.showConfirm("Scan", "Failed to list models:\n"+err.Error(), nil)
+						w.showConfirm("Discover", "Failed to discover models:\n"+err.Error(), nil)
 						return
 					}
-					modelSelect.Options = ids
-					modelSelect.SetSelected(indexOrZero(ids, currentModelID()))
+					opts := make([]string, 0, len(ds))
+					capsByID = map[string]config.ModelCapabilities{}
+					for _, d := range ds {
+						label := "✓ " + d.ID
+						if !d.Available {
+							label = "⚠ " + d.ID
+						}
+						opts = append(opts, label)
+						capsByID[d.ID] = d.Caps
+					}
+					if len(opts) == 0 {
+						w.showConfirm("Discover", "The connection returned no models.", nil)
+						return
+					}
+					modelSelect.Options = opts
+					modelSelect.SetSelected(0)
 					modelID.Root().Visible = false
 					modelSelect.Root().Visible = true
 					w.desktop.SetFocus(modelSelect)
@@ -187,7 +235,7 @@ func (w *Workbench) showModelForm(title string, initial config.ModelConfig, name
 			}()
 		}
 		dialog.Window.AddContent(newButton("Scan",
-			tv.Rect{X: boxX + modelBoxW + 1, Y: 5, W: modelFormScanW, H: 1}, scanModels))
+			tv.Rect{X: boxX + modelBoxW + 1, Y: 5, W: modelFormScanW, H: 1}, discover))
 	}
 
 	var layer *tv.Layer
@@ -198,20 +246,26 @@ func (w *Workbench) showModelForm(title string, initial config.ModelConfig, name
 			cfg.Name = strings.TrimSpace(nameBox.GetText())
 		}
 		cfg.DisplayName = display.GetText()
-		cfg.APIType = apiType.Value()
-		cfg.Endpoint = strings.TrimSpace(endpoint.GetText())
+		cfg.Connection = currentConnection()
 		cfg.Model = strings.TrimSpace(currentModelID())
-		cfg.APIKey = apiKey.GetText()
+		// Capability precedence: a manual edit wins; else a discovered snapshot for the
+		// chosen model; else the caps carried through from initial.
+		switch {
+		case manualCapsEdited:
+			cfg.Caps = manualCaps
+		default:
+			if caps, ok := capsByID[cfg.Model]; ok {
+				cfg.Caps = caps
+			}
+		}
 		if v, err := strconv.ParseFloat(temp.GetText(), 32); err == nil {
 			cfg.Temperature = float32(v)
 		}
 		cfg.MaxTokens = atoiOr(maxTokens.GetText(), cfg.MaxTokens)
 		cfg.ReasoningEffort = strings.TrimSpace(reasoningEffort.GetText())
 		cfg.Thinking = thinkingValue(thinking.Value())
-		cfg.Project = strings.TrimSpace(project.GetText())
-		cfg.Location = strings.TrimSpace(location.GetText())
-		// Blank clears the override (0 = use global); a valid non-negative value
-		// sets it; garbage leaves the prior value untouched.
+		// Blank clears the model-timeout override (0 = use global); a valid
+		// non-negative value sets it; garbage leaves the prior value untouched.
 		if txt := strings.TrimSpace(modelTimeout.GetText()); txt == "" {
 			cfg.ModelTimeoutSeconds = 0
 		} else if v, err := strconv.Atoi(txt); err == nil && v >= 0 {

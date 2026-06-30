@@ -53,7 +53,15 @@ type SessionWindow struct {
 	// effortLabelEnabledFG remembers the themed label colour so the greyed-out
 	// state (a model with no effort options) can be restored to it.
 	effortLabelEnabledFG tui.Color
-	status               *tv.Label
+	// thinkLabel / thinkSelect are the per-session extended-thinking control,
+	// symmetric with effort: options ["(default)","on","off"], enabled only when the
+	// selected model's Caps.ThinkingToggle is set. Placed left of the effort control.
+	thinkLabel          *tv.Label
+	thinkSelect         *tv.Select
+	thinkEnabled        bool
+	thinkHidden         bool
+	thinkLabelEnabledFG tui.Color
+	status              *tv.Label
 	// separator is the horizontal divider rule drawn on its own row directly above
 	// the status line (issue #195). It supplies the top edge of the controls region
 	// (status line + input row); together with the window frame's left/right/bottom
@@ -324,6 +332,9 @@ func newSessionWindowKind(wb *Workbench, id, title string, bounds tv.Rect, kind 
 	effortLabel := tv.NewLabel("Effort", tv.Rect{})
 	effortSelect := newSelect(wb.desktop, []string{effortDefaultOption}, tv.Rect{})
 	effortLabel.SetTarget(effortSelect)
+	thinkLabel := tv.NewLabel("Think", tv.Rect{})
+	thinkSelect := newSelect(wb.desktop, []string{effortDefaultOption, "on", "off"}, tv.Rect{})
+	thinkLabel.SetTarget(thinkSelect)
 	status := tv.NewLabel("idle", tv.Rect{})
 	status.FG = colorNote
 	// Two-colour status render (issue #551): the left content keeps the label's own
@@ -368,19 +379,25 @@ func newSessionWindowKind(wb *Workbench, id, title string, bounds tv.Rect, kind 
 	sw.effortLabel = effortLabel
 	sw.effortSelect = effortSelect
 	sw.effortLabelEnabledFG = effortLabel.FG
+	sw.thinkLabel = thinkLabel
+	sw.thinkSelect = thinkSelect
+	sw.thinkLabelEnabledFG = thinkLabel.FG
 	// The effort selector only opens while enabled (a model with effort options):
 	// wrap its click/key handlers so a greyed-out control is inert (issue #177).
 	sw.guardEffortSelect()
+	sw.guardThinkSelect()
 	// A model change in the focused session moves the Overall panel's "model"/"api"
 	// rows (issue #107) and rebuilds the per-session effort options + enabled state
 	// for the newly selected model (issue #177); coalesce the Overall refresh rather
 	// than paying for one per pick.
 	modelSelect.OnChange = func(int) {
 		sw.rebuildEffortOptions()
+		sw.rebuildThinkOptions()
 		wb.scheduleOverallRefresh()
 	}
-	// Seed the effort options from the initially selected model.
+	// Seed the effort + thinking controls from the initially selected model.
 	sw.rebuildEffortOptions()
+	sw.rebuildThinkOptions()
 	sw.status = status
 	sw.separator = separator
 	sw.statusState = "idle"
@@ -398,6 +415,8 @@ func newSessionWindowKind(wb *Workbench, id, title string, bounds tv.Rect, kind 
 	window.AddContent(modelSelect)
 	window.AddContent(effortLabel)
 	window.AddContent(effortSelect)
+	window.AddContent(thinkLabel)
+	window.AddContent(thinkSelect)
 	window.AddContent(status)
 	window.Content.LayoutFn = func(c *tv.VisualComponent) {
 		wd := c.Bounds.W
@@ -529,6 +548,7 @@ func newSessionWindowKind(wb *Workbench, id, title string, bounds tv.Rect, kind 
 		sw.planPending = false // sending supersedes any plan awaiting approval
 		modelName := sw.selectedModelName()
 		effort := sw.selectedEffort()
+		thinking := sw.selectedThinking()
 		// Expand any @-file mentions into attached file content so the model
 		// receives the referenced files directly (issue #46). The transcript keeps
 		// the message as typed; a note records what was attached.
@@ -538,7 +558,7 @@ func newSessionWindowKind(wb *Workbench, id, title string, bounds tv.Rect, kind 
 			sw.addNote("attached " + strings.Join(attached, ", "))
 		}
 		if wb.handlers.OnSend != nil {
-			go wb.handlers.OnSend(sw.id, message, modelName, effort)
+			go wb.handlers.OnSend(sw.id, message, modelName, effort, thinking)
 		}
 	}
 	sendButton.OnPress = submit
@@ -865,7 +885,7 @@ func (sw *SessionWindow) rebuildEffortOptions() {
 	cfg := sw.selectedModelConfig()
 	options := []string{effortDefaultOption}
 	if cfg != nil {
-		options = append(options, cfg.EffortOptions...)
+		options = append(options, cfg.Caps.EffortOptions...)
 	}
 	sw.effortSelect.Options = options
 	sw.effortEnabled = len(options) > 1
@@ -986,11 +1006,15 @@ func (sw *SessionWindow) layoutEffortControl(wd, modelRight int) {
 		sw.effortHidden = true
 		sw.effortSelect.Component.SetBounds(tv.Rect{})
 		sw.effortLabel.Component.SetBounds(tv.Rect{})
+		sw.hideThinkControl()
 		return
 	}
 	sw.effortHidden = false
 	sw.effortSelect.Component.SetBounds(tv.Rect{X: selX, Y: 0, W: effW, H: 1})
 	sw.effortLabel.Component.SetBounds(tv.Rect{X: labelX, Y: 0, W: effortLabelWidth, H: 1})
+	// Place the thinking control immediately left of the effort label, hiding it when
+	// it would overlap the model selector.
+	sw.layoutThinkControl(wd, modelRight, labelX)
 }
 
 // effortSelectWidth sizes the header effort dropdown (issue #177). It is a small
@@ -2207,7 +2231,7 @@ func (sw *SessionWindow) sendCommandNow(message string, ov pendingCommand) {
 		return
 	}
 	if sw.wb.handlers.OnSend != nil {
-		go sw.wb.handlers.OnSend(sw.id, message, modelName, effort)
+		go sw.wb.handlers.OnSend(sw.id, message, modelName, effort, sw.selectedThinking())
 	}
 }
 

@@ -14,13 +14,14 @@ func TestDefaultZAIEndpointsResolve(t *testing.T) {
 		"zai-glm-5.2": "https://api.z.ai/api/coding/paas/v4/chat/completions",
 	}
 	seen := map[string]bool{}
-	for _, m := range config.GetDefaultConfig().ModelConfigs {
+	cfg := config.GetDefaultConfig()
+	for _, m := range cfg.ModelConfigs {
 		exp, ok := want[m.Name]
 		if !ok {
 			continue
 		}
 		seen[m.Name] = true
-		got := NewModelConnectionFromConfig(m).URL
+		got := NewModelConnection(cfg.ConnectionForModel(m), m).URL
 		if got != exp {
 			t.Errorf("%s: chat URL = %q, want %q", m.Name, got, exp)
 		}

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"gogent/internal/agent"
+	"gogent/internal/config"
 	"gogent/internal/model"
 	"gogent/internal/tool"
 )
@@ -93,7 +94,10 @@ func agentFinalResponse(content string) map[string]interface{} {
 // exported API so the UI test can drive a genuine loop.
 func newInjectableSession(t *testing.T, url string) *agent.UserSession {
 	t.Helper()
-	conn := model.NewModelConnection()
+	conn := model.NewModelConnection(
+		&config.ProviderConnection{APIType: "openai"},
+		&config.ModelConfig{Model: "test"},
+	)
 	conn.SetURL(url)
 	sess := model.NewModelSession("test", conn)
 	reg := tool.NewToolRegistry()

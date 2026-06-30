@@ -8,17 +8,17 @@ import (
 	"gogent/internal/config"
 )
 
-func TestModelToViewIncludesVertexProjectLocationAndRedactsAPIKey(t *testing.T) {
-	view := modelToView(&config.ModelConfig{
-		Name:        "vertex-gemini",
-		DisplayName: "Vertex Gemini",
-		APIType:     "vertex",
-		Endpoint:    "",
-		Project:     "gogent-prod",
-		Location:    "us-central1",
-		Model:       "google/gemini-2.5-flash",
-		APIKey:      "secret-that-must-not-leak",
-		MaxTokens:   4096,
+// Credentials and the Vertex project/location now live on the provider connection,
+// not the model, so this exercises connectionToView: it surfaces api_type, project
+// and location, reports HasAPIKey, and never echoes the api_key itself.
+func TestConnectionToViewIncludesVertexProjectLocationAndRedactsAPIKey(t *testing.T) {
+	view := connectionToView(&config.ProviderConnection{
+		Name:     "vertex-gemini",
+		APIType:  "vertex",
+		Endpoint: "",
+		Project:  "gogent-prod",
+		Location: "us-central1",
+		APIKey:   "secret-that-must-not-leak",
 	})
 
 	if view.APIType != "vertex" {
@@ -39,12 +39,12 @@ func TestModelToViewIncludesVertexProjectLocationAndRedactsAPIKey(t *testing.T) 
 		t.Fatalf("Marshal: %v", err)
 	}
 	if strings.Contains(string(data), "secret-that-must-not-leak") || strings.Contains(string(data), `"api_key"`) {
-		t.Fatalf("model view leaked API key material: %s", data)
+		t.Fatalf("connection view leaked API key material: %s", data)
 	}
 	if !strings.Contains(string(data), `"project":"gogent-prod"`) {
-		t.Fatalf("model view JSON missing project: %s", data)
+		t.Fatalf("connection view JSON missing project: %s", data)
 	}
 	if !strings.Contains(string(data), `"location":"us-central1"`) {
-		t.Fatalf("model view JSON missing location: %s", data)
+		t.Fatalf("connection view JSON missing location: %s", data)
 	}
 }

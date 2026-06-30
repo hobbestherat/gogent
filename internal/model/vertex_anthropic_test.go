@@ -117,12 +117,14 @@ func TestVertexAnthropicURLsFromProjectLocation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			conn := NewModelConnectionFromConfig(&config.ModelConfig{
-				APIType:  "vertex-anthropic",
-				Project:  tc.project,
-				Location: tc.location,
-				Model:    tc.model,
-			})
+			conn := NewModelConnection(
+				&config.ProviderConnection{
+					APIType:  "vertex-anthropic",
+					Project:  tc.project,
+					Location: tc.location,
+				},
+				&config.ModelConfig{Model: tc.model},
+			)
 			if conn.URL != tc.wantChat {
 				t.Errorf("URL = %q, want %q", conn.URL, tc.wantChat)
 			}
@@ -158,7 +160,7 @@ func TestVertexAnthropicBodyShape(t *testing.T) {
 	}
 	// buildBody is now a PURE FORWARDER on both paths (issue #543): whether a model
 	// accepts sampling params is decided UPSTREAM in buildRequest via the
-	// (provider,model) capability layer (resolveModelCaps), not here. This call
+	// (provider,model) capability layer (resolveModelQuirks), not here. This call
 	// hands the adapter non-nil pointers, so they are forwarded verbatim — pinning
 	// the new contract. The "current-gen Claude drops sampling" assertion now lives
 	// at the buildRequest level (see caps_test.go) where the decision actually
@@ -483,13 +485,17 @@ func TestVertexAnthropicEndToEndADCAndWire(t *testing.T) {
 
 	// An explicit endpoint overrides the derived base but the spec's chatURLFunc
 	// still appends the :rawPredict model path, so we get the Anthropic wire here.
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType:     "vertex-anthropic",
-		Endpoint:    server.URL,
-		Model:       "claude-opus-4-8",
-		Temperature: 0.9, // must NOT be forwarded
-		MaxTokens:   321,
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{
+			APIType:  "vertex-anthropic",
+			Endpoint: server.URL,
+		},
+		&config.ModelConfig{
+			Model:       "claude-opus-4-8",
+			Temperature: 0.9, // must NOT be forwarded
+			MaxTokens:   321,
+		},
+	)
 	resp, err := conn.Complete([]Message{{Role: RoleUser, Content: "hi"}})
 	if err != nil {
 		t.Fatalf("Complete: %v", err)

@@ -26,7 +26,7 @@ func blockingLoopSession(t *testing.T, release <-chan struct{}) *UserSession {
 	}))
 	t.Cleanup(server.Close)
 
-	conn := model.NewModelConnection()
+	conn := newTestModelConnection()
 	conn.SetURL(server.URL)
 	sess := model.NewModelSession("s", conn)
 

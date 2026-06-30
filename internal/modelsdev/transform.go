@@ -52,34 +52,66 @@ func ProviderAPIType(p Provider) string {
 	return "openai"
 }
 
-// ToModelConfig builds a draft config.ModelConfig from a models.dev provider and
-// model. It is pure (no network) and fills every field models.dev can supply; the
-// API key (or Vertex project/location) is left blank for the user, and Name is the
-// sanitized base — call UniqueName to resolve collisions before saving.
-//
-// Endpoint is resolver-aware: blank for deriveBaseAPITypes (adapter default base),
-// p.API otherwise (the generic "openai" adapter's built-in base is a useless
-// localhost default, so a real gateway must carry p.API). Thinking is deliberately
-// left nil in v1 (provider default): forcing it would flip IsReasoningModel and
-// change the request encoding. The review form leaves the toggle user-editable.
-func ToModelConfig(providerID string, p Provider, m Model) config.ModelConfig {
+// ToConnection builds a draft config.ProviderConnection for a models.dev provider.
+// It is pure (no network); the API key (or Vertex project/location) is left blank
+// for the user. Endpoint is resolver-aware: blank for deriveBaseAPITypes (adapter
+// default base), p.API otherwise (the generic "openai" adapter's built-in base is a
+// useless localhost default, so a real gateway must carry p.API). Name is the
+// provider id; callers resolve collisions / reuse before saving.
+func ToConnection(p Provider) config.ProviderConnection {
 	apiType := ProviderAPIType(p)
-	cfg := config.ModelConfig{
-		Name:          sanitizeName(providerID, m.ID),
-		DisplayName:   m.Name,
-		APIType:       apiType,
-		Model:         m.ID,
-		Temperature:   0.7,
-		MaxTokens:     m.Limit.Output,
-		ContextWindow: m.Limit.Context,
-		Free:          m.Cost.Input == 0 && m.Cost.Output == 0,
+	pc := config.ProviderConnection{
+		Name:    strings.ToLower(strings.TrimSpace(p.ID)),
+		APIType: apiType,
 	}
 	if !deriveBaseAPITypes[apiType] {
-		cfg.Endpoint = p.API
+		pc.Endpoint = p.API
+	}
+	return pc
+}
+
+// ToModelCapabilities maps a models.dev model to a config.ModelCapabilities
+// snapshot (the discovery merge's catalog tier). Source is set to "catalog".
+func ToModelCapabilities(m Model) config.ModelCapabilities {
+	caps := config.ModelCapabilities{
+		ContextWindow:    m.Limit.Context,
+		MaxOutput:        m.Limit.Output,
+		Reasoning:        ReasoningCapable(m),
+		ThinkingToggle:   HasThinkingToggle(m),
+		EffortOptions:    effortOptions(m),
+		Vision:           m.Attachment,
+		ToolCall:         m.ToolCall,
+		StructuredOutput: m.StructuredOutput,
+		CustomTemp:       m.Temperature,
+		InputModalities:  append([]string(nil), m.Modalities.Input...),
+		OutputModalities: append([]string(nil), m.Modalities.Output...),
+		InputCostPerM:    m.Cost.Input,
+		OutputCostPerM:   m.Cost.Output,
+		CacheReadPerM:    m.Cost.CacheRead,
+		CacheWritePerM:   m.Cost.CacheWrite,
+		Knowledge:        m.Knowledge,
+		ReleaseDate:      m.ReleaseDate,
+		Source:           "catalog",
+	}
+	return caps
+}
+
+// ToModelConfig builds a draft config.ModelConfig from a models.dev model, pointing
+// at the given connection name and carrying a capability snapshot. Name is the
+// sanitized base — call UniqueName to resolve collisions before saving. Thinking is
+// left nil (provider default); the default ReasoningEffort is the first effort
+// option when the model exposes one.
+func ToModelConfig(providerID, connName string, m Model) config.ModelConfig {
+	cfg := config.ModelConfig{
+		Name:        sanitizeName(providerID, m.ID),
+		DisplayName: m.Name,
+		Connection:  connName,
+		Model:       m.ID,
+		Temperature: 0.7,
+		Caps:        ToModelCapabilities(m),
 	}
 	if effort := effortOptions(m); len(effort) > 0 {
 		cfg.ReasoningEffort = effort[0]
-		cfg.EffortOptions = effort
 	}
 	return cfg
 }

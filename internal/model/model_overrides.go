@@ -14,16 +14,16 @@ package model
 // modelOverride is one row of the curated override table. An empty provider
 // matches ANY provider (the model-only tier, applied across providers); an empty
 // model matches ANY model on the given provider (the provider-wildcard tier). At
-// least one of provider/model is set in every real row. See resolveModelCaps for
+// least one of provider/model is set in every real row. See resolveModelQuirks for
 // match precedence.
 type modelOverride struct {
 	provider APIType
 	model    string
-	caps     ModelCaps
+	caps     ModelQuirks
 }
 
 // modelOverrides is the authoritative override table. Order does not matter:
-// resolveModelCaps selects by tier (exact, then provider-wildcard, then
+// resolveModelQuirks selects by tier (exact, then provider-wildcard, then
 // model-only), not by table position.
 var modelOverrides = []modelOverride{
 	// --- Current-gen Claude rejects sampling params (temperature/top_p) ---
@@ -34,18 +34,18 @@ var modelOverrides = []modelOverride{
 	// either path (issue #543). claude-opus-4-8 is confirmed live; its current-gen
 	// siblings share the deprecation. Add a row here as each new deprecation is
 	// confirmed; this curated list is the source of truth.
-	{model: "claude-opus-4-8", caps: ModelCaps{RejectsSampling: true}},
-	{model: "claude-opus-4-5", caps: ModelCaps{RejectsSampling: true}},
-	{model: "claude-opus-4-1", caps: ModelCaps{RejectsSampling: true}},
-	{model: "claude-sonnet-4-5", caps: ModelCaps{RejectsSampling: true}},
-	{model: "claude-haiku-4-5", caps: ModelCaps{RejectsSampling: true}},
+	{model: "claude-opus-4-8", caps: ModelQuirks{RejectsSampling: true}},
+	{model: "claude-opus-4-5", caps: ModelQuirks{RejectsSampling: true}},
+	{model: "claude-opus-4-1", caps: ModelQuirks{RejectsSampling: true}},
+	{model: "claude-sonnet-4-5", caps: ModelQuirks{RejectsSampling: true}},
+	{model: "claude-haiku-4-5", caps: ModelQuirks{RejectsSampling: true}},
 
 	// Provider-wildcard: every Claude served over Vertex drops sampling params.
 	// This reproduces the former `if a.vertex { /* drop temperature/top_p */ }`
 	// branch in anthropicAdapter.buildBody exactly, so no Vertex model regresses
 	// regardless of generation — the decision now lives here as data rather than
 	// in the adapter.
-	{provider: APITypeVertexAnthropic, caps: ModelCaps{RejectsSampling: true}},
+	{provider: APITypeVertexAnthropic, caps: ModelQuirks{RejectsSampling: true}},
 
 	// --- DeepSeek cache discount (issue #544) ---
 	// DeepSeek is not a distinct api_type: it is reached as a base-URL config on
@@ -54,22 +54,22 @@ var modelOverrides = []modelOverride{
 	// (provider,model) rows override just the read multiplier for the two DeepSeek
 	// chat models, leaving everything else (incl. sampling) at the OpenAI default.
 	// DeepSeek reports no cache-write count, so WriteMultiplier stays inherited.
-	{provider: APITypeOpenAI, model: "deepseek-chat", caps: ModelCaps{CacheReadMultiplier: ptr(0.10)}},
-	{provider: APITypeOpenAI, model: "deepseek-reasoner", caps: ModelCaps{CacheReadMultiplier: ptr(0.10)}},
+	{provider: APITypeOpenAI, model: "deepseek-chat", caps: ModelQuirks{CacheReadMultiplier: ptr(0.10)}},
+	{provider: APITypeOpenAI, model: "deepseek-reasoner", caps: ModelQuirks{CacheReadMultiplier: ptr(0.10)}},
 }
 
 // ptr returns a pointer to v, for the optional (nil = inherit) multiplier fields
-// on ModelCaps.
+// on ModelQuirks.
 func ptr[T any](v T) *T { return &v }
 
 // findOverride returns the caps of the first override row satisfying match, and
-// whether one was found. resolveModelCaps calls it once per tier with a
+// whether one was found. resolveModelQuirks calls it once per tier with a
 // tier-specific predicate.
-func findOverride(match func(modelOverride) bool) (ModelCaps, bool) {
+func findOverride(match func(modelOverride) bool) (ModelQuirks, bool) {
 	for _, o := range modelOverrides {
 		if match(o) {
 			return o.caps, true
 		}
 	}
-	return ModelCaps{}, false
+	return ModelQuirks{}, false
 }

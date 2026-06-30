@@ -12,8 +12,8 @@ import (
 
 func issue389Models() []*config.ModelConfig {
 	return []*config.ModelConfig{
-		{Name: "alpha", DisplayName: "Alpha", Model: "provider-alpha", EffortOptions: []string{"low"}, ReasoningEffort: "low"},
-		{Name: "beta", DisplayName: "Beta", Model: "provider-beta", EffortOptions: []string{"old"}, ReasoningEffort: "old"},
+		{Name: "alpha", DisplayName: "Alpha", Model: "provider-alpha", ReasoningEffort: "low", Caps: config.ModelCapabilities{EffortOptions: []string{"low"}}},
+		{Name: "beta", DisplayName: "Beta", Model: "provider-beta", ReasoningEffort: "old", Caps: config.ModelCapabilities{EffortOptions: []string{"old"}}},
 	}
 }
 
@@ -30,8 +30,8 @@ func TestIssue389SetModelsRefreshesOpenSessionByStableName(t *testing.T) {
 	}
 
 	w.SetModels([]*config.ModelConfig{
-		{Name: "alpha", DisplayName: "Alpha", Model: "provider-alpha", EffortOptions: []string{"low"}, ReasoningEffort: "low"},
-		{Name: "beta", DisplayName: "Beta Renamed", Model: "provider-beta-v2", EffortOptions: []string{"fresh", "deep"}, ReasoningEffort: "deep"},
+		{Name: "alpha", DisplayName: "Alpha", Model: "provider-alpha", ReasoningEffort: "low", Caps: config.ModelCapabilities{EffortOptions: []string{"low"}}},
+		{Name: "beta", DisplayName: "Beta Renamed", Model: "provider-beta-v2", ReasoningEffort: "deep", Caps: config.ModelCapabilities{EffortOptions: []string{"fresh", "deep"}}},
 	})
 
 	if got := sw.modelSelect.Value(); got != "Beta Renamed" {
@@ -63,7 +63,7 @@ func TestIssue389SetModelsClampsWhenSelectedModelRemoved(t *testing.T) {
 	sw := w.NewSession()
 
 	w.SetModels([]*config.ModelConfig{
-		{Name: "alpha", DisplayName: "Alpha Updated", Model: "provider-alpha", EffortOptions: []string{"low"}, ReasoningEffort: "low"},
+		{Name: "alpha", DisplayName: "Alpha Updated", Model: "provider-alpha", ReasoningEffort: "low", Caps: config.ModelCapabilities{EffortOptions: []string{"low"}}},
 	})
 
 	if got := sw.modelSelect.Value(); got != "Alpha Updated" {
@@ -76,8 +76,8 @@ func TestIssue389SetModelsClampsWhenSelectedModelRemoved(t *testing.T) {
 
 func TestIssue389SetModelsPreservesDuplicateDisplayLabelByStableName(t *testing.T) {
 	w := NewWorkbench([]*config.ModelConfig{
-		{Name: "alpha", DisplayName: "Shared", Model: "provider-alpha", EffortOptions: []string{"low"}, ReasoningEffort: "low"},
-		{Name: "beta", DisplayName: "Shared", Model: "provider-beta", EffortOptions: []string{"deep"}, ReasoningEffort: "deep"},
+		{Name: "alpha", DisplayName: "Shared", Model: "provider-alpha", ReasoningEffort: "low", Caps: config.ModelCapabilities{EffortOptions: []string{"low"}}},
+		{Name: "beta", DisplayName: "Shared", Model: "provider-beta", ReasoningEffort: "deep", Caps: config.ModelCapabilities{EffortOptions: []string{"deep"}}},
 	})
 	sw := w.NewSession()
 	sw.modelSelect.SetSelected(1)
@@ -87,8 +87,8 @@ func TestIssue389SetModelsPreservesDuplicateDisplayLabelByStableName(t *testing.
 	}
 
 	w.SetModels([]*config.ModelConfig{
-		{Name: "alpha", DisplayName: "Shared", Model: "provider-alpha-v2", EffortOptions: []string{"low"}, ReasoningEffort: "low"},
-		{Name: "beta", DisplayName: "Shared", Model: "provider-beta-v2", EffortOptions: []string{"wide"}, ReasoningEffort: "wide"},
+		{Name: "alpha", DisplayName: "Shared", Model: "provider-alpha-v2", ReasoningEffort: "low", Caps: config.ModelCapabilities{EffortOptions: []string{"low"}}},
+		{Name: "beta", DisplayName: "Shared", Model: "provider-beta-v2", ReasoningEffort: "wide", Caps: config.ModelCapabilities{EffortOptions: []string{"wide"}}},
 	})
 
 	if got := sw.selectedModelName(); got != "beta" {

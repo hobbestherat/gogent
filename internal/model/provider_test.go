@@ -75,10 +75,10 @@ func TestNormalizeBaseURLPreservesQuery(t *testing.T) {
 
 func TestNewModelConnectionFromConfigBaseURL(t *testing.T) {
 	// An OpenAI backend given only a base URL gets /chat/completions appended.
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		Endpoint: "https://api.example.com/v1",
-		Model:    "m",
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{Endpoint: "https://api.example.com/v1"},
+		&config.ModelConfig{Model: "m"},
+	)
 	if want := "https://api.example.com/v1/chat/completions"; conn.URL != want {
 		t.Errorf("openai chat URL = %q, want %q", conn.URL, want)
 	}
@@ -87,10 +87,10 @@ func TestNewModelConnectionFromConfigBaseURL(t *testing.T) {
 	}
 
 	// A Z.AI backend with no endpoint uses the provider default base URL.
-	zconn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType: "zai",
-		Model:   "glm-4.6",
-	})
+	zconn := NewModelConnection(
+		&config.ProviderConnection{APIType: "zai"},
+		&config.ModelConfig{Model: "glm-4.6"},
+	)
 	if want := "https://api.z.ai/api/paas/v4/chat/completions"; zconn.URL != want {
 		t.Errorf("zai chat URL = %q, want %q", zconn.URL, want)
 	}
@@ -114,12 +114,10 @@ func TestZAIMaxTokensClamp(t *testing.T) {
 
 	// Z.AI rejects max_tokens above 131072, so an over-large config value must
 	// be clamped before the request is sent.
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType:   "zai",
-		Endpoint:  server.URL,
-		Model:     "glm-4.6",
-		MaxTokens: 262144,
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "zai", Endpoint: server.URL},
+		&config.ModelConfig{Model: "glm-4.6", MaxTokens: 262144},
+	)
 	if _, err := conn.Complete([]Message{{Role: RoleUser, Content: "hi"}}); err != nil {
 		t.Fatalf("Complete failed: %v", err)
 	}
@@ -128,11 +126,10 @@ func TestZAIMaxTokensClamp(t *testing.T) {
 	}
 
 	// OpenAI provider has no known ceiling, so the value passes through.
-	oconn := NewModelConnectionFromConfig(&config.ModelConfig{
-		Endpoint:  server.URL,
-		Model:     "m",
-		MaxTokens: 262144,
-	})
+	oconn := NewModelConnection(
+		&config.ProviderConnection{Endpoint: server.URL},
+		&config.ModelConfig{Model: "m", MaxTokens: 262144},
+	)
 	if _, err := oconn.Complete([]Message{{Role: RoleUser, Content: "hi"}}); err != nil {
 		t.Fatalf("Complete failed: %v", err)
 	}
@@ -152,11 +149,10 @@ func TestZAIModelsListing(t *testing.T) {
 	}))
 	defer server.Close()
 
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType:  "zai",
-		Endpoint: server.URL,
-		Model:    "glm-4.6",
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "zai", Endpoint: server.URL},
+		&config.ModelConfig{Model: "glm-4.6"},
+	)
 	models, err := conn.ListModels()
 	if err != nil {
 		t.Fatalf("ListModels failed: %v", err)
@@ -176,10 +172,10 @@ func TestListModelsNameKeyedShape(t *testing.T) {
 	}))
 	defer server.Close()
 
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		Endpoint: server.URL,
-		Model:    "llama3",
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{Endpoint: server.URL},
+		&config.ModelConfig{Model: "llama3"},
+	)
 	models, err := conn.ListModels()
 	if err != nil {
 		t.Fatalf("ListModels failed: %v", err)

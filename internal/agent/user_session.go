@@ -1856,7 +1856,7 @@ func (s *UserSession) MigrateToContextWindow(ctx context.Context, sess *model.Mo
 		return nil
 	}
 
-	target := cfg.ContextWindow // raw setting: 0 == unknown / use provider default
+	target := cfg.Caps.ContextWindow // raw setting: 0 == unknown / use provider default
 	prev := sess.LastMigrationWindow()
 	sess.SetLastMigrationWindow(target)
 

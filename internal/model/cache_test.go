@@ -95,7 +95,7 @@ func TestCompleteAccumulatesCachedTokens(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 	c.SetURL(server.URL)
 
 	resp, err := c.Complete([]Message{{Role: RoleUser, Content: "hi"}})

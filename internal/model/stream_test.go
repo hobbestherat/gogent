@@ -9,15 +9,16 @@ import (
 	"gogent/internal/config"
 )
 
-// newStreamConfig builds a minimal config pointed at a test server with an API
-// key, so the connection installs the APIKeyRoundTripper used by the auth tests.
-func newStreamConfig(endpoint, apiKey string) *config.ModelConfig {
-	return &config.ModelConfig{
-		APIType:  "openai",
-		Endpoint: endpoint,
-		Model:    "test-model",
-		APIKey:   apiKey,
-	}
+// newStreamConfig builds a minimal connection + model pointed at a test server
+// with an API key, so the connection installs the APIKeyRoundTripper used by the
+// auth tests.
+func newStreamConfig(endpoint, apiKey string) (*config.ProviderConnection, *config.ModelConfig) {
+	return &config.ProviderConnection{
+			APIType:  "openai",
+			Endpoint: endpoint,
+			APIKey:   apiKey,
+		},
+		&config.ModelConfig{Model: "test-model"}
 }
 
 // sseServer replays a fixed SSE body as a 200 text/event-stream response.
@@ -66,7 +67,7 @@ data: [DONE]
 
 func TestCompleteStreamContent(t *testing.T) {
 	server := sseServer(t, contentSSE)
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 	c.SetURL(server.URL)
 
 	streamCh, errCh := c.CompleteStream([]Message{{Role: RoleUser, Content: "hi"}})
@@ -120,7 +121,7 @@ func TestCompleteStreamRequestShape(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewModelConnectionFromConfig(newStreamConfig(server.URL, "secret-key"))
+	c := NewModelConnection(newStreamConfig(server.URL, "secret-key"))
 	c.SetURL(server.URL)
 
 	streamCh, errCh := c.CompleteStream([]Message{{Role: RoleUser, Content: "hi"}})
@@ -162,7 +163,7 @@ data: [DONE]
 
 `
 	server := sseServer(t, toolSSE)
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 	c.SetURL(server.URL)
 
 	streamCh, errCh := c.CompleteStream([]Message{{Role: RoleUser, Content: "go"}})
@@ -206,7 +207,7 @@ func TestCompleteStreamLargeLine(t *testing.T) {
 	big := strings.Repeat("x", 200*1024) // 200 KB, well past the Scanner default
 	body := `data: {"choices":[{"delta":{"content":"` + big + `"},"index":0,"finish_reason":"stop"}]}` + "\n\ndata: [DONE]\n\n"
 	server := sseServer(t, body)
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 	c.SetURL(server.URL)
 
 	streamCh, errCh := c.CompleteStream([]Message{{Role: RoleUser, Content: "hi"}})
@@ -225,7 +226,7 @@ func TestCompleteStreamHTTPError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 	c.SetURL(server.URL)
 
 	streamCh, errCh := c.CompleteStream([]Message{{Role: RoleUser, Content: "hi"}})

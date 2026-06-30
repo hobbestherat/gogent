@@ -102,8 +102,8 @@ func TestCostWeightedInputFlooredAtZero(t *testing.T) {
 
 // TestCostWeightedInputPerProvider drives the FULL two-axis resolution through a
 // real *ModelConnection built from config: Capabilities (per api_type) overridden
-// by ModelCaps (per provider×model). This is where a mis-set multiplier, a missing
-// DeepSeek row, or a broken resolveModelCaps wiring would surface.
+// by ModelQuirks (per provider×model). This is where a mis-set multiplier, a missing
+// DeepSeek row, or a broken resolveModelQuirks wiring would surface.
 func TestCostWeightedInputPerProvider(t *testing.T) {
 	// usage: prompt 1000, 500 cache reads, 100 cache writes (Anthropic-style).
 	usage := TokenUsage{PromptTokens: 1000, Cache: CacheStats{ReadTokens: 500, WriteTokens: 100}}
@@ -124,7 +124,7 @@ func TestCostWeightedInputPerProvider(t *testing.T) {
 		{"vertex-native gemini read0.25", "vertex-native", "gemini-2.5-pro", 625}, // 400 + 125 + 100
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			conn := NewModelConnectionFromConfig(&config.ModelConfig{APIType: tc.apiType, Model: tc.model})
+			conn := NewModelConnection(&config.ProviderConnection{APIType: tc.apiType}, &config.ModelConfig{Model: tc.model})
 			if got := conn.CostWeightedInput(usage); got != tc.want {
 				t.Errorf("CostWeightedInput(%s/%s) = %d, want %d", tc.apiType, tc.model, got, tc.want)
 			}
@@ -137,8 +137,8 @@ func TestCostWeightedInputPerProvider(t *testing.T) {
 // OpenAI models. This is the exact case Capabilities alone cannot express.
 func TestDeepSeekOverrideDistinctFromOpenAI(t *testing.T) {
 	usage := TokenUsage{PromptTokens: 1000, Cache: CacheStats{ReadTokens: 500}}
-	openai := NewModelConnectionFromConfig(&config.ModelConfig{APIType: "openai", Model: "gpt-4o"})
-	deepseek := NewModelConnectionFromConfig(&config.ModelConfig{APIType: "openai", Model: "deepseek-chat"})
+	openai := NewModelConnection(&config.ProviderConnection{APIType: "openai"}, &config.ModelConfig{Model: "gpt-4o"})
+	deepseek := NewModelConnection(&config.ProviderConnection{APIType: "openai"}, &config.ModelConfig{Model: "deepseek-chat"})
 	gotO, gotD := openai.CostWeightedInput(usage), deepseek.CostWeightedInput(usage)
 	if gotO != 750 {
 		t.Errorf("gpt-4o = %d, want 750 (read 0.5)", gotO)
@@ -156,7 +156,7 @@ func TestDeepSeekOverrideDistinctFromOpenAI(t *testing.T) {
 // prices everything at face value, so cost-weighting equals raw PromptTokens
 // regardless of cache counts (empty caps ⇒ 0 ⇒ orOne ⇒ 1.0).
 func TestCostWeightedInputProviderlessIsRawPrompt(t *testing.T) {
-	conn := &ModelConnection{} // zero value: provider nil, no ModelCaps row
+	conn := &ModelConnection{} // zero value: provider nil, no ModelQuirks row
 	for _, prompt := range []int{0, 1, 999, 100000} {
 		usage := TokenUsage{PromptTokens: prompt, Cache: CacheStats{ReadTokens: prompt / 2, WriteTokens: prompt / 4}}
 		if got := conn.CostWeightedInput(usage); got != prompt {
@@ -166,13 +166,13 @@ func TestCostWeightedInputProviderlessIsRawPrompt(t *testing.T) {
 }
 
 // TestBareNewModelConnectionIsPricedAsOpenAI documents a real behavior the design's
-// prose was loose about: NewModelConnection() is NOT provider-less — it wires the
+// prose was loose about: newPlaceholderConnection() is NOT provider-less — it wires the
 // OpenAI provider (api_type openai, read mult 0.5). So a bare connection DOES
 // discount cache reads, unlike a zero-value connection. No regression today (no test
 // sends cache tokens through a bare connection's budget), but pinning it keeps the
 // budget math honest if that ever changes.
 func TestBareNewModelConnectionIsPricedAsOpenAI(t *testing.T) {
-	conn := NewModelConnection()
+	conn := newPlaceholderConnection()
 	usage := TokenUsage{PromptTokens: 1000, Cache: CacheStats{ReadTokens: 500}}
 	// OpenAI 0.5: (1000-500) + 500*0.5 = 750, NOT the raw 1000.
 	if got := conn.CostWeightedInput(usage); got != 750 {
@@ -185,16 +185,16 @@ func TestBareNewModelConnectionIsPricedAsOpenAI(t *testing.T) {
 // while a native OpenAI model gets no override.
 func TestDeepSeekModelOverridesExist(t *testing.T) {
 	for _, m := range []string{"deepseek-chat", "deepseek-reasoner"} {
-		mc := resolveModelCaps(APITypeOpenAI, m)
+		mc := resolveModelQuirks(APITypeOpenAI, m)
 		if mc.CacheReadMultiplier == nil || *mc.CacheReadMultiplier != 0.10 {
-			t.Errorf("resolveModelCaps(openai, %s) read = %v, want *0.10", m, mc.CacheReadMultiplier)
+			t.Errorf("resolveModelQuirks(openai, %s) read = %v, want *0.10", m, mc.CacheReadMultiplier)
 		}
 		if mc.CacheWriteMultiplier != nil {
-			t.Errorf("resolveModelCaps(openai, %s) write = %v, want nil (inherit OpenAI default)", m, mc.CacheWriteMultiplier)
+			t.Errorf("resolveModelQuirks(openai, %s) write = %v, want nil (inherit OpenAI default)", m, mc.CacheWriteMultiplier)
 		}
 	}
-	if mc := resolveModelCaps(APITypeOpenAI, "gpt-4o"); mc.CacheReadMultiplier != nil {
-		t.Errorf("resolveModelCaps(openai, gpt-4o) read = %v, want nil (no override for native OpenAI)", mc.CacheReadMultiplier)
+	if mc := resolveModelQuirks(APITypeOpenAI, "gpt-4o"); mc.CacheReadMultiplier != nil {
+		t.Errorf("resolveModelQuirks(openai, gpt-4o) read = %v, want nil (no override for native OpenAI)", mc.CacheReadMultiplier)
 	}
 }
 
@@ -214,7 +214,7 @@ func TestCacheControlKindPerProvider(t *testing.T) {
 		{"openrouter", CacheControlNone},
 		{"vertex", CacheControlNone},
 	} {
-		conn := NewModelConnectionFromConfig(&config.ModelConfig{APIType: tc.apiType, Model: "m"})
+		conn := NewModelConnection(&config.ProviderConnection{APIType: tc.apiType}, &config.ModelConfig{Model: "m"})
 		if got := conn.caps().CacheControl; got != tc.want {
 			t.Errorf("%s CacheControl = %v, want %v", tc.apiType, got, tc.want)
 		}

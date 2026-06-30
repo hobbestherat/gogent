@@ -13,7 +13,7 @@ import (
 // on when the flag is set, off otherwise (the default).
 func TestCreateUserSessionWiresStreamThinking(t *testing.T) {
 	newSession := func(g *Gogent, id string) *agent.UserSession {
-		m := model.NewModelConnection()
+		m := testConn()
 		s := model.NewModelSession(id, m)
 		ag := agent.NewAgent(id, s)
 		return g.CreateUserSession(id, ag)

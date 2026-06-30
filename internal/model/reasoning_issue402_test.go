@@ -121,7 +121,7 @@ func TestGeminiParseResponseThoughtReasoningIssue402(t *testing.T) {
 
 func TestCompleteWithToolsStreamCtxPersistsReasoningOnResponseIssue402(t *testing.T) {
 	server := reasoningServer(t, reasoningContentSSE, nil)
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 	c.SetURL(server.URL)
 
 	resp, err := c.CompleteWithToolsStreamCtx(context.Background(), []Message{{Role: RoleUser, Content: "hi"}}, nil, nil)
@@ -165,7 +165,7 @@ func TestOpenAIRequestDoesNotReplayPersistedReasoningIssue402(t *testing.T) {
 	}))
 	defer server.Close()
 
-	conn := NewModelConnection()
+	conn := newPlaceholderConnection()
 	conn.SetURL(server.URL)
 	sess := NewModelSession("reasoning-replay", conn)
 	sess.ReplaceTranscript([]Message{

@@ -16,7 +16,7 @@ import (
 // maxSub sets the per-parent fan-out budget under test (issue #280, change F).
 func newSlotSession(t *testing.T, maxSub int) (*UserSession, *Agent) {
 	t.Helper()
-	conn := model.NewModelConnection()
+	conn := newTestModelConnection()
 	root := NewAgent("root", model.NewModelSession("root", conn))
 	us := NewUserSession("s", root)
 	cfg := config.DefaultSubAgentConfig() // one-shot, no recursion
@@ -31,7 +31,7 @@ func newSlotSession(t *testing.T, maxSub int) (*UserSession, *Agent) {
 // contract: completed/failed children stay in the tree but no longer occupy a
 // delegation slot, while running/waiting children do.
 func TestActiveSubAgentCount_OnlyNonTerminalChildrenCount(t *testing.T) {
-	conn := model.NewModelConnection()
+	conn := newTestModelConnection()
 	root := NewAgent("root", model.NewModelSession("root", conn))
 
 	if got := root.ActiveSubAgentCount(); got != 0 {
@@ -64,7 +64,7 @@ func TestActiveSubAgentCount_OnlyNonTerminalChildrenCount(t *testing.T) {
 // (its own direct children), not a recursive tree-wide tally — otherwise a
 // grandchild would wrongly consume the parent's slot budget.
 func TestActiveSubAgentCount_DirectChildrenOnly(t *testing.T) {
-	conn := model.NewModelConnection()
+	conn := newTestModelConnection()
 	root := NewAgent("root", model.NewModelSession("root", conn))
 
 	child := NewAgent("root/c", model.NewModelSession("c", conn))

@@ -107,11 +107,18 @@ func selectCatalogEffort(t *testing.T, w *Workbench, option string) {
 	w.desktop.Redraw()
 }
 
-// addModelCapturer returns GetModels/AddModel handlers where AddModel stashes the
-// saved draft in *captured and reports whether it fired via *fired.
-func addModelCapturer(captured **config.ModelConfig, fired *bool) Handlers {
+// addModelCapturer returns GetModels/AddConnection/AddModel handlers where AddModel
+// stashes the saved model draft in *captured (reporting whether it fired via
+// *fired) and AddConnection stashes the saved connection draft in *capturedConn.
+// Credential/endpoint fields now live on the connection, so tests assert those on
+// *capturedConn and Connection/Model/Caps on *captured.
+func addModelCapturer(captured **config.ModelConfig, capturedConn **config.ProviderConnection, fired *bool) Handlers {
 	return Handlers{
 		GetModels: func() []config.ModelConfig { return nil },
+		AddConnection: func(pc config.ProviderConnection) error {
+			*capturedConn = &pc
+			return nil
+		},
 		AddModel: func(m config.ModelConfig) error {
 			*captured = &m
 			*fired = true
@@ -329,9 +336,10 @@ func TestCatalogReviewEffortSelectOptions(t *testing.T) {
 // (the #541 invariant), while the catalog effort default is retained.
 func TestCatalogReviewSavePersistsEmptyEndpoint(t *testing.T) {
 	var captured *config.ModelConfig
+	var capturedConn *config.ProviderConnection
 	fired := false
 	w := newTestWorkbench(t)
-	w.SetHandlers(addModelCapturer(&captured, &fired))
+	w.SetHandlers(addModelCapturer(&captured, &capturedConn, &fired))
 	p := modelsdev.Provider{
 		ID: "anthropic", Name: "Anthropic", Env: []string{"ANTHROPIC_API_KEY"}, API: "https://api.anthropic.com/v1",
 		Models: map[string]modelsdev.Model{"c": {
@@ -347,13 +355,16 @@ func TestCatalogReviewSavePersistsEmptyEndpoint(t *testing.T) {
 	if !fired || captured == nil {
 		t.Fatal("Save did not call AddModel (API key not accepted or Save failed)")
 	}
-	if captured.Endpoint != "" {
-		t.Errorf("persisted derive-base Endpoint = %q, want empty (the #541 invariant: empty endpoint unless the user overrides)", captured.Endpoint)
+	if capturedConn == nil {
+		t.Fatal("Save did not call AddConnection (the credential/endpoint now live on the connection)")
+	}
+	if capturedConn.Endpoint != "" {
+		t.Errorf("persisted derive-base Endpoint = %q, want empty (the #541 invariant: empty endpoint unless the user overrides)", capturedConn.Endpoint)
 	}
 	if captured.ReasoningEffort != "low" {
 		t.Errorf("persisted ReasoningEffort = %q, want the catalog default %q (effort Select preselects EffortOptions[0])", captured.ReasoningEffort, "low")
 	}
-	if captured.APIKey == "" {
+	if capturedConn.APIKey == "" {
 		t.Error("persisted APIKey is empty (the typed key was not read on Save)")
 	}
 }
@@ -363,9 +374,10 @@ func TestCatalogReviewSavePersistsEmptyEndpoint(t *testing.T) {
 // the pre-#542 free-text box allowed.
 func TestCatalogReviewEffortNoneOptOut(t *testing.T) {
 	var captured *config.ModelConfig
+	var capturedConn *config.ProviderConnection
 	fired := false
 	w := newTestWorkbench(t)
-	w.SetHandlers(addModelCapturer(&captured, &fired))
+	w.SetHandlers(addModelCapturer(&captured, &capturedConn, &fired))
 	p := modelsdev.Provider{
 		ID: "anthropic", Name: "Anthropic", Env: []string{"ANTHROPIC_API_KEY"}, API: "https://api.anthropic.com/v1",
 		Models: map[string]modelsdev.Model{"c": {
@@ -391,9 +403,10 @@ func TestCatalogReviewEffortNoneOptOut(t *testing.T) {
 // survives Save (the gateway path is unchanged end-to-end through persistence).
 func TestCatalogReviewSaveGatewayPersistsAPI(t *testing.T) {
 	var captured *config.ModelConfig
+	var capturedConn *config.ProviderConnection
 	fired := false
 	w := newTestWorkbench(t)
-	w.SetHandlers(addModelCapturer(&captured, &fired))
+	w.SetHandlers(addModelCapturer(&captured, &capturedConn, &fired))
 	p := modelsdev.Provider{
 		ID: "groq", Name: "Groq", Env: []string{"GROQ_API_KEY"}, API: "https://api.groq.com/openai/v1",
 		Models: map[string]modelsdev.Model{"llama": {ID: "llama", Name: "Llama"}},
@@ -406,8 +419,11 @@ func TestCatalogReviewSaveGatewayPersistsAPI(t *testing.T) {
 	if !fired || captured == nil {
 		t.Fatal("Save did not call AddModel")
 	}
-	if captured.Endpoint != "https://api.groq.com/openai/v1" {
-		t.Errorf("persisted gateway Endpoint = %q, want p.API", captured.Endpoint)
+	if capturedConn == nil {
+		t.Fatal("Save did not call AddConnection")
+	}
+	if capturedConn.Endpoint != "https://api.groq.com/openai/v1" {
+		t.Errorf("persisted gateway Endpoint = %q, want p.API", capturedConn.Endpoint)
 	}
 }
 
@@ -416,9 +432,10 @@ func TestCatalogReviewSaveGatewayPersistsAPI(t *testing.T) {
 // key or silently save an unroutable config.
 func TestCatalogReviewVertexSaveRequiresProjectLocation(t *testing.T) {
 	var captured *config.ModelConfig
+	var capturedConn *config.ProviderConnection
 	fired := false
 	w := newTestWorkbench(t)
-	w.SetHandlers(addModelCapturer(&captured, &fired))
+	w.SetHandlers(addModelCapturer(&captured, &capturedConn, &fired))
 	p := modelsdev.Provider{
 		ID: "google-vertex", Name: "Vertex", API: "ignored",
 		Models: map[string]modelsdev.Model{"gemini": {ID: "gemini", Name: "Gemini"}},

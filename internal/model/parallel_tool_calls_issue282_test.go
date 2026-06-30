@@ -75,7 +75,10 @@ func TestParallelToolCallsMustBeDisabledMatrix(t *testing.T) {
 // non-strict spawn_subagent plus read-only tools must leave parallel_tool_calls
 // unset (provider default), so batched spawns can still be emitted in parallel.
 func TestBuildRequestNonStrictSpawnBatchKeepsParallelUnset(t *testing.T) {
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{Model: "gpt-4o"})
+	conn := NewModelConnection(
+		&config.ProviderConnection{},
+		&config.ModelConfig{Model: "gpt-4o"},
+	)
 	tools := []ToolDef{
 		spawnSubagentDef(),
 		readOnlyDef("read_file"),
@@ -106,7 +109,10 @@ func TestBuildRequestNonStrictSpawnBatchKeepsParallelUnset(t *testing.T) {
 // non-strict spawn_subagent is advertised alongside a strict tool, the strict
 // tool still forces parallel_tool_calls:false on an OpenAI-compatible provider.
 func TestBuildRequestStrictInvariantPreservedAlongsideSpawn(t *testing.T) {
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{Model: "gpt-4o"})
+	conn := NewModelConnection(
+		&config.ProviderConnection{},
+		&config.ModelConfig{Model: "gpt-4o"},
+	)
 	tools := []ToolDef{
 		spawnSubagentDef(),
 		{Type: "function", Function: FunctionDef{Name: "structured_output", Parameters: exampleSchema(), Strict: true}},
@@ -138,7 +144,10 @@ func TestBuildRequestStrictInvariantPreservedAlongsideSpawn(t *testing.T) {
 // non-strict spawn batch never produces a parallel_tool_calls field — the
 // narrowing leaves that provider's behaviour unchanged.
 func TestBuildRequestSpawnBatchNoParallelFieldForAnthropic(t *testing.T) {
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{APIType: "anthropic", Model: "claude-x"})
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "anthropic"},
+		&config.ModelConfig{Model: "claude-x"},
+	)
 	tools := []ToolDef{spawnSubagentDef(), readOnlyDef("read_file")}
 	req := conn.buildRequest([]Message{{Role: RoleUser, Content: "hi"}}, false, tools, nil)
 	if req.ParallelToolCalls != nil {

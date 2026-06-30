@@ -27,7 +27,7 @@ func (s *stubCompleter) StatsSnapshot() model.StatsSnapshot { return s.snap }
 // makeCompressibleSession builds a session whose transcript has enough turns to
 // split and whose token count is over the compression threshold.
 func makeCompressibleSession(id string) (*UserSession, *model.ModelSession) {
-	conn := model.NewModelConnection()
+	conn := newTestModelConnection()
 	sess := model.NewModelSession(id, conn)
 	sess.SetMaxContextLength(100)
 

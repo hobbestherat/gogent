@@ -19,12 +19,12 @@ import (
 // field directly and exercise the public completion / listing paths without any
 // network (configErr short-circuits before any HTTP dial).
 
-// configErrOf builds a connection from cfg and returns its deferred config error
-// (nil when the config is valid). This mirrors how the Vertex deferred error is
-// observed: validation runs in the constructor and is exposed via configErr.
-func configErrOf(t *testing.T, cfg *config.ModelConfig) error {
+// configErrOf builds a connection from pc+cfg and returns its deferred config
+// error (nil when the config is valid). This mirrors how the Vertex deferred error
+// is observed: validation runs in the constructor and is exposed via configErr.
+func configErrOf(t *testing.T, pc *config.ProviderConnection, cfg *config.ModelConfig) error {
 	t.Helper()
-	conn := NewModelConnectionFromConfig(cfg)
+	conn := NewModelConnection(pc, cfg)
 	if conn.configErr == nil {
 		return nil
 	}
@@ -70,13 +70,16 @@ func assertNoLocalhost404(t *testing.T, err error) {
 // headline case: an entry with neither api_type nor endpoint must not silently
 // fall back to localhost:8080.
 func TestRoutableValidation_EmptyAPITypeAndEndpoint_Rejected(t *testing.T) {
+	// Routability errors now name the CONNECTION (connectionName), so the
+	// identifying name lives on the ProviderConnection.
+	pc := &config.ProviderConnection{Name: "openrouter-glm-5.2"}
 	cfg := &config.ModelConfig{
 		Name:  "openrouter-glm-5.2",
 		Model: "glm-5.2", // model is set; the problem is routing, not the model id
 	}
-	me := requireMisconfig(t, configErrOf(t, cfg))
+	me := requireMisconfig(t, configErrOf(t, pc, cfg))
 
-	want := `model "openrouter-glm-5.2" is misconfigured: api_type and endpoint are both empty (cannot determine where to send requests)`
+	want := `connection "openrouter-glm-5.2" is misconfigured: api_type and endpoint are both empty (cannot determine where to send requests)`
 	if me.Message != want {
 		t.Errorf("message = %q\nwant %q", me.Message, want)
 	}
@@ -93,8 +96,9 @@ func TestRoutableValidation_EmptyAPITypeAndEndpoint_Rejected(t *testing.T) {
 // endpoint are both empty AND the model is also empty, the routability failure
 // (clearest, most actionable) wins, not the model-empty message.
 func TestRoutableValidation_RoutabilityPrecedesModelEmpty(t *testing.T) {
-	cfg := &config.ModelConfig{Name: "blank"} // api_type, endpoint, model all empty
-	me := requireMisconfig(t, configErrOf(t, cfg))
+	pc := &config.ProviderConnection{Name: "blank"} // api_type, endpoint empty
+	cfg := &config.ModelConfig{Name: "blank"}       // model empty
+	me := requireMisconfig(t, configErrOf(t, pc, cfg))
 	if !strings.Contains(me.Message, "api_type and endpoint are both empty") {
 		t.Errorf("routability error should take precedence over model-empty; got: %q", me.Message)
 	}
@@ -107,10 +111,11 @@ func TestRoutableValidation_RoutabilityPrecedesModelEmpty(t *testing.T) {
 // token silently maps to the OpenAI/localhost placeholder today; the fix
 // surfaces it as a misconfiguration that echoes the user's raw (typo'd) token.
 func TestRoutableValidation_UnrecognizedAPIType_Rejected(t *testing.T) {
-	cfg := &config.ModelConfig{Name: "typo", APIType: "opnai", Model: "x"}
-	me := requireMisconfig(t, configErrOf(t, cfg))
-	if !strings.Contains(me.Message, `model "typo"`) {
-		t.Errorf("message must name the model; got: %q", me.Message)
+	pc := &config.ProviderConnection{Name: "typo", APIType: "opnai"}
+	cfg := &config.ModelConfig{Name: "typo", Model: "x"}
+	me := requireMisconfig(t, configErrOf(t, pc, cfg))
+	if !strings.Contains(me.Message, `connection "typo"`) {
+		t.Errorf("message must name the connection; got: %q", me.Message)
 	}
 	if !strings.Contains(me.Message, `api_type "opnai" is unrecognized`) {
 		t.Errorf("message must echo the raw unrecognized api_type token; got: %q", me.Message)
@@ -118,20 +123,24 @@ func TestRoutableValidation_UnrecognizedAPIType_Rejected(t *testing.T) {
 	assertNoLocalhost404(t, me)
 }
 
-// TestRoutableValidation_NamesModelViaDisplayNameAndUnnamed: the error always
-// names something — DisplayName when Name is absent, "<unnamed>" when both are.
-func TestRoutableValidation_NamesModelViaDisplayNameAndUnnamed(t *testing.T) {
-	t.Run("display_name", func(t *testing.T) {
-		cfg := &config.ModelConfig{DisplayName: "My Local GPT", Model: "x"}
-		me := requireMisconfig(t, configErrOf(t, cfg))
-		if !strings.Contains(me.Message, `model "My Local GPT"`) {
-			t.Errorf("message must use DisplayName when Name is empty; got: %q", me.Message)
+// TestRoutableValidation_NamesConnectionAndUnnamed: a routability error always
+// names something — the connection's Name when set, "<unnamed>" when absent.
+// (Routability errors now identify the ProviderConnection via connectionName,
+// which has no DisplayName fallback — that is the new schema's behavior.)
+func TestRoutableValidation_NamesConnectionAndUnnamed(t *testing.T) {
+	t.Run("named", func(t *testing.T) {
+		pc := &config.ProviderConnection{Name: "My Local Conn"}
+		cfg := &config.ModelConfig{Model: "x"}
+		me := requireMisconfig(t, configErrOf(t, pc, cfg))
+		if !strings.Contains(me.Message, `connection "My Local Conn"`) {
+			t.Errorf("message must use the connection Name; got: %q", me.Message)
 		}
 	})
 	t.Run("unnamed", func(t *testing.T) {
-		cfg := &config.ModelConfig{Model: "x"} // no Name, no DisplayName
-		me := requireMisconfig(t, configErrOf(t, cfg))
-		if !strings.Contains(me.Message, `model "<unnamed>"`) {
+		pc := &config.ProviderConnection{} // no Name
+		cfg := &config.ModelConfig{Model: "x"}
+		me := requireMisconfig(t, configErrOf(t, pc, cfg))
+		if !strings.Contains(me.Message, `connection "<unnamed>"`) {
 			t.Errorf("message must fall back to <unnamed>; got: %q", me.Message)
 		}
 	})
@@ -149,8 +158,9 @@ func TestRoutableValidation_HostedGatewayEmptyModel_Rejected(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// endpoint empty is fine — these derive their base — but the model is empty.
-			cfg := &config.ModelConfig{Name: "gw", APIType: tc.apiType, Model: ""}
-			me := requireMisconfig(t, configErrOf(t, cfg))
+			pc := &config.ProviderConnection{Name: "gw", APIType: tc.apiType}
+			cfg := &config.ModelConfig{Name: "gw", Model: ""}
+			me := requireMisconfig(t, configErrOf(t, pc, cfg))
 			want := `model "gw" is misconfigured: model is empty (api_type "` + tc.apiType + `" requires a model name)`
 			// The deriving providers never trip routability, so the model-empty
 			// check is what fires; confirm it did not instead report routing.
@@ -176,21 +186,24 @@ func TestRoutableValidation_HostedGatewayEmptyModel_Rejected(t *testing.T) {
 func TestRoutableValidation_WhitespaceAndCaseNormalization(t *testing.T) {
 	t.Run("whitespace-only endpoint counts as empty (rejected)", func(t *testing.T) {
 		// empty api_type + a whitespace-only endpoint must still be rejected.
-		cfg := &config.ModelConfig{Name: "ws", Endpoint: "   \t  ", Model: "x"}
-		me := requireMisconfig(t, configErrOf(t, cfg))
+		pc := &config.ProviderConnection{Name: "ws", Endpoint: "   \t  "}
+		cfg := &config.ModelConfig{Name: "ws", Model: "x"}
+		me := requireMisconfig(t, configErrOf(t, pc, cfg))
 		if !strings.Contains(me.Message, "api_type and endpoint are both empty") {
 			t.Errorf("whitespace endpoint must be treated as empty; got: %q", me.Message)
 		}
 	})
 	t.Run("mixed-case OpenAI still accepted", func(t *testing.T) {
-		cfg := &config.ModelConfig{Name: "c", APIType: "OpenAI", Model: "m"} // empty endpoint
-		if err := configErrOf(t, cfg); err != nil {
+		pc := &config.ProviderConnection{Name: "c", APIType: "OpenAI"} // empty endpoint
+		cfg := &config.ModelConfig{Name: "c", Model: "m"}
+		if err := configErrOf(t, pc, cfg); err != nil {
 			t.Errorf("mixed-case OpenAI must be accepted via the openai exception; got: %v", err)
 		}
 	})
 	t.Run("whitespace-padded openrouter derives base (accepted)", func(t *testing.T) {
-		cfg := &config.ModelConfig{Name: "p", APIType: "  openrouter  ", Model: "google/gemma-3-27b-it:free"}
-		if err := configErrOf(t, cfg); err != nil {
+		pc := &config.ProviderConnection{Name: "p", APIType: "  openrouter  "}
+		cfg := &config.ModelConfig{Name: "p", Model: "google/gemma-3-27b-it:free"}
+		if err := configErrOf(t, pc, cfg); err != nil {
 			t.Errorf("whitespace-padded openrouter must resolve to a deriving provider; got: %v", err)
 		}
 	})
@@ -202,8 +215,9 @@ func TestRoutableValidation_WhitespaceAndCaseNormalization(t *testing.T) {
 // config-validation time and left to surface a real API error instead. This test
 // documents that conservative scope so it is not narrowed/expanded by accident.
 func TestRoutableValidation_AnthropicEmptyModelAcceptedDocumentsScope(t *testing.T) {
-	cfg := &config.ModelConfig{Name: "a", APIType: "anthropic", Model: ""}
-	if err := configErrOf(t, cfg); err != nil {
+	pc := &config.ProviderConnection{Name: "a", APIType: "anthropic"}
+	cfg := &config.ModelConfig{Name: "a", Model: ""}
+	if err := configErrOf(t, pc, cfg); err != nil {
 		t.Errorf("anthropic empty-model must NOT be rejected by the scoped gateway check; got: %v", err)
 	}
 }
@@ -215,7 +229,7 @@ func TestRoutableValidation_AnthropicEmptyModelAcceptedDocumentsScope(t *testing
 // TestRoutableValidation_ValidConfigs_Accepted exercises every configuration
 // the fix must NOT reject.
 func TestRoutableValidation_ValidConfigs_Accepted(t *testing.T) {
-	vertexReady := func(apiType string) *config.ModelConfig {
+	vertexReady := func(apiType string) (*config.ProviderConnection, *config.ModelConfig) {
 		// The OpenAI-compat shim ("vertex") addresses Gemini as "google/<model>";
 		// the native and anthropic Vertex routes name the model bare (issue #574).
 		// Each fixture uses the shape its route expects so it stays a *valid* config
@@ -224,33 +238,38 @@ func TestRoutableValidation_ValidConfigs_Accepted(t *testing.T) {
 		if StringToAPIType(apiType) == APITypeVertex {
 			model = "google/gemini-2.5-flash"
 		}
-		return &config.ModelConfig{
-			Name: "v", APIType: apiType, Model: model,
-			Project: "my-proj", Location: "us-central1",
-		}
+		return &config.ProviderConnection{
+				Name: "v", APIType: apiType,
+				Project: "my-proj", Location: "us-central1",
+			},
+			&config.ModelConfig{Name: "v", Model: model}
 	}
+	vpc, vcfg := vertexReady("vertex")
+	vnpc, vncfg := vertexReady("vertex-native")
+	vapc, vacfg := vertexReady("vertex-anthropic")
 	for _, tc := range []struct {
 		name string
+		pc   *config.ProviderConnection
 		cfg  *config.ModelConfig
 	}{
 		// The maintainer-flagged legitimate edges:
-		{"empty api_type with explicit endpoint", &config.ModelConfig{Name: "e", Endpoint: "https://api.example.com/v1", Model: "m"}},
-		{"explicit openai empty endpoint (documented local default)", &config.ModelConfig{Name: "o", APIType: "openai", Model: "m"}},
-		{"explicit openai empty endpoint empty model (local auto-select)", &config.ModelConfig{Name: "o", APIType: "openai", Model: ""}},
-		{"explicit openai endpoint empty model", &config.ModelConfig{Name: "o", APIType: "openai", Endpoint: "http://127.0.0.1:8080/v1", Model: ""}},
+		{"empty api_type with explicit endpoint", &config.ProviderConnection{Name: "e", Endpoint: "https://api.example.com/v1"}, &config.ModelConfig{Name: "e", Model: "m"}},
+		{"explicit openai empty endpoint (documented local default)", &config.ProviderConnection{Name: "o", APIType: "openai"}, &config.ModelConfig{Name: "o", Model: "m"}},
+		{"explicit openai empty endpoint empty model (local auto-select)", &config.ProviderConnection{Name: "o", APIType: "openai"}, &config.ModelConfig{Name: "o", Model: ""}},
+		{"explicit openai endpoint empty model", &config.ProviderConnection{Name: "o", APIType: "openai", Endpoint: "http://127.0.0.1:8080/v1"}, &config.ModelConfig{Name: "o", Model: ""}},
 		// Every base-URL-deriving provider with an empty endpoint (model set):
-		{"zai empty endpoint", &config.ModelConfig{Name: "z", APIType: "zai", Model: "glm-4.6"}},
-		{"openrouter empty endpoint", &config.ModelConfig{Name: "r", APIType: "openrouter", Model: "google/gemma-3-27b-it:free"}},
-		{"anthropic empty endpoint", &config.ModelConfig{Name: "a", APIType: "anthropic", Model: "claude-opus-4-8"}},
-		{"vertex empty endpoint", vertexReady("vertex")},
-		{"vertex-native empty endpoint", vertexReady("vertex-native")},
-		{"vertex-anthropic empty endpoint", vertexReady("vertex-anthropic")},
+		{"zai empty endpoint", &config.ProviderConnection{Name: "z", APIType: "zai"}, &config.ModelConfig{Name: "z", Model: "glm-4.6"}},
+		{"openrouter empty endpoint", &config.ProviderConnection{Name: "r", APIType: "openrouter"}, &config.ModelConfig{Name: "r", Model: "google/gemma-3-27b-it:free"}},
+		{"anthropic empty endpoint", &config.ProviderConnection{Name: "a", APIType: "anthropic"}, &config.ModelConfig{Name: "a", Model: "claude-opus-4-8"}},
+		{"vertex empty endpoint", vpc, vcfg},
+		{"vertex-native empty endpoint", vnpc, vncfg},
+		{"vertex-anthropic empty endpoint", vapc, vacfg},
 		// An unrecognized api_type WITH an explicit endpoint is routable (maps to
 		// the generic OpenAI adapter) and must stay accepted.
-		{"unrecognized api_type with explicit endpoint", &config.ModelConfig{Name: "u", APIType: "acme-llama", Endpoint: "https://api.acme.test/v1", Model: "m"}},
+		{"unrecognized api_type with explicit endpoint", &config.ProviderConnection{Name: "u", APIType: "acme-llama", Endpoint: "https://api.acme.test/v1"}, &config.ModelConfig{Name: "u", Model: "m"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := configErrOf(t, tc.cfg); err != nil {
+			if err := configErrOf(t, tc.pc, tc.cfg); err != nil {
 				t.Errorf("valid config must not be rejected, got: %v", err)
 			}
 		})
@@ -263,8 +282,9 @@ func TestRoutableValidation_ValidConfigs_Accepted(t *testing.T) {
 // The model is publisher-qualified so the #574 publisher-prefix rule passes and
 // this test keeps isolating the project/location precedence it was written for.
 func TestRoutableValidation_VertexMissingProjectLocation_StillUsesVertexValidate(t *testing.T) {
-	cfg := &config.ModelConfig{Name: "v", APIType: "vertex", Model: "google/gemini-2.5-flash"}
-	me := requireMisconfig(t, configErrOf(t, cfg))
+	pc := &config.ProviderConnection{Name: "v", APIType: "vertex"}
+	cfg := &config.ModelConfig{Name: "v", Model: "google/gemini-2.5-flash"}
+	me := requireMisconfig(t, configErrOf(t, pc, cfg))
 	if !strings.Contains(me.Message, "project and location are required") {
 		t.Errorf("expected Vertex's own project/location error, got: %q", me.Message)
 	}
@@ -280,7 +300,12 @@ func TestRoutableValidation_VertexMissingProjectLocation_StillUsesVertexValidate
 
 func newRejectedConn(t *testing.T) *ModelConnection {
 	t.Helper()
-	return NewModelConnectionFromConfig(&config.ModelConfig{Name: "bad-entry", Model: "x"})
+	// An unroutable connection (empty api_type + endpoint) with a model selected:
+	// the routability check rejects it with a deferred configErr.
+	return NewModelConnection(
+		&config.ProviderConnection{Name: "bad-entry"},
+		&config.ModelConfig{Name: "bad-entry", Model: "x"},
+	)
 }
 
 // TestRoutableValidation_CompleteSurfacesConfigErr_FirstUse_NoNetwork: the
@@ -386,7 +411,7 @@ func TestRoutableValidation_ListModelsSurfacesConfigErr_NoNetwork(t *testing.T) 
 // carries a clearer message and stays non-retryable, with retryability of other
 // statuses unchanged.
 func TestAnalyzeError_404_DescriptiveButStillNonRetryable(t *testing.T) {
-	conn := NewModelConnection() // has Stats initialized
+	conn := newPlaceholderConnection() // has Stats initialized
 	me := conn.analyzeError(404, "not found body")
 
 	if me.Type != ErrorGeneric {
@@ -466,21 +491,20 @@ func TestRoutableValidation_BuildRequestStillWorksOnRejectedConfig(t *testing.T)
 // TestRoutableValidation_BareNewModelConnectionUntouched: the standalone library
 // default (no config) is never validated and stays usable as-is.
 func TestRoutableValidation_BareNewModelConnectionUntouched(t *testing.T) {
-	conn := NewModelConnection()
+	conn := newPlaceholderConnection()
 	if conn.configErr != nil {
-		t.Errorf("bare NewModelConnection() must not set a configErr, got: %v", conn.configErr)
+		t.Errorf("bare newPlaceholderConnection() must not set a configErr, got: %v", conn.configErr)
 	}
 	if conn.URL != DefaultModelURL {
 		t.Errorf("bare default URL changed: %q (want %q)", conn.URL, DefaultModelURL)
 	}
 }
 
-// TestRoutableValidation_NilConfigSafe: validateRoutableConfig (the function the
-// fix adds) has a nil guard and returns nil rather than panicking. (The
-// constructor itself dereferences the config upstream of this function, so
-// nil-config nil-safety of the constructor is pre-existing and out of scope.)
+// TestRoutableValidation_NilConfigSafe: validateRoutableConnection (the function
+// the fix adds) has a nil guard and returns nil rather than panicking when both
+// the connection and the config are nil.
 func TestRoutableValidation_NilConfigSafe(t *testing.T) {
-	if err := validateRoutableConfig(nil); err != nil {
-		t.Errorf("validateRoutableConfig(nil) = %v, want nil", err)
+	if err := validateRoutableConnection(nil, nil); err != nil {
+		t.Errorf("validateRoutableConnection(nil, nil) = %v, want nil", err)
 	}
 }

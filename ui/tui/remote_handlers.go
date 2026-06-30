@@ -1061,13 +1061,13 @@ func (rc *RemoteClient) Handlers() Handlers {
 		// OnSend fires the turn on the daemon in the background; progress streams
 		// back over the global SSE consumer into this session's window, exactly as
 		// the embedded observer delivers it.
-		OnSend: func(sessionID, message, modelName, effort string) {
+		OnSend: func(sessionID, message, modelName, effort, thinking string) {
 			// The turn's lifetime belongs to the daemon: use a background context
 			// (not rc.ctx) so detaching the TUI does not proactively cancel the
 			// request. Cancellation comes from the session's own controls (OnStop →
 			// POST /stop). Progress streams back over the global SSE consumer.
 			go func() {
-				if _, err := c.SendMessage(context.Background(), sessionID, message, modelName, effort); err != nil {
+				if _, err := c.SendMessage(context.Background(), sessionID, message, modelName, effort, thinking); err != nil {
 					rc.emitSendErr(sessionID, err)
 				}
 			}()
@@ -1331,6 +1331,31 @@ func (rc *RemoteClient) Handlers() Handlers {
 		ScanModels:  func(m config.ModelConfig) ([]string, error) { return c.ScanModels(m.Name) },
 		AddModel:    func(m config.ModelConfig) error { return c.AddModel(m) },
 		RemoveModel: func(name string) error { return c.RemoveModel(name) },
+		GetConnections: func() []config.ProviderConnection {
+			conns, err := c.ListConnections()
+			if err != nil {
+				return nil
+			}
+			out := make([]config.ProviderConnection, 0, len(conns))
+			for _, dto := range conns {
+				out = append(out, dto.ToConnection())
+			}
+			return out
+		},
+		AddConnection:    func(pc config.ProviderConnection) error { return c.AddConnection(pc) },
+		UpdateConnection: func(pc config.ProviderConnection) error { return c.UpdateConnection(pc) },
+		RemoveConnection: func(name string) error { return c.RemoveConnection(name) },
+		DiscoverModels: func(connName string) ([]DiscoveredModelInfo, error) {
+			ds, err := c.DiscoverConnection(connName)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]DiscoveredModelInfo, 0, len(ds))
+			for _, d := range ds {
+				out = append(out, d.toInfo())
+			}
+			return out, nil
+		},
 		GetModelCatalog: func(ctx context.Context, force bool) (modelsdev.Catalog, error) {
 			return mdc.Catalog(ctx, force)
 		},

@@ -3,7 +3,7 @@ package model
 import "testing"
 
 func TestApplyCompressedTranscriptPreservesSystemPrompt(t *testing.T) {
-	s := NewModelSession("t", NewModelConnection())
+	s := NewModelSession("t", newPlaceholderConnection())
 	s.SetSystemPrompt("SYSTEM PROMPT")
 	s.ReplaceTranscript([]Message{
 		{Role: RoleUser, Content: "a long original first message"},
@@ -53,7 +53,7 @@ func TestApplyCompressedTranscriptPreservesSystemPrompt(t *testing.T) {
 }
 
 func TestNeedsCompressionThreshold(t *testing.T) {
-	s := NewModelSession("t", NewModelConnection())
+	s := NewModelSession("t", newPlaceholderConnection())
 	s.SetMaxContextLength(1000)
 
 	s.CurrentTokenCount = 799
@@ -72,7 +72,7 @@ func TestNeedsCompressionThreshold(t *testing.T) {
 // high-water mark, then stays suppressed until the context recedes below the 50%
 // low-water mark.
 func TestNeedsCompressionHysteresis(t *testing.T) {
-	s := NewModelSession("t", NewModelConnection())
+	s := NewModelSession("t", newPlaceholderConnection())
 	s.SetMaxContextLength(1000) // high-water 800, low-water 500
 
 	// Armed by default: fires at the high-water mark.
@@ -108,7 +108,7 @@ func TestNeedsCompressionHysteresis(t *testing.T) {
 // configured, compaction never fires (the safeguard is off rather than firing at
 // a nonsense threshold).
 func TestNeedsCompressionDisabledWithoutWindow(t *testing.T) {
-	s := NewModelSession("t", NewModelConnection())
+	s := NewModelSession("t", newPlaceholderConnection())
 	s.SetMaxContextLength(0)
 	s.CurrentTokenCount = 1_000_000
 	if s.NeedsCompression() {
@@ -121,7 +121,7 @@ func TestNeedsCompressionDisabledWithoutWindow(t *testing.T) {
 // window is evaluated against the new budget), while re-setting the same window
 // leaves an active suppression intact.
 func TestSetMaxContextLengthResetsHysteresisOnChange(t *testing.T) {
-	s := NewModelSession("t", NewModelConnection())
+	s := NewModelSession("t", newPlaceholderConnection())
 	s.SetMaxContextLength(1000) // high 800, low 500
 	s.CurrentTokenCount = 800
 	if !s.NeedsCompression() {

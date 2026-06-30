@@ -494,7 +494,9 @@ func buildOverallStats(report stats.Report, sessions, subAgents int, model *conf
 		if o.Model == "" {
 			o.Model = model.Name
 		}
-		o.APIEndpoint = formatEndpoint(model.Endpoint, model.APIType)
+		// Credentials/endpoint live on the connection now; show which connection this
+		// model routes through (stage 5b can resolve the connection's host/api_type).
+		o.APIEndpoint = model.Connection
 	}
 	return o
 }

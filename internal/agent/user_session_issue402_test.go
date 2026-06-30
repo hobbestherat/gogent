@@ -218,11 +218,13 @@ func TestRunLoopEmptyLengthAtProviderCeilingErrorsWithoutRetryIssue402(t *testin
 	server := httptest.NewServer(b)
 	defer server.Close()
 
-	conn := model.NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType:   "zai",
-		Model:     "glm-5.2",
-		MaxTokens: 131072,
-	})
+	conn := model.NewModelConnection(
+		&config.ProviderConnection{APIType: "zai"},
+		&config.ModelConfig{
+			Model:     "glm-5.2",
+			MaxTokens: 131072,
+		},
+	)
 	conn.SetURL(server.URL)
 	sess := model.NewModelSession("m", conn)
 	agent := NewAgent("root", sess)

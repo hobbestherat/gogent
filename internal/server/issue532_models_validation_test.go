@@ -19,11 +19,12 @@ import (
 // a valid PUT must take effect (proving the body is read); if the body were
 // silently dropped, the zero-value config would be rejected as unroutable (400).
 
-// unroutableCreateBody is {name, api_key, rest empty}: a model with no api_type and
-// no endpoint — the headline unroutable shape from the issue.
+// unroutableCreateBody is {name, rest empty}: a model that references no provider
+// connection — the headline unroutable shape under the connection redesign (the
+// model cannot be routed because it points at no connection).
 func unroutableCreateBody(t *testing.T, name string) []byte {
 	t.Helper()
-	b, err := json.Marshal(config.ModelConfig{Name: name, APIKey: "k"})
+	b, err := json.Marshal(config.ModelConfig{Name: name})
 	if err != nil {
 		t.Fatalf("marshal unroutable body: %v", err)
 	}
@@ -68,7 +69,9 @@ func TestCreateModel_Unroutable_Returns400_NotPersisted(t *testing.T) {
 // empty model is also unroutable and must be a 400.
 func TestCreateModel_HostedGatewayEmptyModel_Returns400(t *testing.T) {
 	srv, _, _ := newTestServer(t, Options{Password: "x"})
-	body, _ := json.Marshal(config.ModelConfig{Name: "gw", APIType: "openrouter", APIKey: "k"})
+	// "openrouter" is a routable built-in hosted-gateway connection, but a model on
+	// it with an empty model id is still unroutable.
+	body, _ := json.Marshal(config.ModelConfig{Name: "gw", Connection: "openrouter"})
 	rec := serveOne(t, srv, loopbackReq(http.MethodPost, "/api/models", bytes.NewReader(body)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("POST openrouter-empty-model status = %d, want 400; body=%s", rec.Code, rec.Body.String())
@@ -111,8 +114,8 @@ func TestUpdateModel_UnroutableBody_Returns400_ExistingIntact(t *testing.T) {
 	if v == nil {
 		t.Fatal("the existing model vanished after a rejected PUT")
 	}
-	if v.Model != "catalog-model-id" || v.Endpoint != "https://catalog.example.com/v1" {
-		t.Errorf("the existing model was mutated by a rejected PUT: model=%q endpoint=%q", v.Model, v.Endpoint)
+	if v.Model != "catalog-model-id" || v.Connection != "local-lan" {
+		t.Errorf("the existing model was mutated by a rejected PUT: model=%q connection=%q", v.Model, v.Connection)
 	}
 }
 
@@ -127,10 +130,9 @@ func TestUpdateModel_ValidBody_Mutates_BodyIsBound(t *testing.T) {
 		t.Fatalf("seed POST status = %d; body=%s", rec.Code, rec.Body.String())
 	}
 	newBody, _ := json.Marshal(config.ModelConfig{
-		Name:     "mut", // ignored — overwritten by the :name path param
-		APIType:  "openai",
-		Model:    "rewritten-model-id",
-		Endpoint: "https://rewritten.example.com/v1",
+		Name:       "mut", // ignored — overwritten by the :name path param
+		Connection: "groq",
+		Model:      "rewritten-model-id",
 	})
 	rec := serveOne(t, srv, loopbackReq(http.MethodPut, "/api/models/mut", bytes.NewReader(newBody)))
 	if rec.Code != http.StatusOK {
@@ -140,8 +142,8 @@ func TestUpdateModel_ValidBody_Mutates_BodyIsBound(t *testing.T) {
 	if v == nil {
 		t.Fatal("the model vanished after a valid PUT")
 	}
-	if v.Model != "rewritten-model-id" || v.Endpoint != "https://rewritten.example.com/v1" {
-		t.Errorf("the PUT body was not applied (body-binding broken): model=%q endpoint=%q", v.Model, v.Endpoint)
+	if v.Model != "rewritten-model-id" || v.Connection != "groq" {
+		t.Errorf("the PUT body was not applied (body-binding broken): model=%q connection=%q", v.Model, v.Connection)
 	}
 }
 

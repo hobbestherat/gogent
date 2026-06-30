@@ -139,12 +139,11 @@ func main() {
 		fmt.Printf("\nActive skills: %d\n", len(skillRegistry.ListActiveSkills()))
 	}
 
-	// Create model session for the default (HTTP) session, pointed at the
-	// configured default endpoint (honors GOGENT_MODEL_URL).
-	m := model.NewModelConnection()
-	if def := g.GetConfig().GetModelConfig(g.GetConfig().DefaultModel); def != nil && def.Endpoint != "" {
-		m.SetURL(def.Endpoint)
-	}
+	// Create model session for the default (HTTP) session, resolving the default
+	// model's provider connection so auth/api_type/endpoint are all wired (no bare
+	// no-auth localhost placeholder). Falls back to a clear deferred error when no
+	// routable model is configured.
+	m := g.DefaultConnection()
 	sess := model.NewModelSession("main", m)
 
 	// Create root agent

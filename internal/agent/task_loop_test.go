@@ -75,7 +75,7 @@ func finalResponse(content string) map[string]interface{} {
 
 func newLoopSession(t *testing.T, url string) (*UserSession, *Agent) {
 	t.Helper()
-	conn := model.NewModelConnection()
+	conn := newTestModelConnection()
 	conn.SetURL(url)
 	sess := model.NewModelSession("test", conn)
 
@@ -280,7 +280,7 @@ func TestInjectUserNoteDisabledIsNotInjected(t *testing.T) {
 // loop is running: it does not panic, ignores empty/whitespace text, and queues a
 // real note for the next turn (issue #170).
 func TestInjectUserNoteSafeWhenIdle(t *testing.T) {
-	conn := model.NewModelConnection()
+	conn := newTestModelConnection()
 	sess := model.NewModelSession("test", conn)
 	ag := NewAgent("root", sess)
 	us := NewUserSession("idle", ag)

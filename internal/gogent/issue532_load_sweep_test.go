@@ -30,15 +30,26 @@ func seedConfigOnDisk(t *testing.T, home string, cfg *config.Config) []byte {
 	return readConfigBytes(t, home)
 }
 
+// goodConnName is the name of the shared routable connection goodEntry references.
+const goodConnName = "good-conn"
+
+// goodConns returns the connection list a config needs so goodEntry models resolve
+// to a routable provider connection (explicit endpoint).
+func goodConns() []*config.ProviderConnection {
+	return []*config.ProviderConnection{
+		{Name: goodConnName, APIType: "openai", Endpoint: "https://api.example.com/v1"},
+	}
+}
+
 // badEntry is an unroutable config — the stale pre-validation shape from the issue
-// (no api_type AND no endpoint).
+// (it references no provider connection, so it cannot be routed).
 func badEntry(name string) *config.ModelConfig {
 	return &config.ModelConfig{Name: name, Model: "x"}
 }
 
-// goodEntry is a routable config (explicit endpoint).
+// goodEntry is a routable config (references the goodConns routable connection).
 func goodEntry(name string) *config.ModelConfig {
-	return &config.ModelConfig{Name: name, APIType: "openai", Model: name + "-model", Endpoint: "https://api.example.com/v1"}
+	return &config.ModelConfig{Name: name, Connection: goodConnName, Model: name + "-model"}
 }
 
 // modelNames returns the configured model names in config order.
@@ -58,6 +69,7 @@ func TestLoadSweep_DropsBadKeepsGood_Notifies_DefaultsToGood(t *testing.T) {
 	home := t.TempDir()
 	cfg := &config.Config{
 		DefaultModel: "bad",
+		Connections:  goodConns(),
 		ModelConfigs: []*config.ModelConfig{badEntry("bad"), goodEntry("good")},
 	}
 	before := seedConfigOnDisk(t, home, cfg)
@@ -98,6 +110,7 @@ func TestLoadSweep_ConfigWarningsReturnsCopy(t *testing.T) {
 	home := t.TempDir()
 	seedConfigOnDisk(t, home, &config.Config{
 		DefaultModel: "bad",
+		Connections:  goodConns(),
 		ModelConfigs: []*config.ModelConfig{badEntry("bad"), goodEntry("good")},
 	})
 	g := NewGogent(home)
@@ -167,6 +180,7 @@ func TestLoadSweep_NoBadEntries_NoWarnings(t *testing.T) {
 	home := t.TempDir()
 	seedConfigOnDisk(t, home, &config.Config{
 		DefaultModel: "g1",
+		Connections:  goodConns(),
 		ModelConfigs: []*config.ModelConfig{goodEntry("g1"), goodEntry("g2")},
 	})
 	g := NewGogent(home)
@@ -187,8 +201,10 @@ func TestLoadSweep_NullArrayEntrySkipped(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	doc := []byte(`{"default_model":"g","models":[` +
-		`{"name":"g","api_type":"openai","model":"gm","endpoint":"https://api.example.com/v1"},` +
+	doc := []byte(`{"default_model":"g",` +
+		`"connections":[{"name":"c","api_type":"openai","endpoint":"https://api.example.com/v1"}],` +
+		`"models":[` +
+		`{"name":"g","connection":"c","model":"gm"},` +
 		`null]}`)
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), doc, 0o600); err != nil {
 		t.Fatalf("write config.json: %v", err)
@@ -222,6 +238,7 @@ func TestRoutableDefaultConfig_Table(t *testing.T) {
 			name: "default is routable returns default",
 			cfg: &config.Config{
 				DefaultModel: "def",
+				Connections:  goodConns(),
 				ModelConfigs: []*config.ModelConfig{goodEntry("def"), goodEntry("other")},
 			},
 			wantName: "def",
@@ -230,6 +247,7 @@ func TestRoutableDefaultConfig_Table(t *testing.T) {
 			name: "default unroutable returns first routable",
 			cfg: &config.Config{
 				DefaultModel: "bad",
+				Connections:  goodConns(),
 				ModelConfigs: []*config.ModelConfig{badEntry("bad"), goodEntry("good")},
 			},
 			wantName: "good",
@@ -238,6 +256,7 @@ func TestRoutableDefaultConfig_Table(t *testing.T) {
 			name: "default dropped (name absent) returns first routable",
 			cfg: &config.Config{
 				DefaultModel: "gone",
+				Connections:  goodConns(),
 				ModelConfigs: []*config.ModelConfig{goodEntry("a"), goodEntry("b")},
 			},
 			wantName: "a",
@@ -246,6 +265,7 @@ func TestRoutableDefaultConfig_Table(t *testing.T) {
 			name: "leading unroutable entries skipped first routable wins",
 			cfg: &config.Config{
 				DefaultModel: "bad0",
+				Connections:  goodConns(),
 				ModelConfigs: []*config.ModelConfig{badEntry("bad0"), badEntry("bad1"), goodEntry("good")},
 			},
 			wantName: "good",

@@ -128,12 +128,14 @@ func TestVertexChatURLFromProjectLocation(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			conn := NewModelConnectionFromConfig(&config.ModelConfig{
-				APIType:  "vertex",
-				Project:  tc.project,
-				Location: tc.location,
-				Model:    "google/gemini-2.5-flash",
-			})
+			conn := NewModelConnection(
+				&config.ProviderConnection{
+					APIType:  "vertex",
+					Project:  tc.project,
+					Location: tc.location,
+				},
+				&config.ModelConfig{Model: "google/gemini-2.5-flash"},
+			)
 			if conn.URL != tc.want {
 				t.Fatalf("URL = %q, want %q", conn.URL, tc.want)
 			}
@@ -142,13 +144,15 @@ func TestVertexChatURLFromProjectLocation(t *testing.T) {
 }
 
 func TestVertexExplicitEndpointOverridesProjectLocation(t *testing.T) {
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType:  "vertex",
-		Endpoint: "https://proxy.example.test/root",
-		Project:  "ignored-project",
-		Location: "ignored-location",
-		Model:    "google/gemini-2.5-flash",
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{
+			APIType:  "vertex",
+			Endpoint: "https://proxy.example.test/root",
+			Project:  "ignored-project",
+			Location: "ignored-location",
+		},
+		&config.ModelConfig{Model: "google/gemini-2.5-flash"},
+	)
 	if want := "https://proxy.example.test/root/endpoints/openapi/chat/completions"; conn.URL != want {
 		t.Fatalf("URL = %q, want %q", conn.URL, want)
 	}
@@ -207,13 +211,15 @@ func TestADCRoundTripperTokenErrorIsActionable(t *testing.T) {
 }
 
 func TestVertexConnectionUsesADCSharedTransport(t *testing.T) {
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType:  "vertex",
-		Project:  "p",
-		Location: "us-central1",
-		Model:    "google/gemini-2.5-flash",
-		APIKey:   "must-not-use-api-key",
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{
+			APIType:  "vertex",
+			Project:  "p",
+			Location: "us-central1",
+			APIKey:   "must-not-use-api-key",
+		},
+		&config.ModelConfig{Model: "google/gemini-2.5-flash"},
+	)
 	rt, ok := conn.client.Transport.(*ADCRoundTripper)
 	if !ok {
 		t.Fatalf("Transport = %T, want *ADCRoundTripper", conn.client.Transport)
@@ -247,16 +253,20 @@ func TestVertexConnectionCompleteUsesOpenAIWireAndADC(t *testing.T) {
 	}))
 	defer server.Close()
 
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType:     "vertex",
-		Endpoint:    server.URL,
-		Project:     "ignored-when-endpoint-set",
-		Location:    "global",
-		Model:       "google/gemini-2.5-flash",
-		APIKey:      "must-not-be-sent",
-		Temperature: 0.25,
-		MaxTokens:   123,
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{
+			APIType:  "vertex",
+			Endpoint: server.URL,
+			Project:  "ignored-when-endpoint-set",
+			Location: "global",
+			APIKey:   "must-not-be-sent",
+		},
+		&config.ModelConfig{
+			Model:       "google/gemini-2.5-flash",
+			Temperature: 0.25,
+			MaxTokens:   123,
+		},
+	)
 	resp, err := conn.Complete([]Message{{Role: RoleUser, Content: "hi"}})
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
@@ -306,11 +316,13 @@ func TestVertexStructuredOutputRequestKeepsOpenAIResponseFormat(t *testing.T) {
 	}))
 	defer server.Close()
 
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType:  "vertex",
-		Endpoint: server.URL,
-		Model:    "google/gemini-2.5-flash",
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{
+			APIType:  "vertex",
+			Endpoint: server.URL,
+		},
+		&config.ModelConfig{Model: "google/gemini-2.5-flash"},
+	)
 	format := JSONSchemaResponseFormat("result", map[string]any{
 		"type":                 "object",
 		"additionalProperties": false,
@@ -335,11 +347,13 @@ func TestVertexADCFailureSurfacesOnFirstRequest(t *testing.T) {
 		return nil, errors.New("adc unavailable")
 	})
 
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType:  "vertex",
-		Endpoint: "http://127.0.0.1:1",
-		Model:    "google/gemini-2.5-flash",
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{
+			APIType:  "vertex",
+			Endpoint: "http://127.0.0.1:1",
+		},
+		&config.ModelConfig{Model: "google/gemini-2.5-flash"},
+	)
 	conn.maxAttempts = 1
 
 	_, err := conn.Complete([]Message{{Role: RoleUser, Content: "hi"}})

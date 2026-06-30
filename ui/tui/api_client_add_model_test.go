@@ -30,15 +30,13 @@ func TestAPIClientAddModelRequest(t *testing.T) {
 		t.Fatalf("NewAPIClient: %v", err)
 	}
 	cfg := config.ModelConfig{
-		Name:          "openrouter-claude-opus-4-6",
-		DisplayName:   "Claude Opus 4.6",
-		APIType:       "openrouter",
-		Model:         "anthropic/claude-opus-4-6",
-		Endpoint:      "", // openrouter derives its base
-		APIKey:        "or-key",
-		Temperature:   0.7,
-		MaxTokens:     128000,
-		ContextWindow: 1000000,
+		Name:        "openrouter-claude-opus-4-6",
+		DisplayName: "Claude Opus 4.6",
+		Connection:  "openrouter", // credentials/endpoint now live on the connection
+		Model:       "anthropic/claude-opus-4-6",
+		Temperature: 0.7,
+		MaxTokens:   128000,
+		Caps:        config.ModelCapabilities{ContextWindow: 1000000},
 	}
 	if err := client.AddModel(cfg); err != nil {
 		t.Fatalf("AddModel: %v", err)
@@ -60,11 +58,8 @@ func TestAPIClientAddModelRequest(t *testing.T) {
 	if gotBody["model"] != "anthropic/claude-opus-4-6" {
 		t.Errorf("body model = %v, want anthropic/claude-opus-4-6", gotBody["model"])
 	}
-	if gotBody["api_key"] != "or-key" {
-		t.Errorf("body api_key = %v, want or-key (the credential travels with the create)", gotBody["api_key"])
-	}
-	if gotBody["api_type"] != "openrouter" {
-		t.Errorf("body api_type = %v, want openrouter", gotBody["api_type"])
+	if gotBody["connection"] != "openrouter" {
+		t.Errorf("body connection = %v, want openrouter (the model references its connection by name)", gotBody["connection"])
 	}
 }
 

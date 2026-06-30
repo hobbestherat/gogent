@@ -21,10 +21,11 @@ func modelCreateBody(t *testing.T, name string) []byte {
 	b, err := json.Marshal(config.ModelConfig{
 		Name:        name,
 		DisplayName: "Catalog " + name,
-		APIType:     "openai",
+		// Credentials/endpoint live on the connection now; the model just references
+		// one by name. "local-lan" is a routable built-in connection (openai + a
+		// non-empty endpoint), so this model passes save-time validation.
+		Connection:  "local-lan",
 		Model:       "catalog-model-id",
-		Endpoint:    "https://catalog.example.com/v1",
-		APIKey:      "super-secret-key",
 		Temperature: 0.7,
 		MaxTokens:   4096,
 	})
@@ -50,8 +51,9 @@ func TestCreateModel(t *testing.T) {
 	if view.Name != "create-ok" {
 		t.Errorf("response name = %q, want create-ok", view.Name)
 	}
-	if bytes.Contains(rec.Body.Bytes(), []byte("super-secret-key")) {
-		t.Error("create response leaked the api_key")
+	// The model view carries no credentials at all (those live on the connection).
+	if bytes.Contains(rec.Body.Bytes(), []byte(`"api_key"`)) {
+		t.Error("create response leaked an api_key field")
 	}
 
 	// The new entry is immediately listed by GET /models.
@@ -61,9 +63,6 @@ func TestCreateModel(t *testing.T) {
 	}
 	if !bytes.Contains(list.Body.Bytes(), []byte(`"create-ok"`)) {
 		t.Fatal("created model not present in GET /models")
-	}
-	if bytes.Contains(list.Body.Bytes(), []byte("super-secret-key")) {
-		t.Error("list response leaked the api_key")
 	}
 }
 
@@ -104,16 +103,15 @@ func TestCreateModelRequiresHuman(t *testing.T) {
 	}
 }
 
-// POST /models stores a blank key verbatim (a new entry has no prior key to
-// preserve, unlike PUT). The catalog flow's review form is responsible for the
-// credential; until then the entry simply has none.
-func TestCreateModelStoresBlankKey(t *testing.T) {
+// POST /models carries no credentials at all — those live on the connection the
+// model references. The created entry is a clean modelView (the catalog flow's
+// review form manages the connection's credential separately).
+func TestCreateModelCarriesNoCredentials(t *testing.T) {
 	srv, _, _ := newTestServer(t, Options{Password: "x"})
 	body, _ := json.Marshal(config.ModelConfig{
-		Name:    "create-nokey",
-		APIType: "openai",
-		Model:   "m",
-		APIKey:  "", // blank — must NOT be borrowed from anywhere
+		Name:       "create-nokey",
+		Connection: "local-lan",
+		Model:      "m",
 	})
 	rec := serveOne(t, srv, loopbackReq(http.MethodPost, "/api/models", bytes.NewReader(body)))
 	if rec.Code != http.StatusOK {
@@ -123,7 +121,10 @@ func TestCreateModelStoresBlankKey(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if view.HasAPIKey {
-		t.Error("HasAPIKey = true, want false for a blank-key create")
+	if view.Connection != "local-lan" {
+		t.Errorf("connection = %q, want local-lan", view.Connection)
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte(`"api_key"`)) {
+		t.Error("create response leaked an api_key field")
 	}
 }

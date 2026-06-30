@@ -9,7 +9,7 @@ import (
 )
 
 func TestBuildMessageWithToolsUsesRegistryRenderedDocs(t *testing.T) {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	s := model.NewModelSession("tool-docs", m)
 	ag := NewAgent("agent", s)
 	us := NewUserSession("session", ag)
@@ -73,7 +73,7 @@ func TestBuildMessageWithToolsUsesRegistryRenderedDocs(t *testing.T) {
 }
 
 func TestBuildMessageWithToolsNilRegistryOmitsCatalog(t *testing.T) {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	s := model.NewModelSession("tool-docs-nil", m)
 	ag := NewAgent("agent", s)
 	us := NewUserSession("session", ag)

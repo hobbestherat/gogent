@@ -25,7 +25,7 @@ func TestBuildOverallStats(t *testing.T) {
 	// Issue #534: the aggregate view (selectedModel == "") leaves the model/api
 	// rows empty even though a focused-session model config is threaded through.
 	got := buildOverallStats(report, 3, 5,
-		&config.ModelConfig{Name: "groq-free", DisplayName: "Groq", Endpoint: "https://api.groq.com/openai/v1/chat/completions"}, "")
+		&config.ModelConfig{Name: "groq-free", DisplayName: "Groq", Connection: "groq"}, "")
 	// CacheReadTokens mirrors prim.CachedTokensIn (250 here); the write fields are 0
 	// because this report records no cache writes (#546 aggregate populate path).
 	want := overallStats{Sessions: 3, SubAgents: 5, TokensIn: 1000, TokensOut: 500,
@@ -46,11 +46,11 @@ func TestBuildOverallStatsEmpty(t *testing.T) {
 }
 
 // TestBuildOverallStatsModel covers the model / endpoint derivation (issue #107):
-// the display name falls back to the config Name, and the endpoint is reduced to
-// its host (or provider label) by formatEndpoint. Issue #534 gates the populate
-// block on a non-empty selectedModel, so the model's own Name is passed as the
-// selection to keep the derivation path under test (otherwise the aggregate would
-// blank the rows and stop exercising it).
+// the display name falls back to the config Name, and the "api" row now names the
+// connection the model routes through (credentials/endpoint moved onto the
+// connection). Issue #534 gates the populate block on a non-empty selectedModel,
+// so the model's own Name is passed as the selection to keep the derivation path
+// under test (otherwise the aggregate would blank the rows and stop exercising it).
 func TestBuildOverallStatsModel(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -61,13 +61,13 @@ func TestBuildOverallStatsModel(t *testing.T) {
 	}{
 		{
 			name:      "display name preferred",
-			model:     &config.ModelConfig{Name: "local-lan", DisplayName: "Local LAN", Endpoint: "http://127.0.0.1:8080/v1/chat/completions"},
+			model:     &config.ModelConfig{Name: "local-lan", DisplayName: "Local LAN", Connection: "local-lan"},
 			wantModel: "Local LAN",
-			wantAPI:   "127.0.0.1:8080",
+			wantAPI:   "local-lan",
 		},
 		{
 			name:      "falls back to config name",
-			model:     &config.ModelConfig{Name: "zai-glm", APIType: "zai"},
+			model:     &config.ModelConfig{Name: "zai-glm", Connection: "zai"},
 			wantModel: "zai-glm",
 			wantAPI:   "zai",
 		},
@@ -201,7 +201,7 @@ func TestSidebarRefreshOverallStats(t *testing.T) {
 	report := stats.Report{Totals: stats.Totals{Primary: stats.ConnectorStat{
 		Requests: 10, Errors: 1, TokensIn: 500, TokensOut: 50, CachedTokensIn: 100,
 	}}}
-	s.refreshOverallStats(report, &config.ModelConfig{Name: "groq-free", DisplayName: "Groq", Endpoint: "https://api.groq.com/openai/v1/chat/completions"}, "")
+	s.refreshOverallStats(report, &config.ModelConfig{Name: "groq-free", DisplayName: "Groq", Connection: "groq"}, "")
 
 	if s.overall.Sessions != 2 {
 		t.Errorf("Sessions = %d, want 2", s.overall.Sessions)

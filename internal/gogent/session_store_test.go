@@ -18,7 +18,7 @@ import (
 // buildSessionWithTranscript makes a UserSession whose root agent has a known
 // transcript, for store round-trip tests.
 func buildSessionWithTranscript(id string, msgs []model.Message) *agent.UserSession {
-	sess := model.NewModelSession("main", model.NewModelConnection())
+	sess := model.NewModelSession("main", testConn())
 	sess.ReplaceTranscript(msgs)
 	root := agent.NewAgent("root", sess)
 	us := agent.NewUserSession(id, root)
@@ -378,7 +378,7 @@ func TestSessionStoreSaveNewSubAgentAppends(t *testing.T) {
 	before, _ := os.Stat(path)
 
 	// Spawn a sub-agent with its own transcript after the first save.
-	subSess := model.NewModelSession("sub", model.NewModelConnection())
+	subSess := model.NewModelSession("sub", testConn())
 	subSess.AppendMessages(
 		model.Message{Role: model.RoleUser, Content: "sub-task"},
 		model.Message{Role: model.RoleAssistant, Content: "sub-done"},

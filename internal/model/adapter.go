@@ -128,7 +128,7 @@ const anthropicVersion = "2023-06-01"
 // field instead of a header, and extended thinking is emitted as adaptive
 // thinking. Sampling params (temperature/top_p) are forwarded identically on both
 // paths; whether a given model accepts them is decided upstream in buildRequest
-// via the (provider,model) capability layer (resolveModelCaps), not here — so
+// via the (provider,model) capability layer (resolveModelQuirks), not here — so
 // current-gen Claude, which rejects them, simply arrives with nil pointers that
 // omitempty drops (issue #543). Prompt-cache breakpoints (cache_control on the
 // system block + the end of the cacheable prefix) are emitted on BOTH paths
@@ -285,7 +285,7 @@ func (a anthropicAdapter) buildBody(req CompletionRequest, buf *bytes.Buffer) er
 		Stream: req.Stream,
 		// Sampling params are forwarded verbatim on BOTH the direct and Vertex
 		// paths. Whether a model accepts them is decided UPSTREAM in buildRequest
-		// via the (provider,model) capability layer (resolveModelCaps): current-gen
+		// via the (provider,model) capability layer (resolveModelQuirks): current-gen
 		// Claude rejects temperature/top_p, so those pointers arrive nil here and
 		// omitempty drops them from the wire body. The adapter no longer makes that
 		// decision — it is data (model_overrides.go), not a per-instance branch

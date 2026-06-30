@@ -12,9 +12,9 @@ func TestDefaultEndpointEnvOverride(t *testing.T) {
 		t.Errorf("Expected env override endpoint, got %q", got)
 	}
 	cfg := GetDefaultConfig()
-	local := cfg.GetModelConfig("local-lan")
+	local := cfg.GetConnection("local-lan")
 	if local == nil {
-		t.Fatal("expected local-lan model config")
+		t.Fatal("expected local-lan connection")
 	}
 	if local.Endpoint != "http://example.test:1234/v1/chat/completions" {
 		t.Errorf("Expected local-lan endpoint to honor env override, got %q", local.Endpoint)
@@ -129,9 +129,9 @@ func TestContextWindowOrDefault(t *testing.T) {
 	}{
 		{"nil receiver", nil, defaultContextWindow},
 		{"empty struct defaults", &ModelConfig{}, defaultContextWindow},
-		{"zero defaults", &ModelConfig{ContextWindow: 0}, defaultContextWindow},
-		{"negative defaults", &ModelConfig{ContextWindow: -1024}, defaultContextWindow},
-		{"configured returned as-is", &ModelConfig{ContextWindow: 131072}, 131072},
+		{"zero defaults", &ModelConfig{Caps: ModelCapabilities{ContextWindow: 0}}, defaultContextWindow},
+		{"negative defaults", &ModelConfig{Caps: ModelCapabilities{ContextWindow: -1024}}, defaultContextWindow},
+		{"configured returned as-is", &ModelConfig{Caps: ModelCapabilities{ContextWindow: 131072}}, 131072},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -151,13 +151,13 @@ func TestDefaultConfigSetsContextWindow(t *testing.T) {
 		t.Fatal("expected default config to define models")
 	}
 	for _, m := range cfg.ModelConfigs {
-		if m.ContextWindow <= 0 {
+		if m.Caps.ContextWindow <= 0 {
 			t.Errorf("model %q has no context_window set", m.Name)
 		}
 		// An explicitly set window must round-trip through the accessor; the
 		// fallback default is only for hand-written configs that omit the field.
-		if got := m.ContextWindowOrDefault(); got != m.ContextWindow {
-			t.Errorf("model %q: ContextWindowOrDefault = %d, want %d", m.Name, got, m.ContextWindow)
+		if got := m.ContextWindowOrDefault(); got != m.Caps.ContextWindow {
+			t.Errorf("model %q: ContextWindowOrDefault = %d, want %d", m.Name, got, m.Caps.ContextWindow)
 		}
 	}
 }
@@ -166,7 +166,7 @@ func TestDefaultConfigSetsContextWindow(t *testing.T) {
 // model with a sane output cap (e.g. 4096) has its compaction threshold driven by
 // the much larger context window, so it does not compact at ~3.3K tokens.
 func TestContextWindowDistinctFromMaxTokens(t *testing.T) {
-	m := &ModelConfig{MaxTokens: 4096, ContextWindow: 131072}
+	m := &ModelConfig{MaxTokens: 4096, Caps: ModelCapabilities{ContextWindow: 131072}}
 	window := m.ContextWindowOrDefault()
 	if window == m.MaxTokens {
 		t.Fatalf("context window (%d) must be distinct from max_tokens output cap (%d)", window, m.MaxTokens)
@@ -193,8 +193,8 @@ func TestContextWindowJSONRoundTrip(t *testing.T) {
 	if err := json.Unmarshal([]byte(oldJSON), &legacy); err != nil {
 		t.Fatalf("unmarshal old config: %v", err)
 	}
-	if legacy.ContextWindow != 0 {
-		t.Errorf("old config ContextWindow = %d, want 0 (field absent)", legacy.ContextWindow)
+	if legacy.Caps.ContextWindow != 0 {
+		t.Errorf("old config ContextWindow = %d, want 0 (field absent)", legacy.Caps.ContextWindow)
 	}
 	if got := legacy.ContextWindowOrDefault(); got != defaultContextWindow {
 		t.Errorf("old config ContextWindowOrDefault = %d, want default %d", got, defaultContextWindow)
@@ -203,7 +203,7 @@ func TestContextWindowJSONRoundTrip(t *testing.T) {
 	// (2) A config that sets context_window preserves the exact value across a
 	// marshal/unmarshal round-trip, and the serialized form carries the documented
 	// JSON key.
-	in := &ModelConfig{Name: "big", Model: "big-1", ContextWindow: 200000}
+	in := &ModelConfig{Name: "big", Model: "big-1", Caps: ModelCapabilities{ContextWindow: 200000}}
 	data, err := json.Marshal(in)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -215,8 +215,8 @@ func TestContextWindowJSONRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(data, &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if out.ContextWindow != 200000 {
-		t.Errorf("round-trip ContextWindow = %d, want 200000", out.ContextWindow)
+	if out.Caps.ContextWindow != 200000 {
+		t.Errorf("round-trip ContextWindow = %d, want 200000", out.Caps.ContextWindow)
 	}
 	if got := out.ContextWindowOrDefault(); got != 200000 {
 		t.Errorf("round-trip ContextWindowOrDefault = %d, want 200000", got)
@@ -227,7 +227,7 @@ func TestContextWindowJSONRoundTrip(t *testing.T) {
 	cfg := &Config{
 		DefaultModel: "big",
 		ModelConfigs: []*ModelConfig{
-			{Name: "big", Model: "big-1", ContextWindow: 200000},
+			{Name: "big", Model: "big-1", Caps: ModelCapabilities{ContextWindow: 200000}},
 			{Name: "legacy", Model: "legacy-1"}, // no context_window
 		},
 	}
@@ -243,15 +243,15 @@ func TestContextWindowJSONRoundTrip(t *testing.T) {
 	if big == nil {
 		t.Fatal("reloaded config missing model big")
 	}
-	if big.ContextWindow != 200000 {
-		t.Errorf("big round-trip ContextWindow = %d, want 200000", big.ContextWindow)
+	if big.Caps.ContextWindow != 200000 {
+		t.Errorf("big round-trip ContextWindow = %d, want 200000", big.Caps.ContextWindow)
 	}
 	leg := reloaded.GetModelConfig("legacy")
 	if leg == nil {
 		t.Fatal("reloaded config missing model legacy")
 	}
-	if leg.ContextWindow != 0 {
-		t.Errorf("legacy round-trip ContextWindow = %d, want 0", leg.ContextWindow)
+	if leg.Caps.ContextWindow != 0 {
+		t.Errorf("legacy round-trip ContextWindow = %d, want 0", leg.Caps.ContextWindow)
 	}
 	if got := leg.ContextWindowOrDefault(); got != defaultContextWindow {
 		t.Errorf("legacy round-trip ContextWindowOrDefault = %d, want default %d", got, defaultContextWindow)

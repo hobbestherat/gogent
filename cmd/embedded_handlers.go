@@ -44,7 +44,7 @@ func embeddedHandlersFor(g *gogent.Gogent, wb *tuipkg.Workbench, noColor bool) t
 		},
 		// OnSend runs the task loop in the background; progress (thoughts,
 		// tool calls, final answer) flows back through the observer above.
-		OnSend: func(sessionID, message, modelName, effort string) {
+		OnSend: func(sessionID, message, modelName, effort, thinking string) {
 			// This is a fire-and-forget background goroutine: contain any
 			// panic so a single session's crash surfaces as an error in its
 			// window instead of taking down the whole TUI process (issue #8).
@@ -59,7 +59,7 @@ func embeddedHandlersFor(g *gogent.Gogent, wb *tuipkg.Workbench, noColor bool) t
 			// The TUI loop runs in the background; cancellation comes from the
 			// session's own controls (Stop / window close), which cancel the
 			// agent loop directly, so a plain background context is correct here.
-			_, err := g.SendMessageToSessionWithModelAndEffort(context.Background(), sessionID, "root", message, modelName, effort)
+			_, err := g.SendMessageToSessionFull(context.Background(), sessionID, "root", message, modelName, effort, thinking)
 			if err != nil {
 				wb.EmitSessionEvent(sessionID, agent.SessionEvent{
 					Type: agent.SessionEventError,
@@ -197,13 +197,54 @@ func embeddedHandlersFor(g *gogent.Gogent, wb *tuipkg.Workbench, noColor bool) t
 			return g.UpdateModel(m)
 		},
 		ScanModels: func(m config.ModelConfig) ([]string, error) {
-			return g.ScanModels(m)
+			ds, err := g.DiscoverModels(context.Background(), m.Connection)
+			if err != nil {
+				return nil, fmt.Errorf("discover models: %w", err)
+			}
+			ids := make([]string, 0, len(ds))
+			for _, d := range ds {
+				if d.Available && d.ID != "" {
+					ids = append(ids, d.ID)
+				}
+			}
+			return ids, nil
 		},
 		AddModel: func(m config.ModelConfig) error {
 			return g.AddModel(m)
 		},
 		RemoveModel: func(name string) error {
 			return g.RemoveModel(name)
+		},
+		GetConnections: func() []config.ProviderConnection {
+			conns := g.Connections()
+			out := make([]config.ProviderConnection, 0, len(conns))
+			for _, c := range conns {
+				out = append(out, *c)
+			}
+			return out
+		},
+		DiscoverModels: func(connName string) ([]tuipkg.DiscoveredModelInfo, error) {
+			ds, err := g.DiscoverModels(context.Background(), connName)
+			if err != nil {
+				return nil, fmt.Errorf("discover models: %w", err)
+			}
+			out := make([]tuipkg.DiscoveredModelInfo, 0, len(ds))
+			for _, d := range ds {
+				out = append(out, tuipkg.DiscoveredModelInfo{
+					ID: d.ID, DisplayName: d.DisplayName,
+					Available: d.Available, InCatalog: d.InCatalog, Caps: d.Caps,
+				})
+			}
+			return out, nil
+		},
+		AddConnection: func(pc config.ProviderConnection) error {
+			return g.AddConnection(pc)
+		},
+		UpdateConnection: func(pc config.ProviderConnection) error {
+			return g.UpdateConnection(pc)
+		},
+		RemoveConnection: func(name string) error {
+			return g.RemoveConnection(name)
 		},
 		GetModelCatalog: func(ctx context.Context, force bool) (modelsdev.Catalog, error) {
 			return mdc.Catalog(ctx, force)

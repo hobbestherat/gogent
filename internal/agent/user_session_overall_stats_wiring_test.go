@@ -118,7 +118,7 @@ func TestOverallConnectorStats_RealResumeCarryNotDoubleCounted(t *testing.T) {
 	us := newOverallSession(t)
 	us.SetPrimaryModel("A")
 
-	c1 := model.NewModelConnection()
+	c1 := newTestModelConnection()
 	c1.Stats.RequestCount = 2
 	c1.Stats.TotalTokensIn = 200
 	c1.Stats.TotalTokensOut = 40
@@ -127,7 +127,7 @@ func TestOverallConnectorStats_RealResumeCarryNotDoubleCounted(t *testing.T) {
 
 	// The per-turn rebuild path: a fresh connector swapped in via Resume, which
 	// Carries c1's snapshot into c2.
-	c2 := model.NewModelConnection()
+	c2 := newTestModelConnection()
 	sess.Resume(c2)
 	// c2 now holds the carried {2,200}; reading it must yield a ZERO delta.
 	us.recordConnectorUsage(c2)
@@ -162,7 +162,7 @@ func TestOverallConnectorStats_RealResumeCarryNotDoubleCounted(t *testing.T) {
 func TestOverallConnectorStats_ConcurrentNoDoubleCount(t *testing.T) {
 	us := newOverallSession(t)
 	us.SetPrimaryModel("glm")
-	conn := model.NewModelConnection()
+	conn := newTestModelConnection()
 
 	const N = 80
 	var wg sync.WaitGroup

@@ -15,7 +15,7 @@ func TestToolExecutionResult(t *testing.T) {
 	requireModel(t)
 
 	g := NewGogent("/tmp/test")
-	m := model.NewModelConnection()
+	m := testConn()
 	m.SetURL(config.DefaultEndpoint())
 	s := model.NewModelSession("session_test", m)
 	agent := agent.NewAgent("agent_test", s)

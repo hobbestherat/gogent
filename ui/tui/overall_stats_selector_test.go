@@ -29,7 +29,7 @@ func reportForSelectorTests() stats.Report {
 // attributed sessions/sub-agents), NOT the grand total.
 func TestBuildOverallStats_SelectedModelScopesMetrics(t *testing.T) {
 	rep := reportForSelectorTests()
-	glmCfg := &config.ModelConfig{Name: "glm", DisplayName: "GLM", Endpoint: "https://open.bigmodel.cn/api/paas/v4"}
+	glmCfg := &config.ModelConfig{Name: "glm", DisplayName: "GLM", Connection: "glm"}
 
 	got := buildOverallStats(rep, 0, 0, glmCfg, "glm")
 

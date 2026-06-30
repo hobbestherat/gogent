@@ -27,7 +27,7 @@ import (
 // is seeded from the real estimate so the guard's before/after measurements are
 // honest; callers may overwrite it to force an over/under-budget scenario.
 func makeMigrationSession(id string, turns, chars, prevWindow int) (*UserSession, *model.ModelSession) {
-	conn := model.NewModelConnection()
+	conn := model.NewModelConnection(&config.ProviderConnection{APIType: "openai", Endpoint: model.DefaultModelURL}, nil)
 	sess := model.NewModelSession(id, conn)
 	var msgs []model.Message
 	for i := 0; i < turns; i++ {
@@ -59,7 +59,7 @@ func withStub(us *UserSession, digest, turnID string) (*stubCompleter, context.C
 func TestMigrateNilArgs(t *testing.T) {
 	us, sess := makeMigrationSession("nil", 3, 10, 0)
 	stub, ctx := withStub(us, "D", "t-nil")
-	cfg := &config.ModelConfig{Name: "m", ContextWindow: 100}
+	cfg := &config.ModelConfig{Name: "m", Caps: config.ModelCapabilities{ContextWindow: 100}}
 
 	for name, tc := range map[string]struct {
 		sess *model.ModelSession
@@ -94,7 +94,7 @@ func TestMigrateUnknownWindowNoGuard(t *testing.T) {
 		stub, ctx := withStub(us, "D", "t-unknown")
 		sess.CurrentTokenCount = 99999 // far over any budget — must still be a no-op
 
-		cfg := &config.ModelConfig{Name: "m", ContextWindow: cw}
+		cfg := &config.ModelConfig{Name: "m", Caps: config.ModelCapabilities{ContextWindow: cw}}
 		if err := us.MigrateToContextWindow(ctx, sess, cfg); err != nil {
 			t.Errorf("ContextWindow=%d returned err %v, want nil (unknown window)", cw, err)
 		}
@@ -116,7 +116,7 @@ func TestMigrateFitsNoCompression(t *testing.T) {
 	us, sess := makeMigrationSession("fits", 6, 10, 0)
 	stub, ctx := withStub(us, "D", "t-fits")
 	before := sess.GetTranscript()
-	cfg := &config.ModelConfig{Name: "m", ContextWindow: 100000} // fit = 80000 >> session size
+	cfg := &config.ModelConfig{Name: "m", Caps: config.ModelCapabilities{ContextWindow: 100000}} // fit = 80000 >> session size
 
 	if err := us.MigrateToContextWindow(ctx, sess, cfg); err != nil {
 		t.Fatalf("fits: unexpected err %v", err)
@@ -139,7 +139,7 @@ func TestMigrateShrinksToFit(t *testing.T) {
 	us, sess := makeMigrationSession("shrink", 6, 40, 0) // ~120 tokens
 	stub, ctx := withStub(us, "D", "t-shrink")
 	const target = 100 // fit = 80; session ~120 > 80
-	cfg := &config.ModelConfig{Name: "m", ContextWindow: target}
+	cfg := &config.ModelConfig{Name: "m", Caps: config.ModelCapabilities{ContextWindow: target}}
 	beforeTokens := sess.GetCurrentTokenCount()
 	beforeLen := len(sess.GetTranscript())
 
@@ -174,7 +174,7 @@ func TestMigrateStopsOnBackendFailure(t *testing.T) {
 	us, sess := makeMigrationSession("backendfail", 6, 100, 0)
 	stub, ctx := withStub(us, "", "t-fail") // empty digest ⇒ summarizeOlder returns false
 	sess.CurrentTokenCount = 99999
-	cfg := &config.ModelConfig{Name: "m", DisplayName: "FailModel", ContextWindow: 100}
+	cfg := &config.ModelConfig{Name: "m", DisplayName: "FailModel", Caps: config.ModelCapabilities{ContextWindow: 100}}
 
 	err := us.MigrateToContextWindow(ctx, sess, cfg)
 	if err == nil {
@@ -201,7 +201,7 @@ func TestMigrateImpossibleFailsCleanly(t *testing.T) {
 	})
 	sess.CurrentTokenCount = model.EstimateTokens(sess.GetTranscript())
 	stub, ctx := withStub(us, "D", "t-impossible")
-	cfg := &config.ModelConfig{Name: "tiny-id", DisplayName: "TinyWindow", ContextWindow: 50} // fit=40
+	cfg := &config.ModelConfig{Name: "tiny-id", DisplayName: "TinyWindow", Caps: config.ModelCapabilities{ContextWindow: 50}} // fit=40
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -236,7 +236,7 @@ func TestMigrateImpossibleEmitsErrorEvent(t *testing.T) {
 	})
 	sess.CurrentTokenCount = model.EstimateTokens(sess.GetTranscript())
 	stub, ctx := withStub(us, "D", "turn-abc")
-	cfg := &config.ModelConfig{Name: "tiny", ContextWindow: 50}
+	cfg := &config.ModelConfig{Name: "tiny", Caps: config.ModelCapabilities{ContextWindow: 50}}
 
 	var events []SessionEvent
 	us.SetObserver(func(ev SessionEvent) { events = append(events, ev) })
@@ -278,7 +278,7 @@ func TestMigrateBoundedRounds(t *testing.T) {
 	// A digest so large the transcript can never get near the target window.
 	stub, ctx := withStub(us, strings.Repeat("z", 5000), "t-bounded")
 	beforeTokens := sess.GetCurrentTokenCount()
-	cfg := &config.ModelConfig{Name: "m", ContextWindow: 200} // fit=160
+	cfg := &config.ModelConfig{Name: "m", Caps: config.ModelCapabilities{ContextWindow: 200}} // fit=160
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -319,7 +319,7 @@ func TestMigrateSameWindowSkips(t *testing.T) {
 	stub, ctx := withStub(us, "D", "t-same")
 	sess.CurrentTokenCount = 9999 // over fit (800) — must still skip
 
-	cfg := &config.ModelConfig{Name: "m", ContextWindow: window}
+	cfg := &config.ModelConfig{Name: "m", Caps: config.ModelCapabilities{ContextWindow: window}}
 	if err := us.MigrateToContextWindow(ctx, sess, cfg); err != nil {
 		t.Fatalf("same window returned err %v, want nil", err)
 	}
@@ -339,7 +339,7 @@ func TestMigrateLargerWindowSkips(t *testing.T) {
 	stub, ctx := withStub(us, "D", "t-larger")
 	sess.CurrentTokenCount = 9999
 
-	cfg := &config.ModelConfig{Name: "m", ContextWindow: 1000} // > prev (500)
+	cfg := &config.ModelConfig{Name: "m", Caps: config.ModelCapabilities{ContextWindow: 1000}} // > prev (500)
 	if err := us.MigrateToContextWindow(ctx, sess, cfg); err != nil {
 		t.Fatalf("larger window returned err %v, want nil", err)
 	}
@@ -355,7 +355,7 @@ func TestMigrateSmallerWindowEngages(t *testing.T) {
 	us, sess := makeMigrationSession("smaller", 6, 100, 2000) // ~300 tokens, prev=2000
 	stub, ctx := withStub(us, "D", "t-smaller")
 
-	cfg := &config.ModelConfig{Name: "m", ContextWindow: 200} // < prev, fit=160 < 300
+	cfg := &config.ModelConfig{Name: "m", Caps: config.ModelCapabilities{ContextWindow: 200}} // < prev, fit=160 < 300
 	if err := us.MigrateToContextWindow(ctx, sess, cfg); err != nil {
 		t.Fatalf("smaller window returned err %v, want nil (should compress to fit)", err)
 	}
@@ -372,7 +372,7 @@ func TestMigrateSmallerWindowEngages(t *testing.T) {
 func TestMigrateEmitsCompactionPerRound(t *testing.T) {
 	us, sess := makeMigrationSession("events", 6, 40, 0) // ~120 tokens
 	stub, ctx := withStub(us, "D", "turn-xyz")
-	cfg := &config.ModelConfig{Name: "m", ContextWindow: 100} // fit=80
+	cfg := &config.ModelConfig{Name: "m", Caps: config.ModelCapabilities{ContextWindow: 100}} // fit=80
 
 	var events []SessionEvent
 	us.SetObserver(func(ev SessionEvent) { events = append(events, ev) })
@@ -409,7 +409,7 @@ func TestMigrateFailureLeavesValidTranscript(t *testing.T) {
 	sess.ReplaceTranscript([]model.Message{{Role: model.RoleUser, Content: huge}})
 	sess.CurrentTokenCount = model.EstimateTokens(sess.GetTranscript())
 	stub, ctx := withStub(us, "D", "t-valid")
-	cfg := &config.ModelConfig{Name: "tiny", ContextWindow: 50}
+	cfg := &config.ModelConfig{Name: "tiny", Caps: config.ModelCapabilities{ContextWindow: 50}}
 
 	if err := us.MigrateToContextWindow(ctx, sess, cfg); err == nil {
 		t.Fatal("expected unfit error")
@@ -438,7 +438,7 @@ func TestExecuteTaskLoopWithModelMigratesBeforeLoop(t *testing.T) {
 	})
 	sess.CurrentTokenCount = model.EstimateTokens(sess.GetTranscript())
 	stub, ctx := withStub(us, "D", "t-etl")
-	cfg := &config.ModelConfig{Name: "tiny", ContextWindow: 50} // fit=40 < 100
+	cfg := &config.ModelConfig{Name: "tiny", Caps: config.ModelCapabilities{ContextWindow: 50}} // fit=40 < 100
 
 	_, err := us.ExecuteTaskLoopWithModel(ctx, "root", "hi", cfg)
 	if err == nil {
@@ -462,7 +462,7 @@ func TestExecuteTaskLoopWithModelMigratesBeforeLoop(t *testing.T) {
 // tool_call from its result the way firstChunk can. This pinpoints the stranding
 // regression to the migration chunker, not the shared compression helper.
 func TestCompactIfNeededKeepsToolCallsTogether(t *testing.T) {
-	conn := model.NewModelConnection()
+	conn := model.NewModelConnection(&config.ProviderConnection{APIType: "openai", Endpoint: model.DefaultModelURL}, nil)
 	sess := model.NewModelSession("compacttool", conn)
 	sess.SetMaxContextLength(120)
 	msgs := []model.Message{
@@ -548,7 +548,7 @@ func TestMigrateCancelledStopsPromptly(t *testing.T) {
 	var events []SessionEvent
 	us.SetObserver(func(ev SessionEvent) { events = append(events, ev) })
 
-	cfg := &config.ModelConfig{Name: "m", ContextWindow: 200} // fit=160 ≪ 99999
+	cfg := &config.ModelConfig{Name: "m", Caps: config.ModelCapabilities{ContextWindow: 200}} // fit=160 ≪ 99999
 	err := us.MigrateToContextWindow(ctx, sess, cfg)
 	if err == nil {
 		t.Fatal("cancelled migration returned nil, want a cancellation error")
@@ -589,7 +589,7 @@ func TestMigrateSummarizeInputBounded(t *testing.T) {
 	us.SetCompressionCompleter(stub)
 	beforeTokens := sess.GetCurrentTokenCount()
 
-	cfg := &config.ModelConfig{Name: "m", ContextWindow: 200} // budget=100, fit=160
+	cfg := &config.ModelConfig{Name: "m", Caps: config.ModelCapabilities{ContextWindow: 200}} // budget=100, fit=160
 	_ = us.MigrateToContextWindow(context.Background(), sess, cfg)
 
 	if stub.calls < 1 {
@@ -613,7 +613,7 @@ func TestMigrateSummarizeInputBounded(t *testing.T) {
 // slice internally by token budget (firstChunk); this asserts it does not cut
 // between a tool_call and its result.
 func TestMigratePreservesToolCallPairing(t *testing.T) {
-	conn := model.NewModelConnection()
+	conn := model.NewModelConnection(&config.ProviderConnection{APIType: "openai", Endpoint: model.DefaultModelURL}, nil)
 	sess := model.NewModelSession("toolpair", conn)
 	msgs := []model.Message{
 		{Role: model.RoleUser, Content: strings.Repeat("q", 100)}, // m0 (~25 tok)
@@ -640,7 +640,7 @@ func TestMigratePreservesToolCallPairing(t *testing.T) {
 	// (25+25=50 ≤ 60, 50+50 > 60): m1 (the tool_call) is summarized into the
 	// digest while m2 (its result) is kept verbatim — stranded after the digest
 	// unless the chunker respects tool-call boundaries.
-	cfg := &config.ModelConfig{Name: "m", ContextWindow: 120}
+	cfg := &config.ModelConfig{Name: "m", Caps: config.ModelCapabilities{ContextWindow: 120}}
 	if err := us.MigrateToContextWindow(context.Background(), sess, cfg); err != nil {
 		t.Fatalf("migration failed: %v (expected to fit after one round)", err)
 	}
@@ -669,7 +669,7 @@ func TestMigratePreservesToolCallPairing(t *testing.T) {
 // loop must walk past ALL of them — a "bump only once" mistake would strand the
 // second result after the digest.
 func TestMigratePreservesMultipleToolResults(t *testing.T) {
-	conn := model.NewModelConnection()
+	conn := model.NewModelConnection(&config.ProviderConnection{APIType: "openai", Endpoint: model.DefaultModelURL}, nil)
 	sess := model.NewModelSession("multipair", conn)
 	msgs := []model.Message{
 		{Role: model.RoleUser, Content: strings.Repeat("q", 100)}, // m0 (~25 tok)
@@ -697,7 +697,7 @@ func TestMigratePreservesMultipleToolResults(t *testing.T) {
 	// target=120 ⇒ chunkBudget=60, fit=96. firstChunk cuts at m2 (25+25=50≤60,
 	// 50+50>60); the tool-pairing loop must then advance past BOTH m2 and m3 so the
 	// assistant tool_call (m1) and all its results are folded into one digest.
-	cfg := &config.ModelConfig{Name: "m", ContextWindow: 120}
+	cfg := &config.ModelConfig{Name: "m", Caps: config.ModelCapabilities{ContextWindow: 120}}
 	if err := us.MigrateToContextWindow(context.Background(), sess, cfg); err != nil {
 		t.Fatalf("migration failed: %v (expected to fit after one round)", err)
 	}

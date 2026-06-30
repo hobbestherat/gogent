@@ -48,7 +48,9 @@ func (w *Workbench) showModelsDialog() {
 		if disp == "" {
 			disp = m.Name
 		}
-		return fmt.Sprintf("%s%s — %s — %s", marker, disp, m.Model, m.APIType)
+		// Show the model id and the connection it routes through (credentials/api_type
+		// live on the connection now).
+		return fmt.Sprintf("%s%s — %s — via %s", marker, disp, m.Model, m.Connection)
 	}
 
 	// Build the action list first: it determines both the button row and the

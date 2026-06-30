@@ -70,12 +70,14 @@ func TestVertexScanGoogleCompat(t *testing.T) {
 	})
 	withModelGardenBase(t, srv.URL)
 
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType:  "vertex",
-		Project:  "my-proj",
-		Location: "us-central1",
-		Model:    "google/gemini-2.5-flash",
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{
+			APIType:  "vertex",
+			Project:  "my-proj",
+			Location: "us-central1",
+		},
+		&config.ModelConfig{Model: "google/gemini-2.5-flash"},
+	)
 	models, err := conn.ListModels()
 	if err != nil {
 		t.Fatalf("ListModels: %v", err)
@@ -120,9 +122,10 @@ func TestVertexScanNativeBareIDs(t *testing.T) {
 	srv, _ := fakeModelGarden(t, "google", [][]string{{"gemini-2.5-flash", "embedding-001"}})
 	withModelGardenBase(t, srv.URL)
 
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType: "vertex-native", Project: "p", Location: "global", Model: "gemini-2.5-flash",
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "vertex-native", Project: "p", Location: "global"},
+		&config.ModelConfig{Model: "gemini-2.5-flash"},
+	)
 	models, err := conn.ListModels()
 	if err != nil {
 		t.Fatalf("ListModels: %v", err)
@@ -141,9 +144,10 @@ func TestVertexScanAnthropicPublisher(t *testing.T) {
 	srv, _ := fakeModelGarden(t, "anthropic", [][]string{{"claude-opus-4-8", "claude-sonnet-4-6"}})
 	withModelGardenBase(t, srv.URL)
 
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType: "vertex-anthropic", Project: "p", Location: "global", Model: "claude-opus-4-8",
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "vertex-anthropic", Project: "p", Location: "global"},
+		&config.ModelConfig{Model: "claude-opus-4-8"},
+	)
 	models, err := conn.ListModels()
 	if err != nil {
 		t.Fatalf("ListModels: %v", err)
@@ -156,9 +160,10 @@ func TestVertexScanAnthropicPublisher(t *testing.T) {
 // TestVertexScanRequiresProject verifies a clear error when the model has no
 // project (the quota header can't be set, so listing can't run).
 func TestVertexScanRequiresProject(t *testing.T) {
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType: "vertex", Endpoint: "https://example.test", Model: "google/gemini-2.5-flash",
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "vertex", Endpoint: "https://example.test"},
+		&config.ModelConfig{Model: "google/gemini-2.5-flash"},
+	)
 	_, err := conn.ListModels()
 	if err == nil || !strings.Contains(err.Error(), "project is required") {
 		t.Fatalf("err = %v, want a 'project is required' error", err)

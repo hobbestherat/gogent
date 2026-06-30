@@ -66,8 +66,11 @@ func newHookGogent(t *testing.T, endpoint string) *Gogent {
 	g := NewGogentWithWorkspace(t.TempDir(), t.TempDir())
 	g.config = &config.Config{
 		DefaultModel: "test",
+		Connections: []*config.ProviderConnection{
+			{Name: "test-conn", APIType: "openai", Endpoint: endpoint},
+		},
 		ModelConfigs: []*config.ModelConfig{
-			{Name: "test", Model: "test-model", Endpoint: endpoint},
+			{Name: "test", Model: "test-model", Connection: "test-conn"},
 		},
 	}
 	return g

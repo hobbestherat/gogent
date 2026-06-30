@@ -28,7 +28,7 @@ func gogentWithTimeouts(t config.TimeoutConfig) *Gogent {
 
 func TestBuildConnectionAppliesGlobalModelTimeout(t *testing.T) {
 	g := gogentWithTimeouts(config.TimeoutConfig{ModelSeconds: 120})
-	conn := g.buildConnection(&config.ModelConfig{Name: "m", Model: "gpt-x", Endpoint: "https://example/v1"})
+	conn := g.buildConnection(&config.ModelConfig{Name: "m", Model: "gpt-x"})
 	if conn.Timeout != 120*time.Second {
 		t.Errorf("conn.Timeout = %v, want 120s (global model timeout)", conn.Timeout)
 	}
@@ -37,7 +37,7 @@ func TestBuildConnectionAppliesGlobalModelTimeout(t *testing.T) {
 func TestBuildConnectionGlobalTimeoutFallsBackToDefaultWhenUnset(t *testing.T) {
 	// ModelSeconds == 0 => the built-in 300s default via ModelSecondsOrDefault.
 	g := gogentWithTimeouts(config.TimeoutConfig{})
-	conn := g.buildConnection(&config.ModelConfig{Name: "m", Endpoint: "https://example/v1"})
+	conn := g.buildConnection(&config.ModelConfig{Name: "m"})
 	if conn.Timeout != defaultModelTimeout {
 		t.Errorf("conn.Timeout = %v, want default %v (unset global => 300s)", conn.Timeout, defaultModelTimeout)
 	}
@@ -48,7 +48,7 @@ func TestBuildConnectionPerModelOverrideWinsOverGlobal(t *testing.T) {
 	// global, without raising the timeout for every other backend.
 	g := gogentWithTimeouts(config.TimeoutConfig{ModelSeconds: 120})
 	conn := g.buildConnection(&config.ModelConfig{
-		Name: "slow-local", Endpoint: "https://example/v1",
+		Name:                "slow-local",
 		ModelTimeoutSeconds: 900,
 	})
 	if conn.Timeout != 900*time.Second {
@@ -59,7 +59,7 @@ func TestBuildConnectionPerModelOverrideWinsOverGlobal(t *testing.T) {
 func TestBuildConnectionPerModelOverrideAppliesEvenWhenGlobalUnset(t *testing.T) {
 	g := gogentWithTimeouts(config.TimeoutConfig{})
 	conn := g.buildConnection(&config.ModelConfig{
-		Name: "slow-local", Endpoint: "https://example/v1",
+		Name:                "slow-local",
 		ModelTimeoutSeconds: 600,
 	})
 	if conn.Timeout != 600*time.Second {
@@ -71,7 +71,7 @@ func TestBuildConnectionUnsetOverrideFallsBackToGlobalExactly(t *testing.T) {
 	// override == 0 must be indistinguishable from "no override field": today's
 	// behaviour, byte- and behaviour-identical (the Part B non-regression promise).
 	g := gogentWithTimeouts(config.TimeoutConfig{ModelSeconds: 150})
-	conn := g.buildConnection(&config.ModelConfig{Name: "m", Endpoint: "https://example/v1"})
+	conn := g.buildConnection(&config.ModelConfig{Name: "m"})
 	if conn.Timeout != 150*time.Second {
 		t.Errorf("conn.Timeout = %v, want 150s (unset override => global, unchanged)", conn.Timeout)
 	}
@@ -82,7 +82,7 @@ func TestBuildConnectionNegativeOverrideFallsBackToGlobal(t *testing.T) {
 	// negative duration; it falls back to the global like an unset value.
 	g := gogentWithTimeouts(config.TimeoutConfig{ModelSeconds: 150})
 	conn := g.buildConnection(&config.ModelConfig{
-		Name: "m", Endpoint: "https://example/v1",
+		Name:                "m",
 		ModelTimeoutSeconds: -10,
 	})
 	if conn.Timeout != 150*time.Second {
@@ -95,7 +95,7 @@ func TestBuildConnectionNilConfigKeepsConnectionDefaultAndDoesNotPanic(t *testin
 	// so the connection keeps NewModelConnectionFromConfig's own 5m default and the
 	// build does not panic.
 	g := &Gogent{config: nil}
-	conn := g.buildConnection(&config.ModelConfig{Name: "m", Endpoint: "https://example/v1"})
+	conn := g.buildConnection(&config.ModelConfig{Name: "m"})
 	if conn == nil {
 		t.Fatal("buildConnection returned nil")
 	}
@@ -109,7 +109,7 @@ func TestBuildConnectionNilConfigKeepsConnectionDefaultAndDoesNotPanic(t *testin
 // inputs, so the resolution logic has exactly one source of truth. Regression guard
 // against the two diverging (e.g. buildConnection re-implementing the fallback).
 func TestBuildConnectionOverrideResolutionMatchesAccessor(t *testing.T) {
-	cfg := &config.ModelConfig{Name: "m", Endpoint: "https://example/v1", ModelTimeoutSeconds: 42}
+	cfg := &config.ModelConfig{Name: "m", ModelTimeoutSeconds: 42}
 	g := gogentWithTimeouts(config.TimeoutConfig{ModelSeconds: 200})
 	conn := g.buildConnection(cfg)
 	want := time.Duration(cfg.ModelTimeoutSecondsOrDefault(g.config.Timeouts.ModelSecondsOrDefault())) * time.Second
@@ -119,4 +119,4 @@ func TestBuildConnectionOverrideResolutionMatchesAccessor(t *testing.T) {
 }
 
 // keep model import used even if future edits drop a direct reference.
-var _ = model.NewModelConnectionFromConfig
+var _ = model.NewModelConnection

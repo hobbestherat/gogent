@@ -41,9 +41,10 @@ type Handlers struct {
 	OnCreate func(sessionID, title string)
 	// OnSend processes a user message for a session. It is called on a background
 	// goroutine; progress is reported through EmitSessionEvent. effort is the
-	// per-session reasoning-effort override (issue #177): empty means "no override
-	// — use the selected model config's reasoning_effort".
-	OnSend func(sessionID, message, modelName, effort string)
+	// per-session reasoning-effort override (issue #177); thinking is the per-session
+	// extended-thinking override ("on"/"off"/""). Empty means "no override — use the
+	// selected model config's value".
+	OnSend func(sessionID, message, modelName, effort, thinking string)
 	// OnFork is invoked (on the UI thread) when a /fork creates a new session
 	// window that should continue from a copy of an existing session's full
 	// conversation history (issue #349). The backend forks parentSessionID into a
@@ -137,6 +138,17 @@ type Handlers struct {
 	// returns an error the dialog surfaces; removing the last model is allowed and
 	// yields the empty-list state. May be nil (Remove then hidden/disabled).
 	RemoveModel func(name string) error
+	// Provider-connection CRUD (credentials live on connections; models reference
+	// them by name). GetConnections returns redacted copies; AddConnection /
+	// UpdateConnection / RemoveConnection persist changes. May be nil.
+	GetConnections   func() []config.ProviderConnection
+	AddConnection    func(config.ProviderConnection) error
+	UpdateConnection func(config.ProviderConnection) error
+	RemoveConnection func(name string) error
+	// DiscoverModels merges a connection's live model listing with the models.dev
+	// catalog into a capability-rich, availability-aware list (the editor's model
+	// picker). May be nil.
+	DiscoverModels func(connName string) ([]DiscoveredModelInfo, error)
 	// GetModelCatalog returns the models.dev catalog (cached on disk with a TTL).
 	// force=true revalidates/refreshes. May be nil (catalog affordance hidden). It
 	// may perform a live network fetch, so callers MUST invoke it off the UI thread
@@ -1252,6 +1264,9 @@ func (w *Workbench) settingsItems() []*tv.MenuItem {
 		// Catalog…" entry is gone, the catalog flow is now one of the Add paths
 		// inside the dialog.
 		tv.NewMenuItem("&Models…", func() { w.showModelsDialog() }),
+	}
+	if w.connectionsReady() {
+		items = append(items, tv.NewMenuItem("&Connections…", func() { w.showConnectionsDialog() }))
 	}
 	// Timeouts is its own discoverable settings page (issue #590) rather than being
 	// buried in the Sub-agent dialog. Gated on its own GetTimeouts/SetTimeouts

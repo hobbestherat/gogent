@@ -102,10 +102,10 @@ func TestStringToAPITypeOpenRouter(t *testing.T) {
 // TestOpenRouterEndpoints checks that the openrouter api_type supplies the base
 // URL automatically and keeps the OpenAI-compatible wire adapter.
 func TestOpenRouterEndpoints(t *testing.T) {
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType: "openrouter",
-		Model:   "google/gemma-3-27b-it:free",
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "openrouter"},
+		&config.ModelConfig{Model: "google/gemma-3-27b-it:free"},
+	)
 	if want := "https://openrouter.ai/api/v1/chat/completions"; conn.URL != want {
 		t.Errorf("chat URL = %q, want %q", conn.URL, want)
 	}
@@ -128,12 +128,10 @@ func TestOpenRouterAttribution(t *testing.T) {
 	}))
 	defer server.Close()
 
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType:  "openrouter",
-		Endpoint: server.URL,
-		Model:    "google/gemma-3-27b-it:free",
-		APIKey:   "or-secret",
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "openrouter", Endpoint: server.URL, APIKey: "or-secret"},
+		&config.ModelConfig{Model: "google/gemma-3-27b-it:free"},
+	)
 	if _, err := conn.Complete([]Message{{Role: RoleUser, Content: "hi"}}); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
