@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
+	"gogent/internal/config"
 )
 
 // This file defines the clean, reusable interface surface for "something that
@@ -84,11 +86,15 @@ type Connector interface {
 	StatsReporter
 }
 
-// ModelInfo describes one model advertised by a backend's listing endpoint.
+// ModelInfo describes one model advertised by a backend's listing endpoint. Caps
+// is populated only by listers whose endpoint self-describes capabilities
+// (OpenRouter's rich /models, Anthropic's limits+flags); it is nil for ID-only
+// listings (Z.AI, Vertex), where the discovery merge fills caps from the catalog.
 type ModelInfo struct {
-	ID      string `json:"id"`
-	Object  string `json:"object,omitempty"`
-	OwnedBy string `json:"owned_by,omitempty"`
+	ID      string                    `json:"id"`
+	Object  string                    `json:"object,omitempty"`
+	OwnedBy string                    `json:"owned_by,omitempty"`
+	Caps    *config.ModelCapabilities `json:"-"`
 }
 
 // UnmarshalJSON reads a listing entry, falling back to a "name" field when the
