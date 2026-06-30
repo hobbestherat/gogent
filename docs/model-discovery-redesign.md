@@ -336,9 +336,10 @@ the rationale and the seam where the work would land.
    `gemini-2.0-flash-001` does not match the catalog's `gemini-2.0-flash` and falls back to
    `Source:"manual"` (no caps). Current-generation models match fine; dated snapshots/previews
    don't. *Seam:* `FamilyKey` / `MergeDiscovery` in `internal/model/discover.go`.
-3. **Bare-Ollama listing (`/api/tags`).** The OpenAI lister only GETs `{base}/models`, so a
-   local Ollama that exposes only `/api/tags` (no `/v1/models`) can't be discovered (the user
-   must type the model id). *Seam:* a fallback in `openAILister.list`.
+3. ✅ **DONE.** **Bare-Ollama listing (`/api/tags`).** `openAILister.list` now falls back to
+   `GET {base}/api/tags` (gated on a `tagsPath` set only on the generic OpenAI provider) when
+   `/models` fails or returns nothing, so a local Ollama/LM Studio is scannable. The original
+   `/models` error is preserved when both fail.
 
 ### B. Cost & budget
 4. **Cost-weighting from catalog cache pricing.** `Caps.CacheReadPerM`/`CacheWritePerM` are
