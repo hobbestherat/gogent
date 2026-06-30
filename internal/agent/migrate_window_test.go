@@ -662,3 +662,58 @@ func TestMigratePreservesToolCallPairing(t *testing.T) {
 		}
 	}
 }
+
+// TestMigratePreservesMultipleToolResults strengthens TestMigratePreservesToolCallPairing
+// for an assistant turn that emits SEVERAL tool calls with consecutive role:tool
+// results. The chunk cut lands on the FIRST result, so firstChunk's tool-pairing
+// loop must walk past ALL of them — a "bump only once" mistake would strand the
+// second result after the digest.
+func TestMigratePreservesMultipleToolResults(t *testing.T) {
+	conn := model.NewModelConnection()
+	sess := model.NewModelSession("multipair", conn)
+	msgs := []model.Message{
+		{Role: model.RoleUser, Content: strings.Repeat("q", 100)}, // m0 (~25 tok)
+		{Role: model.RoleAssistant, Content: strings.Repeat("a", 100), ToolCalls: []model.ToolCall{ // m1 (~25 tok)
+			{ID: "call_1", Type: "function", Function: model.FunctionCall{Name: "f", Arguments: "{}"}},
+			{ID: "call_2", Type: "function", Function: model.FunctionCall{Name: "g", Arguments: "{}"}},
+		}},
+		{Role: model.RoleTool, ToolCallID: "call_1", Content: strings.Repeat("r", 200)}, // m2 (~50 tok)
+		{Role: model.RoleTool, ToolCallID: "call_2", Content: strings.Repeat("r", 200)}, // m3 (~50 tok)
+		{Role: model.RoleAssistant, Content: strings.Repeat("a", 8)},                    // m4
+		{Role: model.RoleUser, Content: "q1"},
+		{Role: model.RoleAssistant, Content: "a1"},
+		{Role: model.RoleUser, Content: "q2"},
+		{Role: model.RoleAssistant, Content: "a2"},
+		{Role: model.RoleUser, Content: "q3"},
+		{Role: model.RoleAssistant, Content: "a3"},
+	}
+	sess.ReplaceTranscript(msgs)
+	sess.SetLastMigrationWindow(0)
+	sess.CurrentTokenCount = model.EstimateTokens(msgs)
+	ag := NewAgent("root", sess)
+	us := NewUserSession("multipair", ag)
+	us.SetCompressionCompleter(&stubCompleter{content: "D"})
+
+	// target=120 ⇒ chunkBudget=60, fit=96. firstChunk cuts at m2 (25+25=50≤60,
+	// 50+50>60); the tool-pairing loop must then advance past BOTH m2 and m3 so the
+	// assistant tool_call (m1) and all its results are folded into one digest.
+	cfg := &config.ModelConfig{Name: "m", ContextWindow: 120}
+	if err := us.MigrateToContextWindow(context.Background(), sess, cfg); err != nil {
+		t.Fatalf("migration failed: %v (expected to fit after one round)", err)
+	}
+
+	got := sess.GetTranscript()
+	for i, m := range got {
+		if m.Role != model.RoleTool {
+			continue
+		}
+		var prev model.Role
+		if i > 0 {
+			prev = got[i-1].Role
+		}
+		if i == 0 || prev != model.RoleAssistant || len(got[i-1].ToolCalls) == 0 {
+			t.Errorf("tool result (tool_call_id=%q) at index %d is stranded (preceded by %q) — "+
+				"firstChunk did not keep all consecutive results with their tool_call", m.ToolCallID, i, prev)
+		}
+	}
+}
