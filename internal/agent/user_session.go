@@ -48,7 +48,9 @@ const (
 	// It is a UI-facing, fire-and-forget notice — the attached TUI uses it to tell
 	// the user, in-band, that a remote approval decision could not be delivered or
 	// that a late "always allow" grant will apply to future requests (issue #560).
-	// The agent loop itself never emits it; it is injected by the client.
+	// It is usually injected by the client, but the agent loop also emits it for the
+	// non-blocking vision warn-on-mismatch notice (a turn carrying images to a model
+	// with no vision capability — see UserSession.warnVisionMismatch).
 	SessionEventNotice SessionEventType = "notice"
 	// SessionEventSubAgent reports a sub-agent lifecycle change (spawned/finished).
 	SessionEventSubAgent SessionEventType = "subagent"
@@ -1212,6 +1214,53 @@ func stopForStepLimit(resp *model.CompletionResponse, maxSteps int) *model.Compl
 	return resp
 }
 
+// turnHasImages reports whether any message in msgs carries an image attachment
+// (model.Message.Images, multimodal input). It is a pure helper driving the
+// non-blocking vision warn-on-mismatch check; it never mutates msgs, so the
+// images are left intact to be sent.
+func turnHasImages(msgs []model.Message) bool {
+	for i := range msgs {
+		if len(msgs[i].Images) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// visionMismatchNotice is the user-facing, non-blocking warning surfaced (once
+// per turn) when an outgoing turn carries images to a model that does not report
+// vision capability. The wording is intentionally soft — the model's caps may
+// simply be unset for a manually-added model — and actionable. The images are
+// still sent; they may be ignored by the model.
+func visionMismatchNotice(modelName string) string {
+	if strings.TrimSpace(modelName) == "" {
+		modelName = "The current model"
+	}
+	return fmt.Sprintf("%s does not report image (vision) support, but this turn "+
+		"includes image attachment(s). They were sent anyway and may be ignored by "+
+		"the model — switch to a vision-capable model if the images matter.", modelName)
+}
+
+// warnVisionMismatch surfaces visionMismatchNotice when the outgoing turn's
+// messages carry images and the active model's connector reports no vision
+// capability. It is non-blocking and read-only: the images are never stripped or
+// blocked. Called once per turn from runLoop (on the user-turn batch), so the
+// notice fires at most once per turn with no de-dup state. It is a no-op when the
+// connector does not report a vision capability (capability unknown — e.g. a test
+// mock), so an unknown backend never triggers a false warning. emit is runLoop's
+// local emitter, which is a no-op for sub-agents, so only the root turn's user
+// sees the notice.
+func (s *UserSession) warnVisionMismatch(sess *model.ModelSession, msgs []model.Message, emit func(SessionEvent)) {
+	if sess == nil || emit == nil || !turnHasImages(msgs) {
+		return
+	}
+	vr, ok := sess.Model.(model.VisionReporter)
+	if !ok || vr.SupportsVision() {
+		return
+	}
+	emit(SessionEvent{Type: SessionEventNotice, Text: visionMismatchNotice(vr.VisionModelName())})
+}
+
 // runLoop is the shared multi-turn tool-calling loop used by both the top-level
 // task loop and sub-agents (sub-agents pass a different system prompt).
 func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initialMessage, systemPrompt string) (responses []*model.CompletionResponse, err error) {
@@ -1329,6 +1378,13 @@ func (s *UserSession) runLoop(ctx context.Context, agent *Agent, agentID, initia
 	if agent.Kind == KindRoot {
 		firstMessages = append(firstMessages, s.takeBackgroundResults()...)
 	}
+	// Non-blocking vision warn-on-mismatch: if this user turn carries images to a
+	// model that does not report vision capability, tell the user the images were
+	// sent anyway and may be ignored. This runs exactly once per turn (the user-turn
+	// batch is built here, before the tool-result continuation rounds) and never
+	// strips or blocks the images. emit is a no-op for sub-agents, so only the root
+	// turn surfaces the notice.
+	s.warnVisionMismatch(sess, firstMessages, emit)
 	s.compactIfNeeded(sess, emit)
 	refreshSystemPrompt()
 	resp, err := s.modelRoundTrip(ctx, sess, agent,

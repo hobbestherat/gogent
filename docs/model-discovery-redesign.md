@@ -352,11 +352,13 @@ the rationale and the seam where the work would land.
    hardcode. *Seam:* `caps.go` / `connection.go` `CostWeightedInput`.
 
 ### C. UX & display
-5. **Vision warn-on-mismatch (decided in §11, not wired).** `Caps.Vision`/modalities are
-   captured and shown, but there is **no** warning when a turn sends images to a model whose
-   `Caps.Vision` is false — images are still sent unconditionally (today's behaviour). The
-   decided UX was a non-blocking warning. *Seam:* a new consumer at the turn / message-
-   serialization seam (`connection.go` `MarshalJSON` or the agent turn).
+5. ✅ **DONE.** **Vision warn-on-mismatch.** When a user turn carries images to a model whose
+   `Caps.Vision` is false, the user gets a single non-blocking `[System]` notice (images are
+   still sent). Implemented via an optional `model.VisionReporter` (`SupportsVision`/
+   `VisionModelName` on `*ModelConnection`, off the `Caps` snapshot) consulted once per turn in
+   `user_session.go runLoop` and surfaced through the existing `SessionEventNotice` (works
+   embedded + remote). *Note:* dormant until user image-input is wired onto outgoing turns —
+   the consumer is placed at the correct seam to activate automatically when it lands.
 6. ✅ **DONE.** **Overall-stats "api" row resolves the connection host.** `buildOverallStats`
    now takes the provider connections (threaded via `refreshOverall`→`refreshOverallStats`,
    fetched through `Handlers.GetConnections`) and resolves the selected model's connection to

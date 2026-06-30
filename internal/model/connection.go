@@ -1229,6 +1229,39 @@ func (c *ModelConnection) caps() Capabilities {
 	return Capabilities{}
 }
 
+// SupportsVision reports whether this connection's selected model advertises
+// image (vision) input in its capability snapshot (config.ModelConfig.Caps.Vision).
+// It backs the non-blocking vision warn-on-mismatch check (see VisionReporter and
+// UserSession.warnVisionMismatch): the agent loop warns — without ever stripping
+// or blocking the images — when an outgoing turn carries images to a model for
+// which this returns false. A connection with no model config returns false.
+//
+// Caps.Vision is false for manually-added models that never went through
+// discovery (their caps are unset), so this can be a false negative; that is
+// acceptable because the consequence is only a soft, non-blocking notice.
+func (c *ModelConnection) SupportsVision() bool {
+	return c.Config != nil && c.Config.Caps.Vision
+}
+
+// VisionModelName returns the most user-recognizable name for this connection's
+// model — the configured DisplayName, else the config Name, else the backend
+// model id — for the vision-mismatch notice. It falls back to the connection's
+// ModelName so a configured model is always named.
+func (c *ModelConnection) VisionModelName() string {
+	if c.Config != nil {
+		if n := strings.TrimSpace(c.Config.DisplayName); n != "" {
+			return n
+		}
+		if n := strings.TrimSpace(c.Config.Name); n != "" {
+			return n
+		}
+		if n := strings.TrimSpace(c.Config.Model); n != "" {
+			return n
+		}
+	}
+	return c.ModelName
+}
+
 func (c *ModelConnection) SetURL(url string) *ModelConnection {
 	c.URL = url
 	return c
