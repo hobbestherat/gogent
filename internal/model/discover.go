@@ -66,11 +66,11 @@ func NormalizeModelID(apiType APIType, id string) string {
 	return strings.TrimSpace(s)
 }
 
-// familyKey reduces a normalized id to a coarse family key for the catalog
+// FamilyKey reduces a normalized id to a coarse family key for the catalog
 // family-match fallback (e.g. "llama-3.3-70b-instruct-turbo" and
 // "llama-3.3-70b-versatile" share "llama-3.3-70b"). It keeps the leading
 // alphanumeric/version segments and drops trailing qualifier words. Best-effort.
-func familyKey(normID string) string {
+func FamilyKey(normID string) string {
 	parts := strings.Split(normID, "-")
 	// Keep segments up to and including the last that looks like a version/size
 	// token (contains a digit); drop trailing pure-word qualifiers.
@@ -165,7 +165,7 @@ type CatalogLookup interface {
 	// Exact returns caps for an exact normalized-id match.
 	Exact(apiType APIType, normID string) (config.ModelCapabilities, bool)
 	// Family returns caps for a coarser family match (fallback).
-	Family(apiType APIType, familyKey string) (config.ModelCapabilities, bool)
+	Family(apiType APIType, fam string) (config.ModelCapabilities, bool)
 	// All returns every catalog model for the api_type, as (origID, normID, caps),
 	// so catalog-only entries can be surfaced (flagged unavailable).
 	All(apiType APIType) []CatalogEntry
@@ -197,7 +197,7 @@ func MergeDiscovery(apiType APIType, live []ModelInfo, cat CatalogLookup) []Disc
 		if cat != nil {
 			if c, ok := cat.Exact(apiType, norm); ok {
 				catalogCaps = &c
-			} else if c, ok := cat.Family(apiType, familyKey(norm)); ok {
+			} else if c, ok := cat.Family(apiType, FamilyKey(norm)); ok {
 				catalogCaps = &c
 			}
 		}

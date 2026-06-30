@@ -161,6 +161,7 @@ func (s *Server) buildAPI() *webapi.API {
 	appr := approvalsSvc{s: s}
 	auth := authSvc{s: s}
 	mods := modelsSvc{s: s}
+	conns := connectionsSvc{s: s}
 	tools := toolsSvc{s: s}
 	skills := skillsSvc{s: s}
 	settings := settingsSvc{s: s}
@@ -222,6 +223,13 @@ func (s *Server) buildAPI() *webapi.API {
 			{Path: "/models/:name", Method: http.MethodPut, Handler: mods.Update, AuthLevel: req},
 			{Path: "/models/:name", Method: http.MethodDelete, Handler: mods.Delete, AuthLevel: req},
 			{Path: "/models/:name/scan", Method: http.MethodPost, Handler: mods.Scan, AuthLevel: req},
+
+			// --- connections ---
+			{Path: "/connections", Method: http.MethodGet, Handler: conns.List, AuthLevel: req},
+			{Path: "/connections", Method: http.MethodPost, Handler: conns.Create, AuthLevel: req},
+			{Path: "/connections/:name", Method: http.MethodPut, Handler: conns.Update, AuthLevel: req},
+			{Path: "/connections/:name", Method: http.MethodDelete, Handler: conns.Delete, AuthLevel: req},
+			{Path: "/connections/:name/discover", Method: http.MethodPost, Handler: conns.Discover, AuthLevel: req},
 
 			// --- tools ---
 			{Path: "/tools", Method: http.MethodGet, Handler: tools.List, AuthLevel: req},

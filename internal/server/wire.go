@@ -359,31 +359,76 @@ type reviewEditsView struct {
 
 // --- Models -----------------------------------------------------------------
 
-// modelView is a redacted model config (api_key never echoed in GET responses).
+// capsView mirrors config.ModelCapabilities on the wire (display + selectors).
+type capsView struct {
+	ContextWindow    int      `json:"context_window,omitempty"`
+	MaxOutput        int      `json:"max_output,omitempty"`
+	Reasoning        bool     `json:"reasoning,omitempty"`
+	ThinkingToggle   bool     `json:"thinking_toggle,omitempty"`
+	EffortOptions    []string `json:"effort_options,omitempty"`
+	Vision           bool     `json:"vision,omitempty"`
+	ToolCall         bool     `json:"tool_call,omitempty"`
+	StructuredOutput bool     `json:"structured_output,omitempty"`
+	CustomTemp       bool     `json:"custom_temperature,omitempty"`
+	InputModalities  []string `json:"input_modalities,omitempty"`
+	OutputModalities []string `json:"output_modalities,omitempty"`
+	InputCostPerM    float64  `json:"input_cost_per_m,omitempty"`
+	OutputCostPerM   float64  `json:"output_cost_per_m,omitempty"`
+	CacheReadPerM    float64  `json:"cache_read_per_m,omitempty"`
+	CacheWritePerM   float64  `json:"cache_write_per_m,omitempty"`
+	Knowledge        string   `json:"knowledge,omitempty"`
+	ReleaseDate      string   `json:"release_date,omitempty"`
+	Source           string   `json:"source,omitempty"`
+}
+
+// modelView is a model config on the wire (references a connection by name; caps
+// nested; no credentials — those live on the connection).
 type modelView struct {
 	Name            string   `json:"name"`
 	DisplayName     string   `json:"display_name"`
-	APIType         string   `json:"api_type,omitempty"`
-	Endpoint        string   `json:"endpoint"`
-	Project         string   `json:"project,omitempty"`
-	Location        string   `json:"location,omitempty"`
+	Connection      string   `json:"connection"`
 	Model           string   `json:"model"`
-	HasAPIKey       bool     `json:"has_api_key"`
-	Temperature     float32  `json:"temperature"`
-	TopP            float32  `json:"top_p,omitempty"`
-	MaxTokens       int      `json:"max_tokens"`
-	ContextWindow   int      `json:"context_window,omitempty"`
-	ReasoningEffort string   `json:"reasoning_effort,omitempty"`
-	EffortOptions   []string `json:"effort_options,omitempty"`
-	Thinking        *bool    `json:"thinking,omitempty"`
+	Caps            capsView `json:"caps"`
 	Free            bool     `json:"free"`
+	Temperature     float32  `json:"temperature,omitempty"`
+	TopP            float32  `json:"top_p,omitempty"`
+	MaxTokens       int      `json:"max_tokens,omitempty"`
+	ReasoningEffort string   `json:"reasoning_effort,omitempty"`
+	Thinking        *bool    `json:"thinking,omitempty"`
+	CacheTTL        string   `json:"cache_ttl,omitempty"`
 }
 
-// updateModelRequest is the body of PUT /models/:name. APIKey is optional: an
-// empty string preserves the existing key so a GET→edit→PUT round-trip doesn't
-// wipe it.
+// connectionView is a redacted provider connection (api_key never echoed in GET
+// responses; HasAPIKey reports whether one is set).
+type connectionView struct {
+	Name              string `json:"name"`
+	APIType           string `json:"api_type,omitempty"`
+	Endpoint          string `json:"endpoint,omitempty"`
+	DiscoveryEndpoint string `json:"discovery_endpoint,omitempty"`
+	Project           string `json:"project,omitempty"`
+	Location          string `json:"location,omitempty"`
+	HasAPIKey         bool   `json:"has_api_key"`
+}
+
+// updateModelRequest is the body of PUT /models/:name.
 type updateModelRequest struct {
 	config.ModelConfig
+}
+
+// updateConnectionRequest is the body of POST/PUT /connections. APIKey is optional
+// on update: an empty string preserves the existing key so a GET→edit→PUT
+// round-trip doesn't wipe it.
+type updateConnectionRequest struct {
+	config.ProviderConnection
+}
+
+// discoveredModelView is one merged discovery result (live + catalog).
+type discoveredModelView struct {
+	ID          string   `json:"id"`
+	DisplayName string   `json:"display_name,omitempty"`
+	Available   bool     `json:"available"`
+	InCatalog   bool     `json:"in_catalog"`
+	Caps        capsView `json:"caps"`
 }
 
 // --- Tools ------------------------------------------------------------------
@@ -468,6 +513,52 @@ type shellView struct {
 
 // --- Conversion helpers -----------------------------------------------------
 
+func capsToView(c config.ModelCapabilities) capsView {
+	return capsView{
+		ContextWindow:    c.ContextWindow,
+		MaxOutput:        c.MaxOutput,
+		Reasoning:        c.Reasoning,
+		ThinkingToggle:   c.ThinkingToggle,
+		EffortOptions:    c.EffortOptions,
+		Vision:           c.Vision,
+		ToolCall:         c.ToolCall,
+		StructuredOutput: c.StructuredOutput,
+		CustomTemp:       c.CustomTemp,
+		InputModalities:  c.InputModalities,
+		OutputModalities: c.OutputModalities,
+		InputCostPerM:    c.InputCostPerM,
+		OutputCostPerM:   c.OutputCostPerM,
+		CacheReadPerM:    c.CacheReadPerM,
+		CacheWritePerM:   c.CacheWritePerM,
+		Knowledge:        c.Knowledge,
+		ReleaseDate:      c.ReleaseDate,
+		Source:           c.Source,
+	}
+}
+
+func capsFromView(v capsView) config.ModelCapabilities {
+	return config.ModelCapabilities{
+		ContextWindow:    v.ContextWindow,
+		MaxOutput:        v.MaxOutput,
+		Reasoning:        v.Reasoning,
+		ThinkingToggle:   v.ThinkingToggle,
+		EffortOptions:    v.EffortOptions,
+		Vision:           v.Vision,
+		ToolCall:         v.ToolCall,
+		StructuredOutput: v.StructuredOutput,
+		CustomTemp:       v.CustomTemp,
+		InputModalities:  v.InputModalities,
+		OutputModalities: v.OutputModalities,
+		InputCostPerM:    v.InputCostPerM,
+		OutputCostPerM:   v.OutputCostPerM,
+		CacheReadPerM:    v.CacheReadPerM,
+		CacheWritePerM:   v.CacheWritePerM,
+		Knowledge:        v.Knowledge,
+		ReleaseDate:      v.ReleaseDate,
+		Source:           v.Source,
+	}
+}
+
 func modelToView(m *config.ModelConfig) modelView {
 	if m == nil {
 		return modelView{}
@@ -475,20 +566,41 @@ func modelToView(m *config.ModelConfig) modelView {
 	return modelView{
 		Name:            m.Name,
 		DisplayName:     m.DisplayName,
-		APIType:         m.APIType,
-		Endpoint:        m.Endpoint,
-		Project:         m.Project,
-		Location:        m.Location,
+		Connection:      m.Connection,
 		Model:           m.Model,
-		HasAPIKey:       m.APIKey != "",
+		Caps:            capsToView(m.Caps),
+		Free:            m.Caps.Free(),
 		Temperature:     m.Temperature,
 		TopP:            m.TopP,
 		MaxTokens:       m.MaxTokens,
-		ContextWindow:   m.ContextWindow,
 		ReasoningEffort: m.ReasoningEffort,
-		EffortOptions:   m.EffortOptions,
 		Thinking:        m.Thinking,
-		Free:            m.Free,
+		CacheTTL:        m.CacheTTL,
+	}
+}
+
+func connectionToView(c *config.ProviderConnection) connectionView {
+	if c == nil {
+		return connectionView{}
+	}
+	return connectionView{
+		Name:              c.Name,
+		APIType:           c.APIType,
+		Endpoint:          c.Endpoint,
+		DiscoveryEndpoint: c.DiscoveryEndpoint,
+		Project:           c.Project,
+		Location:          c.Location,
+		HasAPIKey:         c.APIKey != "",
+	}
+}
+
+func discoveredToView(d model.DiscoveredModel) discoveredModelView {
+	return discoveredModelView{
+		ID:          d.ID,
+		DisplayName: d.DisplayName,
+		Available:   d.Available,
+		InCatalog:   d.InCatalog,
+		Caps:        capsToView(d.Caps),
 	}
 }
 

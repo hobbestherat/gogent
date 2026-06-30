@@ -395,11 +395,9 @@ func buildDaemonCore(homeDir string, opts daemonStartOpts, logRing *diag.Ring) *
 		log.Printf("open audit log: %v", err)
 	}
 
-	// The default (HTTP) session, pointed at the configured default endpoint.
-	m := model.NewModelConnection()
-	if def := g.GetConfig().GetModelConfig(g.GetConfig().DefaultModel); def != nil && def.Endpoint != "" {
-		m.SetURL(def.Endpoint)
-	}
+	// The default (HTTP) session, resolving the default model's provider connection
+	// (auth/api_type/endpoint all wired; no bare placeholder).
+	m := g.DefaultConnection()
 	rootAgent := agent.NewAgent("root", model.NewModelSession("main", m))
 	rootAgent.SetState(agent.StateIdle)
 	_ = g.CreateUserSession("default", rootAgent)
