@@ -564,12 +564,28 @@ type openAILister struct {
 	// generic OpenAI api_type; hosted gateways (Z.AI, OpenRouter) and Anthropic,
 	// which always serve /models, leave it empty and are unaffected.
 	tagsPath string
+	// parseCaps, when non-nil, parses a PROVIDER-SPECIFIC rich /models body into
+	// entries carrying self-described capabilities (ModelInfo.Caps). It is set only
+	// for backends whose listing describes more than an id (OpenRouter, Anthropic);
+	// the id-only providers (generic OpenAI, Z.AI) leave it nil so their Caps stays
+	// nil and discovery fills caps from the catalog. A parse failure falls back to
+	// the generic id-only path, so a wire change degrades to ids, never an error.
+	parseCaps capsParser
 }
 
 func (l openAILister) list(ctx context.Context, c *ModelConnection) ([]ModelInfo, error) {
 	base := stripChatPath(c.URL, l.chatPath)
 	body, err := c.doJSON(ctx, http.MethodGet, appendPath(base, l.modelsPath), nil)
 	if err == nil {
+		// Provider-aware rich parse first: when the backend self-describes
+		// capabilities (OpenRouter, Anthropic), parse them onto ModelInfo.Caps so
+		// discovery prefers the live values. On any parse failure fall through to the
+		// generic id-only path so a wire change degrades gracefully.
+		if l.parseCaps != nil {
+			if models, perr := l.parseCaps(body); perr == nil && len(models) > 0 {
+				return models, nil
+			}
+		}
 		if models := parseOpenAIModelList(body); len(models) > 0 {
 			return models, nil
 		}
