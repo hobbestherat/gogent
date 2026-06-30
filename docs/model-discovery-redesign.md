@@ -355,11 +355,11 @@ the rationale and the seam where the work would land.
    `Caps.Vision` is false — images are still sent unconditionally (today's behaviour). The
    decided UX was a non-blocking warning. *Seam:* a new consumer at the turn / message-
    serialization seam (`connection.go` `MarshalJSON` or the agent turn).
-6. **Overall-stats "api" row shows the connection *name*, not the host.** `buildOverallStats`
-   sets `o.APIEndpoint = model.Connection`; it lacks the connections list to resolve the
-   connection's endpoint host / api_type, so the former host display (`formatEndpoint`, now
-   unused dead code in `overall_stats.go`) is gone. Threading connections into the builder
-   would restore it. *Seam:* `ui/tui/overall_stats.go` + its callers.
+6. ✅ **DONE.** **Overall-stats "api" row resolves the connection host.** `buildOverallStats`
+   now takes the provider connections (threaded via `refreshOverall`→`refreshOverallStats`,
+   fetched through `Handlers.GetConnections`) and resolves the selected model's connection to
+   its host (`api.groq.com`) or provider label for derive-base connections, re-using
+   `formatEndpoint`. The #534 aggregate-blank invariant is preserved.
 7. **First-run onboarding nudge.** The welcome dialog and the empty-list placeholders
    (Models…/Connections…) don't point a brand-new user at "create your first connection".
    *Seam:* `welcome_dialog.go`, `model_dialog.go`, `connections_dialog.go`.
