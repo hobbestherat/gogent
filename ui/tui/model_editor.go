@@ -95,14 +95,35 @@ func (w *Workbench) showModelForm(title string, initial config.ModelConfig, name
 
 	// Connection: the credentialed provider connection this model talks through
 	// (credentials/api_type/endpoint live there now, edited in the Connections…
-	// dialog). A text field for now; stage 5b turns this into a picker.
-	connection := field("Connection:", 3)
-	connection.SetText(initial.Connection)
+	// dialog). A dropdown of configured connections, falling back to a text field
+	// when none are wired/known.
+	connNames := w.connectionNames()
+	dialog.Window.AddContent(dialogLabel("Connection:", tv.Rect{X: 2, Y: 3, W: labelW, H: 1}))
+	var connectionSel *tv.Select
+	var connectionBox *tv.TextBox
+	if len(connNames) > 0 {
+		connectionSel = newSelect(w.desktop, connNames, tv.Rect{X: boxX, Y: 3, W: boxW, H: 1})
+		connectionSel.SetSelected(indexOrZero(connNames, initial.Connection))
+		dialog.Window.AddContent(connectionSel)
+	} else {
+		connectionBox = tv.NewTextBox("", tv.Rect{X: boxX, Y: 3, W: boxW, H: 1})
+		connectionBox.SetText(initial.Connection)
+		dialog.Window.AddContent(connectionBox)
+	}
+	currentConnection := func() string {
+		if connectionSel != nil {
+			return connectionSel.Value()
+		}
+		return strings.TrimSpace(connectionBox.GetText())
+	}
 
-	// Model id: a text field, with a Scan button (edit mode only) that discovers the
-	// connection's models and, on success, swaps the text field for a dropdown.
+	// Model id: a text field, with a Discover button that merges the connection's
+	// live listing with the catalog and, on success, swaps the text field for a
+	// dropdown of advertised models (✓ available / ⚠ catalog-only); picking one
+	// also auto-fills its capability snapshot. Discovery works on both add and edit
+	// since it is keyed by the connection, not a saved model name.
 	dialog.Window.AddContent(dialogLabel("Model id:", tv.Rect{X: 2, Y: 5, W: labelW, H: 1}))
-	scanEnabled := !nameEditable && w.handlers.ScanModels != nil
+	scanEnabled := w.handlers.DiscoverModels != nil
 	modelBoxW := boxW
 	if scanEnabled {
 		modelBoxW = boxW - modelFormScanW - 1
@@ -114,9 +135,14 @@ func (w *Workbench) showModelForm(title string, initial config.ModelConfig, name
 	modelSelect := newSelect(w.desktop, nil, modelRect)
 	modelSelect.Root().Visible = false
 	dialog.Window.AddContent(modelSelect)
+	// capsByID carries the discovered capability snapshot for each model id, applied
+	// to the saved config when the user picks a discovered model. The "⚠ " prefix on
+	// catalog-only rows is stripped here.
+	capsByID := map[string]config.ModelCapabilities{}
+	stripFlag := func(s string) string { return strings.TrimPrefix(strings.TrimPrefix(s, "⚠ "), "✓ ") }
 	currentModelID := func() string {
 		if modelSelect.Root().Visible {
-			return modelSelect.Value()
+			return stripFlag(modelSelect.Value())
 		}
 		return modelID.GetText()
 	}
@@ -136,22 +162,40 @@ func (w *Workbench) showModelForm(title string, initial config.ModelConfig, name
 	thinking.SetSelected(thinkingIndex(initial.Thinking))
 	dialog.Window.AddContent(thinking)
 
-	// Scan (edit mode only): discover the connection's models off the UI thread so a
-	// slow backend can't freeze the dialog.
+	// Discover: merge the selected connection's live listing with the catalog off the
+	// UI thread so a slow backend can't freeze the dialog. On success swap the model
+	// text box for a dropdown of advertised models, flagged ✓ available / ⚠
+	// catalog-only, and remember each model's caps for auto-fill on save.
 	if scanEnabled {
-		scanModels := func() {
-			draft := initial
-			draft.Connection = strings.TrimSpace(connection.GetText())
-			draft.Model = currentModelID()
+		discover := func() {
+			connName := currentConnection()
+			if connName == "" {
+				w.showConfirm("Discover", "Choose a connection first.", nil)
+				return
+			}
 			go func() {
-				ids, err := w.handlers.ScanModels(draft)
+				ds, err := w.handlers.DiscoverModels(connName)
 				w.desktop.Post(func() {
 					if err != nil {
-						w.showConfirm("Scan", "Failed to list models:\n"+err.Error(), nil)
+						w.showConfirm("Discover", "Failed to discover models:\n"+err.Error(), nil)
 						return
 					}
-					modelSelect.Options = ids
-					modelSelect.SetSelected(indexOrZero(ids, currentModelID()))
+					opts := make([]string, 0, len(ds))
+					capsByID = map[string]config.ModelCapabilities{}
+					for _, d := range ds {
+						label := "✓ " + d.ID
+						if !d.Available {
+							label = "⚠ " + d.ID
+						}
+						opts = append(opts, label)
+						capsByID[d.ID] = d.Caps
+					}
+					if len(opts) == 0 {
+						w.showConfirm("Discover", "The connection returned no models.", nil)
+						return
+					}
+					modelSelect.Options = opts
+					modelSelect.SetSelected(0)
 					modelID.Root().Visible = false
 					modelSelect.Root().Visible = true
 					w.desktop.SetFocus(modelSelect)
@@ -159,7 +203,7 @@ func (w *Workbench) showModelForm(title string, initial config.ModelConfig, name
 			}()
 		}
 		dialog.Window.AddContent(newButton("Scan",
-			tv.Rect{X: boxX + modelBoxW + 1, Y: 5, W: modelFormScanW, H: 1}, scanModels))
+			tv.Rect{X: boxX + modelBoxW + 1, Y: 5, W: modelFormScanW, H: 1}, discover))
 	}
 
 	var layer *tv.Layer
@@ -170,15 +214,19 @@ func (w *Workbench) showModelForm(title string, initial config.ModelConfig, name
 			cfg.Name = strings.TrimSpace(nameBox.GetText())
 		}
 		cfg.DisplayName = display.GetText()
-		cfg.Connection = strings.TrimSpace(connection.GetText())
+		cfg.Connection = currentConnection()
 		cfg.Model = strings.TrimSpace(currentModelID())
+		// Apply the discovered capability snapshot when the user picked a discovered
+		// model; otherwise cfg.Caps is carried through from initial.
+		if caps, ok := capsByID[cfg.Model]; ok {
+			cfg.Caps = caps
+		}
 		if v, err := strconv.ParseFloat(temp.GetText(), 32); err == nil {
 			cfg.Temperature = float32(v)
 		}
 		cfg.MaxTokens = atoiOr(maxTokens.GetText(), cfg.MaxTokens)
 		cfg.ReasoningEffort = strings.TrimSpace(reasoningEffort.GetText())
 		cfg.Thinking = thinkingValue(thinking.Value())
-		// cfg.Caps is carried through from initial (set by discovery / catalog).
 
 		if cfg.Name == "" {
 			w.showConfirm("Model", "A unique model name is required.", nil)

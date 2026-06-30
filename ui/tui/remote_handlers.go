@@ -1345,6 +1345,17 @@ func (rc *RemoteClient) Handlers() Handlers {
 		AddConnection:    func(pc config.ProviderConnection) error { return c.AddConnection(pc) },
 		UpdateConnection: func(pc config.ProviderConnection) error { return c.UpdateConnection(pc) },
 		RemoveConnection: func(name string) error { return c.RemoveConnection(name) },
+		DiscoverModels: func(connName string) ([]DiscoveredModelInfo, error) {
+			ds, err := c.DiscoverConnection(connName)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]DiscoveredModelInfo, 0, len(ds))
+			for _, d := range ds {
+				out = append(out, d.toInfo())
+			}
+			return out, nil
+		},
 		GetModelCatalog: func(ctx context.Context, force bool) (modelsdev.Catalog, error) {
 			return mdc.Catalog(ctx, force)
 		},

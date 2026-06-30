@@ -223,6 +223,20 @@ func embeddedHandlersFor(g *gogent.Gogent, wb *tuipkg.Workbench, noColor bool) t
 			}
 			return out
 		},
+		DiscoverModels: func(connName string) ([]tuipkg.DiscoveredModelInfo, error) {
+			ds, err := g.DiscoverModels(context.Background(), connName)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]tuipkg.DiscoveredModelInfo, 0, len(ds))
+			for _, d := range ds {
+				out = append(out, tuipkg.DiscoveredModelInfo{
+					ID: d.ID, DisplayName: d.DisplayName,
+					Available: d.Available, InCatalog: d.InCatalog, Caps: d.Caps,
+				})
+			}
+			return out, nil
+		},
 		AddConnection: func(pc config.ProviderConnection) error {
 			return g.AddConnection(pc)
 		},

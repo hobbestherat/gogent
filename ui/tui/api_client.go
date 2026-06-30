@@ -525,6 +525,26 @@ type DiscoveredModelDTO struct {
 	Caps        CapsDTO `json:"caps"`
 }
 
+// DiscoveredModelInfo is the UI-facing form of a merged discovery result (the
+// handler return type, identical in embedded and remote modes).
+type DiscoveredModelInfo struct {
+	ID          string
+	DisplayName string
+	Available   bool
+	InCatalog   bool
+	Caps        config.ModelCapabilities
+}
+
+func (d DiscoveredModelDTO) toInfo() DiscoveredModelInfo {
+	return DiscoveredModelInfo{
+		ID:          d.ID,
+		DisplayName: d.DisplayName,
+		Available:   d.Available,
+		InCatalog:   d.InCatalog,
+		Caps:        d.Caps.toConfig(),
+	}
+}
+
 // ToolDTO mirrors the server's toolView.
 type ToolDTO struct {
 	Name        string `json:"name"`

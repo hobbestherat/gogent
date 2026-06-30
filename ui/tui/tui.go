@@ -144,6 +144,10 @@ type Handlers struct {
 	AddConnection    func(config.ProviderConnection) error
 	UpdateConnection func(config.ProviderConnection) error
 	RemoveConnection func(name string) error
+	// DiscoverModels merges a connection's live model listing with the models.dev
+	// catalog into a capability-rich, availability-aware list (the editor's model
+	// picker). May be nil.
+	DiscoverModels func(connName string) ([]DiscoveredModelInfo, error)
 	// GetModelCatalog returns the models.dev catalog (cached on disk with a TTL).
 	// force=true revalidates/refreshes. May be nil (catalog affordance hidden). It
 	// may perform a live network fetch, so callers MUST invoke it off the UI thread
