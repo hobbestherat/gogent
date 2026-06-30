@@ -25,7 +25,7 @@ func TestBuildOverallStatsCacheWriteAggregate(t *testing.T) {
 		// 700 reads / 200 writes of 1000 input → 70% read, 20% write.
 		Primary: stats.ConnectorStat{TokensIn: 1000, CachedTokensIn: 700, CacheWriteTokensIn: 200},
 	}}
-	got := buildOverallStats(report, 0, 0, nil, "")
+	got := buildOverallStats(report, 0, 0, nil, "", nil)
 	if got.CacheWritePct != 20 {
 		t.Errorf("CacheWritePct = %d, want 20 (200/1000)", got.CacheWritePct)
 	}
@@ -50,7 +50,7 @@ func TestBuildOverallStatsCacheWriteFastDoesNotBleed(t *testing.T) {
 		Primary: stats.ConnectorStat{TokensIn: 1000, CachedTokensIn: 700, CacheWriteTokensIn: 200},
 		Fast:    stats.ConnectorStat{TokensIn: 9999, CachedTokensIn: 9999, CacheWriteTokensIn: 9999},
 	}}
-	got := buildOverallStats(report, 0, 0, nil, "")
+	got := buildOverallStats(report, 0, 0, nil, "", nil)
 	if got.CacheWriteTokens != 200 {
 		t.Errorf("CacheWriteTokens = %d, want 200 — Fast backend (%d) must not bleed into the panel",
 			got.CacheWriteTokens, 9999)
@@ -64,7 +64,7 @@ func TestBuildOverallStatsCacheWriteFastDoesNotBleed(t *testing.T) {
 // yields zero cache fields (no panic, no divide-by-zero), so the panel renders "cache rd 0% 0"
 // before any traffic.
 func TestBuildOverallStatsCacheWriteEmpty(t *testing.T) {
-	got := buildOverallStats(stats.Report{}, 0, 0, nil, "")
+	got := buildOverallStats(stats.Report{}, 0, 0, nil, "", nil)
 	if got.CacheWritePct != 0 || got.CacheReadTokens != 0 || got.CacheWriteTokens != 0 {
 		t.Errorf("empty report cache fields = pct=%d read=%d write=%d, want all 0",
 			got.CacheWritePct, got.CacheReadTokens, got.CacheWriteTokens)
@@ -83,7 +83,7 @@ func TestBuildOverallStatsCacheWriteModelScoped(t *testing.T) {
 			Connector: stats.ConnectorStat{TokensIn: 500, CachedTokensIn: 300, CacheWriteTokensIn: 50},
 		}},
 	}
-	got := buildOverallStats(report, 0, 0, nil, "anthropic-claude")
+	got := buildOverallStats(report, 0, 0, nil, "anthropic-claude", nil)
 	// 50 writes / 500 input = 10%; sourced from the model, not the 20% cluster aggregate.
 	if got.CacheWritePct != 10 {
 		t.Errorf("model-scoped CacheWritePct = %d, want 10 (50/500 from ms.Connector, not 20%% cluster)",
@@ -105,7 +105,7 @@ func TestBuildOverallStatsCacheWriteModelNotFound(t *testing.T) {
 	report := stats.Report{Totals: stats.Totals{
 		Primary: stats.ConnectorStat{TokensIn: 1000, CachedTokensIn: 700, CacheWriteTokensIn: 200},
 	}}
-	got := buildOverallStats(report, 0, 0, nil, "never-used-model")
+	got := buildOverallStats(report, 0, 0, nil, "never-used-model", nil)
 	if got.CacheWritePct != 0 || got.CacheReadTokens != 0 || got.CacheWriteTokens != 0 {
 		t.Errorf("absent-model cache fields = pct=%d read=%d write=%d, want all 0 (no aggregate leak)",
 			got.CacheWritePct, got.CacheReadTokens, got.CacheWriteTokens)

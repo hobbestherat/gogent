@@ -22,15 +22,26 @@ import (
 // usability, no regressions, holistic scope) and exercise both halves of the fix,
 // the edge cases the guard introduces, and the full refreshOverall integration path.
 
-// groqIssue534 is a representative focused-session model config: a display name,
-// an explicit endpoint (so formatEndpoint yields a host) and the OpenAI-compatible
-// api type. Passing it alongside selectedModel == "" is exactly the pre-#534
+// groqIssue534 is a representative focused-session model config: a display name and
+// a "groq" provider connection. issue534Connections resolves that connection to an
+// explicit endpoint, so the model-scoped "api" row shows the backend HOST
+// ("api.groq.com"). Passing it alongside selectedModel == "" is exactly the pre-#534
 // aggregate scenario that wrongly filled the rows from a single session's backend.
 func groqIssue534() *config.ModelConfig {
 	return &config.ModelConfig{
 		Name:        "groq-free",
 		DisplayName: "Groq",
 		Connection:  "groq",
+	}
+}
+
+// issue534Connections is the provider-connection list threaded through to
+// buildOverallStats (deferred item 6): the "groq" connection carries an explicit
+// endpoint, so a model routed through it shows the resolved host "api.groq.com" on the
+// "api" row rather than the bare connection name.
+func issue534Connections() []config.ProviderConnection {
+	return []config.ProviderConnection{
+		{Name: "groq", APIType: "openai", Endpoint: "https://api.groq.com/openai/v1/chat/completions"},
 	}
 }
 
@@ -69,7 +80,7 @@ func overallRowValue(line string) string {
 // EVEN THOUGH a non-nil focused-session model config is passed — exactly the input
 // refreshOverall feeds it. A cluster-wide grand total names no single backend.
 func TestIssue534_AggregateBlanksModelAndAPI(t *testing.T) {
-	got := buildOverallStats(issue534Report(), 3, 5, groqIssue534(), "")
+	got := buildOverallStats(issue534Report(), 3, 5, groqIssue534(), "", issue534Connections())
 
 	if got.Model != "" {
 		t.Errorf("aggregate Model = %q, want %q (no backend for a cluster total, issue #534)", got.Model, "")
@@ -87,7 +98,7 @@ func TestIssue534_AggregateBlanksModelAndAPI(t *testing.T) {
 // aggregate-built struct renders the two rows with an EMPTY value column — not the
 // old "-" placeholder, and not the focused session's backend name/host.
 func TestIssue534_AggregateRowsRenderBlankNotDashNorBackend(t *testing.T) {
-	lines := formatOverallStats(buildOverallStats(issue534Report(), 3, 5, groqIssue534(), ""))
+	lines := formatOverallStats(buildOverallStats(issue534Report(), 3, 5, groqIssue534(), "", issue534Connections()))
 	modelRow, apiRow := lines[len(lines)-2], lines[len(lines)-1]
 
 	// Value column is empty.
@@ -118,21 +129,21 @@ func TestIssue534_AggregateRowsRenderBlankNotDashNorBackend(t *testing.T) {
 // build time and in the rendered band.
 func TestIssue534_SpecificModelShowsNameAndEndpoint(t *testing.T) {
 	cfg := groqIssue534()
-	got := buildOverallStats(issue534Report(), 3, 5, cfg, cfg.Name)
+	got := buildOverallStats(issue534Report(), 3, 5, cfg, cfg.Name, issue534Connections())
 
 	if got.Model != "Groq" {
 		t.Errorf("specific Model = %q, want display name %q", got.Model, "Groq")
 	}
-	if got.APIEndpoint != "groq" {
-		t.Errorf("specific APIEndpoint = %q, want connection %q", got.APIEndpoint, "groq")
+	if got.APIEndpoint != "api.groq.com" {
+		t.Errorf("specific APIEndpoint = %q, want resolved host %q", got.APIEndpoint, "api.groq.com")
 	}
 
 	lines := formatOverallStats(got)
 	if overallRowValue(lines[len(lines)-2]) != "Groq" {
 		t.Errorf("specific model row = %q, want value %q", lines[len(lines)-2], "Groq")
 	}
-	if overallRowValue(lines[len(lines)-1]) != "groq" {
-		t.Errorf("specific api row = %q, want value %q", lines[len(lines)-1], "groq")
+	if overallRowValue(lines[len(lines)-1]) != "api.groq.com" {
+		t.Errorf("specific api row = %q, want value %q", lines[len(lines)-1], "api.groq.com")
 	}
 }
 
@@ -145,7 +156,7 @@ func TestIssue534_SpecificModelShowsNameAndEndpoint(t *testing.T) {
 func TestIssue534_FocusedAggregateBlanksBothHalves(t *testing.T) {
 	cfg := groqIssue534()
 
-	agg := buildOverallStats(issue534Report(), 4, 6, cfg, "")
+	agg := buildOverallStats(issue534Report(), 4, 6, cfg, "", issue534Connections())
 	aggLines := formatOverallStats(agg)
 
 	if agg.Model != "" || agg.APIEndpoint != "" {
@@ -163,10 +174,10 @@ func TestIssue534_FocusedAggregateBlanksBothHalves(t *testing.T) {
 	}
 
 	// Sanity: the same config scoped to itself fills the rows.
-	scoped := formatOverallStats(buildOverallStats(issue534Report(), 4, 6, cfg, cfg.Name))
+	scoped := formatOverallStats(buildOverallStats(issue534Report(), 4, 6, cfg, cfg.Name, issue534Connections()))
 	if overallRowValue(scoped[overallMetricLines-2]) != "Groq" ||
-		overallRowValue(scoped[overallMetricLines-1]) != "groq" {
-		t.Errorf("scoped rows = %q / %q, want Groq / groq",
+		overallRowValue(scoped[overallMetricLines-1]) != "api.groq.com" {
+		t.Errorf("scoped rows = %q / %q, want Groq / api.groq.com",
 			scoped[overallMetricLines-2], scoped[overallMetricLines-1])
 	}
 }
@@ -186,8 +197,8 @@ func TestIssue534_RowCountStableAcrossSelections(t *testing.T) {
 		name string
 		s    overallStats
 	}{
-		{"aggregate (blank backend)", buildOverallStats(rep, 3, 5, cfg, "")},
-		{"specific model (filled)", buildOverallStats(rep, 3, 5, cfg, cfg.Name)},
+		{"aggregate (blank backend)", buildOverallStats(rep, 3, 5, cfg, "", issue534Connections())},
+		{"specific model (filled)", buildOverallStats(rep, 3, 5, cfg, cfg.Name, issue534Connections())},
 		{"empty / first-frame", overallStats{}},
 	}
 	for _, tc := range cases {
@@ -214,8 +225,8 @@ func TestIssue534_ValueColumnStaysAligned(t *testing.T) {
 	cfg := groqIssue534()
 	rep := issue534Report()
 
-	blankLines := formatOverallStats(buildOverallStats(rep, 3, 5, cfg, ""))
-	filledLines := formatOverallStats(buildOverallStats(rep, 3, 5, cfg, cfg.Name))
+	blankLines := formatOverallStats(buildOverallStats(rep, 3, 5, cfg, "", issue534Connections()))
+	filledLines := formatOverallStats(buildOverallStats(rep, 3, 5, cfg, cfg.Name, issue534Connections()))
 	prefixLen := overallLabelWidth + 1 // padded label + single separator space
 
 	for _, idx := range []int{len(blankLines) - 2, len(blankLines) - 1} {
@@ -236,7 +247,7 @@ func TestIssue534_ValueColumnStaysAligned(t *testing.T) {
 // the aggregate case: formatOverallStats returns overallMetricLines rows and the
 // reserved band height still decomposes as separator + selector + metrics + title.
 func TestIssue534_BandHeightInvariantHolds(t *testing.T) {
-	aggLines := formatOverallStats(buildOverallStats(issue534Report(), 3, 5, groqIssue534(), ""))
+	aggLines := formatOverallStats(buildOverallStats(issue534Report(), 3, 5, groqIssue534(), "", issue534Connections()))
 	if len(aggLines) != overallMetricLines {
 		t.Fatalf("aggregate format = %d lines, want %d", len(aggLines), overallMetricLines)
 	}
@@ -256,7 +267,7 @@ func TestIssue534_BandHeightInvariantHolds(t *testing.T) {
 // sites, so a numeric row cannot be blanked — but this makes that structural
 // guarantee explicit rather than relying on the call-graph.
 func TestIssue534_NumericRowsNeverBlankedInAggregate(t *testing.T) {
-	lines := formatOverallStats(buildOverallStats(issue534Report(), 7, 9, groqIssue534(), ""))
+	lines := formatOverallStats(buildOverallStats(issue534Report(), 7, 9, groqIssue534(), "", issue534Connections()))
 
 	// The first overallMetricLines-2 rows are numeric; none may be blank or carry "-".
 	for i := 0; i < overallMetricLines-2; i++ {
@@ -284,7 +295,7 @@ func TestIssue534_NumericRowsNeverBlankedInAggregate(t *testing.T) {
 // does not shift overallErrLineIdx: the errors row still sits at its pinned index
 // in the aggregate view and remains the row the band highlights red.
 func TestIssue534_ErrorHighlightIndexUnchanged(t *testing.T) {
-	lines := formatOverallStats(buildOverallStats(issue534Report(), 3, 5, groqIssue534(), ""))
+	lines := formatOverallStats(buildOverallStats(issue534Report(), 3, 5, groqIssue534(), "", issue534Connections()))
 	if overallErrLineIdx >= len(lines) {
 		t.Fatalf("overallErrLineIdx %d out of range (%d lines)", overallErrLineIdx, len(lines))
 	}
@@ -339,8 +350,8 @@ func TestIssue534_NoStaleDashPlaceholderAnywhere(t *testing.T) {
 	cfg := groqIssue534()
 	states := []overallStats{
 		{}, // first-frame, no session
-		buildOverallStats(issue534Report(), 3, 5, cfg, ""),          // aggregate
-		buildOverallStats(issue534Report(), 3, 5, cfg, "groq-free"), // specific
+		buildOverallStats(issue534Report(), 3, 5, cfg, "", issue534Connections()),          // aggregate
+		buildOverallStats(issue534Report(), 3, 5, cfg, "groq-free", issue534Connections()), // specific
 	}
 	for i, s := range states {
 		for j, line := range formatOverallStats(s) {
@@ -359,7 +370,7 @@ func TestIssue534_NoStaleDashPlaceholderAnywhere(t *testing.T) {
 // nil half of the guard: a selection set but no resolvable config cannot name a
 // backend, so the rows stay blank (never crash, never fall back to garbage).
 func TestIssue534_SelectedModelWithNilConfig_BlanksBackend(t *testing.T) {
-	got := buildOverallStats(issue534Report(), 3, 5, nil, "groq-free")
+	got := buildOverallStats(issue534Report(), 3, 5, nil, "groq-free", issue534Connections())
 	if got.Model != "" || got.APIEndpoint != "" {
 		t.Errorf("selected-but-nil-config = Model %q API %q, want both empty", got.Model, got.APIEndpoint)
 	}
@@ -368,7 +379,7 @@ func TestIssue534_SelectedModelWithNilConfig_BlanksBackend(t *testing.T) {
 // TestIssue534_AggregateNilConfigStillEmpty confirms the pre-fix aggregate path
 // (nil model + aggregate) stays empty and still renders the full row count.
 func TestIssue534_AggregateNilConfigStillEmpty(t *testing.T) {
-	got := buildOverallStats(stats.Report{}, 0, 0, nil, "")
+	got := buildOverallStats(stats.Report{}, 0, 0, nil, "", issue534Connections())
 	if got != (overallStats{}) {
 		t.Fatalf("nil-model aggregate = %+v, want the zero view", got)
 	}
@@ -393,33 +404,42 @@ func TestIssue534_FirstFrameBlankNotDash(t *testing.T) {
 // TestIssue534_SpecificConfigEmptyName_BlanksGracefully covers a config with neither
 // a display name nor a config name: the populate block runs (selectedModel != "" &&
 // model != nil) but yields an empty Model, so the row renders blank without error
-// while the endpoint still resolves from the config.
+// while the endpoint still resolves from the model's connection (here the "groq"
+// connection's host).
 func TestIssue534_SpecificConfigEmptyName_BlanksGracefully(t *testing.T) {
 	cfg := &config.ModelConfig{Name: "", DisplayName: "", Connection: "groq"}
-	got := buildOverallStats(stats.Report{}, 0, 0, cfg, "some-selection")
+	got := buildOverallStats(stats.Report{}, 0, 0, cfg, "some-selection", issue534Connections())
 	if got.Model != "" {
 		t.Errorf("empty-name config Model = %q, want %q", got.Model, "")
 	}
-	if got.APIEndpoint != "groq" {
-		t.Errorf("empty-name config APIEndpoint = %q, want groq (connection name)", got.APIEndpoint)
+	if got.APIEndpoint != "api.groq.com" {
+		t.Errorf("empty-name config APIEndpoint = %q, want resolved host %q", got.APIEndpoint, "api.groq.com")
 	}
 }
 
-// TestIssue534_SpecificAPIRowShowsConnection covers the api row in the specific
-// view: it now shows the model's connection name (credentials/endpoint moved to the
-// connection in the discovery redesign).
-func TestIssue534_SpecificAPIRowShowsConnection(t *testing.T) {
+// TestIssue534_SpecificAPIRowResolvesConnectionHost covers the api row in the specific
+// view (deferred item 6): the model's connection is resolved to a short backend label
+// — the endpoint HOST when one is set, the api_type provider label for a
+// derive-base/blank-endpoint connection — and degrades gracefully to the bare
+// connection name when unresolved, or blank when the model names no connection.
+func TestIssue534_SpecificAPIRowResolvesConnectionHost(t *testing.T) {
+	conns := []config.ProviderConnection{
+		{Name: "groq", APIType: "openai", Endpoint: "https://api.groq.com/openai/v1/chat/completions"},
+		{Name: "zai", APIType: "zai"}, // derive-base: blank endpoint -> provider label
+	}
 	cases := []struct {
 		name string
 		cfg  *config.ModelConfig
 		want string
 	}{
-		{"connection name shown", &config.ModelConfig{Name: "zai", DisplayName: "ZAI", Connection: "zai"}, "zai"},
+		{"explicit endpoint shows host", &config.ModelConfig{Name: "g", DisplayName: "G", Connection: "groq"}, "api.groq.com"},
+		{"derive-base shows provider label", &config.ModelConfig{Name: "z", DisplayName: "ZAI", Connection: "zai"}, "zai"},
+		{"unresolved connection falls back to name", &config.ModelConfig{Name: "x", DisplayName: "X", Connection: "ghost"}, "ghost"},
 		{"blank when no connection", &config.ModelConfig{Name: "oai", DisplayName: "OAI"}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildOverallStats(stats.Report{}, 0, 0, tc.cfg, tc.cfg.Name)
+			got := buildOverallStats(stats.Report{}, 0, 0, tc.cfg, tc.cfg.Name, conns)
 			if got.APIEndpoint != tc.want {
 				t.Errorf("APIEndpoint = %q, want %q", got.APIEndpoint, tc.want)
 			}
@@ -434,7 +454,8 @@ func TestIssue534_SpecificAPIRowShowsConnection(t *testing.T) {
 // TestIssue534_WorkbenchRefreshOverall_AggregateBlanksAndSpecificFills drives the
 // full refreshOverall path the user hits (model selector -> refresh): the default
 // aggregate selection blanks the model/api rows, and selecting a known model fills
-// them from that model's config via modelByName.
+// them from that model's config — with the "api" row resolving the model's connection
+// to its backend HOST via the threaded GetConnections handler (deferred item 6).
 func TestIssue534_WorkbenchRefreshOverall_AggregateBlanksAndSpecificFills(t *testing.T) {
 	w := newTestWorkbench(t)
 	w.SetModels([]*config.ModelConfig{{
@@ -442,6 +463,9 @@ func TestIssue534_WorkbenchRefreshOverall_AggregateBlanksAndSpecificFills(t *tes
 		Connection: "groq",
 	}})
 	w.handlers.GetStatistics = func() stats.Report { return issue534Report() }
+	// Wire the connections handler so refreshOverall can resolve the model's "groq"
+	// connection to its endpoint host (no network call — redacted config copies).
+	w.handlers.GetConnections = func() []config.ProviderConnection { return issue534Connections() }
 
 	// Default selection is the aggregate ("All models") -> blank backend.
 	w.refreshOverall()
@@ -450,11 +474,11 @@ func TestIssue534_WorkbenchRefreshOverall_AggregateBlanksAndSpecificFills(t *tes
 			w.sidebar.overall.Model, w.sidebar.overall.APIEndpoint)
 	}
 
-	// Selecting the known model fills the rows from its config.
+	// Selecting the known model fills the rows; the api row shows the resolved host.
 	w.sidebar.setSelectedOverallModel("groq-free")
 	w.refreshOverall()
-	if w.sidebar.overall.Model != "Groq" || w.sidebar.overall.APIEndpoint != "groq" {
-		t.Errorf("specific refresh Model/API = %q/%q, want Groq/groq",
+	if w.sidebar.overall.Model != "Groq" || w.sidebar.overall.APIEndpoint != "api.groq.com" {
+		t.Errorf("specific refresh Model/API = %q/%q, want Groq/api.groq.com",
 			w.sidebar.overall.Model, w.sidebar.overall.APIEndpoint)
 	}
 }

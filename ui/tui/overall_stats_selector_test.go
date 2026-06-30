@@ -31,7 +31,7 @@ func TestBuildOverallStats_SelectedModelScopesMetrics(t *testing.T) {
 	rep := reportForSelectorTests()
 	glmCfg := &config.ModelConfig{Name: "glm", DisplayName: "GLM", Connection: "glm"}
 
-	got := buildOverallStats(rep, 0, 0, glmCfg, "glm")
+	got := buildOverallStats(rep, 0, 0, glmCfg, "glm", nil)
 
 	if got.Requests != 70 || got.Errors != 4 || got.TokensIn != 700 || got.TokensOut != 140 {
 		t.Errorf("scoped metrics = %+v, want glm's {Req:70 Err:4 In:700 Out:140}", got)
@@ -56,7 +56,7 @@ func TestBuildOverallStats_SelectedModelScopesMetrics(t *testing.T) {
 func TestBuildOverallStats_AllModelsShowsGrandTotal(t *testing.T) {
 	rep := reportForSelectorTests()
 
-	got := buildOverallStats(rep, 4, 6, nil, "")
+	got := buildOverallStats(rep, 4, 6, nil, "", nil)
 
 	if got.Requests != 100 || got.Errors != 5 || got.TokensIn != 1000 || got.TokensOut != 200 {
 		t.Errorf("aggregate metrics = %+v, want grand total {Req:100 Err:5 In:1000 Out:200}", got)
@@ -75,7 +75,7 @@ func TestBuildOverallStats_AllModelsShowsGrandTotal(t *testing.T) {
 // never the grand total or another model's numbers.
 func TestBuildOverallStats_SelectedModelNotFound(t *testing.T) {
 	rep := reportForSelectorTests()
-	got := buildOverallStats(rep, 4, 6, nil, "does-not-exist")
+	got := buildOverallStats(rep, 4, 6, nil, "does-not-exist", nil)
 	if got.Requests != 0 || got.TokensIn != 0 || got.Sessions != 0 || got.Errors != 0 {
 		t.Errorf("unknown-model selection = %+v, want all zeros (not the grand total or a sibling model)", got)
 	}
