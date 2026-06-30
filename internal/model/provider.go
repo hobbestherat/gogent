@@ -189,7 +189,7 @@ type Capabilities struct {
 	// prices all input at 1x — identical to before cache cost-weighting. Reads are
 	// discounted (<1); writes are an Anthropic-only premium (>1). A discount that
 	// varies by model WITHIN a provider (e.g. DeepSeek riding api_type "openai")
-	// is expressed per-model via ModelCaps, which overrides these.
+	// is expressed per-model via ModelQuirks, which overrides these.
 	CacheReadMultiplier  float64
 	CacheWriteMultiplier float64
 }

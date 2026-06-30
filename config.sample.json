@@ -1,102 +1,130 @@
 {
   "default_model": "local-lan",
+  "connections": [
+    {
+      "name": "local-lan",
+      "api_type": "openai",
+      "endpoint": "http://192.168.1.88:8080/v1/chat/completions"
+    },
+    {
+      "name": "localhost",
+      "api_type": "openai",
+      "endpoint": "http://127.0.0.1:8080/v1/chat/completions"
+    },
+    {
+      "name": "groq",
+      "api_type": "openai",
+      "endpoint": "https://api.groq.com/openai/v1/chat/completions",
+      "api_key": ""
+    },
+    {
+      "name": "openrouter",
+      "api_type": "openrouter",
+      "api_key": ""
+    },
+    {
+      "name": "zai",
+      "api_type": "zai",
+      "api_key": ""
+    },
+    {
+      "name": "zai-coding",
+      "api_type": "zai",
+      "endpoint": "https://api.z.ai/api/coding/paas/v4",
+      "api_key": ""
+    },
+    {
+      "name": "vertex",
+      "api_type": "vertex",
+      "project": "your-gcp-project",
+      "location": "us-central1"
+    },
+    {
+      "name": "vertex-claude",
+      "api_type": "vertex-anthropic",
+      "project": "your-gcp-project",
+      "location": "global"
+    }
+  ],
   "models": [
     {
       "name": "local-lan",
       "display_name": "Local LAN (env: GOGENT_MODEL_URL)",
-      "api_type": "openai",
-      "endpoint": "http://192.168.1.88:8080/v1/chat/completions",
+      "connection": "local-lan",
       "model": "default",
       "temperature": 0.7,
       "max_tokens": 262144,
-      "context_window": 262144,
-      "free": true
+      "caps": { "context_window": 262144, "max_output": 262144, "source": "manual" }
     },
     {
       "name": "localhost",
       "display_name": "Localhost (127.0.0.1)",
-      "api_type": "openai",
-      "endpoint": "http://127.0.0.1:8080/v1/chat/completions",
+      "connection": "localhost",
       "model": "default",
       "temperature": 0.7,
       "max_tokens": 262144,
-      "context_window": 262144,
-      "free": true
+      "caps": { "context_window": 262144, "max_output": 262144, "source": "manual" }
     },
     {
-      "name": "groq",
+      "name": "groq-free",
       "display_name": "Groq (API Key Required)",
-      "api_type": "openai",
-      "endpoint": "https://api.groq.com/openai/v1/chat/completions",
+      "connection": "groq",
       "model": "llama-3.3-70b-versatile",
-      "api_key": "",
       "temperature": 0.7,
       "max_tokens": 32768,
-      "context_window": 131072,
-      "free": false
+      "caps": { "context_window": 131072, "max_output": 32768, "tool_call": true, "source": "manual" }
     },
     {
-      "name": "openrouter",
+      "name": "openrouter-free",
       "display_name": "OpenRouter (gemma-3-27b-it)",
-      "api_type": "openrouter",
-      "endpoint": "",
+      "connection": "openrouter",
       "model": "google/gemma-3-27b-it:free",
-      "api_key": "",
       "temperature": 0.7,
       "max_tokens": 16384,
-      "context_window": 131072,
-      "free": false
+      "caps": { "context_window": 131072, "max_output": 16384, "source": "manual" }
     },
     {
       "name": "zai-glm",
       "display_name": "Z.AI (API Key Required)",
-      "api_type": "zai",
-      "endpoint": "",
+      "connection": "zai",
       "model": "glm-4.6",
-      "api_key": "",
       "temperature": 0.7,
       "max_tokens": 131072,
-      "context_window": 204800,
-      "free": false
+      "caps": { "context_window": 204800, "max_output": 131072, "reasoning": true, "tool_call": true, "source": "manual" }
     },
     {
       "name": "zai-glm-5.2",
       "display_name": "Z.AI GLM-5.2 (Coding Plan, API Key Required)",
-      "api_type": "zai",
-      "endpoint": "https://api.z.ai/api/coding/paas/v4",
+      "connection": "zai-coding",
       "model": "glm-5.2",
-      "api_key": "",
       "temperature": 0.7,
       "max_tokens": 131072,
-      "context_window": 1000000,
       "reasoning_effort": "high",
-      "effort_options": ["high", "max"],
-      "free": false
+      "caps": {
+        "context_window": 1000000,
+        "max_output": 131072,
+        "reasoning": true,
+        "tool_call": true,
+        "effort_options": ["high", "max"],
+        "source": "manual"
+      }
     },
     {
       "name": "gemini-vertex",
-      "display_name": "Gemini on Vertex AI (GCP ADC; Scan to discover models)",
-      "api_type": "vertex",
-      "endpoint": "",
-      "project": "your-gcp-project",
-      "location": "us-central1",
+      "display_name": "Gemini on Vertex AI (GCP ADC; Discover models)",
+      "connection": "vertex",
       "model": "google/gemini-2.5-flash",
       "max_tokens": 8192,
-      "context_window": 1000000,
-      "free": false
+      "caps": { "context_window": 1000000, "max_output": 8192, "reasoning": true, "tool_call": true, "vision": true, "source": "manual" }
     },
     {
       "name": "claude-vertex",
       "display_name": "Claude on Vertex AI (GCP ADC; no API key)",
-      "api_type": "vertex-anthropic",
-      "endpoint": "",
-      "project": "your-gcp-project",
-      "location": "global",
+      "connection": "vertex-claude",
       "model": "claude-opus-4-8",
       "max_tokens": 8192,
-      "context_window": 1000000,
       "thinking": true,
-      "free": false
+      "caps": { "context_window": 1000000, "max_output": 8192, "reasoning": true, "thinking_toggle": true, "tool_call": true, "vision": true, "source": "manual" }
     }
   ],
   "fast_model": "",

@@ -14,65 +14,109 @@ import (
 	"gogent/internal/watcher"
 )
 
-// ModelConfig represents a single model configuration
+// ProviderConnection is a named, credentialed connection to a model backend.
+// Credentials live here, once per provider, and ModelConfig entries reference a
+// connection by Name. The api_type selects the provider conventions; the endpoint
+// may be left blank for base-URL-deriving providers (anthropic/zai/openrouter/
+// vertex*). See docs/model-discovery-redesign.md.
+type ProviderConnection struct {
+	// Name uniquely identifies this connection; ModelConfig.Connection references it.
+	Name string `json:"name"`
+	// APIType selects the provider conventions ("openai" for any OpenAI-compatible
+	// server, "zai", "anthropic", "openrouter", "vertex-native", …). Empty defaults
+	// to "openai".
+	APIType string `json:"api_type,omitempty"`
+	// Endpoint overrides the request base URL. Blank uses the provider default
+	// (base-URL-deriving providers) or, for vertex*, the project/location-derived host.
+	Endpoint string `json:"endpoint,omitempty"`
+	// DiscoveryEndpoint overrides the model-listing host used by Discover/Scan.
+	// Blank uses the request endpoint / provider default. It exists so a private or
+	// proxied Vertex (whose Model Garden host differs from the global public one) and
+	// local servers can be discovered, not just used.
+	DiscoveryEndpoint string `json:"discovery_endpoint,omitempty"`
+	// APIKey is the credential for key-auth providers (bearer / x-api-key). Empty for
+	// Vertex (which authenticates with Application Default Credentials).
+	APIKey string `json:"api_key,omitempty"`
+	// Project and Location target a Google Vertex AI deployment. Project is the GCP
+	// project ID; Location is the region (e.g. "us-central1", or the special "global").
+	Project  string `json:"project,omitempty"`
+	Location string `json:"location,omitempty"`
+}
+
+// ModelCapabilities is the capability snapshot for a model, produced by the
+// discovery merge (live listing ▸ models.dev catalog ▸ manual). It is informational
+// + drives display, the effort/thinking selectors, compaction thresholds, and
+// cost-weighting. The Source records where it came from.
+type ModelCapabilities struct {
+	// ContextWindow is the input context window in tokens — the budget the whole
+	// conversation must fit within (drives compaction). Leave 0 to fall back to
+	// ContextWindowOrDefault's conservative default.
+	ContextWindow int `json:"context_window,omitempty"`
+	// MaxOutput is the model's maximum per-request output tokens (the capability
+	// ceiling). ModelConfig.MaxTokens is the user's chosen cap within this.
+	MaxOutput int `json:"max_output,omitempty"`
+	// Reasoning reports the model performs reasoning; ThinkingToggle reports it
+	// exposes an explicit thinking on/off switch (gates the session thinking toggle).
+	Reasoning      bool `json:"reasoning,omitempty"`
+	ThinkingToggle bool `json:"thinking_toggle,omitempty"`
+	// EffortOptions lists the reasoning_effort values this model accepts. Drives the
+	// per-session effort selector: ["(default)"] + EffortOptions. Empty greys it out.
+	EffortOptions []string `json:"effort_options,omitempty"`
+	// Capability flags surfaced in the UI. Vision gates the image-send warning.
+	Vision           bool `json:"vision,omitempty"`
+	ToolCall         bool `json:"tool_call,omitempty"`
+	StructuredOutput bool `json:"structured_output,omitempty"`
+	CustomTemp       bool `json:"custom_temperature,omitempty"`
+	// Modalities the backend accepts/produces (e.g. ["text","image","pdf"]).
+	InputModalities  []string `json:"input_modalities,omitempty"`
+	OutputModalities []string `json:"output_modalities,omitempty"`
+	// Per-million-token pricing. Cache read/write feed the cost-weighted budget.
+	InputCostPerM  float64 `json:"input_cost_per_m,omitempty"`
+	OutputCostPerM float64 `json:"output_cost_per_m,omitempty"`
+	CacheReadPerM  float64 `json:"cache_read_per_m,omitempty"`
+	CacheWritePerM float64 `json:"cache_write_per_m,omitempty"`
+	// Knowledge cutoff and release date (catalog metadata, display only).
+	Knowledge   string `json:"knowledge,omitempty"`
+	ReleaseDate string `json:"release_date,omitempty"`
+	// Source records the provenance: "merged" | "live" | "catalog" | "manual".
+	Source string `json:"source,omitempty"`
+}
+
+// Free reports whether the model is free to use (zero input and output price).
+// It replaces the former ModelConfig.Free boolean, derived from catalog pricing.
+func (c ModelCapabilities) Free() bool {
+	return c.InputCostPerM == 0 && c.OutputCostPerM == 0
+}
+
+// ModelConfig represents a single selectable model: a reference to a
+// ProviderConnection, the backend model id, a capability snapshot (Caps), and the
+// per-turn tuning overrides.
 type ModelConfig struct {
 	Name        string `json:"name"`
 	DisplayName string `json:"display_name"`
-	// APIType selects the provider conventions used to talk to this backend
-	// ("openai" for any OpenAI-compatible server, "zai" for the Z.AI platform).
-	// Empty defaults to "openai".
-	APIType  string `json:"api_type,omitempty"`
-	Endpoint string `json:"endpoint"`
-	Model    string `json:"model"`
-	APIKey   string `json:"api_key,omitempty"`
-	// Project and Location target a Google Vertex AI deployment (api_type
-	// "vertex"). Project is the GCP project ID; Location is the region (e.g.
-	// "us-central1", or the special "global"). They build the Vertex endpoint URL
-	// when Endpoint is left empty, and are unused by every other provider.
-	// Vertex authenticates with Application Default Credentials, so no API key is
-	// needed (see model.ADCRoundTripper).
-	Project     string  `json:"project,omitempty"`
-	Location    string  `json:"location,omitempty"`
-	Temperature float32 `json:"temperature"`
+	// Connection references a ProviderConnection by Name (the credentialed backend).
+	Connection string `json:"connection"`
+	// Model is the backend model id, already formatted for the connection's route
+	// (e.g. "google/gemini-3.5-flash" for the vertex shim, bare for native).
+	Model string `json:"model"`
+	// Caps is the capability snapshot from discovery (display, selectors, cost).
+	Caps ModelCapabilities `json:"caps"`
+
+	// --- per-turn tuning overrides (stay top-level; the session override copies them) ---
+	Temperature float32 `json:"temperature,omitempty"`
 	TopP        float32 `json:"top_p,omitempty"`
-	// MaxTokens is the per-request output cap sent as the API's max_tokens field.
-	// It bounds only the model's response length, never the conversation size.
-	MaxTokens int `json:"max_tokens"`
-	// ContextWindow is the model's input context window in tokens — the budget
-	// the whole conversation (system prompt + transcript + tool results) must fit
-	// within. It drives context-compaction thresholds and is deliberately
-	// separate from MaxTokens: a sane output cap (e.g. 4096) must not be mistaken
-	// for the context window. Leave unset (0) to fall back to
-	// ContextWindowOrDefault's conservative default.
-	ContextWindow int `json:"context_window,omitempty"`
+	// MaxTokens is the user's chosen per-request output cap (sent as max_tokens).
+	// 0 falls back to Caps.MaxOutput. It bounds only the response, never the context.
+	MaxTokens int `json:"max_tokens,omitempty"`
 	// ReasoningEffort, when set, is forwarded as the reasoning_effort request
-	// parameter for providers that support it (OpenAI o-series / GPT-5, Z.AI
-	// GLM). Recognized values are provider-specific — commonly
-	// minimal|low|medium|high, plus none|max|xhigh on Z.AI GLM-5.2. Setting it
-	// also marks the model as a reasoning model, which switches the output-token
-	// parameter to max_completion_tokens and drops the (rejected) temperature on
-	// OpenAI reasoning tiers. Empty omits the parameter.
+	// parameter for providers that support it. Empty omits it. Setting it (or
+	// Thinking) marks the model as a reasoning model.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
-	// EffortOptions lists the reasoning_effort values this model accepts, taken
-	// from models.dev reasoning_options (type "effort"). It drives the
-	// per-session effort selector (issue #177): its options are
-	// ["(default)"] + EffortOptions, where "(default)" means "no override — use
-	// this model's ReasoningEffort". Empty => no effort control: the selector is
-	// greyed out for this model (a toggle-type reasoning, reasoning:false, or a
-	// provider without supportsReasoningEffort).
-	EffortOptions []string `json:"effort_options,omitempty"`
-	// Thinking toggles chain-of-thought reasoning on providers that expose an
-	// explicit switch (Z.AI GLM-4.5+, sent as thinking:{type:enabled|disabled}).
-	// nil leaves the parameter unset (provider default); a non-nil value forces
-	// it on/off and, like ReasoningEffort, marks the model as a reasoning model.
+	// Thinking forces the explicit chain-of-thought switch on/off
+	// (thinking:{type:enabled|disabled}); nil leaves it at the provider default.
 	Thinking *bool `json:"thinking,omitempty"`
-	Free     bool  `json:"free"`
-	// CacheTTL selects the Anthropic prompt-cache breakpoint lifetime. "" or "5m"
-	// (the default) use the 5-minute ephemeral cache; "1h" uses the 1-hour cache
-	// (a 2× write premium, worthwhile only across idle/resume gaps >5min — see
-	// issue #545); "off"/"none" disables client-side cache_control entirely. It is
-	// honored only by Anthropic and Claude-on-Vertex (api_type anthropic /
-	// vertex-anthropic); providers that cache automatically ignore it.
+	// CacheTTL selects the Anthropic/Gemini prompt-cache lifetime ("" / "5m" / "1h"
+	// / "off"). Honored only by anthropic / vertex-anthropic / vertex-native.
 	CacheTTL string `json:"cache_ttl,omitempty"`
 }
 
@@ -141,10 +185,10 @@ const defaultContextWindow = 32768
 // conservative built-in default when unset (<=0). Compaction thresholds are
 // calibrated against this value, never against MaxTokens (the output cap).
 func (m *ModelConfig) ContextWindowOrDefault() int {
-	if m == nil || m.ContextWindow <= 0 {
+	if m == nil || m.Caps.ContextWindow <= 0 {
 		return defaultContextWindow
 	}
-	return m.ContextWindow
+	return m.Caps.ContextWindow
 }
 
 // SubAgentExecutionModel selects how sub-agents are run.
@@ -605,9 +649,12 @@ type Config struct {
 	// "fast_model" sentinel (FastModelRef) or a specific Models[] name. A role
 	// absent from this map defaults to the fast model when one is configured,
 	// otherwise to the primary model.
-	ModelRoles   map[string]string `json:"model_roles,omitempty"`
-	ModelConfigs []*ModelConfig    `json:"models"`
-	SubAgents    SubAgentConfig    `json:"sub_agents"`
+	ModelRoles map[string]string `json:"model_roles,omitempty"`
+	// Connections holds the credentialed provider connections; ModelConfigs
+	// reference them by Name.
+	Connections  []*ProviderConnection `json:"connections"`
+	ModelConfigs []*ModelConfig        `json:"models"`
+	SubAgents    SubAgentConfig        `json:"sub_agents"`
 	Timeouts     TimeoutConfig     `json:"timeouts"`
 	// UnattendedApprovalTimeout bounds how long a pending interactive approval
 	// (permission/edit-review) waits when NO client is connected to answer it,
@@ -1133,150 +1180,125 @@ func GetDefaultConfig() *Config {
 			MinWidth:    50,
 			MinHeight:   12,
 		},
+		Connections: []*ProviderConnection{
+			// Local LAN endpoint (honors GOGENT_MODEL_URL via DefaultEndpoint).
+			{Name: "local-lan", APIType: "openai", Endpoint: DefaultEndpoint()},
+			{Name: "qemu-host", APIType: "openai", Endpoint: "http://10.0.2.2:8080/v1/chat/completions"},
+			{Name: "localhost", APIType: "openai", Endpoint: "http://127.0.0.1:8080/v1/chat/completions"},
+			{Name: "groq", APIType: "openai", Endpoint: "https://api.groq.com/openai/v1/chat/completions"},
+			{Name: "together", APIType: "openai", Endpoint: "https://api.together.xyz/v1/chat/completions"},
+			// OpenRouter / Z.AI / Vertex supply their own base URLs (blank endpoint).
+			{Name: "openrouter", APIType: "openrouter"},
+			{Name: "zai", APIType: "zai"},
+			// Z.AI coding-plan models live under a different base URL.
+			{Name: "zai-coding", APIType: "zai", Endpoint: "https://api.z.ai/api/coding/paas/v4"},
+			// Vertex authenticates with ADC — set project/location (no API key).
+			{Name: "vertex", APIType: "vertex", Project: "", Location: ""},
+		},
 		ModelConfigs: []*ModelConfig{
 			{
 				Name:        "local-lan",
 				DisplayName: "Local LAN (env: GOGENT_MODEL_URL)",
-				Endpoint:    DefaultEndpoint(),
+				Connection:  "local-lan",
 				Model:       "default",
-				APIKey:      "",
 				Temperature: 0.7,
 				MaxTokens:   262144,
 				// Local llama.cpp-style servers expose a configurable context; set
 				// this to the server's actual --ctx-size to calibrate compaction.
-				ContextWindow: 262144,
-				Free:          true,
+				Caps: ModelCapabilities{ContextWindow: 262144, MaxOutput: 262144, Source: "manual"},
 			},
 			{
 				Name:        "qemu-host",
 				DisplayName: "Qemu Host (10.0.2.2)",
-				Endpoint:    "http://10.0.2.2:8080/v1/chat/completions",
+				Connection:  "qemu-host",
 				Model:       "default",
-				APIKey:      "",
 				Temperature: 0.7,
 				MaxTokens:   262144,
-				// Local llama.cpp-style servers expose a configurable context; set
-				// this to the server's actual --ctx-size to calibrate compaction.
-				ContextWindow: 262144,
-				Free:          true,
+				Caps:        ModelCapabilities{ContextWindow: 262144, MaxOutput: 262144, Source: "manual"},
 			},
 			{
 				Name:        "localhost",
 				DisplayName: "Localhost (127.0.0.1)",
-				Endpoint:    "http://127.0.0.1:8080/v1/chat/completions",
+				Connection:  "localhost",
 				Model:       "default",
-				APIKey:      "",
 				Temperature: 0.7,
 				MaxTokens:   262144,
-				// Local llama.cpp-style servers expose a configurable context; set
-				// this to the server's actual --ctx-size to calibrate compaction.
-				ContextWindow: 262144,
-				Free:          true,
+				Caps:        ModelCapabilities{ContextWindow: 262144, MaxOutput: 262144, Source: "manual"},
 			},
 			{
 				Name:        "groq-free",
 				DisplayName: "Groq (API Key Required)",
-				Endpoint:    "https://api.groq.com/openai/v1/chat/completions",
+				Connection:  "groq",
 				Model:       "llama-3.3-70b-versatile",
-				APIKey:      "",
 				Temperature: 0.7,
-				// models.dev: Groq caps llama-3.3-70b output at 32K.
+				// models.dev: Groq caps llama-3.3-70b output at 32K; 128K input window.
 				MaxTokens: 32768,
-				// Llama 3.3 70B serves a 128K input context window.
-				ContextWindow: 131072,
-				Free:          false,
+				Caps:      ModelCapabilities{ContextWindow: 131072, MaxOutput: 32768, ToolCall: true, Source: "manual"},
 			},
 			{
 				Name:        "together-free",
 				DisplayName: "Together (API Key Required)",
-				Endpoint:    "https://api.together.xyz/v1/chat/completions",
+				Connection:  "together",
 				Model:       "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-				APIKey:      "",
 				Temperature: 0.7,
 				// models.dev: Together serves llama-3.3-70b with a 128K output cap.
 				MaxTokens: 131072,
-				// Llama 3.3 70B serves a 128K input context window.
-				ContextWindow: 131072,
-				Free:          false,
+				Caps:      ModelCapabilities{ContextWindow: 131072, MaxOutput: 131072, ToolCall: true, Source: "manual"},
 			},
 			{
-				// OpenRouter: api_type "openrouter" supplies the base URL and the
-				// recommended HTTP-Referer / X-Title attribution headers; only an
-				// API key (and model) are needed.
 				Name:        "openrouter-free",
 				DisplayName: "OpenRouter (gemma-3-27b-it)",
-				APIType:     "openrouter",
-				Endpoint:    "",
+				Connection:  "openrouter",
 				Model:       "google/gemma-3-27b-it:free",
-				APIKey:      "",
 				Temperature: 0.7,
-				// models.dev: gemma-3-27b-it caps output at 16K.
+				// models.dev: gemma-3-27b-it caps output at 16K; 128K input window.
 				MaxTokens: 16384,
-				// Gemma 3 serves a 128K input context window.
-				ContextWindow: 131072,
-				Free:          false,
+				Caps:      ModelCapabilities{ContextWindow: 131072, MaxOutput: 16384, Source: "manual"},
 			},
 			{
-				// Z.AI: api_type "zai" supplies the base URL automatically, so
-				// only an API key (and model) are needed. See https://docs.z.ai.
 				Name:        "zai-glm",
 				DisplayName: "Z.AI (API Key Required)",
-				APIType:     "zai",
-				Endpoint:    "",
+				Connection:  "zai",
 				Model:       "glm-4.6",
-				APIKey:      "",
 				Temperature: 0.7,
 				MaxTokens:   131072,
 				// models.dev: GLM-4.6 serves a 200K input context window.
-				ContextWindow: 204800,
-				Free:          false,
+				Caps: ModelCapabilities{ContextWindow: 204800, MaxOutput: 131072, Reasoning: true, ToolCall: true, Source: "manual"},
 			},
 			{
-				// Z.AI GLM-5.2 (coding plan). api_type "zai" supplies the auth,
-				// max_tokens clamp and reasoning behaviour; the coding-plan models
-				// live under a DIFFERENT base URL (…/api/coding/paas/v4) than the
-				// general PaaS default, so set Endpoint explicitly. Only an API key
-				// is then needed. See https://docs.z.ai/devpack.
 				Name:        "zai-glm-5.2",
 				DisplayName: "Z.AI GLM-5.2 (Coding Plan, API Key Required)",
-				APIType:     "zai",
-				Endpoint:    "https://api.z.ai/api/coding/paas/v4",
+				Connection:  "zai-coding",
 				Model:       "glm-5.2",
-				APIKey:      "",
 				Temperature: 0.7,
 				// models.dev: glm-5.2 output cap (also Z.AI's clamp ceiling).
 				MaxTokens: 131072,
-				// GLM-5.2 serves a 1M input context window.
-				ContextWindow: 1000000,
-				// GLM-5.2 is a reasoning model; models.dev lists effort values
-				// [high, max]. "high" gives strong coding reasoning without the
-				// latency/cost of max. Safe on zai (keeps max_tokens/temperature).
+				// GLM-5.2 is a reasoning model; "high" gives strong coding reasoning
+				// without the latency/cost of max.
 				ReasoningEffort: "high",
-				// models.dev reasoning_options for glm-5.2 (type "effort").
-				EffortOptions: []string{"high", "max"},
-				Free:          false,
+				// GLM-5.2 serves a 1M input context window; effort values [high, max].
+				Caps: ModelCapabilities{
+					ContextWindow: 1000000, MaxOutput: 131072,
+					Reasoning: true, ToolCall: true,
+					EffortOptions: []string{"high", "max"},
+					Source:        "manual",
+				},
 			},
 			{
-				// Google Vertex AI via its OpenAI-compatible endpoint (api_type
-				// "vertex"). It authenticates with Application Default Credentials,
-				// so NO API key is used — run `gcloud auth application-default login`
-				// or set GOOGLE_APPLICATION_CREDENTIALS. Fill in your GCP project and
-				// a region (e.g. "us-central1"; "global" is also valid); leaving
-				// Endpoint empty derives the URL from project/location.
+				// Google Vertex AI (ADC — no API key). Set project/location on the
+				// "vertex" connection; leaving its Endpoint empty derives the URL.
 				Name:        "vertex-gemini",
 				DisplayName: "Vertex AI Gemini (ADC — set project/location)",
-				APIType:     "vertex",
-				Endpoint:    "",
-				Project:     "",
-				Location:    "",
+				Connection:  "vertex",
 				Model:       "google/gemini-2.5-flash",
-				APIKey:      "",
 				Temperature: 0.7,
-				// models.dev: gemini-2.5-flash caps output at 64K.
+				// models.dev: gemini-2.5-flash caps output at 64K; ~1M input window.
 				MaxTokens: 65536,
-				// Gemini 2.5 Flash serves a ~1M input context window.
-				ContextWindow: 1048576,
-				Free:          false,
+				Caps: ModelCapabilities{
+					ContextWindow: 1048576, MaxOutput: 65536,
+					Reasoning: true, ToolCall: true, Vision: true,
+					Source: "manual",
+				},
 			},
 		},
 	}
@@ -1299,6 +1321,28 @@ func (c *Config) GetModelConfig(name string) *ModelConfig {
 		}
 	}
 	return nil
+}
+
+// GetConnection returns a provider connection by name, or nil if absent.
+func (c *Config) GetConnection(name string) *ProviderConnection {
+	if c == nil {
+		return nil
+	}
+	for _, conn := range c.Connections {
+		if conn.Name == name {
+			return conn
+		}
+	}
+	return nil
+}
+
+// ConnectionForModel returns the ProviderConnection a model references, or nil if
+// the model is nil or its connection is unknown.
+func (c *Config) ConnectionForModel(m *ModelConfig) *ProviderConnection {
+	if c == nil || m == nil {
+		return nil
+	}
+	return c.GetConnection(m.Connection)
 }
 
 // primaryModel returns the configured default model, falling back to the first

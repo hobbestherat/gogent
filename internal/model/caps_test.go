@@ -20,7 +20,7 @@ import (
 // if the adapter re-acquires a sampling branch.
 
 // ---------------------------------------------------------------------------
-// resolveModelCaps — tiered resolution (DoD unit test)
+// resolveModelQuirks — tiered resolution (DoD unit test)
 // ---------------------------------------------------------------------------
 
 func TestResolveModelCapsTiering(t *testing.T) {
@@ -33,8 +33,8 @@ func TestResolveModelCapsTiering(t *testing.T) {
 		name        string
 		apiType     APIType
 		model       string
-		wantRejects bool // ModelCaps.RejectsSampling
-		wantNonZero bool // expect a non-empty ModelCaps overall
+		wantRejects bool // ModelQuirks.RejectsSampling
+		wantNonZero bool // expect a non-empty ModelQuirks overall
 		note        string
 	}{
 		// --- Model-only tier: applies across EVERY provider (issue #543 design) ---
@@ -138,14 +138,14 @@ func TestResolveModelCapsTiering(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveModelCaps(tt.apiType, tt.model)
+			got := resolveModelQuirks(tt.apiType, tt.model)
 			if got.RejectsSampling != tt.wantRejects {
-				t.Errorf("resolveModelCaps(%q,%q).RejectsSampling = %v, want %v",
+				t.Errorf("resolveModelQuirks(%q,%q).RejectsSampling = %v, want %v",
 					tt.apiType, tt.model, got.RejectsSampling, tt.wantRejects)
 			}
-			nonZero := got != ModelCaps{}
+			nonZero := got != ModelQuirks{}
 			if nonZero != tt.wantNonZero {
-				t.Errorf("resolveModelCaps(%q,%q) = %+v, want zero=%v",
+				t.Errorf("resolveModelQuirks(%q,%q) = %+v, want zero=%v",
 					tt.apiType, tt.model, got, !tt.wantNonZero)
 			}
 		})
@@ -155,8 +155,8 @@ func TestResolveModelCapsTiering(t *testing.T) {
 	// RejectsSampling on the DIRECT path (the bug path). If a row is removed this
 	// fails loudly.
 	for _, m := range currentGenClaude {
-		if got := resolveModelCaps(APITypeAnthropic, m); !got.RejectsSampling {
-			t.Errorf("resolveModelCaps(anthropic,%q) = %+v, want RejectsSampling true (override row missing?)", m, got)
+		if got := resolveModelQuirks(APITypeAnthropic, m); !got.RejectsSampling {
+			t.Errorf("resolveModelQuirks(anthropic,%q) = %+v, want RejectsSampling true (override row missing?)", m, got)
 		}
 	}
 }
@@ -176,8 +176,8 @@ func TestResolveModelCapsCatalogTierNotWired(t *testing.T) {
 		{APITypeZAI, "glm-4.6"},
 		{APITypeAnthropic, "some-brand-new-claude-5"}, // not yet curated
 	} {
-		if got := resolveModelCaps(tt.apiType, tt.model); got != (ModelCaps{}) {
-			t.Errorf("resolveModelCaps(%q,%q) = %+v, want empty ModelCaps (catalog tier not wired in step 1)",
+		if got := resolveModelQuirks(tt.apiType, tt.model); got != (ModelQuirks{}) {
+			t.Errorf("resolveModelQuirks(%q,%q) = %+v, want empty ModelQuirks (catalog tier not wired in step 1)",
 				tt.apiType, tt.model, got)
 		}
 	}
@@ -448,7 +448,7 @@ func TestPinnedSnapshotDropsSamplingButPreservesWireModel(t *testing.T) {
 // contract introduced by issue #543: buildBody forwards whatever sampling pointers
 // it is handed on the direct AND the Vertex path, and omits them when nil. The
 // "should this model accept sampling?" decision no longer lives in the adapter; it
-// lives in buildRequest via resolveModelCaps. This test fails if anyone re-introduces
+// lives in buildRequest via resolveModelQuirks. This test fails if anyone re-introduces
 // a `if a.vertex { /* drop */ }` sampling branch.
 func TestAnthropicAdapterBuildBodyForwardsSamplingOnBothPaths(t *testing.T) {
 	temp := float32(0.7)

@@ -158,7 +158,7 @@ func TestVertexAnthropicBodyShape(t *testing.T) {
 	}
 	// buildBody is now a PURE FORWARDER on both paths (issue #543): whether a model
 	// accepts sampling params is decided UPSTREAM in buildRequest via the
-	// (provider,model) capability layer (resolveModelCaps), not here. This call
+	// (provider,model) capability layer (resolveModelQuirks), not here. This call
 	// hands the adapter non-nil pointers, so they are forwarded verbatim — pinning
 	// the new contract. The "current-gen Claude drops sampling" assertion now lives
 	// at the buildRequest level (see caps_test.go) where the decision actually

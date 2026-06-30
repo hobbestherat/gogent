@@ -1361,7 +1361,7 @@ type CacheCostReporter interface {
 
 // CostWeightedInput prices u's prompt tokens by cache tier using this connection's
 // per-provider cache multipliers (Capabilities), overridden by any per-(provider,
-// model) ModelCaps entry — the same two-axis resolution buildRequest uses for wire
+// model) ModelQuirks entry — the same two-axis resolution buildRequest uses for wire
 // quirks. The override path is what lets DeepSeek (which rides api_type "openai"
 // and so shares OpenAI's Capabilities) carry its own deeper cache discount. With
 // no provider and no override every multiplier defaults to 1.0, so the result
@@ -1370,7 +1370,7 @@ type CacheCostReporter interface {
 func (c *ModelConnection) CostWeightedInput(u TokenUsage) int {
 	caps := c.caps()
 	readMult, writeMult := caps.CacheReadMultiplier, caps.CacheWriteMultiplier
-	if mc := resolveModelCaps(c.APIType, c.ModelName); mc.CacheReadMultiplier != nil || mc.CacheWriteMultiplier != nil {
+	if mc := resolveModelQuirks(c.APIType, c.ModelName); mc.CacheReadMultiplier != nil || mc.CacheWriteMultiplier != nil {
 		if mc.CacheReadMultiplier != nil {
 			readMult = *mc.CacheReadMultiplier
 		}
@@ -1476,9 +1476,9 @@ func (c *ModelConnection) buildRequest(messages []Message, stream bool, tools []
 	// #543) — OR this is a reasoning model on a provider that rejects a custom
 	// temperature (OpenAI reasoning tiers). Otherwise send temperature (pointer,
 	// so a deliberate 0 survives) and top_p when configured. With no override the
-	// resolved ModelCaps is empty, so this reduces to the prior reasoning-only gate
+	// resolved ModelQuirks is empty, so this reduces to the prior reasoning-only gate
 	// and is byte-identical for every other model.
-	modelCaps := resolveModelCaps(c.APIType, c.ModelName)
+	modelCaps := resolveModelQuirks(c.APIType, c.ModelName)
 	dropSampling := modelCaps.RejectsSampling || (reasoning && caps.ReasoningRejectsTemperature)
 	if !dropSampling {
 		t := temperature
