@@ -273,14 +273,21 @@ new shape (one `ProviderConnection` per distinct `(api_type, endpoint, key|proje
 models repointed; caps moved under `Caps`). `GetDefaultConfig` and `config.sample.json` are rewritten
 to the new shape directly. The loader simply reads the new schema; legacy flat configs are not supported.
 
-## 8. Build order (one branch, multiple commits)
+## 8. Build order (one branch, multiple commits) — PROGRESS
 
-1. Schema + model-package rebind (`NewModelConnection(conn,m)`; strategies take connection) — compiles on new shape.
-2. Catalog extension (new fields, cache bump, `ToModelCapabilities`).
-3. Discovery engine + caps wiring + manual/family-match + cost weighting.
-4. Wire/orchestration: DTOs (redaction), connection CRUD, validation split, bootstrap, migrator, thinking param.
-5. UI: connections dialog, discovery list, manual-caps form, thinking toggle, effort/ctx read from Caps, first-run nudge.
-6. Tests throughout (~50 model test files + config/server/ui reworked); merge/normalization/family-match table tests.
+Branch `redesign/model-discovery`.
+
+1. ✅ **DONE** Config schema (ProviderConnection + ModelCapabilities); GetDefaultConfig + config.sample.json + the maintainer's config rewritten; `model.ModelCaps`→`ModelQuirks`. *(commit: config schema)*
+2. ✅ **DONE** Model-package rebind: `NewModelConnection(conn, m)`; strategies take `*ProviderConnection`; validation split; vertex `DiscoveryEndpoint`; `MaxTokens`→`OutputCap()`. *(commit: model rebind)*
+3. ✅ **DONE** Catalog extension (cache pricing, modalities, knowledge/release, budget_tokens.min, cache-version bump) + discovery merge primitives (`NormalizeModelID`, `MergeCaps`, `MergeDiscovery`, `CatalogLookup`). *(commit: modelsdev+model)*
+4. ✅ **DONE** Orchestration: `DiscoverModels` + `catalogLookup`; connection CRUD; `buildConnection` resolves the connection; validation sites; cmd bootstrap via `DefaultConnection()`; server model/connection DTOs + `/connections` routes + discovery endpoint. *All `internal/...` builds.* *(commit: gogent+server)*
+5. ⬜ **TODO** UI (ui/tui): api_client DTOs; Handlers struct (Discover + connection CRUD); connections-manager dialog; unified discovery list (availability flags); manual-caps form; per-session thinking toggle; effort/ctx read from Caps; overall_stats endpoint via connection; first-run nudge. cmd/embedded_handlers + remote_handlers rewired. *(cmd builds once ui/tui does.)*
+6. ⬜ **TODO** Tests: rework ~50 model test files + config/server/ui tests to the new schema; add table tests for NormalizeModelID/MergeCaps/FamilyKey/MergeDiscovery; `go build ./...` + `go test ./...` green; golangci-lint clean.
+
+### Deferred refinements (noted, not yet wired)
+- Live self-describe caps parsing in the OpenRouter/Anthropic listers (framework in place via `ModelInfo.Caps`; catalog currently fills caps for all providers).
+- Cost-weighting from `Caps` cache pricing (still uses provider-cap/`ModelQuirks` multipliers; catalog data now captured).
+- `/api/tags` fallback for bare Ollama in the OpenAI lister.
 
 ## 9. Risk / attention sites
 - `ModelConnection` embeds `*config.ModelConfig` as `Config`; the rebind threads a `*ProviderConnection` too.
