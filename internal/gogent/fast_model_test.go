@@ -14,9 +14,13 @@ func fastModelConfig(roles map[string]string) *config.Config {
 		DefaultModel: "opus",
 		FastModel:    "haiku",
 		ModelRoles:   roles,
+		Connections: []*config.ProviderConnection{
+			{Name: "primary", APIType: "openai", Endpoint: "http://primary.test/v1/chat/completions"},
+			{Name: "fast", APIType: "openai", Endpoint: "http://fast.test/v1/chat/completions"},
+		},
 		ModelConfigs: []*config.ModelConfig{
-			{Name: "opus", Model: "claude-opus", Endpoint: "http://primary.test/v1/chat/completions"},
-			{Name: "haiku", Model: "claude-haiku", Endpoint: "http://fast.test/v1/chat/completions"},
+			{Name: "opus", Model: "claude-opus", Connection: "primary"},
+			{Name: "haiku", Model: "claude-haiku", Connection: "fast"},
 		},
 	}
 }

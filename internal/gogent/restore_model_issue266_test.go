@@ -42,9 +42,12 @@ func newRestoreGogent(t *testing.T) *Gogent {
 	g := NewGogentWithWorkspace(t.TempDir(), t.TempDir())
 	g.config = &config.Config{
 		DefaultModel: "main",
+		Connections: []*config.ProviderConnection{
+			{Name: "openai", APIType: "openai"},
+		},
 		ModelConfigs: []*config.ModelConfig{
-			{Name: "main", Model: "m1", APIType: "openai"},
-			{Name: "alt", Model: "m2", APIType: "openai"},
+			{Name: "main", Model: "m1", Connection: "openai"},
+			{Name: "alt", Model: "m2", Connection: "openai"},
 		},
 	}
 	return g

@@ -15,16 +15,18 @@ import (
 	"gogent/internal/config"
 )
 
-// geminiTestConfig is a minimal vertex-native (Gemini) model config — enough for
-// buildRequest/buildBody to route through geminiAdapter without a live endpoint.
-func geminiTestConfig() *config.ModelConfig {
-	return &config.ModelConfig{
-		Name:     "g",
-		APIType:  "vertex-native",
-		Model:    "gemini-3.5-flash",
-		Project:  "p",
-		Location: "us-central1",
-	}
+// geminiTestConfig is a minimal vertex-native (Gemini) connection + model config —
+// enough for buildRequest/buildBody to route through geminiAdapter without a live
+// endpoint.
+func geminiTestConfig() (*config.ProviderConnection, *config.ModelConfig) {
+	return &config.ProviderConnection{
+			APIType:  "vertex-native",
+			Project:  "p",
+			Location: "us-central1",
+		}, &config.ModelConfig{
+			Name:  "g",
+			Model: "gemini-3.5-flash",
+		}
 }
 
 // realBuiltinToolSchemas returns the verbatim parameter schemas of the built-in
@@ -144,7 +146,8 @@ func assertGeminiParamsValid(t *testing.T, name string, params interface{}) {
 func TestGeminiRealToolSchemasWireValid(t *testing.T) {
 	for name, schema := range realBuiltinToolSchemas() {
 		t.Run(name, func(t *testing.T) {
-			conn := NewModelConnectionFromConfig(geminiTestConfig())
+			pc, mc := geminiTestConfig()
+			conn := NewModelConnection(pc, mc)
 			req := conn.buildRequest(
 				[]Message{{Role: RoleUser, Content: "hi"}},
 				false,
@@ -172,7 +175,8 @@ func TestGeminiAllRealToolSchemasInOneRequest(t *testing.T) {
 		tools = append(tools, ToolDef{Type: "function", Function: FunctionDef{Name: name, Parameters: schema}})
 		names = append(names, name)
 	}
-	conn := NewModelConnectionFromConfig(geminiTestConfig())
+	pc, mc := geminiTestConfig()
+	conn := NewModelConnection(pc, mc)
 	req := conn.buildRequest([]Message{{Role: RoleUser, Content: "hi"}}, false, tools, nil)
 	raw, err := buildBodyBytes(geminiAdapter{}, req)
 	if err != nil {

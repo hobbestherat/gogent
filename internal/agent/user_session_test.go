@@ -9,7 +9,7 @@ import (
 )
 
 func TestUserSessionCreate(t *testing.T) {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	s := model.NewModelSession("test1", m)
 	agent := NewAgent("agent1", s)
 	userSession := NewUserSession("session1", agent)
@@ -24,7 +24,7 @@ func TestUserSessionCreate(t *testing.T) {
 }
 
 func TestUserSessionListAgents(t *testing.T) {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	s := model.NewModelSession("test2", m)
 	root := NewAgent("root", s)
 	child := NewAgent("child", s)
@@ -39,7 +39,7 @@ func TestUserSessionListAgents(t *testing.T) {
 }
 
 func TestUserSessionGetAgent(t *testing.T) {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	s := model.NewModelSession("test3", m)
 	root := NewAgent("root", s)
 	child := NewAgent("child", s)
@@ -59,7 +59,7 @@ func TestUserSessionGetAgent(t *testing.T) {
 }
 
 func TestUserSessionAddAgent(t *testing.T) {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	s := model.NewModelSession("test4", m)
 	root := NewAgent("root", s)
 	userSession := NewUserSession("session4", root)
@@ -79,7 +79,7 @@ func TestUserSessionAddAgent(t *testing.T) {
 func TestUserSessionSendMessage(t *testing.T) {
 	requireModel(t)
 
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	s := model.NewModelSession("test5", m)
 	agent := NewAgent("agent", s)
 	userSession := NewUserSession("session5", agent)
@@ -91,7 +91,7 @@ func TestUserSessionSendMessage(t *testing.T) {
 }
 
 func TestUserSessionStopAgent(t *testing.T) {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	s := model.NewModelSession("test6", m)
 	agent := NewAgent("agent", s)
 	userSession := NewUserSession("session6", agent)
@@ -112,7 +112,7 @@ func TestUserSessionStopAgent(t *testing.T) {
 }
 
 func TestUserSessionResumeAgent(t *testing.T) {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	s := model.NewModelSession("test7", m)
 	agent := NewAgent("agent", s)
 	userSession := NewUserSession("session7", agent)
@@ -133,7 +133,7 @@ func TestUserSessionResumeAgent(t *testing.T) {
 }
 
 func TestUserSessionInterruptAgent(t *testing.T) {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	s := model.NewModelSession("test8", m)
 	agent := NewAgent("agent", s)
 	userSession := NewUserSession("session8", agent)
@@ -154,7 +154,7 @@ func TestUserSessionInterruptAgent(t *testing.T) {
 }
 
 func TestUserSessionCountMessages(t *testing.T) {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	s := model.NewModelSession("test9", m)
 	agent := NewAgent("agent", s)
 	userSession := NewUserSession("session9", agent)
@@ -168,7 +168,7 @@ func TestUserSessionCountMessages(t *testing.T) {
 }
 
 func TestUserSessionGetStatsTotalTurns(t *testing.T) {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	s := model.NewModelSession("test-stats", m)
 	agent := NewAgent("agent", s)
 	userSession := NewUserSession("session-stats", agent)
@@ -190,7 +190,7 @@ func TestUserSessionGetStatsTotalTurns(t *testing.T) {
 // GetStats -> CountMessages re-entry would deadlock against an interleaving
 // writer; this test hangs (and is killed by the test timeout) on the old code.
 func TestUserSessionGetStatsNoDeadlock(t *testing.T) {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	s := model.NewModelSession("test-deadlock", m)
 	agent := NewAgent("agent", s)
 	userSession := NewUserSession("session-deadlock", agent)
@@ -233,7 +233,7 @@ func TestUserSessionGetStatsNoDeadlock(t *testing.T) {
 }
 
 func TestUserSessionNotFound(t *testing.T) {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	s := model.NewModelSession("test10", m)
 	agent := NewAgent("agent", s)
 	userSession := NewUserSession("session10", agent)
@@ -252,7 +252,7 @@ func TestUserSessionNotFound(t *testing.T) {
 // newEventTestSession builds a minimal session for exercising the
 // coordinator event channel directly.
 func newEventTestSession(id string) *UserSession {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	ms := model.NewModelSession(id, m)
 	return NewUserSession(id, NewAgent("root", ms))
 }

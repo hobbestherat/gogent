@@ -22,11 +22,13 @@ func newMaxStepsGogent(t *testing.T, maxSteps *int) *Gogent {
 	g := NewGogentWithWorkspace(t.TempDir(), t.TempDir())
 	g.config = &config.Config{
 		DefaultModel: "test",
+		Connections: []*config.ProviderConnection{
+			{Name: "zai", APIType: "zai", Endpoint: "http://unused.test/v1/chat/completions"},
+		},
 		ModelConfigs: []*config.ModelConfig{{
-			Name:     "test",
-			Model:    "glm-5.2",
-			APIType:  "zai",
-			Endpoint: "http://unused.test/v1/chat/completions",
+			Name:       "test",
+			Model:      "glm-5.2",
+			Connection: "zai",
 		}},
 		MaxSteps: maxSteps,
 	}
@@ -71,11 +73,11 @@ func TestCreateUserSessionDefaultConfigKeepsHistoricalBound(t *testing.T) {
 	g.config = config.GetDefaultConfig()
 	// Keep a reachable model so defaultConnection() resolves during NewSession.
 	g.config.DefaultModel = "test"
+	// GetDefaultConfig seeds a routable "zai" connection; reference it.
 	g.config.ModelConfigs = []*config.ModelConfig{{
-		Name:     "test",
-		Model:    "glm-5.2",
-		APIType:  "zai",
-		Endpoint: "http://unused.test/v1/chat/completions",
+		Name:       "test",
+		Model:      "glm-5.2",
+		Connection: "zai",
 	}}
 
 	us := g.NewSession("default-cfg")

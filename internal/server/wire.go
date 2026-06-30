@@ -537,29 +537,6 @@ func capsToView(c config.ModelCapabilities) capsView {
 	}
 }
 
-func capsFromView(v capsView) config.ModelCapabilities {
-	return config.ModelCapabilities{
-		ContextWindow:    v.ContextWindow,
-		MaxOutput:        v.MaxOutput,
-		Reasoning:        v.Reasoning,
-		ThinkingToggle:   v.ThinkingToggle,
-		EffortOptions:    v.EffortOptions,
-		Vision:           v.Vision,
-		ToolCall:         v.ToolCall,
-		StructuredOutput: v.StructuredOutput,
-		CustomTemp:       v.CustomTemp,
-		InputModalities:  v.InputModalities,
-		OutputModalities: v.OutputModalities,
-		InputCostPerM:    v.InputCostPerM,
-		OutputCostPerM:   v.OutputCostPerM,
-		CacheReadPerM:    v.CacheReadPerM,
-		CacheWritePerM:   v.CacheWritePerM,
-		Knowledge:        v.Knowledge,
-		ReleaseDate:      v.ReleaseDate,
-		Source:           v.Source,
-	}
-}
-
 func modelToView(m *config.ModelConfig) modelView {
 	if m == nil {
 		return modelView{}

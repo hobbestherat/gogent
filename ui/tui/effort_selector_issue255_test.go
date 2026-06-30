@@ -26,19 +26,19 @@ import (
 func effort255Models() []*config.ModelConfig {
 	return []*config.ModelConfig{
 		// 0 — GLM-5.2 from the issue: configured "high", offered in options.
-		{Name: "glm", DisplayName: "GLM", Model: "glm-5.2", ReasoningEffort: "high", EffortOptions: []string{"high", "max"}},
+		{Name: "glm", DisplayName: "GLM", Model: "glm-5.2", ReasoningEffort: "high", Caps: config.ModelCapabilities{EffortOptions: []string{"high", "max"}}},
 		// 1 — configured value NOT among its offered options (-> fallback).
-		{Name: "cfg-other", DisplayName: "CfgOther", Model: "m-other", ReasoningEffort: "ultra", EffortOptions: []string{"high", "max"}},
+		{Name: "cfg-other", DisplayName: "CfgOther", Model: "m-other", ReasoningEffort: "ultra", Caps: config.ModelCapabilities{EffortOptions: []string{"high", "max"}}},
 		// 2 — reasoning model with options but no configured reasoning_effort.
-		{Name: "no-cfg", DisplayName: "NoCfg", Model: "m-nocfg", EffortOptions: []string{"high", "max"}},
+		{Name: "no-cfg", DisplayName: "NoCfg", Model: "m-nocfg", Caps: config.ModelCapabilities{EffortOptions: []string{"high", "max"}}},
 		// 3 — reasoning_effort set but no effort_options (-> greyed-out).
 		{Name: "disabled", DisplayName: "Disabled", Model: "m-disabled", ReasoningEffort: "high"},
 		// 4 — plain non-reasoning model (no effort control at all).
 		{Name: "plain", DisplayName: "Plain", Model: "plain"},
 		// 5 — only offers "max", configured "max".
-		{Name: "max-only", DisplayName: "MaxOnly", Model: "m-maxonly", ReasoningEffort: "max", EffortOptions: []string{"max"}},
+		{Name: "max-only", DisplayName: "MaxOnly", Model: "m-maxonly", ReasoningEffort: "max", Caps: config.ModelCapabilities{EffortOptions: []string{"max"}}},
 		// 6 — only offers "high", configured "high".
-		{Name: "high-only", DisplayName: "HighOnly", Model: "m-highonly", ReasoningEffort: "high", EffortOptions: []string{"high"}},
+		{Name: "high-only", DisplayName: "HighOnly", Model: "m-highonly", ReasoningEffort: "high", Caps: config.ModelCapabilities{EffortOptions: []string{"high"}}},
 	}
 }
 
@@ -472,7 +472,7 @@ func TestEffort255_AnalysisWindowNilGuard(t *testing.T) {
 // ["high","max"], and a fresh session must show "high", not "(default)".
 func TestEffort255_GLMRealWorldScenario(t *testing.T) {
 	w := NewWorkbench([]*config.ModelConfig{
-		{Name: "glm", DisplayName: "GLM-5.2", Model: "glm-5.2", ReasoningEffort: "high", EffortOptions: []string{"high", "max"}},
+		{Name: "glm", DisplayName: "GLM-5.2", Model: "glm-5.2", ReasoningEffort: "high", Caps: config.ModelCapabilities{EffortOptions: []string{"high", "max"}}},
 	})
 	sw := w.NewSession()
 

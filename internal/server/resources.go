@@ -198,7 +198,7 @@ func (svc connectionsSvc) Discover(r *http.Request, name string) (interface{}, e
 	if err := requireHuman(r, svc.s.provider); err != nil {
 		return nil, err
 	}
-	return modelsSvc{s: svc.s}.discover(r, name)
+	return modelsSvc(svc).discover(r, name)
 }
 
 // --- tools ------------------------------------------------------------------

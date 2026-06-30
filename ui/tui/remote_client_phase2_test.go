@@ -76,7 +76,7 @@ func TestAPIClientSendMessageAndStreamEvents(t *testing.T) {
 		t.Fatalf("NewAPIClient: %v", err)
 	}
 
-	msg, err := client.SendMessage(context.Background(), "s/a b", "hello", "m1", "medium")
+	msg, err := client.SendMessage(context.Background(), "s/a b", "hello", "m1", "medium", "")
 	if err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestAPIClientReportsHTTPErrorBodies(t *testing.T) {
 	if err := client.Health(); err == nil || !strings.Contains(err.Error(), "418") || !strings.Contains(err.Error(), "daemon unavailable") {
 		t.Fatalf("Health error = %v, want status and response body", err)
 	}
-	_, err = client.SendMessage(context.Background(), "s1", "hello", "m1", "")
+	_, err = client.SendMessage(context.Background(), "s1", "hello", "m1", "", "")
 	if err == nil || !strings.Contains(err.Error(), "502") || !strings.Contains(err.Error(), "model failed") {
 		t.Fatalf("SendMessage error = %v, want status and response body", err)
 	}
@@ -460,7 +460,7 @@ func TestRemoteHandlersMapCallsToHTTPRequests(t *testing.T) {
 		t.Fatalf("OnRewind = %q, %v; want rewound, nil", got, err)
 	}
 	h.OnSetPlanMode("sess/1", true)
-	h.OnSend("sess/1", "hello", "m1", "high")
+	h.OnSend("sess/1", "hello", "m1", "high", "")
 
 	want := []struct {
 		method string

@@ -56,7 +56,7 @@ var (
 // recorded exactly like the blocking path.
 func TestSendWithToolsStreamCtxStreamingForwardsReasoning(t *testing.T) {
 	server := reasoningServer(t, reasoningContentSSE, nil)
-	conn := NewModelConnection()
+	conn := newPlaceholderConnection()
 	conn.SetURL(server.URL)
 	sess := NewModelSession("s1", conn)
 
@@ -94,7 +94,7 @@ func TestSendWithToolsStreamCtxStreamingForwardsReasoning(t *testing.T) {
 // path speaks a single JSON response, so the server here serves JSON (not SSE).
 func TestSendWithToolsStreamCtxNilSinkStillWorks(t *testing.T) {
 	server := blockingJSONServer(t, `{"choices":[{"index":0,"message":{"role":"assistant","content":"Hello, world"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`)
-	conn := NewModelConnection()
+	conn := newPlaceholderConnection()
 	conn.SetURL(server.URL)
 	sess := NewModelSession("nil-sink", conn)
 
@@ -158,7 +158,7 @@ func TestSendWithToolsStreamCtxFallsBackWhenBackendCannotStream(t *testing.T) {
 // blocking path — so enabling live thinking does not lose token stats.
 func TestSendWithToolsStreamCtxRecordsUsage(t *testing.T) {
 	server := reasoningServer(t, reasoningContentSSE, nil)
-	conn := NewModelConnection()
+	conn := newPlaceholderConnection()
 	conn.SetURL(server.URL)
 	sess := NewModelSession("usage", conn)
 

@@ -93,7 +93,7 @@ func TestModelsDialogShowsRowContent(t *testing.T) {
 	w := newTestWorkbench(t)
 	w.SetHandlers(Handlers{
 		GetModels: func() []config.ModelConfig {
-			return []config.ModelConfig{{Name: "gpt4o", DisplayName: "GPT-4o", Model: "gpt-4o", APIType: "openai"}}
+			return []config.ModelConfig{{Name: "gpt4o", DisplayName: "GPT-4o", Model: "gpt-4o", Connection: "openai"}}
 		},
 		GetDefaultModel: func() string { return "gpt4o" },
 		UpdateModel:     func(config.ModelConfig) error { return nil },
@@ -179,7 +179,7 @@ func TestModelsDialogAddCatalogCancelReturnsToList(t *testing.T) {
 	w := newTestWorkbench(t)
 	w.SetHandlers(Handlers{
 		GetModels: func() []config.ModelConfig {
-			return []config.ModelConfig{{Name: "x", DisplayName: "X", Model: "m", APIType: "openai"}}
+			return []config.ModelConfig{{Name: "x", DisplayName: "X", Model: "m", Connection: "openai"}}
 		},
 		GetDefaultModel: func() string { return "x" },
 		UpdateModel:     func(config.ModelConfig) error { return nil },
@@ -212,7 +212,7 @@ func TestModelsDialogAddCatalogCancelReturnsToList(t *testing.T) {
 // TestModelsDialogRemoveLastClearsLiveDropdowns drives the full Remove flow and
 // asserts the live dropdowns go empty — the end-to-end D1 acceptance criterion.
 func TestModelsDialogRemoveLastClearsLiveDropdowns(t *testing.T) {
-	backend := []config.ModelConfig{{Name: "solo", DisplayName: "Solo", Model: "m", APIType: "openai"}}
+	backend := []config.ModelConfig{{Name: "solo", DisplayName: "Solo", Model: "m", Connection: "openai"}}
 	w := newTestWorkbench(t)
 	w.SetHandlers(Handlers{
 		GetModels:       func() []config.ModelConfig { return append([]config.ModelConfig(nil), backend...) },
@@ -252,8 +252,8 @@ func TestModelsDialogRemoveDefaultBlockedSurfacesMessage(t *testing.T) {
 	w.SetHandlers(Handlers{
 		GetModels: func() []config.ModelConfig {
 			return []config.ModelConfig{
-				{Name: "main", DisplayName: "Main", Model: "m1", APIType: "openai"},
-				{Name: "alt", DisplayName: "Alt", Model: "m2", APIType: "openai"},
+				{Name: "main", DisplayName: "Main", Model: "m1", Connection: "openai"},
+				{Name: "alt", DisplayName: "Alt", Model: "m2", Connection: "openai"},
 			}
 		},
 		GetDefaultModel: func() string { return "main" },
@@ -305,7 +305,7 @@ func TestModelFormAddCallsAddModel(t *testing.T) {
 	})
 	// Pre-fill Name + Model so Save passes validation; nameEditable=true (Add mode).
 	w.showModelForm("Add model — empty",
-		config.ModelConfig{Name: "newmodel", DisplayName: "New", Model: "m1", APIType: "openai"},
+		config.ModelConfig{Name: "newmodel", DisplayName: "New", Model: "m1", Connection: "openai"},
 		true, w.handlers.AddModel, nil)
 	clickModelFormSave(t, w)
 
@@ -325,7 +325,7 @@ func TestModelFormEditIsPreFilled(t *testing.T) {
 	w := newTestWorkbench(t)
 	w.SetHandlers(Handlers{UpdateModel: func(config.ModelConfig) error { return nil }})
 	w.showModelForm("Edit model — x",
-		config.ModelConfig{Name: "x", DisplayName: "MyDisplay", Model: "mymodel", APIType: "openai"},
+		config.ModelConfig{Name: "x", DisplayName: "MyDisplay", Model: "mymodel", Connection: "openai"},
 		false, w.handlers.UpdateModel, nil)
 
 	grid := editorGrid(w)

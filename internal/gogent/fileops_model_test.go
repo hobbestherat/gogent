@@ -45,7 +45,7 @@ func TestFileOpsWithModel(t *testing.T) {
 	})
 
 	// Create model session pointed at the configured (LAN/env) endpoint
-	m := model.NewModelConnection()
+	m := testConn()
 	m.SetURL(config.DefaultEndpoint())
 	sess := model.NewModelSession("test", m)
 

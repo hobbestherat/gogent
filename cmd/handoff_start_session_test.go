@@ -168,7 +168,7 @@ func TestStartHandoffFreshWindowSendRunsTurnNo404(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	dto, err := client.SendMessage(ctx, "session-1", "hello", "", "")
+	dto, err := client.SendMessage(ctx, "session-1", "hello", "", "", "")
 	if err != nil {
 		// The bug manifests as exactly this error string; fail loudly if it returns.
 		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "session not found") {
@@ -221,7 +221,7 @@ func TestStartHandoffPreservesWindowTitleAcrossHandoff(t *testing.T) {
 	// the daemon's disk index (the only way Get can observe it for a fresh session).
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if _, err := client.SendMessage(ctx, "session-7", "hi", "", ""); err != nil {
+	if _, err := client.SendMessage(ctx, "session-7", "hi", "", "", ""); err != nil {
 		t.Fatalf("seed turn to persist title: %v", err)
 	}
 	// Issue #481: the seed turn runs asynchronously, so wait for it to complete

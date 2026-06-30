@@ -17,15 +17,13 @@ func TestAddModelAppendsAndPersists(t *testing.T) {
 
 	before := len(g.Models())
 	cfg := config.ModelConfig{
-		Name:          "catalog-test-opus",
-		DisplayName:   "Opus (catalog)",
-		APIType:       "openai",
-		Model:         "claude-opus-4-6",
-		Endpoint:      "https://api.example.com/v1",
-		APIKey:        "catalog-key",
-		Temperature:   0.7,
-		MaxTokens:     8192,
-		ContextWindow: 200000,
+		Name:        "catalog-test-opus",
+		DisplayName: "Opus (catalog)",
+		Connection:  "local-lan",
+		Model:       "claude-opus-4-6",
+		Temperature: 0.7,
+		MaxTokens:   8192,
+		Caps:        config.ModelCapabilities{ContextWindow: 200000},
 	}
 	if err := g.AddModel(cfg); err != nil {
 		t.Fatalf("AddModel: %v", err)
@@ -70,9 +68,10 @@ func TestAddModelRejectsDuplicateName(t *testing.T) {
 	dir := t.TempDir()
 	g := NewGogent(dir)
 
-	// A routable config (api_type/endpoint set) so save-time validation (issue #532)
-	// is satisfied — this test exercises the duplicate-name guard, not validation.
-	cfg := config.ModelConfig{Name: "catalog-dup", Model: "m1", APIType: "openai", Endpoint: "https://api.example.com/v1"}
+	// A routable config (references a seeded routable connection) so save-time
+	// validation (issue #532) is satisfied — this test exercises the
+	// duplicate-name guard, not validation.
+	cfg := config.ModelConfig{Name: "catalog-dup", Model: "m1", Connection: "local-lan"}
 	if err := g.AddModel(cfg); err != nil {
 		t.Fatalf("first AddModel: %v", err)
 	}
@@ -103,7 +102,7 @@ func TestAddModelRejectsDuplicateOfExistingSeededName(t *testing.T) {
 		t.Skip("no seeded models to collide with")
 	}
 	dup := existing[0]
-	dup.APIKey = "should-not-overwrite"
+	dup.DisplayName = "should-not-overwrite"
 	// Trying to re-add an existing name fails; the original is untouched.
 	if err := g.AddModel(dup); err == nil {
 		t.Fatal("AddModel of an existing seeded name = nil, want error")

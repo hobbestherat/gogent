@@ -45,7 +45,7 @@ func (c *captureConnector) GetStats() *ModelStats { return &ModelStats{} }
 func (c *captureConnector) StatsSnapshot() StatsSnapshot { return StatsSnapshot{} }
 
 func TestModelSessionRemoveCallback(t *testing.T) {
-	m := NewModelConnection()
+	m := newPlaceholderConnection()
 	s := NewModelSession("test1", m)
 
 	s.AddCallback(func(event CallbackEvent) {})

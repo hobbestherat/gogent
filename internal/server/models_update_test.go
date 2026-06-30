@@ -49,28 +49,44 @@ func newModelUpdateServer(t *testing.T) (*Server, string) {
 
 // seedModel is a fully-configured, routable model that populates EVERY ModelConfig
 // field so the round-trip assertion surface is complete and robust to future
-// additions. The non-empty endpoint+model+api_type make it routable, so it passes
-// the #532 save-time validation AddModel/UpdateModel enforce. Every omitempty
-// field is given a non-zero value so it actually serialises and survives the
-// round-trip (a zero value would be omitted and silently pass an equality check).
+// additions. It references the built-in routable "local-lan" connection (openai +
+// a non-empty endpoint), so it passes the #532 save-time validation AddModel/
+// UpdateModel enforce. Credentials/endpoint/api_type/project/location now live on
+// the connection, not the model. Every omitempty field is given a non-zero value
+// so it actually serialises and survives the round-trip (a zero value would be
+// omitted and silently pass an equality check).
 func seedModel() config.ModelConfig {
 	return config.ModelConfig{
 		Name:            "work",
 		DisplayName:     "Work",
+		Connection:      "local-lan",
 		Model:           "gpt-x",
-		Endpoint:        "https://api.example.com/v1",
-		APIType:         "openai",
-		APIKey:          "seed-secret-key",
 		Temperature:     0.4,
 		TopP:            0.9,
 		MaxTokens:       2048,
-		ContextWindow:   128000,
 		ReasoningEffort: "medium",
-		EffortOptions:   []string{"low", "medium", "high"},
 		Thinking:        boolPtr(true),
-		Project:         "proj",
-		Location:        "us-central1",
-		Free:            true,
+		CacheTTL:        "1h",
+		Caps: config.ModelCapabilities{
+			ContextWindow:    128000,
+			MaxOutput:        8192,
+			Reasoning:        true,
+			ThinkingToggle:   true,
+			EffortOptions:    []string{"low", "medium", "high"},
+			Vision:           true,
+			ToolCall:         true,
+			StructuredOutput: true,
+			CustomTemp:       true,
+			InputModalities:  []string{"text", "image"},
+			OutputModalities: []string{"text"},
+			InputCostPerM:    3,
+			OutputCostPerM:   15,
+			CacheReadPerM:    0.3,
+			CacheWritePerM:   3.75,
+			Knowledge:        "2025-01",
+			ReleaseDate:      "2025-02-01",
+			Source:           "manual",
+		},
 	}
 }
 
@@ -104,16 +120,13 @@ func TestUpdateModelRoundTripPersistsAllFields(t *testing.T) {
 	if !ok {
 		t.Fatalf("seeded model %q absent from GET /models", "work")
 	}
-	if !view.HasAPIKey {
-		t.Error("GET has_api_key = false, want true (the seed has a key)")
-	}
-	if bytes.Contains(get.Body.Bytes(), []byte(seed.APIKey)) {
-		t.Error("GET /models leaked the api_key in the redacted view")
+	// The model view carries no credentials — those live on the connection.
+	if bytes.Contains(get.Body.Bytes(), []byte(`"api_key"`)) {
+		t.Error("GET /models leaked an api_key field in the model view")
 	}
 
-	// 3. Re-marshal the redacted view as the PUT body, mutating exactly one field.
-	// modelView carries no api_key, so the body omits it — exactly what the TUI
-	// does — which also exercises the empty-key-preserves-stored-key path.
+	// 3. Re-marshal the redacted view as the PUT body, mutating exactly one field —
+	// exactly what the TUI does on a Models → Edit → Save round-trip.
 	view.DisplayName = "Work Renamed"
 	body, err := json.Marshal(view)
 	if err != nil {
@@ -126,8 +139,8 @@ func TestUpdateModelRoundTripPersistsAllFields(t *testing.T) {
 		t.Fatalf("PUT /models/work status = %d, want 200 (a 400 means the body was dropped — signature regression); body=%s",
 			put.Code, put.Body.String())
 	}
-	if bytes.Contains(put.Body.Bytes(), []byte(seed.APIKey)) {
-		t.Error("PUT response leaked the api_key")
+	if bytes.Contains(put.Body.Bytes(), []byte(`"api_key"`)) {
+		t.Error("PUT response leaked an api_key field")
 	}
 
 	// 5. Reload config FROM DISK and assert the full round-trip.
@@ -156,43 +169,96 @@ func TestUpdateModelRoundTripPersistsAllFields(t *testing.T) {
 	if resp.DisplayName != "Work Renamed" {
 		t.Errorf("response display_name = %q, want Work Renamed", resp.DisplayName)
 	}
-	if resp.Model == "" || resp.Endpoint == "" {
-		t.Errorf("response is a zero-value husk: model=%q endpoint=%q", resp.Model, resp.Endpoint)
-	}
-	if !resp.HasAPIKey {
-		t.Error("response has_api_key = false, want true (the stored key was preserved)")
+	if resp.Model == "" || resp.Connection == "" {
+		t.Errorf("response is a zero-value husk: model=%q connection=%q", resp.Model, resp.Connection)
 	}
 }
 
-// TestUpdateModelNewAPIKeyReplacesStoredKey covers the INVERSE of the preserve
-// rule: when the PUT body carries a non-empty api_key (a user who re-enters a
-// key, or a fresh add), the stored key must be REPLACED, not borrowed. It also
-// proves the handler accepts a flat config.ModelConfig body (updateModelRequest
-// embeds it anonymously) — the wire shape APIClient.UpdateModel actually sends.
-func TestUpdateModelNewAPIKeyReplacesStoredKey(t *testing.T) {
+// TestUpdateConnectionAPIKeyPreserveAndReplace covers the api_key lifecycle that
+// moved from the model onto the provider connection. It pins both branches of the
+// connection PUT rule over the redacted GET→edit→PUT round-trip the TUI performs:
+//   - the redacted GET reports HasAPIKey but never echoes the secret,
+//   - a PUT whose body omits the api_key (the only thing the TUI can re-send)
+//     PRESERVES the stored key while still applying the other edited fields,
+//   - a PUT carrying a non-empty api_key REPLACES the stored key, not borrows it.
+func TestUpdateConnectionAPIKeyPreserveAndReplace(t *testing.T) {
 	srv, home := newModelUpdateServer(t)
-	if err := srv.g.AddModel(seedModel()); err != nil {
-		t.Fatalf("AddModel seed: %v", err)
+	if err := srv.g.AddConnection(config.ProviderConnection{
+		Name:     "keyed",
+		APIType:  "openai",
+		Endpoint: "https://api.example.com/v1",
+		APIKey:   "seed-secret-key",
+	}); err != nil {
+		t.Fatalf("AddConnection seed: %v", err)
 	}
 
-	withNewKey := seedModel()
-	withNewKey.APIKey = "brand-new-key" // non-empty → must replace, not preserve
-	body, err := json.Marshal(withNewKey)
+	// The redacted GET reports the key's presence but never the key itself.
+	get := serveOne(t, srv, loopbackReq(http.MethodGet, "/api/connections", nil))
+	if get.Code != http.StatusOK {
+		t.Fatalf("GET /connections status = %d; body=%s", get.Code, get.Body.String())
+	}
+	if bytes.Contains(get.Body.Bytes(), []byte("seed-secret-key")) {
+		t.Error("GET /connections leaked the api_key in the redacted view")
+	}
+	var conns []connectionView
+	if err := json.Unmarshal(get.Body.Bytes(), &conns); err != nil {
+		t.Fatalf("decode []connectionView: %v", err)
+	}
+	cv, ok := findConnectionView(conns, "keyed")
+	if !ok {
+		t.Fatal("seeded connection \"keyed\" absent from GET /connections")
+	}
+	if !cv.HasAPIKey {
+		t.Error("GET has_api_key = false, want true (the seed has a key)")
+	}
+
+	// PUT the redacted view back (no api_key in the body) with one field edited:
+	// the stored key must survive, the edit must apply.
+	cv.Endpoint = "https://api.example.com/v2"
+	body, err := json.Marshal(cv)
 	if err != nil {
-		t.Fatalf("marshal body: %v", err)
+		t.Fatalf("marshal PUT body: %v", err)
 	}
-	rec := serveOne(t, srv, loopbackReq(http.MethodPut, "/api/models/work", bytes.NewReader(body)))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("PUT status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	put := serveOne(t, srv, loopbackReq(http.MethodPut, "/api/connections/keyed", bytes.NewReader(body)))
+	if put.Code != http.StatusOK {
+		t.Fatalf("PUT /connections/keyed status = %d, want 200; body=%s", put.Code, put.Body.String())
 	}
-
 	cfg, err := config.LoadConfig(home)
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	got := findModelConfig(cfg, "work")
+	got := findConnection(cfg, "keyed")
 	if got == nil {
-		t.Fatal("model \"work\" missing from reloaded config")
+		t.Fatal("connection \"keyed\" missing from reloaded config")
+	}
+	if got.APIKey != "seed-secret-key" {
+		t.Errorf("APIKey = %q, want %q (a blank submit must preserve the stored key)", got.APIKey, "seed-secret-key")
+	}
+	if got.Endpoint != "https://api.example.com/v2" {
+		t.Errorf("Endpoint = %q, want the edited value (the body must still apply)", got.Endpoint)
+	}
+
+	// PUT a non-empty api_key: it must REPLACE the stored one.
+	replace, err := json.Marshal(config.ProviderConnection{
+		Name:     "keyed",
+		APIType:  "openai",
+		Endpoint: "https://api.example.com/v2",
+		APIKey:   "brand-new-key",
+	})
+	if err != nil {
+		t.Fatalf("marshal replace body: %v", err)
+	}
+	rec := serveOne(t, srv, loopbackReq(http.MethodPut, "/api/connections/keyed", bytes.NewReader(replace)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT replace status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	cfg, err = config.LoadConfig(home)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	got = findConnection(cfg, "keyed")
+	if got == nil {
+		t.Fatal("connection \"keyed\" missing after replace")
 	}
 	if got.APIKey != "brand-new-key" {
 		t.Errorf("APIKey = %q, want %q (a non-empty key must replace the stored key)", got.APIKey, "brand-new-key")
@@ -215,9 +281,8 @@ func TestUpdateModelPathNameWinsOverBodyName(t *testing.T) {
 	body, err := json.Marshal(config.ModelConfig{
 		Name:        "imposter", // must be discarded — the path name wins
 		DisplayName: "Path Wins",
-		APIType:     "openai",
+		Connection:  "local-lan",
 		Model:       "gpt-x",
-		Endpoint:    "https://api.example.com/v1",
 	})
 	if err != nil {
 		t.Fatalf("marshal body: %v", err)
@@ -304,6 +369,24 @@ func findModelConfig(cfg *config.Config, name string) *config.ModelConfig {
 	return nil
 }
 
+func findConnectionView(views []connectionView, name string) (connectionView, bool) {
+	for i := range views {
+		if views[i].Name == name {
+			return views[i], true
+		}
+	}
+	return connectionView{}, false
+}
+
+func findConnection(cfg *config.Config, name string) *config.ProviderConnection {
+	for _, c := range cfg.Connections {
+		if c != nil && c.Name == name {
+			return c
+		}
+	}
+	return nil
+}
+
 func configModelNames(t *testing.T, home string) []string {
 	t.Helper()
 	cfg, err := config.LoadConfig(home)
@@ -331,20 +414,15 @@ func assertModelEquals(t *testing.T, label string, got, want config.ModelConfig)
 	}{
 		{"Name", got.Name == want.Name},
 		{"DisplayName", got.DisplayName == want.DisplayName},
+		{"Connection", got.Connection == want.Connection},
 		{"Model", got.Model == want.Model},
-		{"Endpoint", got.Endpoint == want.Endpoint},
-		{"APIType", got.APIType == want.APIType},
-		{"APIKey", got.APIKey == want.APIKey},
 		{"Temperature", got.Temperature == want.Temperature},
 		{"TopP", got.TopP == want.TopP},
 		{"MaxTokens", got.MaxTokens == want.MaxTokens},
-		{"ContextWindow", got.ContextWindow == want.ContextWindow},
 		{"ReasoningEffort", got.ReasoningEffort == want.ReasoningEffort},
-		{"EffortOptions", reflect.DeepEqual(got.EffortOptions, want.EffortOptions)},
 		{"Thinking", reflect.DeepEqual(got.Thinking, want.Thinking)},
-		{"Project", got.Project == want.Project},
-		{"Location", got.Location == want.Location},
-		{"Free", got.Free == want.Free},
+		{"CacheTTL", got.CacheTTL == want.CacheTTL},
+		{"Caps", reflect.DeepEqual(got.Caps, want.Caps)},
 	}
 	for _, c := range checks {
 		if !c.ok {

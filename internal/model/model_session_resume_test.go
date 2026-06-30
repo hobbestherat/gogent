@@ -15,7 +15,7 @@ import "testing"
 // the root cause of premature context compaction (the session compacted at
 // ~10% real usage on large-window models).
 func TestModelSessionResumeRecomputesOnModelSwitch(t *testing.T) {
-	first := NewModelConnection()
+	first := newPlaceholderConnection()
 	s := NewModelSession("t", first)
 
 	// Record two turns with known usage. The second turn's total already covers
@@ -37,7 +37,7 @@ func TestModelSessionResumeRecomputesOnModelSwitch(t *testing.T) {
 	})
 
 	t.Run("different model recomputes from history", func(t *testing.T) {
-		s.Resume(NewModelConnection())
+		s.Resume(newPlaceholderConnection())
 		if got := s.GetCurrentTokenCount(); got != wantRecount {
 			t.Errorf("after resuming on a new model: count = %d, want recomputed %d", got, wantRecount)
 		}
@@ -48,10 +48,10 @@ func TestModelSessionResumeRecomputesOnModelSwitch(t *testing.T) {
 // with no recorded usage, ensuring the recompute degrades cleanly rather than
 // leaving the stale count in place.
 func TestModelSessionResumeWithNoUsage(t *testing.T) {
-	s := NewModelSession("t", NewModelConnection())
+	s := NewModelSession("t", newPlaceholderConnection())
 	s.CurrentTokenCount = 4321 // stale value carried over from the old model
 
-	s.Resume(NewModelConnection())
+	s.Resume(newPlaceholderConnection())
 
 	if got := s.GetCurrentTokenCount(); got != 0 {
 		t.Errorf("after resuming on a new model with no recorded usage: count = %d, want 0", got)
@@ -64,7 +64,7 @@ func TestModelSessionResumeWithNoUsage(t *testing.T) {
 // outgoing connector's accumulated counters must be carried into the incoming
 // one so the totals stay cumulative across switches instead of resetting.
 func TestModelSessionResumeCarriesConnectorStats(t *testing.T) {
-	first := NewModelConnection()
+	first := newPlaceholderConnection()
 	first.Stats.RequestCount = 3
 	first.Stats.SuccessCount = 3
 	first.Stats.ErrorCount = 1
@@ -76,7 +76,7 @@ func TestModelSessionResumeCarriesConnectorStats(t *testing.T) {
 	s := NewModelSession("t", first)
 
 	t.Run("switching backend carries accumulated counters", func(t *testing.T) {
-		second := NewModelConnection()
+		second := newPlaceholderConnection()
 		s.Resume(second)
 
 		got := second.StatsSnapshot()
@@ -101,7 +101,7 @@ func TestModelSessionResumeCarriesConnectorStats(t *testing.T) {
 		cur.Stats.TotalTokensIn += 50
 		cur.Stats.RequestCount++
 
-		third := NewModelConnection()
+		third := newPlaceholderConnection()
 		s.Resume(third)
 
 		if got := third.StatsSnapshot().TotalTokensIn; got != 1050 {
@@ -135,7 +135,7 @@ func TestModelSessionResumeCarriesConnectorStats(t *testing.T) {
 // the real context reaches ~100K (10%), but the old sum-based recompute would
 // report ~1M (100%) by the end. After the fix Resume reports the real ~100K.
 func TestResumeDoesNotDoubleCountContextAcrossTurns(t *testing.T) {
-	s := NewModelSession("t", NewModelConnection())
+	s := NewModelSession("t", newPlaceholderConnection())
 	s.SetMaxContextLength(1_000_000) // GLM-5.2 1M window
 
 	// Each turn's total grows by ~5K (the new content) on top of the prior
@@ -150,7 +150,7 @@ func TestResumeDoesNotDoubleCountContextAcrossTurns(t *testing.T) {
 	}
 	wantReal := growth * turns // 100K — the latest turn's total, 10% of the window
 
-	s.Resume(NewModelConnection()) // gogent does this every send
+	s.Resume(newPlaceholderConnection()) // gogent does this every send
 	got := s.GetCurrentTokenCount()
 
 	if got != wantReal {
@@ -170,7 +170,7 @@ func TestResumeDoesNotDoubleCountContextAcrossTurns(t *testing.T) {
 // AddTurn recording path: a turn's total is the whole-context size, so the
 // running count must be set, not added to.
 func TestAddTurnDoesNotAccumulateContext(t *testing.T) {
-	s := NewModelSession("t", NewModelConnection())
+	s := NewModelSession("t", newPlaceholderConnection())
 	s.AddTurn([]Message{{Role: RoleUser, Content: "hi"}}, "hello",
 		&TokenUsage{TotalTokens: 1000}, nil)
 	s.AddTurn([]Message{{Role: RoleUser, Content: "again"}}, "hi",

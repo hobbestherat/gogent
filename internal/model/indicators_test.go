@@ -80,8 +80,9 @@ func TestResolvedBaseURLMatchesRouting(t *testing.T) {
 		}
 		// A derive-base config with an empty endpoint resolves to <base> + chatPath.
 		// The indicator base must be a prefix of (or equal to the stripped) chat URL.
-		cfg := &config.ModelConfig{Name: "t", APIType: string(apiType), Model: "m", Endpoint: ""}
-		conn := NewModelConnectionFromConfig(cfg)
+		pc := &config.ProviderConnection{Name: "t", APIType: string(apiType), Endpoint: ""}
+		cfg := &config.ModelConfig{Name: "t", Connection: "t", Model: "m"}
+		conn := NewModelConnection(pc, cfg)
 		if conn.URL == "" {
 			t.Errorf("%s: resolved chat URL is empty", apiType)
 			continue

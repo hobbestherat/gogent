@@ -91,11 +91,12 @@ func TestValidateModelConfig_VertexShimPublisherPrefix(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := &config.ModelConfig{
-				Name: "v", APIType: "vertex", Model: tc.model,
+			pc := &config.ProviderConnection{
+				Name: "v", APIType: "vertex",
 				Project: "my-proj", Location: "us-central1",
 			}
-			err := ValidateModelConfig(cfg)
+			cfg := &config.ModelConfig{Name: "v", Model: tc.model}
+			err := ValidateModelConfig(pc, cfg)
 			if tc.wantReject {
 				me := requireMisconfig(t, err)
 				if me.Type != ErrorGeneric {
@@ -150,11 +151,12 @@ func TestValidateModelConfig_VertexNativeBareRequired(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := &config.ModelConfig{
-				Name: "n", APIType: tc.apiType, Model: tc.model,
+			pc := &config.ProviderConnection{
+				Name: "n", APIType: tc.apiType,
 				Project: "my-proj", Location: "us-central1",
 			}
-			err := ValidateModelConfig(cfg)
+			cfg := &config.ModelConfig{Name: "n", Model: tc.model}
+			err := ValidateModelConfig(pc, cfg)
 			if tc.wantReject {
 				me := requireMisconfig(t, err)
 				if me.Type != ErrorGeneric {
@@ -195,13 +197,14 @@ func TestValidateModelConfig_PublisherRulesScopedToVertexFamily(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := &config.ModelConfig{Name: "x", APIType: tc.apiType, Model: tc.model}
+			pc := &config.ProviderConnection{Name: "x", APIType: tc.apiType}
+			cfg := &config.ModelConfig{Name: "x", Model: tc.model}
 			// Some of these need an endpoint to be routable; supply one so a
 			// routability rejection is not mistaken for a publisher-prefix hit.
 			if tc.apiType == "openai" {
-				cfg.Endpoint = "http://127.0.0.1:8080/v1"
+				pc.Endpoint = "http://127.0.0.1:8080/v1"
 			}
-			err := ValidateModelConfig(cfg)
+			err := ValidateModelConfig(pc, cfg)
 			if err != nil {
 				t.Errorf("publisher rules must not fire for api_type %q; got: %v", tc.apiType, err)
 			}
@@ -215,8 +218,9 @@ func TestValidateModelConfig_PublisherRulesScopedToVertexFamily(t *testing.T) {
 // "project and location are required". validateRoutableConfig runs before the
 // provider's vertexValidate, and it is the only validator at save/load.
 func TestValidateModelConfig_VertexShimPublisherErrorShadowsProjectLocation(t *testing.T) {
-	cfg := &config.ModelConfig{Name: "v", APIType: "vertex", Model: "gemini-3.5-flash"} // no project/location
-	me := requireMisconfig(t, configErrOf(t, cfg))
+	pc := &config.ProviderConnection{Name: "v", APIType: "vertex"} // no project/location
+	cfg := &config.ModelConfig{Name: "v", Model: "gemini-3.5-flash"}
+	me := requireMisconfig(t, configErrOf(t, pc, cfg))
 	if !strings.Contains(me.Message, "publisher-qualified") {
 		t.Errorf("publisher-prefix error must win for a bare shim config; got: %q", me.Message)
 	}
@@ -275,10 +279,13 @@ func TestVertexShimProviderHasNormalizer(t *testing.T) {
 // when validation has flagged the config.
 func TestVertexShim_BuildRequestAutoQualifiesBareModel(t *testing.T) {
 	mk := func(apiType, model string) *ModelConnection {
-		return NewModelConnectionFromConfig(&config.ModelConfig{
-			Name: "v", APIType: apiType, Model: model,
-			Project: "my-proj", Location: "us-central1",
-		})
+		return NewModelConnection(
+			&config.ProviderConnection{
+				Name: "v", APIType: apiType,
+				Project: "my-proj", Location: "us-central1",
+			},
+			&config.ModelConfig{Name: "v", Model: model},
+		)
 	}
 	t.Run("shim bare qualified at build", func(t *testing.T) {
 		conn := mk("vertex", "gemini-3.5-flash")
@@ -302,9 +309,10 @@ func TestVertexShim_BuildRequestAutoQualifiesBareModel(t *testing.T) {
 		}
 	})
 	t.Run("openai bare NOT rewritten at build", func(t *testing.T) {
-		conn := NewModelConnectionFromConfig(&config.ModelConfig{
-			Name: "o", APIType: "openai", Endpoint: "http://127.0.0.1:8080/v1", Model: "gpt-4o",
-		})
+		conn := NewModelConnection(
+			&config.ProviderConnection{Name: "o", APIType: "openai", Endpoint: "http://127.0.0.1:8080/v1"},
+			&config.ModelConfig{Name: "o", Model: "gpt-4o"},
+		)
 		req := conn.buildRequest([]Message{{Role: RoleUser, Content: "hi"}}, false, nil, nil)
 		if req.Model != "gpt-4o" {
 			t.Errorf("openai Model = %q, want verbatim (nil normalizer)", req.Model)
@@ -333,9 +341,10 @@ func TestVertexShim_NormalizationFiresOnSend(t *testing.T) {
 	// Build with a QUALIFIED model so configErr is nil and the completion
 	// proceeds; then override ModelName to a bare id, as a caller bypassing
 	// validation would. Without the normalizer this would reach Vertex bare.
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType: "vertex", Endpoint: server.URL, Model: "google/gemini-3.5-flash",
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "vertex", Endpoint: server.URL},
+		&config.ModelConfig{Model: "google/gemini-3.5-flash"},
+	)
 	if conn.configErr != nil {
 		t.Fatalf("precondition: qualified config must be routable, got configErr: %v", conn.configErr)
 	}
@@ -364,9 +373,10 @@ func TestVertexShim_QualifiedModelSentUnchangedOnSend(t *testing.T) {
 	}))
 	defer server.Close()
 
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType: "vertex", Endpoint: server.URL, Model: "google/gemini-3.5-flash",
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "vertex", Endpoint: server.URL},
+		&config.ModelConfig{Model: "google/gemini-3.5-flash"},
+	)
 	if _, err := conn.Complete([]Message{{Role: RoleUser, Content: "hi"}}); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
@@ -496,7 +506,7 @@ func TestExtractProviderMessage_ObjectFormUnchangedRegression(t *testing.T) {
 // ErrorGeneric (NOT context_overflow — the body contains neither "context" nor
 // "length"), stays non-retryable at 400, and preserves the full RawResponse.
 func TestAnalyzeError_VertexPublisherArray400(t *testing.T) {
-	conn := NewModelConnection() // has Stats initialized
+	conn := newPlaceholderConnection() // has Stats initialized
 	me := conn.analyzeError(400, vertexPublisher400Body)
 
 	if me.Type != ErrorGeneric {
@@ -531,14 +541,14 @@ func TestAnalyzeError_VertexPublisherArray400(t *testing.T) {
 // applies to an array body that genuinely contains "context".
 func TestAnalyzeError_400ContextHeuristicUnchanged(t *testing.T) {
 	t.Run("object 400 with context -> context_overflow", func(t *testing.T) {
-		conn := NewModelConnection()
+		conn := newPlaceholderConnection()
 		me := conn.analyzeError(400, `{"error":{"message":"This model's maximum context length is 8192 tokens."}}`)
 		if me.Type != ErrorContextOverflow {
 			t.Errorf("Type = %v, want ErrorContextOverflow", me.Type)
 		}
 	})
 	t.Run("array 400 with context -> context_overflow (heuristic scans raw body)", func(t *testing.T) {
-		conn := NewModelConnection()
+		conn := newPlaceholderConnection()
 		me := conn.analyzeError(400, `[{"error":{"message":"maximum context length exceeded"}}]`)
 		if me.Type != ErrorContextOverflow {
 			t.Errorf("Type = %v, want ErrorContextOverflow (heuristic must scan the raw array body)", me.Type)
@@ -555,12 +565,12 @@ func TestAnalyzeError_400ContextHeuristicUnchanged(t *testing.T) {
 // default + sample config (api_type "vertex", model "google/gemini-2.5-flash")
 // against the new rule — it must continue to validate.
 func TestValidateModelConfig_DefaultVertexSampleQualifies(t *testing.T) {
-	cfg := &config.ModelConfig{
-		Name: "gemini-vertex", APIType: "vertex",
+	pc := &config.ProviderConnection{
+		Name: "vertex", APIType: "vertex",
 		Project: "your-gcp-project", Location: "us-central1",
-		Model: "google/gemini-2.5-flash",
 	}
-	if err := ValidateModelConfig(cfg); err != nil {
+	cfg := &config.ModelConfig{Name: "gemini-vertex", Connection: "vertex", Model: "google/gemini-2.5-flash"}
+	if err := ValidateModelConfig(pc, cfg); err != nil {
 		t.Errorf("the shipped default/sample vertex config must still validate; got: %v", err)
 	}
 }

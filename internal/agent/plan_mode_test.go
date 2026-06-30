@@ -74,7 +74,7 @@ func toolNamesFromRequest(t *testing.T, names []map[string]interface{}) []string
 // "read" tool and a side-effecting "write" tool, pointed at a fake server.
 func newPlanSession(t *testing.T, url string) (*UserSession, *Agent) {
 	t.Helper()
-	conn := model.NewModelConnection()
+	conn := newTestModelConnection()
 	conn.SetURL(url)
 	sess := model.NewModelSession("test", conn)
 

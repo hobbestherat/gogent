@@ -510,12 +510,18 @@ func (w *Workbench) showCatalogReviewStep(cat modelsdev.Catalog, providerID, mod
 	temp.SetText(strconv.FormatFloat(float64(draft.Temperature), 'g', -1, 32))
 	row++
 
+	// The catalog output limit lives on Caps.MaxOutput now; seed the editable
+	// per-request cap from it (the user's MaxTokens override defaults to it).
+	outCap := draft.MaxTokens
+	if outCap == 0 {
+		outCap = draft.Caps.MaxOutput
+	}
 	maxHint := ""
-	if draft.MaxTokens > 0 {
+	if outCap > 0 {
 		maxHint = "(from catalog output limit)"
 	}
 	maxTokens := fieldHint("Max tokens:", row, 12, maxHint)
-	maxTokens.SetText(strconv.Itoa(draft.MaxTokens))
+	maxTokens.SetText(strconv.Itoa(outCap))
 	row++
 
 	// Reasoning effort: a Select constrained to the catalog's valid set when the

@@ -9,7 +9,7 @@ import (
 )
 
 func TestAgentCreate(t *testing.T) {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	s := model.NewModelSession("test1", m)
 	a := NewAgent("agent1", s)
 
@@ -27,7 +27,7 @@ func TestAgentCreate(t *testing.T) {
 }
 
 func TestAgentAddSubAgent(t *testing.T) {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	s := model.NewModelSession("test2", m)
 	a := NewAgent("parent", s)
 	sub := NewAgent("child", s)
@@ -49,7 +49,7 @@ func TestAgentAddSubAgent(t *testing.T) {
 }
 
 func TestAgentRemoveSubAgent(t *testing.T) {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	s := model.NewModelSession("test3", m)
 	a := NewAgent("parent", s)
 	sub1 := NewAgent("child1", s)
@@ -70,7 +70,7 @@ func TestAgentRemoveSubAgent(t *testing.T) {
 }
 
 func TestAgentGetSubAgent(t *testing.T) {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	s := model.NewModelSession("test4", m)
 	a := NewAgent("parent", s)
 	sub := NewAgent("child", s)
@@ -89,7 +89,7 @@ func TestAgentGetSubAgent(t *testing.T) {
 }
 
 func TestAgentGetRootAgent(t *testing.T) {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	s := model.NewModelSession("test5", m)
 	root := NewAgent("root", s)
 	child := NewAgent("child", s)
@@ -112,7 +112,7 @@ func TestAgentGetRootAgent(t *testing.T) {
 }
 
 func TestAgentListAllAgents(t *testing.T) {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	s := model.NewModelSession("test6", m)
 	root := NewAgent("root", s)
 	child1 := NewAgent("child1", s)
@@ -140,7 +140,7 @@ func TestAgentListAllAgents(t *testing.T) {
 }
 
 func TestAgentGetAgentByID(t *testing.T) {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	s := model.NewModelSession("test7", m)
 	root := NewAgent("root", s)
 	child := NewAgent("child", s)
@@ -161,7 +161,7 @@ func TestAgentGetAgentByID(t *testing.T) {
 }
 
 func TestAgentSetState(t *testing.T) {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	s := model.NewModelSession("test8", m)
 	a := NewAgent("agent", s)
 
@@ -177,7 +177,7 @@ func TestAgentSetState(t *testing.T) {
 }
 
 func TestAgentUpdateState(t *testing.T) {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	s := model.NewModelSession("test9", m)
 	a := NewAgent("agent", s)
 
@@ -230,7 +230,7 @@ func TestAgentStateChangeCallback(t *testing.T) {
 }
 
 func TestAgentGetParent(t *testing.T) {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	s := model.NewModelSession("test10", m)
 	root := NewAgent("root", s)
 	child := NewAgent("child", s)
@@ -264,7 +264,7 @@ func TestAgentGetParent(t *testing.T) {
 // header under the readers. It also checks the post-condition invariants
 // (complete child set, correct parent and root links) once all writers finish.
 func TestAgentTreeConcurrentReadWrite(t *testing.T) {
-	m := model.NewModelConnection()
+	m := newTestModelConnection()
 	s := model.NewModelSession("test11", m)
 	root := NewAgent("root", s)
 

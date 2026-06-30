@@ -222,8 +222,7 @@ func TestBuildRequestDropsSamplingForCurrentGenClaudeDirect(t *testing.T) {
 	}
 	for _, model := range currentGen {
 		t.Run(model, func(t *testing.T) {
-			req := buildRequestFor(&config.ModelConfig{
-				APIType:     "anthropic",
+			req := buildRequestFor(&config.ProviderConnection{APIType: "anthropic"}, &config.ModelConfig{
 				Model:       model,
 				Temperature: 0.7,
 				TopP:        0.9,
@@ -257,22 +256,23 @@ func TestBuildRequestDirectAndVertexIdenticalForCurrentGenClaude(t *testing.T) {
 	cases := []struct {
 		name  string
 		api   string
-		extra func(c *config.ModelConfig)
+		extra func(pc *config.ProviderConnection)
 	}{
-		{"direct", "anthropic", func(c *config.ModelConfig) {}},
-		{"vertex", "vertex-anthropic", func(c *config.ModelConfig) {
-			c.Project, c.Location = "p", "us-central1"
+		{"direct", "anthropic", func(pc *config.ProviderConnection) {}},
+		{"vertex", "vertex-anthropic", func(pc *config.ProviderConnection) {
+			pc.Project, pc.Location = "p", "us-central1"
 		}},
 	}
 	for _, model := range []string{"claude-opus-4-8", "claude-sonnet-4-5"} {
 		for _, tc := range cases {
 			t.Run(tc.name+"_"+model, func(t *testing.T) {
+				pc := &config.ProviderConnection{APIType: tc.api}
+				tc.extra(pc)
 				cfg := &config.ModelConfig{
-					APIType: tc.api, Model: model,
+					Model:       model,
 					Temperature: 0.7, TopP: 0.9, MaxTokens: 500,
 				}
-				tc.extra(cfg)
-				req := buildRequestFor(cfg)
+				req := buildRequestFor(pc, cfg)
 				if req.Temperature != nil {
 					t.Errorf("%s/%s: Temperature = %v, want nil", tc.name, model, *req.Temperature)
 				}
@@ -292,7 +292,7 @@ func TestBuildRequestDirectAndVertexIdenticalForCurrentGenClaude(t *testing.T) {
 // an override). These cases had ZERO coverage before this change.
 func TestBuildRequestKeepsSamplingForUnaffectedModels(t *testing.T) {
 	t.Run("gpt-4o keeps temperature and top_p", func(t *testing.T) {
-		req := buildRequestFor(&config.ModelConfig{Model: "gpt-4o", Temperature: 0.7, TopP: 0.9, MaxTokens: 4096})
+		req := buildRequestFor(nil, &config.ModelConfig{Model: "gpt-4o", Temperature: 0.7, TopP: 0.9, MaxTokens: 4096})
 		if req.Temperature == nil || *req.Temperature != 0.7 {
 			t.Errorf("Temperature = %v, want 0.7", req.Temperature)
 		}
@@ -302,21 +302,21 @@ func TestBuildRequestKeepsSamplingForUnaffectedModels(t *testing.T) {
 	})
 
 	t.Run("old claude on DIRECT anthropic keeps temperature (no override row)", func(t *testing.T) {
-		req := buildRequestFor(&config.ModelConfig{APIType: "anthropic", Model: "claude-3-5-sonnet", Temperature: 0.5, MaxTokens: 1024})
+		req := buildRequestFor(&config.ProviderConnection{APIType: "anthropic"}, &config.ModelConfig{Model: "claude-3-5-sonnet", Temperature: 0.5, MaxTokens: 1024})
 		if req.Temperature == nil || *req.Temperature != 0.5 {
 			t.Errorf("Temperature = %v, want 0.5 (old Claude accepts temperature; must be byte-identical to today)", req.Temperature)
 		}
 	})
 
 	t.Run("deliberate temperature 0 survives on a model that accepts it", func(t *testing.T) {
-		req := buildRequestFor(&config.ModelConfig{Model: "gpt-4o", Temperature: 0, MaxTokens: 4096})
+		req := buildRequestFor(nil, &config.ModelConfig{Model: "gpt-4o", Temperature: 0, MaxTokens: 4096})
 		if req.Temperature == nil || *req.Temperature != 0 {
 			t.Errorf("Temperature = %v, want 0 (pointer must preserve a deliberate zero)", req.Temperature)
 		}
 	})
 
 	t.Run("openai reasoning o3 drops temperature via the pre-existing path (unchanged)", func(t *testing.T) {
-		req := buildRequestFor(&config.ModelConfig{Model: "o3", Temperature: 0.7, ReasoningEffort: "high", MaxTokens: 8000})
+		req := buildRequestFor(nil, &config.ModelConfig{Model: "o3", Temperature: 0.7, ReasoningEffort: "high", MaxTokens: 8000})
 		if req.Temperature != nil {
 			t.Errorf("Temperature = %v, want nil (OpenAI reasoning rejects temperature; path must be unchanged)", *req.Temperature)
 		}
@@ -326,7 +326,7 @@ func TestBuildRequestKeepsSamplingForUnaffectedModels(t *testing.T) {
 	})
 
 	t.Run("zai reasoning keeps temperature (glm reasoning does not reject it)", func(t *testing.T) {
-		req := buildRequestFor(&config.ModelConfig{APIType: "zai", Model: "glm-5.2", Temperature: 0.6, ReasoningEffort: "max", MaxTokens: 4096})
+		req := buildRequestFor(&config.ProviderConnection{APIType: "zai"}, &config.ModelConfig{Model: "glm-5.2", Temperature: 0.6, ReasoningEffort: "max", MaxTokens: 4096})
 		if req.Temperature == nil || *req.Temperature != 0.6 {
 			t.Errorf("Temperature = %v, want 0.6", req.Temperature)
 		}
@@ -339,8 +339,8 @@ func TestBuildRequestKeepsSamplingForUnaffectedModels(t *testing.T) {
 // the case the task brief mis-stated ("IsReasoningModel true") — it confirms the
 // override, not the reasoning flag, is what fixes the bug.
 func TestBuildRequestCurrentGenClaudeWithReasoningStillDropsSampling(t *testing.T) {
-	req := buildRequestFor(&config.ModelConfig{
-		APIType: "anthropic", Model: "claude-opus-4-8",
+	req := buildRequestFor(&config.ProviderConnection{APIType: "anthropic"}, &config.ModelConfig{
+		Model:       "claude-opus-4-8",
 		Temperature: 0.7, ReasoningEffort: "high", MaxTokens: 4096,
 	})
 	if req.Temperature != nil {
@@ -372,15 +372,15 @@ func TestDirectAnthropicCurrentGenClaudeEndToEndNoSamplingOnWire(t *testing.T) {
 	}))
 	defer server.Close()
 
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType:     "anthropic",
-		Endpoint:    server.URL,
-		Model:       "claude-opus-4-8",
-		APIKey:      "k",
-		Temperature: 0.7, // the field whose mere presence used to 400
-		TopP:        0.9,
-		MaxTokens:   321,
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "anthropic", Endpoint: server.URL, APIKey: "k"},
+		&config.ModelConfig{
+			Model:       "claude-opus-4-8",
+			Temperature: 0.7, // the field whose mere presence used to 400
+			TopP:        0.9,
+			MaxTokens:   321,
+		},
+	)
 	if _, err := conn.Complete([]Message{{Role: RoleUser, Content: "hi"}}); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
@@ -409,8 +409,8 @@ func TestPinnedSnapshotDropsSamplingButPreservesWireModel(t *testing.T) {
 	const pinned = "claude-opus-4-5@20251101"
 
 	// Request-level: sampling dropped because base normalizes to the family row.
-	req := buildRequestFor(&config.ModelConfig{
-		APIType: "anthropic", Model: pinned, Temperature: 0.7, TopP: 0.9, MaxTokens: 100,
+	req := buildRequestFor(&config.ProviderConnection{APIType: "anthropic"}, &config.ModelConfig{
+		Model: pinned, Temperature: 0.7, TopP: 0.9, MaxTokens: 100,
 	})
 	if req.Temperature != nil || req.TopP != nil {
 		t.Errorf("pinned snapshot sampling not dropped: Temperature=%v TopP=%v", req.Temperature, req.TopP)
@@ -425,9 +425,10 @@ func TestPinnedSnapshotDropsSamplingButPreservesWireModel(t *testing.T) {
 	}))
 	defer server.Close()
 
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType: "anthropic", Endpoint: server.URL, Model: pinned, APIKey: "k", Temperature: 0.7, MaxTokens: 50,
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "anthropic", Endpoint: server.URL, APIKey: "k"},
+		&config.ModelConfig{Model: pinned, Temperature: 0.7, MaxTokens: 50},
+	)
 	if _, err := conn.Complete([]Message{{Role: RoleUser, Content: "hi"}}); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}

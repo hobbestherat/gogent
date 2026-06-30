@@ -9,17 +9,18 @@ import (
 
 func boolPtr(b bool) *bool { return &b }
 
-// buildRequestFor constructs a connection from cfg (endpoint left empty so the
-// provider spec/capabilities are derived from api_type) and returns the request
-// buildRequest would send.
-func buildRequestFor(cfg *config.ModelConfig) CompletionRequest {
-	conn := NewModelConnectionFromConfig(cfg)
+// buildRequestFor constructs a connection from pc + cfg (endpoint left empty so
+// the provider spec/capabilities are derived from api_type) and returns the
+// request buildRequest would send. A nil pc defaults to a bare openai connection.
+func buildRequestFor(pc *config.ProviderConnection, cfg *config.ModelConfig) CompletionRequest {
+	conn := NewModelConnection(pc, cfg)
 	return conn.buildRequest([]Message{{Role: RoleUser, Content: "hi"}}, false, nil, nil)
 }
 
 func TestBuildRequestReasoningParams(t *testing.T) {
 	tests := []struct {
 		name string
+		pc   *config.ProviderConnection
 		cfg  *config.ModelConfig
 		// expectations
 		wantMaxTokens       *int
@@ -69,7 +70,8 @@ func TestBuildRequestReasoningParams(t *testing.T) {
 		},
 		{
 			name:                "zai reasoning keeps max_tokens and temperature, emits thinking + effort",
-			cfg:                 &config.ModelConfig{APIType: "zai", Model: "glm-5.2", MaxTokens: 4096, Temperature: 0.6, ReasoningEffort: "max", Thinking: boolPtr(true)},
+			pc:                  &config.ProviderConnection{APIType: "zai"},
+			cfg:                 &config.ModelConfig{Model: "glm-5.2", MaxTokens: 4096, Temperature: 0.6, ReasoningEffort: "max", Thinking: boolPtr(true)},
 			wantMaxTokens:       intPtr(4096),
 			wantTempSet:         true,
 			wantTemp:            0.6,
@@ -78,7 +80,8 @@ func TestBuildRequestReasoningParams(t *testing.T) {
 		},
 		{
 			name:          "zai thinking disabled emits disabled toggle",
-			cfg:           &config.ModelConfig{APIType: "zai", Model: "glm-4.6", MaxTokens: 4096, Temperature: 0.6, Thinking: boolPtr(false)},
+			pc:            &config.ProviderConnection{APIType: "zai"},
+			cfg:           &config.ModelConfig{Model: "glm-4.6", MaxTokens: 4096, Temperature: 0.6, Thinking: boolPtr(false)},
 			wantMaxTokens: intPtr(4096),
 			wantTempSet:   true,
 			wantTemp:      0.6,
@@ -88,7 +91,7 @@ func TestBuildRequestReasoningParams(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := buildRequestFor(tt.cfg)
+			req := buildRequestFor(tt.pc, tt.cfg)
 
 			if !eqIntPtr(req.MaxTokens, tt.wantMaxTokens) {
 				t.Errorf("MaxTokens = %v, want %v", derefInt(req.MaxTokens), derefInt(tt.wantMaxTokens))
@@ -130,7 +133,7 @@ func TestBuildRequestReasoningParams(t *testing.T) {
 // fields the issue calls out (no max_tokens/temperature for OpenAI reasoning)
 // and includes the reasoning controls.
 func TestBuildRequestReasoningJSONShape(t *testing.T) {
-	req := buildRequestFor(&config.ModelConfig{
+	req := buildRequestFor(nil, &config.ModelConfig{
 		Model: "o3", MaxTokens: 8000, Temperature: 0.7, ReasoningEffort: "medium",
 	})
 	data, err := json.Marshal(req)

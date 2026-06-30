@@ -10,7 +10,7 @@ import (
 // newTestSession builds a minimal user session + root agent for unit tests that
 // do not need a reachable model (the connection is never dialed here).
 func newTestSession(id string) *UserSession {
-	sess := model.NewModelSession("test", model.NewModelConnection())
+	sess := model.NewModelSession("test", newTestModelConnection())
 	ag := NewAgent("root", sess)
 	return NewUserSession(id, ag)
 }

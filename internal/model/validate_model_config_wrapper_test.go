@@ -21,51 +21,58 @@ import (
 // model-named *ModelError the server can classify and the TUI can surface, and
 // (c) the fail-safe connection errors clearly without dialing.
 
-// TestValidateModelConfig_MatchesValidateRoutableConfig pins the wrapper as a
-// passthrough: for every representative config, the exported and private functions
-// agree (both nil, or both erroring with the same message). A drift here would mean
-// two routability rules, which is exactly what the issue forbids.
-func TestValidateModelConfig_MatchesValidateRoutableConfig(t *testing.T) {
+// TestValidateConnectionAndModelConfig pins the split routability rule: connection
+// routability is checked against the ProviderConnection (ValidateConnection), while
+// model-level rules (hosted-gateway empty model, Vertex model-id shape) are checked
+// by ValidateModelConfig(pc, m). There is still one rule with no drift, now keyed on
+// the connection + model rather than a flat config.
+func TestValidateConnectionAndModelConfig(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		cfg  *config.ModelConfig
+		name    string
+		pc      *config.ProviderConnection
+		m       *config.ModelConfig
+		wantErr bool
 	}{
-		{"nil", nil},
-		{"empty api_type + endpoint (unroutable)", &config.ModelConfig{Name: "bad", Model: "x"}},
-		{"unrecognized api_type", &config.ModelConfig{Name: "typo", APIType: "opnai", Model: "x"}},
-		{"openrouter empty model", &config.ModelConfig{Name: "gw", APIType: "openrouter"}},
-		{"openai empty endpoint (local default)", &config.ModelConfig{Name: "o", APIType: "openai", Model: "m"}},
-		{"explicit endpoint empty api_type", &config.ModelConfig{Name: "e", Endpoint: "https://api.example.com/v1", Model: "m"}},
-		{"anthropic empty model (accepted)", &config.ModelConfig{Name: "a", APIType: "anthropic"}},
+		{"nil/nil", nil, nil, false},
+		{"empty api_type + endpoint (unroutable)", &config.ProviderConnection{Name: "bad"}, &config.ModelConfig{Name: "x", Model: "x"}, true},
+		{"unrecognized api_type", &config.ProviderConnection{Name: "typo", APIType: "opnai"}, &config.ModelConfig{Name: "x", Model: "x"}, true},
+		{"openrouter empty model", &config.ProviderConnection{Name: "gw", APIType: "openrouter"}, &config.ModelConfig{Name: "x"}, true},
+		{"openai empty endpoint (local default)", &config.ProviderConnection{Name: "o", APIType: "openai"}, &config.ModelConfig{Name: "x", Model: "m"}, false},
+		{"explicit endpoint empty api_type", &config.ProviderConnection{Name: "e", Endpoint: "https://api.example.com/v1"}, &config.ModelConfig{Name: "x", Model: "m"}, false},
+		{"anthropic empty model (accepted)", &config.ProviderConnection{Name: "a", APIType: "anthropic"}, &config.ModelConfig{Name: "x"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			expErr := validateRoutableConfig(tc.cfg)
-			gotErr := ValidateModelConfig(tc.cfg)
-			if (expErr == nil) != (gotErr == nil) {
-				t.Fatalf("wrapper disagrees with private function: private=%v wrapper=%v", expErr, gotErr)
+			err := ValidateModelConfig(tc.pc, tc.m)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ValidateModelConfig = %v, wantErr=%v", err, tc.wantErr)
 			}
-			if expErr != nil && gotErr != nil && expErr.Error() != gotErr.Error() {
-				t.Errorf("verdict agreed but message drifted: private=%q wrapper=%q", expErr.Error(), gotErr.Error())
+			// Connection routability must agree on the connection-only verdict.
+			if tc.pc != nil {
+				connErr := ValidateConnection(tc.pc)
+				routability := tc.name == "empty api_type + endpoint (unroutable)" || tc.name == "unrecognized api_type"
+				if (connErr != nil) != routability {
+					t.Errorf("ValidateConnection = %v, want routability=%v", connErr, routability)
+				}
 			}
 		})
 	}
 }
 
-// TestValidateModelConfig_RejectsAsModelError verifies the wrapper's rejection is a
-// *model.ModelError (model-named, field-naming). gogent wraps it with its
-// ErrModelInvalid sentinel; the actionable *ModelError must still be recoverable via
+// TestValidateConnection_RejectsAsModelError verifies an unroutable connection is
+// rejected as a *model.ModelError (connection-named, field-naming). gogent wraps it
+// with ErrModelInvalid; the actionable *ModelError must still be recoverable via
 // errors.As through that double-wrap (exercised in the gogent package tests).
-func TestValidateModelConfig_RejectsAsModelError(t *testing.T) {
-	err := ValidateModelConfig(&config.ModelConfig{Name: "ghost", Model: "x"})
+func TestValidateConnection_RejectsAsModelError(t *testing.T) {
+	err := ValidateConnection(&config.ProviderConnection{Name: "ghost"})
 	if err == nil {
-		t.Fatal("an unroutable config must be rejected")
+		t.Fatal("an unroutable connection must be rejected")
 	}
 	var me *ModelError
 	if !errors.As(err, &me) {
 		t.Fatalf("rejection must be a *ModelError, got %T: %v", err, err)
 	}
-	if !strings.Contains(me.Message, `model "ghost"`) {
-		t.Errorf("error must name the model; got %q", me.Message)
+	if !strings.Contains(me.Message, `connection "ghost"`) {
+		t.Errorf("error must name the connection; got %q", me.Message)
 	}
 	if !strings.Contains(me.Message, "api_type and endpoint are both empty") {
 		t.Errorf("error must explain the routability failure; got %q", me.Message)
@@ -75,7 +82,7 @@ func TestValidateModelConfig_RejectsAsModelError(t *testing.T) {
 // TestNewUnroutableConnection_FailsWithClearMessage_NoDial is the Defect-1.1 fix:
 // when no routable model is configured, gogent builds this connection so the first
 // completion fails fast with the actionable message instead of silently targeting
-// DefaultModelURL (localhost) and 404ing. A bare NewModelConnection() has
+// DefaultModelURL (localhost) and 404ing. A bare newPlaceholderConnection() has
 // configErr == nil and would dial; this must not.
 func TestNewUnroutableConnection_FailsWithClearMessage_NoDial(t *testing.T) {
 	const want = "no routable model is configured — add a model"
@@ -132,7 +139,7 @@ func TestNewUnroutableConnection_AlsoFailsStreamAndList(t *testing.T) {
 // localhost, so the no-model fallback must carry a configErr and never be the bare
 // placeholder.
 func TestNewUnroutableConnection_DistinctFromBarePlaceholder(t *testing.T) {
-	bare := NewModelConnection()
+	bare := newPlaceholderConnection()
 	if bare.configErr != nil {
 		t.Fatalf("test premise: bare NewModelConnection must have nil configErr, got %v", bare.configErr)
 	}

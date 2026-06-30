@@ -286,7 +286,7 @@ func newBothModeSession(t *testing.T, serverURL string) (*Gogent, *agent.UserSes
 	}
 
 	g := NewGogentWithWorkspace(tempDir, workspace)
-	conn := model.NewModelConnection()
+	conn := testConn()
 	conn.SetURL(serverURL)
 	sess := model.NewModelSession("session_284", conn)
 	root := agent.NewAgent("root", sess)

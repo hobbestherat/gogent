@@ -205,15 +205,19 @@ func setupGeminiCacheTest(t *testing.T, cacheTTL string, createStatus int) (*Mod
 		return &staticTokenSource{token: "test-token"}, nil
 	})
 	srv := newGeminiCacheServer(t, createStatus)
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType:   "vertex-native",
-		Endpoint:  srv.URL,
-		Project:   "p",
-		Location:  "us-central1",
-		Model:     "gemini-2.5-flash",
-		CacheTTL:  cacheTTL,
-		MaxTokens: 64,
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{
+			APIType:  "vertex-native",
+			Endpoint: srv.URL,
+			Project:  "p",
+			Location: "us-central1",
+		},
+		&config.ModelConfig{
+			Model:     "gemini-2.5-flash",
+			CacheTTL:  cacheTTL,
+			MaxTokens: 64,
+		},
+	)
 	conn.URL = srv.URL + "/v1/projects/p/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent"
 	return conn, srv
 }
@@ -471,7 +475,7 @@ func TestGeminiStablePrefixBoundary(t *testing.T) {
 // ===========================================================================
 
 func TestGeminiCacheEndpointDerivation(t *testing.T) {
-	conn := NewModelConnection()
+	conn := newPlaceholderConnection()
 	const chatURL = "https://us-central1-aiplatform.googleapis.com/v1/projects/myproj/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent"
 	conn.URL = chatURL
 
@@ -502,7 +506,7 @@ func TestGeminiCacheEndpointDerivation(t *testing.T) {
 	})
 
 	t.Run("rejects_url_without_publishers_segment", func(t *testing.T) {
-		c := NewModelConnection()
+		c := newPlaceholderConnection()
 		c.URL = "https://host/v1/projects/p/locations/l/foo:generateContent"
 		if _, _, ok := geminiCacheEndpoint(c); ok {
 			t.Errorf("expected ok=false when /publishers/ is absent")
@@ -510,7 +514,7 @@ func TestGeminiCacheEndpointDerivation(t *testing.T) {
 	})
 
 	t.Run("rejects_url_without_projects_segment", func(t *testing.T) {
-		c := NewModelConnection()
+		c := newPlaceholderConnection()
 		c.URL = "https://host/publishers/google/models/gemini-2.5-flash:generateContent"
 		if _, _, ok := geminiCacheEndpoint(c); ok {
 			t.Errorf("expected ok=false when /projects/ is absent (e.g. bare Endpoint override)")
@@ -794,9 +798,10 @@ func TestGeminiCacheNoopGates(t *testing.T) {
 			return &staticTokenSource{token: "tok"}, nil
 		})
 		srv := newGeminiCacheServer(t, http.StatusOK)
-		conn := NewModelConnectionFromConfig(&config.ModelConfig{
-			APIType: "openai", Endpoint: srv.URL, Model: "gpt-4o", CacheTTL: "1h",
-		})
+		conn := NewModelConnection(
+			&config.ProviderConnection{APIType: "openai", Endpoint: srv.URL},
+			&config.ModelConfig{Model: "gpt-4o", CacheTTL: "1h"},
+		)
 		conn.URL = srv.URL + "/v1/projects/p/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent"
 		req := CompletionRequest{Messages: largeCacheMessages()}
 		conn.ensureGeminiCache(ctx, &req)
@@ -847,10 +852,14 @@ func TestGeminiCacheWiredIntoCompletePath(t *testing.T) {
 		return &staticTokenSource{token: "tok"}, nil
 	})
 	srv := newGeminiCacheServer(t, http.StatusOK)
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType: "vertex-native", Endpoint: srv.URL, Project: "p", Location: "us-central1",
-		Model: "gemini-2.5-flash", CacheTTL: "1h", MaxTokens: 64,
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{
+			APIType: "vertex-native", Endpoint: srv.URL, Project: "p", Location: "us-central1",
+		},
+		&config.ModelConfig{
+			Model: "gemini-2.5-flash", CacheTTL: "1h", MaxTokens: 64,
+		},
+	)
 	conn.URL = srv.URL + "/v1/projects/p/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent"
 
 	msgs := []Message{
@@ -899,10 +908,14 @@ func TestGeminiCacheWiredIntoStreamPath(t *testing.T) {
 		return &staticTokenSource{token: "tok"}, nil
 	})
 	srv := newGeminiCacheServer(t, http.StatusOK)
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType: "vertex-native", Endpoint: srv.URL, Project: "p", Location: "us-central1",
-		Model: "gemini-2.5-flash", CacheTTL: "1h", MaxTokens: 64,
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{
+			APIType: "vertex-native", Endpoint: srv.URL, Project: "p", Location: "us-central1",
+		},
+		&config.ModelConfig{
+			Model: "gemini-2.5-flash", CacheTTL: "1h", MaxTokens: 64,
+		},
+	)
 	conn.URL = srv.URL + "/v1/projects/p/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent"
 
 	msgs := []Message{
@@ -939,10 +952,14 @@ func TestGeminiImplicitCacheReportingIntactWhenExplicitInactive(t *testing.T) {
 		return &staticTokenSource{token: "tok"}, nil
 	})
 	srv := newGeminiCacheServer(t, http.StatusOK)
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType: "vertex-native", Endpoint: srv.URL, Project: "p", Location: "us-central1",
-		Model: "gemini-2.5-flash", MaxTokens: 64, // no CacheTTL → explicit caching OFF
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{
+			APIType: "vertex-native", Endpoint: srv.URL, Project: "p", Location: "us-central1",
+		},
+		&config.ModelConfig{
+			Model: "gemini-2.5-flash", MaxTokens: 64, // no CacheTTL → explicit caching OFF
+		},
+	)
 	conn.URL = srv.URL + "/v1/projects/p/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent"
 
 	// Small prefix: no explicit cache; implicit hits still reported.

@@ -52,11 +52,14 @@ func seedClientConfigIssue507(t *testing.T, home, defaultModel string) []byte {
 func daemonWithModelsIssue507(t *testing.T, initialDefault string, models ...string) (*gogent.Gogent, *tuipkg.APIClient) {
 	t.Helper()
 	g := gogent.NewGogent(t.TempDir())
+	// A routable provider connection the models reference, so save-time validation
+	// (issue #532) is satisfied — these tests exercise default-model resolution,
+	// not config validation.
+	if err := g.AddConnection(config.ProviderConnection{Name: "test", APIType: "openai", Endpoint: "https://api.example.com/v1"}); err != nil {
+		t.Fatalf("AddConnection: %v", err)
+	}
 	for _, name := range models {
-		// Routable config (api_type/endpoint set) so save-time validation
-		// (issue #532) is satisfied — these tests exercise default-model resolution,
-		// not config validation.
-		if err := g.AddModel(config.ModelConfig{Name: name, APIType: "openai", Endpoint: "https://api.example.com/v1"}); err != nil {
+		if err := g.AddModel(config.ModelConfig{Name: name, Connection: "test"}); err != nil {
 			t.Fatalf("AddModel %s: %v", name, err)
 		}
 	}

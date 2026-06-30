@@ -15,7 +15,7 @@ import (
 // panics, so the task loop drives the panic-recovery path end to end.
 func newPanicLoopSession(t *testing.T, url string) (*UserSession, *Agent) {
 	t.Helper()
-	conn := model.NewModelConnection()
+	conn := newTestModelConnection()
 	conn.SetURL(url)
 	sess := model.NewModelSession("test", conn)
 

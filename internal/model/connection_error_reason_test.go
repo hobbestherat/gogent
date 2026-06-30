@@ -31,7 +31,7 @@ const headlineAnthropicMaxTokensBody = `{"type":"error","error":{"type":"invalid
 // offending field ("max_tokens ... greater than the maximum") in the
 // user-visible error string, not just "unexpected error: status 400".
 func TestAnalyzeError_Headline_AnthropicOverLimitMaxTokens(t *testing.T) {
-	conn := NewModelConnection()
+	conn := newPlaceholderConnection()
 	me := conn.analyzeError(400, headlineAnthropicMaxTokensBody)
 
 	// Falls through to the generic catch-all (body has no "context"/"length").
@@ -106,7 +106,7 @@ func TestAnalyzeError_EveryBranchAppendsReason(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			conn := NewModelConnection()
+			conn := newPlaceholderConnection()
 			me := conn.analyzeError(tt.status, tt.body)
 			if me.Type != tt.wantType {
 				t.Errorf("Type = %q, want %q", me.Type, tt.wantType)
@@ -144,7 +144,7 @@ func TestAnalyzeError_TypeAndCountersUnchangedByReason(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := NewModelConnection()
+			c := newPlaceholderConnection()
 			me := c.analyzeError(tt.status, tt.body)
 			if me.Type != tt.wantType {
 				t.Errorf("type = %q, want %q", me.Type, tt.wantType)
@@ -176,7 +176,7 @@ func TestAnalyzeError_RawResponseNotTruncated_FullBodyPreserved(t *testing.T) {
 	hugeReason := strings.Repeat("x", 20*1024) // 20 KiB — well past the 8 KiB session cap
 	body := `{"error":{"message":"` + hugeReason + sentinel + `"}}`
 
-	conn := NewModelConnection()
+	conn := newPlaceholderConnection()
 	me := conn.analyzeError(500, body)
 
 	// Full body preserved byte-for-byte (Go strings are immutable; analyzeError
@@ -203,7 +203,7 @@ func TestAnalyzeError_RawResponseNotTruncated_FullBodyPreserved(t *testing.T) {
 func TestAnalyzeError_EmptyOrBlankBody_MessageIdenticalToStatusOnly(t *testing.T) {
 	wantGeneric := "unexpected error: status 500"
 	for _, body := range []string{"", "   ", "\n\t\r\n  "} {
-		conn := NewModelConnection()
+		conn := newPlaceholderConnection()
 		me := conn.analyzeError(500, body)
 		if me.Message != wantGeneric {
 			t.Errorf("empty/blank body must keep status-only message %q; body=%q got %q", wantGeneric, body, me.Message)
@@ -213,7 +213,7 @@ func TestAnalyzeError_EmptyOrBlankBody_MessageIdenticalToStatusOnly(t *testing.T
 		}
 	}
 	// 429 with an empty body keeps its fixed phrase verbatim too.
-	conn := NewModelConnection()
+	conn := newPlaceholderConnection()
 	if me := conn.analyzeError(429, ""); me.Message != "rate limit exceeded" {
 		t.Errorf("empty-body 429 must keep %q; got %q", "rate limit exceeded", me.Message)
 	}
@@ -225,7 +225,7 @@ func TestAnalyzeError_EmptyOrBlankBody_MessageIdenticalToStatusOnly(t *testing.T
 // appended reason must preserve both substrings. The non-JSON body here also
 // exercises the raw-body fallback rung.
 func TestAnalyzeError_404_PreservesDescriptiveSubstrings(t *testing.T) {
-	conn := NewModelConnection()
+	conn := newPlaceholderConnection()
 	me := conn.analyzeError(404, "not found body")
 	if !strings.Contains(me.Message, "404") {
 		t.Errorf("404 message must still mention 404; got: %q", me.Message)
@@ -254,7 +254,7 @@ func TestAnalyzeError_MultilineReason_OnlyFirstLineInMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	conn := NewModelConnection()
+	conn := newPlaceholderConnection()
 	me := conn.analyzeError(400, string(body))
 	if !strings.Contains(me.Message, "first offending line") {
 		t.Errorf("first line of the reason must be present; got: %q", me.Message)

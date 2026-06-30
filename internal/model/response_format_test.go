@@ -58,7 +58,7 @@ func TestCompletionRequestOmitsNilResponseFormat(t *testing.T) {
 // On an OpenAI-compatible provider, a response format is emitted on the wire in
 // the OpenAI json_schema shape (with strict:true).
 func TestBuildRequestResponseFormatOnWireOpenAI(t *testing.T) {
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{Model: "gpt-4o"})
+	conn := NewModelConnection(&config.ProviderConnection{}, &config.ModelConfig{Model: "gpt-4o"})
 	format := JSONSchemaResponseFormat("reply", exampleSchema())
 	req := conn.buildRequest([]Message{{Role: RoleUser, Content: "hi"}}, false, nil, format)
 	if req.ResponseFormat == nil {
@@ -95,7 +95,7 @@ func TestBuildRequestResponseFormatOnWireOpenAI(t *testing.T) {
 // Anthropic has no response_format field, so the format is dropped (not sent and
 // rejected) — its provider spec leaves supportsResponseFormat unset.
 func TestBuildRequestResponseFormatDroppedForAnthropic(t *testing.T) {
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{APIType: "anthropic", Model: "claude-x"})
+	conn := NewModelConnection(&config.ProviderConnection{APIType: "anthropic"}, &config.ModelConfig{Model: "claude-x"})
 	format := JSONSchemaResponseFormat("reply", exampleSchema())
 	req := conn.buildRequest([]Message{{Role: RoleUser, Content: "hi"}}, false, nil, format)
 	if req.ResponseFormat != nil {
@@ -124,7 +124,7 @@ func TestBuildRequestResponseFormatDroppedForAnthropic(t *testing.T) {
 // A strict tool forces parallel_tool_calls:false on an OpenAI-compatible
 // provider (OpenAI rejects parallel tool calls alongside strict tool schemas).
 func TestBuildRequestStrictToolDisablesParallelToolCalls(t *testing.T) {
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{Model: "gpt-4o"})
+	conn := NewModelConnection(&config.ProviderConnection{}, &config.ModelConfig{Model: "gpt-4o"})
 	tools := []ToolDef{{
 		Type: "function",
 		Function: FunctionDef{
@@ -166,7 +166,7 @@ func TestBuildRequestStrictToolDisablesParallelToolCalls(t *testing.T) {
 
 // A non-strict tool set leaves parallel_tool_calls unset (provider default).
 func TestBuildRequestNonStrictToolKeepsParallelToolCallsUnset(t *testing.T) {
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{Model: "gpt-4o"})
+	conn := NewModelConnection(&config.ProviderConnection{}, &config.ModelConfig{Model: "gpt-4o"})
 	tools := []ToolDef{{
 		Type:     "function",
 		Function: FunctionDef{Name: "read", Parameters: map[string]interface{}{"type": "object"}},
@@ -180,7 +180,7 @@ func TestBuildRequestNonStrictToolKeepsParallelToolCallsUnset(t *testing.T) {
 // On Anthropic a strict tool does not produce a parallel_tool_calls field — that
 // invariant is OpenAI-specific and the Anthropic request shape has no such field.
 func TestBuildRequestStrictToolNoParallelFieldForAnthropic(t *testing.T) {
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{APIType: "anthropic", Model: "claude-x"})
+	conn := NewModelConnection(&config.ProviderConnection{APIType: "anthropic"}, &config.ModelConfig{Model: "claude-x"})
 	tools := []ToolDef{{
 		Type:     "function",
 		Function: FunctionDef{Name: "structured_output", Parameters: exampleSchema(), Strict: true},

@@ -121,7 +121,7 @@ func TestExecuteTaskLoopParallelReadOnly(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(fs.handler))
 	defer server.Close()
 
-	conn := model.NewModelConnection()
+	conn := newTestModelConnection()
 	conn.SetURL(server.URL)
 	sess := model.NewModelSession("test", conn)
 
@@ -195,7 +195,7 @@ func TestExecuteTaskLoopMixedBatchSerial(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(fs.handler))
 	defer server.Close()
 
-	conn := model.NewModelConnection()
+	conn := newTestModelConnection()
 	conn.SetURL(server.URL)
 	sess := model.NewModelSession("test", conn)
 

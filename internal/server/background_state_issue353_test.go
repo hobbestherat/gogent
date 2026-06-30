@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"gogent/internal/agent"
+	"gogent/internal/config"
 	"gogent/internal/gogent"
 	"gogent/internal/model"
 )
@@ -31,7 +32,7 @@ func TestSessionToViewReportsBackgroundOnlyWhenRootIdle(t *testing.T) {
 
 	home := t.TempDir()
 	g := gogent.NewGogentWithWorkspace(home, home)
-	conn := model.NewModelConnection()
+	conn := model.NewModelConnection(&config.ProviderConnection{APIType: "openai"}, nil)
 	conn.SetURL(backend.URL)
 	sess := model.NewModelSession("session_test", conn)
 	root := agent.NewAgent("agent_test", sess)
@@ -216,7 +217,7 @@ func TestStopEndpointCancelsAsyncBackgroundSubAgents(t *testing.T) {
 
 	home := t.TempDir()
 	g := gogent.NewGogentWithWorkspace(home, home)
-	conn := model.NewModelConnection()
+	conn := model.NewModelConnection(&config.ProviderConnection{APIType: "openai"}, nil)
 	conn.SetURL(backend.URL)
 	sess := model.NewModelSession("session_test", conn)
 	root := agent.NewAgent("root", sess)

@@ -321,7 +321,10 @@ func TestIssue567DefaultToolSetWouldPassAnthropicStrict(t *testing.T) {
 	// default registry: grep (nullable+enum — the bug) plus a git-style tool
 	// (plain string + enum — already valid). After normalization NO tool in the
 	// set may carry the rejected combination, i.e. a turn would reach the model.
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{APIType: "anthropic", Model: "claude-opus-4-8"})
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "anthropic"},
+		&config.ModelConfig{Model: "claude-opus-4-8"},
+	)
 	gitLike := ToolDef{Type: "function", Function: FunctionDef{
 		Name: "git", Strict: true,
 		Parameters: map[string]interface{}{

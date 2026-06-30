@@ -28,7 +28,10 @@ func issue359StrictToolDef() ToolDef {
 }
 
 func TestIssue359StrictToolWireFormatOpenAI(t *testing.T) {
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{Model: "gpt-4o"})
+	conn := NewModelConnection(
+		&config.ProviderConnection{},
+		&config.ModelConfig{Model: "gpt-4o"},
+	)
 	req := conn.buildRequest([]Message{{Role: RoleUser, Content: "hi"}}, false, []ToolDef{issue359StrictToolDef()}, nil)
 	raw, err := buildBodyBytes(openAIAdapter{}, req)
 	if err != nil {
@@ -72,7 +75,10 @@ func TestIssue359StrictToolWireFormatAnthropicEmitsStrictField(t *testing.T) {
 	// input_schema (https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/
 	// strict-tool-use). So a strict tool MUST carry strict:true on the Anthropic
 	// wire — it is not dropped (unlike Gemini, which has no per-tool strict field).
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{APIType: "anthropic", Model: "claude-x"})
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "anthropic"},
+		&config.ModelConfig{Model: "claude-x"},
+	)
 	req := conn.buildRequest([]Message{{Role: RoleUser, Content: "hi"}}, false, []ToolDef{issue359StrictToolDef()}, nil)
 	raw, err := buildBodyBytes(anthropicAdapter{}, req)
 	if err != nil {
@@ -108,7 +114,10 @@ func TestIssue359NonStrictToolOmitsStrictFieldAnthropic(t *testing.T) {
 	// Anthropic wire so it is not advertised as strict — strict:omitempty.
 	def := issue359StrictToolDef()
 	def.Function.Strict = false
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{APIType: "anthropic", Model: "claude-x"})
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "anthropic"},
+		&config.ModelConfig{Model: "claude-x"},
+	)
 	req := conn.buildRequest([]Message{{Role: RoleUser, Content: "hi"}}, false, []ToolDef{def}, nil)
 	raw, err := buildBodyBytes(anthropicAdapter{}, req)
 	if err != nil {
@@ -120,7 +129,10 @@ func TestIssue359NonStrictToolOmitsStrictFieldAnthropic(t *testing.T) {
 }
 
 func TestIssue359StrictToolWireFormatGeminiDropsUnsupportedStrictField(t *testing.T) {
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{APIType: "gemini", Model: "gemini-2.5-flash"})
+	conn := NewModelConnection(
+		&config.ProviderConnection{APIType: "gemini"},
+		&config.ModelConfig{Model: "gemini-2.5-flash"},
+	)
 	req := conn.buildRequest([]Message{{Role: RoleUser, Content: "hi"}}, false, []ToolDef{issue359StrictToolDef()}, nil)
 	raw, err := buildBodyBytes(geminiAdapter{}, req)
 	if err != nil {

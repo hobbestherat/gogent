@@ -30,7 +30,7 @@ func groqIssue534() *config.ModelConfig {
 	return &config.ModelConfig{
 		Name:        "groq-free",
 		DisplayName: "Groq",
-		Endpoint:    "https://api.groq.com/openai/v1/chat/completions",
+		Connection:  "groq",
 	}
 }
 
@@ -123,16 +123,16 @@ func TestIssue534_SpecificModelShowsNameAndEndpoint(t *testing.T) {
 	if got.Model != "Groq" {
 		t.Errorf("specific Model = %q, want display name %q", got.Model, "Groq")
 	}
-	if got.APIEndpoint != "api.groq.com" {
-		t.Errorf("specific APIEndpoint = %q, want host %q", got.APIEndpoint, "api.groq.com")
+	if got.APIEndpoint != "groq" {
+		t.Errorf("specific APIEndpoint = %q, want connection %q", got.APIEndpoint, "groq")
 	}
 
 	lines := formatOverallStats(got)
 	if overallRowValue(lines[len(lines)-2]) != "Groq" {
 		t.Errorf("specific model row = %q, want value %q", lines[len(lines)-2], "Groq")
 	}
-	if overallRowValue(lines[len(lines)-1]) != "api.groq.com" {
-		t.Errorf("specific api row = %q, want value %q", lines[len(lines)-1], "api.groq.com")
+	if overallRowValue(lines[len(lines)-1]) != "groq" {
+		t.Errorf("specific api row = %q, want value %q", lines[len(lines)-1], "groq")
 	}
 }
 
@@ -165,8 +165,8 @@ func TestIssue534_FocusedAggregateBlanksBothHalves(t *testing.T) {
 	// Sanity: the same config scoped to itself fills the rows.
 	scoped := formatOverallStats(buildOverallStats(issue534Report(), 4, 6, cfg, cfg.Name))
 	if overallRowValue(scoped[overallMetricLines-2]) != "Groq" ||
-		overallRowValue(scoped[overallMetricLines-1]) != "api.groq.com" {
-		t.Errorf("scoped rows = %q / %q, want Groq / api.groq.com",
+		overallRowValue(scoped[overallMetricLines-1]) != "groq" {
+		t.Errorf("scoped rows = %q / %q, want Groq / groq",
 			scoped[overallMetricLines-2], scoped[overallMetricLines-1])
 	}
 }
@@ -395,27 +395,27 @@ func TestIssue534_FirstFrameBlankNotDash(t *testing.T) {
 // model != nil) but yields an empty Model, so the row renders blank without error
 // while the endpoint still resolves from the config.
 func TestIssue534_SpecificConfigEmptyName_BlanksGracefully(t *testing.T) {
-	cfg := &config.ModelConfig{Name: "", DisplayName: "", Endpoint: "https://api.groq.com/x"}
+	cfg := &config.ModelConfig{Name: "", DisplayName: "", Connection: "groq"}
 	got := buildOverallStats(stats.Report{}, 0, 0, cfg, "some-selection")
 	if got.Model != "" {
 		t.Errorf("empty-name config Model = %q, want %q", got.Model, "")
 	}
-	if got.APIEndpoint != "api.groq.com" {
-		t.Errorf("empty-name config APIEndpoint = %q, want api.groq.com", got.APIEndpoint)
+	if got.APIEndpoint != "groq" {
+		t.Errorf("empty-name config APIEndpoint = %q, want groq (connection name)", got.APIEndpoint)
 	}
 }
 
-// TestIssue534_SpecificEndpointDefaultsAndProviders covers the api row's endpoint
-// derivation in the specific view (unchanged by #534): an empty endpoint resolves
-// to the provider (api_type), defaulting to the OpenAI-compatible convention.
-func TestIssue534_SpecificEndpointDefaultsAndProviders(t *testing.T) {
+// TestIssue534_SpecificAPIRowShowsConnection covers the api row in the specific
+// view: it now shows the model's connection name (credentials/endpoint moved to the
+// connection in the discovery redesign).
+func TestIssue534_SpecificAPIRowShowsConnection(t *testing.T) {
 	cases := []struct {
 		name string
 		cfg  *config.ModelConfig
 		want string
 	}{
-		{"provider label from api type", &config.ModelConfig{Name: "zai", DisplayName: "ZAI", APIType: "zai"}, "zai"},
-		{"openai default when empty", &config.ModelConfig{Name: "oai", DisplayName: "OAI"}, "openai"},
+		{"connection name shown", &config.ModelConfig{Name: "zai", DisplayName: "ZAI", Connection: "zai"}, "zai"},
+		{"blank when no connection", &config.ModelConfig{Name: "oai", DisplayName: "OAI"}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -439,7 +439,7 @@ func TestIssue534_WorkbenchRefreshOverall_AggregateBlanksAndSpecificFills(t *tes
 	w := newTestWorkbench(t)
 	w.SetModels([]*config.ModelConfig{{
 		Name: "groq-free", DisplayName: "Groq",
-		Endpoint: "https://api.groq.com/openai/v1/chat/completions",
+		Connection: "groq",
 	}})
 	w.handlers.GetStatistics = func() stats.Report { return issue534Report() }
 
@@ -453,8 +453,8 @@ func TestIssue534_WorkbenchRefreshOverall_AggregateBlanksAndSpecificFills(t *tes
 	// Selecting the known model fills the rows from its config.
 	w.sidebar.setSelectedOverallModel("groq-free")
 	w.refreshOverall()
-	if w.sidebar.overall.Model != "Groq" || w.sidebar.overall.APIEndpoint != "api.groq.com" {
-		t.Errorf("specific refresh Model/API = %q/%q, want Groq/api.groq.com",
+	if w.sidebar.overall.Model != "Groq" || w.sidebar.overall.APIEndpoint != "groq" {
+		t.Errorf("specific refresh Model/API = %q/%q, want Groq/groq",
 			w.sidebar.overall.Model, w.sidebar.overall.APIEndpoint)
 	}
 }

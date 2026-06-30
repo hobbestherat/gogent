@@ -68,7 +68,7 @@ func TestSpawnSubAgentBatchBounded(t *testing.T) {
 
 	// Root agent whose model backend points at the fake server; spawned children
 	// share this backend.
-	conn := model.NewModelConnection()
+	conn := testConn()
 	conn.SetURL(server.URL)
 	sess := model.NewModelSession("session_test", conn)
 	root := agent.NewAgent("agent_test", sess)

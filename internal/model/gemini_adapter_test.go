@@ -82,12 +82,16 @@ func TestVertexNativeAPITypeSpecAndURLs(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			conn := NewModelConnectionFromConfig(&config.ModelConfig{
-				APIType:  "gemini",
-				Project:  tc.project,
-				Location: tc.location,
-				Model:    tc.model,
-			})
+			conn := NewModelConnection(
+				&config.ProviderConnection{
+					APIType:  "gemini",
+					Project:  tc.project,
+					Location: tc.location,
+				},
+				&config.ModelConfig{
+					Model: tc.model,
+				},
+			)
 			if conn.URL != tc.wantURL {
 				t.Errorf("URL = %q, want %q", conn.URL, tc.wantURL)
 			}
@@ -597,15 +601,19 @@ func TestVertexNativeConnectionCompleteAndStreamUseNativeURLsAndADC(t *testing.T
 	}))
 	defer server.Close()
 
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType:     "vertex-native",
-		Endpoint:    server.URL,
-		Project:     "ignored",
-		Location:    "ignored",
-		Model:       "gemini-2.5-flash",
-		Temperature: 0.2,
-		MaxTokens:   64,
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{
+			APIType:  "vertex-native",
+			Endpoint: server.URL,
+			Project:  "ignored",
+			Location: "ignored",
+		},
+		&config.ModelConfig{
+			Model:       "gemini-2.5-flash",
+			Temperature: 0.2,
+			MaxTokens:   64,
+		},
+	)
 	resp, err := conn.Complete([]Message{{Role: RoleUser, Content: "hi"}})
 	if err != nil {
 		t.Fatalf("Complete: %v", err)

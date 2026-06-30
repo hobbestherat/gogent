@@ -141,10 +141,14 @@ func setupCacheConn(t *testing.T, srv *cacheSrv, cacheTTL string) *ModelConnecti
 	withFakeADCTokenSource(t, func(ctx context.Context, _ ...string) (oauth2.TokenSource, error) {
 		return &staticTokenSource{token: "tok"}, nil
 	})
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{
-		APIType: "vertex-native", Endpoint: srv.URL, Project: "p", Location: "us-central1",
-		Model: "gemini-2.5-flash", CacheTTL: cacheTTL, MaxTokens: 64,
-	})
+	conn := NewModelConnection(
+		&config.ProviderConnection{
+			APIType: "vertex-native", Endpoint: srv.URL, Project: "p", Location: "us-central1",
+		},
+		&config.ModelConfig{
+			Model: "gemini-2.5-flash", CacheTTL: cacheTTL, MaxTokens: 64,
+		},
+	)
 	conn.URL = srv.URL + "/v1/projects/p/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent"
 	conn.StreamURL = srv.URL + "/v1/projects/p/locations/us-central1/publishers/google/models/gemini-2.5-flash:streamGenerateContent"
 	conn.maxAttempts = 1
@@ -331,7 +335,7 @@ func TestGeminiCacheReactiveDropOnStream4xx(t *testing.T) {
 // dropGeminiCacheRefAfterError guard: a 5xx is transient and must NOT clear; a
 // non-referenced request is a no-op.
 func TestGeminiCacheReactiveDropGuard(t *testing.T) {
-	conn := NewModelConnection()
+	conn := newPlaceholderConnection()
 
 	set := func() {
 		conn.geminiCache.mu.Lock()
@@ -376,7 +380,7 @@ func TestGeminiCacheReactiveDropGuard(t *testing.T) {
 // excludes isRetryableStatus; this test was the defect-pinning test that flipped
 // when the guard was narrowed.)
 func TestGeminiCacheReactiveDropGuardExcludesRetryable4xx(t *testing.T) {
-	conn := NewModelConnection()
+	conn := newPlaceholderConnection()
 	const ref = "projects/p/locations/l/cachedContents/live"
 
 	reset := func() {

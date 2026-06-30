@@ -60,7 +60,10 @@ func TestForceTool(t *testing.T) {
 // End to end: when tools are offered, buildRequest sets ToolChoice to auto and
 // the OpenAI adapter serializes it as the bare string "auto".
 func TestBuildRequestToolChoiceAutoOnWire(t *testing.T) {
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{Model: "gpt-4o"})
+	conn := NewModelConnection(
+		&config.ProviderConnection{},
+		&config.ModelConfig{Model: "gpt-4o"},
+	)
 	tools := []ToolDef{{
 		Type:     "function",
 		Function: FunctionDef{Name: "read", Parameters: map[string]interface{}{"type": "object"}},
@@ -84,7 +87,10 @@ func TestBuildRequestToolChoiceAutoOnWire(t *testing.T) {
 
 // No tools => buildRequest leaves ToolChoice unset, and it is omitted on the wire.
 func TestBuildRequestNoToolChoiceWithoutTools(t *testing.T) {
-	conn := NewModelConnectionFromConfig(&config.ModelConfig{Model: "gpt-4o"})
+	conn := NewModelConnection(
+		&config.ProviderConnection{},
+		&config.ModelConfig{Model: "gpt-4o"},
+	)
 	req := conn.buildRequest([]Message{{Role: RoleUser, Content: "hi"}}, false, nil, nil)
 	if req.ToolChoice != nil {
 		t.Errorf("ToolChoice = %+v, want nil without tools", req.ToolChoice)

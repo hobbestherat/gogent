@@ -15,7 +15,7 @@ import (
 // so a send never blocks the UI thread under test.
 func recordSends(w *Workbench) <-chan string {
 	sent := make(chan string, 8)
-	w.handlers.OnSend = func(_, message, _, _ string) { sent <- message }
+	w.handlers.OnSend = func(_, message, _, _, _ string) { sent <- message }
 	return sent
 }
 

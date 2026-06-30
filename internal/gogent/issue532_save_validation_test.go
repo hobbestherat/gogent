@@ -11,12 +11,12 @@ import (
 	"gogent/internal/model"
 )
 
-// Issue #532 — GOAL 1 (save time). AddModel/UpdateModel must REJECT an unroutable
-// ModelConfig (no api_type AND no endpoint, or a hosted gateway with no model)
-// before any mutation or SaveConfig, wrapping the model-named detail with the
-// gogent.ErrModelInvalid sentinel so the HTTP seam maps it to 400 (distinct from
-// 409 duplicate-name and 404 not-found). A rejected save leaves g.config untouched
-// and writes nothing to disk.
+// Issue #532 — GOAL 1 (save time). AddModel/UpdateModel must REJECT a model whose
+// referenced ProviderConnection is unroutable (no api_type AND no endpoint, or a
+// hosted gateway with no model) before any mutation or SaveConfig, wrapping the
+// detail with the gogent.ErrModelInvalid sentinel so the HTTP seam maps it to 400
+// (distinct from 409 duplicate-name and 404 not-found). A rejected save leaves
+// g.config untouched and writes nothing to disk.
 
 // readConfigBytes returns the contents of <home>/.gogent/config.json, failing the
 // test if it is absent. Shared by the save/load tests to assert "no disk write".
@@ -38,15 +38,24 @@ func assertNoConfigFile(t *testing.T, home string) {
 	}
 }
 
+// injectUnroutableConn appends an unroutable connection (no api_type, no endpoint)
+// straight into the in-memory config, bypassing AddConnection's validation, so the
+// save-time model guard can be exercised against a model that references it.
+func injectUnroutableConn(g *Gogent, name string) {
+	g.config.Connections = append(g.config.Connections, &config.ProviderConnection{Name: name})
+}
+
 // TestAddModel_RejectsUnroutable_NoMutationNoDisk is the headline save-time guard.
-// A config with no api_type AND no endpoint cannot be persisted; the rejection
-// leaves g.config.ModelConfigs untouched and writes nothing to disk.
+// A model referencing a connection with no api_type AND no endpoint cannot be
+// persisted; the rejection leaves g.config.ModelConfigs untouched and writes
+// nothing to disk.
 func TestAddModel_RejectsUnroutable_NoMutationNoDisk(t *testing.T) {
 	home := t.TempDir()
 	g := NewGogent(home)
+	injectUnroutableConn(g, "bad-conn") // no api_type, no endpoint
 	before := len(g.Models())
 
-	err := g.AddModel(config.ModelConfig{Name: "bad", APIKey: "k"}) // no api_type, no endpoint
+	err := g.AddModel(config.ModelConfig{Name: "bad", Connection: "bad-conn"})
 
 	if err == nil {
 		t.Fatal("AddModel of an unroutable config = nil, want error")
@@ -55,12 +64,12 @@ func TestAddModel_RejectsUnroutable_NoMutationNoDisk(t *testing.T) {
 	if !errors.Is(err, ErrModelInvalid) {
 		t.Errorf("errors.Is(ErrModelInvalid) = false; the rejection must wrap the sentinel, got %v", err)
 	}
-	// ...and the actionable, model-named detail survives the wrap (errors.As through %w:%w).
+	// ...and the actionable, connection-named detail survives the wrap (errors.As through %w:%w).
 	var me *model.ModelError
 	if !errors.As(err, &me) {
 		t.Errorf("errors.As(*ModelError) = false; the actionable detail must survive the wrap, got %T", err)
-	} else if !strings.Contains(me.Message, `model "bad"`) {
-		t.Errorf("error must name the model; got %q", me.Message)
+	} else if !strings.Contains(me.Message, `connection "bad-conn"`) {
+		t.Errorf("error must name the connection; got %q", me.Message)
 	}
 	if !strings.Contains(err.Error(), "api_type and endpoint are both empty") {
 		t.Errorf("error must explain the routability failure; got %q", err.Error())
@@ -75,13 +84,15 @@ func TestAddModel_RejectsUnroutable_NoMutationNoDisk(t *testing.T) {
 // TestAddModel_RejectsHostedGatewayEmptyModel: an openrouter/zai entry with an
 // empty model is almost certainly wrong and must not be persistable.
 func TestAddModel_RejectsHostedGatewayEmptyModel(t *testing.T) {
-	for _, apiType := range []string{"openrouter", "zai"} {
-		t.Run(apiType, func(t *testing.T) {
+	for _, conn := range []string{"openrouter", "zai"} {
+		t.Run(conn, func(t *testing.T) {
 			home := t.TempDir()
 			g := NewGogent(home)
 			before := len(g.Models())
 
-			err := g.AddModel(config.ModelConfig{Name: "gw", APIType: apiType, APIKey: "k"}) // empty model
+			// The seeded "openrouter"/"zai" connections are routable (derive their
+			// base URL); the model itself is unroutable because its model id is empty.
+			err := g.AddModel(config.ModelConfig{Name: "gw", Connection: conn})
 			if err == nil {
 				t.Fatal("AddModel of a hosted-gateway entry with empty model = nil, want error")
 			}
@@ -100,7 +111,7 @@ func TestAddModel_RejectsHostedGatewayEmptyModel(t *testing.T) {
 func TestAddModel_ValidPersists(t *testing.T) {
 	home := t.TempDir()
 	g := NewGogent(home)
-	cfg := config.ModelConfig{Name: "ok", APIType: "openai", Model: "m", Endpoint: "https://api.example.com/v1"}
+	cfg := config.ModelConfig{Name: "ok", Connection: "local-lan", Model: "m"}
 	if err := g.AddModel(cfg); err != nil {
 		t.Fatalf("AddModel of a valid config: %v", err)
 	}
@@ -125,7 +136,7 @@ func TestAddModel_ValidPersists(t *testing.T) {
 func TestAddModel_DuplicateNotClassifiedAsInvalid(t *testing.T) {
 	home := t.TempDir()
 	g := NewGogent(home)
-	valid := config.ModelConfig{Name: "dup", APIType: "openai", Model: "m", Endpoint: "https://api.example.com/v1"}
+	valid := config.ModelConfig{Name: "dup", Connection: "local-lan", Model: "m"}
 	if err := g.AddModel(valid); err != nil {
 		t.Fatalf("first AddModel: %v", err)
 	}
@@ -145,13 +156,14 @@ func TestUpdateModel_RejectsUnroutable_KeepsExisting_NoDisk(t *testing.T) {
 	home := t.TempDir()
 	g := NewGogent(home)
 	if err := g.AddModel(config.ModelConfig{
-		Name: "keep", APIType: "openai", Model: "orig-model", Endpoint: "https://orig.example.com/v1",
+		Name: "keep", Connection: "local-lan", Model: "orig-model",
 	}); err != nil {
 		t.Fatalf("seed AddModel: %v", err)
 	}
 	before := readConfigBytes(t, home)
 
-	err := g.UpdateModel(config.ModelConfig{Name: "keep", APIKey: "k"}) // unroutable replacement
+	injectUnroutableConn(g, "bad-conn")
+	err := g.UpdateModel(config.ModelConfig{Name: "keep", Connection: "bad-conn"}) // unroutable replacement
 	if err == nil {
 		t.Fatal("UpdateModel with an unroutable replacement = nil, want error")
 	}
@@ -159,12 +171,12 @@ func TestUpdateModel_RejectsUnroutable_KeepsExisting_NoDisk(t *testing.T) {
 		t.Errorf("unroutable update must wrap ErrModelInvalid; got %v", err)
 	}
 
-	// The existing entry is untouched (still has its model id + endpoint).
+	// The existing entry is untouched (still has its model id + connection).
 	found := false
 	for _, m := range g.Models() {
 		if m.Name == "keep" {
 			found = true
-			if m.Model != "orig-model" || m.Endpoint != "https://orig.example.com/v1" {
+			if m.Model != "orig-model" || m.Connection != "local-lan" {
 				t.Errorf("existing entry was mutated by a rejected update: %+v", m)
 			}
 		}
@@ -185,7 +197,7 @@ func TestUpdateModel_RejectsUnroutable_KeepsExisting_NoDisk(t *testing.T) {
 func TestUpdateModel_NotFoundWinsOverValidation(t *testing.T) {
 	home := t.TempDir()
 	g := NewGogent(home)
-	err := g.UpdateModel(config.ModelConfig{Name: "ghost", APIKey: "k"}) // unknown name AND unroutable body
+	err := g.UpdateModel(config.ModelConfig{Name: "ghost", Connection: "nope"}) // unknown name AND unroutable body
 	if err == nil {
 		t.Fatal("UpdateModel of an unknown model = nil, want error")
 	}
@@ -203,12 +215,12 @@ func TestUpdateModel_ValidOverwritesPersists(t *testing.T) {
 	home := t.TempDir()
 	g := NewGogent(home)
 	if err := g.AddModel(config.ModelConfig{
-		Name: "upd", APIType: "openai", Model: "old", Endpoint: "https://old.example.com/v1",
+		Name: "upd", Connection: "local-lan", Model: "old",
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	if err := g.UpdateModel(config.ModelConfig{
-		Name: "upd", APIType: "openai", Model: "new", Endpoint: "https://new.example.com/v1",
+		Name: "upd", Connection: "groq", Model: "new",
 	}); err != nil {
 		t.Fatalf("UpdateModel valid: %v", err)
 	}
@@ -216,7 +228,7 @@ func TestUpdateModel_ValidOverwritesPersists(t *testing.T) {
 	for _, m := range g.Models() {
 		if m.Name == "upd" {
 			found = true
-			if m.Model != "new" || m.Endpoint != "https://new.example.com/v1" {
+			if m.Model != "new" || m.Connection != "groq" {
 				t.Errorf("valid update did not overwrite in memory: %+v", m)
 			}
 		}
@@ -230,9 +242,9 @@ func TestUpdateModel_ValidOverwritesPersists(t *testing.T) {
 		t.Fatalf("LoadConfig: %v", err)
 	}
 	for _, m := range loaded.ModelConfigs {
-		if m != nil && m.Name == "upd" && m.Endpoint == "https://new.example.com/v1" {
+		if m != nil && m.Name == "upd" && m.Connection == "groq" {
 			return // persisted
 		}
 	}
-	t.Error("valid update did not persist the new endpoint to config.json")
+	t.Error("valid update did not persist the new connection to config.json")
 }

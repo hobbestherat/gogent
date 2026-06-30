@@ -31,7 +31,7 @@ func TestFamilyKey(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"llama-3.3-70b-instruct-turbo", "llama-3.3-70b"},
 		{"llama-3.3-70b-versatile", "llama-3.3-70b"},
-		{"gemini-2.5-flash", "gemini-2.5-flash"},
+		{"gemini-2.5-flash", "gemini-2.5"}, // trailing non-version qualifier dropped
 		{"deepseek-chat", "deepseek-chat"}, // no version token → unchanged
 	}
 	for _, tc := range cases {

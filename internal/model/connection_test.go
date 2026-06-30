@@ -13,7 +13,7 @@ import (
 )
 
 func TestModelConnectionDefaultURL(t *testing.T) {
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 	if c.URL != DefaultModelURL {
 		t.Errorf("Expected default URL %q, got %q", DefaultModelURL, c.URL)
 	}
@@ -31,7 +31,7 @@ func TestListModelsWithMockServer(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 	c.SetURL(server.URL + "/v1/chat/completions")
 
 	models, err := c.ListModels()
@@ -44,7 +44,7 @@ func TestListModelsWithMockServer(t *testing.T) {
 }
 
 func TestModelConnectionStats(t *testing.T) {
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 
 	stats := c.GetStats()
 	if stats.RequestCount != 0 {
@@ -53,7 +53,7 @@ func TestModelConnectionStats(t *testing.T) {
 }
 
 func TestModelConnectionSetters(t *testing.T) {
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 
 	c.SetURL("http://test:8080")
 	if c.URL != "http://test:8080" {
@@ -101,7 +101,7 @@ func TestModelConnectionWithMockServer(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 	c.SetURL(server.URL)
 
 	resp, err := c.Complete([]Message{{Role: RoleUser, Content: "hi"}})
@@ -130,7 +130,7 @@ func TestModelConnectionWithMockServer(t *testing.T) {
 // newTestConn returns a connection pointed at url with backoff disabled so the
 // retry logic can be exercised without sleeping.
 func newTestConn(url string) *ModelConnection {
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 	c.SetURL(url)
 	c.retryBaseDelay = 0
 	c.retryMaxDelay = 0
@@ -295,7 +295,7 @@ func TestParseRetryAfter(t *testing.T) {
 }
 
 func TestBackoffHonorsRetryAfter(t *testing.T) {
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 	c.retryBaseDelay = time.Second
 	c.retryMaxDelay = 30 * time.Second
 
@@ -316,7 +316,7 @@ func TestBackoffHonorsRetryAfter(t *testing.T) {
 }
 
 func TestModelConnectionWithEmptyURL(t *testing.T) {
-	c := NewModelConnection()
+	c := newPlaceholderConnection()
 	c.SetURL("")
 	_, err := c.Complete([]Message{{Role: RoleUser, Content: "hi"}})
 
@@ -354,7 +354,7 @@ func TestAnalyzeErrorCounters(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := NewModelConnection()
+			c := newPlaceholderConnection()
 			me := c.analyzeError(tt.status, tt.response)
 			if me.Type != tt.wantType {
 				t.Errorf("type = %q, want %q", me.Type, tt.wantType)

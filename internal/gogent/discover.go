@@ -29,7 +29,11 @@ func (g *Gogent) catalogClient() *modelsdev.Client {
 // ModelCatalog returns the models.dev catalog (cached; force bypasses the TTL).
 // It is the single catalog entry point the handlers expose to the UI.
 func (g *Gogent) ModelCatalog(ctx context.Context, force bool) (modelsdev.Catalog, error) {
-	return g.catalogClient().Catalog(ctx, force)
+	cat, err := g.catalogClient().Catalog(ctx, force)
+	if err != nil {
+		return nil, fmt.Errorf("models.dev catalog: %w", err)
+	}
+	return cat, nil
 }
 
 // catalogLookup adapts a models.dev catalog (filtered to one api_type) to the

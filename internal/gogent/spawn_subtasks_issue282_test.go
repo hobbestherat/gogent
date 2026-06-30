@@ -38,7 +38,7 @@ func newBatchSession(t *testing.T, handler http.HandlerFunc, limit int) (*Gogent
 	server := httptest.NewServer(handler)
 
 	g := NewGogentWithWorkspace(tempDir, workspace)
-	conn := model.NewModelConnection()
+	conn := testConn()
 	conn.SetURL(server.URL)
 	sess := model.NewModelSession("session_test", conn)
 	root := agent.NewAgent("agent_test", sess)

@@ -31,7 +31,7 @@ func TestSendMessageDecodesAcceptedTurnID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAPIClient: %v", err)
 	}
-	msg, err := client.SendMessage(context.Background(), "s1", "hello", "m1", "medium")
+	msg, err := client.SendMessage(context.Background(), "s1", "hello", "m1", "medium", "")
 	if err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestSendMessagePropagatesDispatchError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAPIClient: %v", err)
 	}
-	if _, err := client.SendMessage(context.Background(), "s1", "hello", "m1", ""); err == nil {
+	if _, err := client.SendMessage(context.Background(), "s1", "hello", "m1", "", ""); err == nil {
 		t.Fatal("SendMessage: expected an error for a failed dispatch, got nil")
 	}
 }

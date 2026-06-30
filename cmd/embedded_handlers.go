@@ -199,7 +199,7 @@ func embeddedHandlersFor(g *gogent.Gogent, wb *tuipkg.Workbench, noColor bool) t
 		ScanModels: func(m config.ModelConfig) ([]string, error) {
 			ds, err := g.DiscoverModels(context.Background(), m.Connection)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("discover models: %w", err)
 			}
 			ids := make([]string, 0, len(ds))
 			for _, d := range ds {
@@ -226,7 +226,7 @@ func embeddedHandlersFor(g *gogent.Gogent, wb *tuipkg.Workbench, noColor bool) t
 		DiscoverModels: func(connName string) ([]tuipkg.DiscoveredModelInfo, error) {
 			ds, err := g.DiscoverModels(context.Background(), connName)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("discover models: %w", err)
 			}
 			out := make([]tuipkg.DiscoveredModelInfo, 0, len(ds))
 			for _, d := range ds {
