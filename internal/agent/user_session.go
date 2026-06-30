@@ -1740,37 +1740,290 @@ func (s *UserSession) compactIfNeeded(sess *model.ModelSession, emit func(Sessio
 		return
 	}
 
-	transcript := sess.GetTranscript()
-	older, recent := compression.SafeSplit(transcript, compression.DefaultKeepRecentTurns)
+	older, recent := compression.SafeSplit(sess.GetTranscript(), compression.DefaultKeepRecentTurns)
 	if len(older) == 0 {
 		return // boundary keeps everything recent; nothing to compress yet
 	}
 
-	// Summarize on the configured fast model when one was wired in for the
-	// compression role, otherwise fall back to the session's own backend.
+	digest, ok := s.summarizeOlder(sess, older)
+	if !ok {
+		return // on any failure, leave the transcript untouched rather than lose context
+	}
+	sess.ApplyCompressedTranscript(append([]model.Message{digestMessage(digest)}, recent...))
+	s.incCompactionCount()
+	emit(SessionEvent{Type: SessionEventCompaction, Step: sess.GetTokenCount(), Text: digest})
+}
+
+// summarizeOlder compresses the older slice of a transcript into a structured
+// digest using the configured compression backend — the fast model when one was
+// wired in for the compression role, otherwise the session's own backend. It
+// returns the trimmed digest and true on success, or ("", false) when there is
+// nothing to summarize or the backend fails / returns empty; callers leave the
+// transcript untouched on false. The completion is stateless, so it never mutates
+// the live session. Shared by compactIfNeeded and MigrateToContextWindow so both
+// compression paths summarize identically.
+func (s *UserSession) summarizeOlder(sess *model.ModelSession, older []model.Message) (string, bool) {
+	if sess == nil || len(older) == 0 {
+		return "", false
+	}
 	completer := model.Completer(sess.Model)
 	s.mu.RLock()
 	if s.compressionCompleter != nil {
 		completer = s.compressionCompleter
 	}
 	s.mu.RUnlock()
-
-	agent := compression.NewCompressionAgent(nil, completer)
-	digest, err := agent.Summarize(older)
-	if err != nil || strings.TrimSpace(digest) == "" {
-		return
+	if completer == nil {
+		return "", false
 	}
+	digest, err := compression.NewCompressionAgent(nil, completer).Summarize(older)
+	if err != nil {
+		return "", false
+	}
+	digest = strings.TrimSpace(digest)
+	if digest == "" {
+		return "", false
+	}
+	return digest, true
+}
 
-	digestMsg := model.Message{
+// digestPrefix marks a message whose body is a compression digest (the summary of
+// older turns) rather than original conversation. It lets the migration chunker
+// recognize an already-summarized prefix so it does not pointlessly re-summarize it
+// (see firstChunk).
+const digestPrefix = "[Earlier conversation summarized to save context]\n\n"
+
+// digestMessage wraps a compression digest as the user-role marker message that
+// replaces the summarized older turns in a transcript. Both the in-loop compaction
+// and the migration fallback build it here so the two paths splice byte-identical
+// messages.
+func digestMessage(digest string) model.Message {
+	return model.Message{
 		Role:    model.RoleUser,
-		Content: "[Earlier conversation summarized to save context]\n\n" + digest,
+		Content: digestPrefix + digest,
 	}
-	newTranscript := append([]model.Message{digestMsg}, recent...)
-	sess.ApplyCompressedTranscript(newTranscript)
+}
+
+// isDigestMessage reports whether m is a compression digest produced by
+// digestMessage (as opposed to original conversation content).
+func isDigestMessage(m model.Message) bool {
+	return m.Role == model.RoleUser && strings.HasPrefix(m.Content, digestPrefix)
+}
+
+// incCompactionCount bumps the per-session compaction counter that feeds the
+// Statistics view's compaction tally.
+func (s *UserSession) incCompactionCount() {
 	s.mu.Lock()
 	s.compactionCount++
 	s.mu.Unlock()
-	emit(SessionEvent{Type: SessionEventCompaction, Step: sess.GetTokenCount(), Text: digest})
+}
+
+// Migration tuning (issue #589).
+const (
+	// maxMigrationRounds caps the chunked-compression fallback so moving a session
+	// to a smaller-window model can never spin indefinitely; a transcript that
+	// still does not fit after this many rounds is reported as un-fittable.
+	maxMigrationRounds = 8
+	// migrationTargetFraction is the share of the target window the fallback
+	// compresses down to, leaving the remainder as headroom for the next turn. It
+	// matches the in-loop compaction high-water mark (model.compressionHighWater),
+	// so a migrated session lands just below the ordinary compaction trigger.
+	migrationTargetFraction = 0.8
+)
+
+// MigrateToContextWindow makes a session safe to run on cfg's model before its
+// first turn there, by compressing the transcript — in bounded, chunked rounds —
+// until it fits the model's context window (issue #589). When a session is moved
+// to a model whose context window is SMALLER than the one it was last calibrated
+// against and the conversation no longer fits, a single summarization pass (see
+// compactIfNeeded) may not be enough, so this folds older context in progressively
+// until it fits or reports a clean, actionable error.
+//
+// It is a no-op (returns nil, runs no compression) when:
+//   - sess or cfg is nil;
+//   - the target window is unknown (cfg.ContextWindow <= 0) — today's behavior is
+//     preserved and migration is never blocked on missing data;
+//   - the target window is the same as or larger than the one last evaluated — an
+//     equal/larger window cannot overflow a session the in-loop compaction already
+//     keeps in check, so ordinary growth stays owned by compactIfNeeded; or
+//   - the conversation already fits under the window's headroom target.
+//
+// On failure it emits SessionEventError (stamped with ctx's turn id, exactly like
+// the task loop) and returns the error, so the daemon/SSE path surfaces it rather
+// than dying silently. It never truncates the transcript outside the compression
+// path and never panics; it is deterministic and bounded by maxMigrationRounds.
+func (s *UserSession) MigrateToContextWindow(ctx context.Context, sess *model.ModelSession, cfg *config.ModelConfig) error {
+	if sess == nil || cfg == nil {
+		return nil
+	}
+
+	target := cfg.ContextWindow // raw setting: 0 == unknown / use provider default
+	prev := sess.LastMigrationWindow()
+	sess.SetLastMigrationWindow(target)
+
+	if target <= 0 {
+		return nil // unknown window: no guard (back-compat)
+	}
+	if prev > 0 && target >= prev {
+		return nil // same or larger window: leave ordinary growth to compactIfNeeded
+	}
+
+	fit := int(float64(target) * migrationTargetFraction)
+	if sess.GetCurrentTokenCount() <= fit {
+		return nil // already fits with headroom: no compression needed
+	}
+
+	// chunkBudget bounds how much conversation a single summarize round-trip may
+	// carry, so no compression call overflows the backend's own window — which,
+	// when no separate fast/compression model is wired in, IS the smaller target
+	// model. Each round folds only the oldest chunk within this budget ("compress
+	// oldest chunks first", issue #589) and leaves the rest of the older slice
+	// verbatim for subsequent rounds, so a transcript that exceeds the target window
+	// as a whole is still compressible piece by piece.
+	chunkBudget := migrationChunkBudget(target)
+
+	keep := compression.DefaultKeepRecentTurns
+	for round := 0; round < maxMigrationRounds; round++ {
+		// Honor a Stop / client disconnect between rounds: each round is a blocking
+		// model round-trip (model.Completer.Complete is not itself cancellable), so
+		// stop spawning further rounds once the turn is cancelled rather than running
+		// all of them to completion. Surface it the way runLoop surfaces a cancelled
+		// turn (emit + wrapped error) so the daemon/SSE path is not left silent; the
+		// partially compressed transcript is left intact (never an over-budget send).
+		if cerr := ctx.Err(); cerr != nil {
+			err := fmt.Errorf("session migration cancelled: %w", cerr)
+			s.emit(SessionEvent{Type: SessionEventError, Err: err, TurnID: turnIDFrom(ctx)})
+			return err
+		}
+		if sess.GetCurrentTokenCount() <= fit {
+			return nil
+		}
+		before := sess.GetCurrentTokenCount()
+
+		older, recent := compression.SafeSplit(sess.GetTranscript(), keep)
+		if len(older) == 0 {
+			if keep <= 1 {
+				break // nothing older left to fold: maximal compression reached
+			}
+			keep-- // fold more of the recent tail next
+			continue
+		}
+
+		// Compress only the oldest chunk that fits the budget; the remaining older
+		// messages stay verbatim this round and are folded in over subsequent rounds.
+		// This keeps every summarize call's input bounded (so it cannot overflow the
+		// backend window) while leaving exactly one backend call per round.
+		chunk, restOlder := firstChunk(older, chunkBudget)
+		digest, ok := s.summarizeOlder(sess, chunk)
+		if !ok {
+			break // compression backend failed/empty: stop and report the shortfall below
+		}
+		newTranscript := append([]model.Message{digestMessage(digest)}, restOlder...)
+		newTranscript = append(newTranscript, recent...)
+		sess.ApplyCompressedTranscript(newTranscript)
+		s.incCompactionCount()
+		s.emit(SessionEvent{Type: SessionEventCompaction, Step: sess.GetTokenCount(), Text: digest, TurnID: turnIDFrom(ctx)})
+
+		if sess.GetCurrentTokenCount() >= before {
+			if keep <= 1 {
+				break // no progress and nothing more to fold: bail early (don't spin the cap)
+			}
+			keep--
+		} else if keep > 1 {
+			keep-- // compress harder each round; the loop stays bounded by maxMigrationRounds
+		}
+	}
+
+	if sess.GetCurrentTokenCount() <= fit {
+		return nil
+	}
+
+	err := fmt.Errorf("cannot fit this conversation into model %q: its context window is %d tokens, "+
+		"but the conversation is still ~%d tokens after maximal compression — "+
+		"start a new session or switch to a model with a larger context window",
+		migrationModelName(cfg), target, sess.GetCurrentTokenCount())
+	s.emit(SessionEvent{Type: SessionEventError, Err: err, TurnID: turnIDFrom(ctx)})
+	return err
+}
+
+// migrationChunkBudget bounds, in estimated tokens, how much conversation a single
+// migration compression call may carry. Half the target window leaves ample room
+// within that window for the summary-prompt scaffolding and the model's own output,
+// so a round-trip stays safe even when the compression backend is the (smaller)
+// target model itself. It is always at least 1 so chunking still makes progress on
+// pathologically tiny windows.
+func migrationChunkBudget(targetWindow int) int {
+	if b := targetWindow / 2; b >= 1 {
+		return b
+	}
+	return 1
+}
+
+// firstChunk returns the oldest run of messages to summarize this round, plus the
+// verbatim remainder. It greedily packs messages whose combined estimated size
+// stays within budget (always at least one message, even when that message alone
+// exceeds budget — an indivisible unit), then adjusts the cut for two invariants:
+//
+//   - Tool pairing: the cut is moved forward past any role:tool result messages so
+//     it never separates a tool result from the assistant tool_call it answers
+//     (which would leave the remainder beginning with an orphaned result that a
+//     provider rejects). This mirrors SafeSplit's no-strand guarantee.
+//   - Progress: if the budget-bounded chunk is nothing but a leading digest from a
+//     previous round, the next message is folded in too (accepting a one-message
+//     overflow), so real old content is actually compressed instead of the digest
+//     being re-summarized round after round.
+//
+// It lets migration summarize an over-window transcript one bounded chunk at a time
+// (oldest first) instead of sending the whole older slice — which could itself
+// exceed the backend's context window — in a single call.
+func firstChunk(msgs []model.Message, budget int) (chunk, rest []model.Message) {
+	if len(msgs) == 0 {
+		return nil, nil
+	}
+	cut := len(msgs)
+	total := 0
+	for i := range msgs {
+		size := model.EstimateTokens(msgs[i : i+1])
+		if i > 0 && total+size > budget {
+			cut = i
+			break
+		}
+		total += size
+	}
+	// Progress guard: never let a round summarize only a leading digest.
+	if cut < len(msgs) && allDigests(msgs[:cut]) {
+		cut++
+	}
+	// Tool pairing: keep tool results with their tool_call in the chunk.
+	for cut < len(msgs) && msgs[cut].Role == model.RoleTool {
+		cut++
+	}
+	if cut >= len(msgs) {
+		return msgs, nil
+	}
+	return msgs[:cut], msgs[cut:]
+}
+
+// allDigests reports whether every message in msgs is a compression digest. An
+// empty slice is not "all digests".
+func allDigests(msgs []model.Message) bool {
+	if len(msgs) == 0 {
+		return false
+	}
+	for i := range msgs {
+		if !isDigestMessage(msgs[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// migrationModelName is the user-facing label for a model config: its display
+// name, falling back to its identifier.
+func migrationModelName(cfg *config.ModelConfig) string {
+	if cfg.DisplayName != "" {
+		return cfg.DisplayName
+	}
+	return cfg.Name
 }
 
 // allSpawnSubAgent reports whether a turn's tool calls are all one-shot
@@ -2460,7 +2713,16 @@ func recursionInstructions(cfg config.SubAgentConfig) string {
 
 // ExecuteTaskLoopWithModel runs the multi-turn task loop with a specific model config
 func (s *UserSession) ExecuteTaskLoopWithModel(ctx context.Context, agentID, message string, modelConfig *config.ModelConfig) ([]*model.CompletionResponse, error) {
-	// Call the regular ExecuteTaskLoop
+	// Before the first turn on modelConfig, make the existing transcript safe for
+	// its context window (issue #589): switching to a model with a smaller window
+	// can leave the conversation over budget, so compress it down — bounded and
+	// chunked — to fit, or fail cleanly with an actionable error. A no-op when the
+	// window is unknown/unchanged-or-larger or the conversation already fits.
+	if ag := s.GetAgent(agentID); ag != nil && ag.ThoughtTrain != nil {
+		if err := s.MigrateToContextWindow(ctx, ag.ThoughtTrain, modelConfig); err != nil {
+			return nil, err
+		}
+	}
 	return s.ExecuteTaskLoop(ctx, agentID, message)
 }
 
